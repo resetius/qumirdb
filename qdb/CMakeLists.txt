@@ -4,6 +4,7 @@ pkg_check_modules(PARQUET REQUIRED IMPORTED_TARGET parquet)
 
 add_library(qumirdb
     stub.cpp
+    modules/qumirdb.cpp
     io/parquet/source.cpp
     io/text/sink.cpp
     ops/source.cpp

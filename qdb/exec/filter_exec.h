@@ -23,7 +23,7 @@ private:
     std::unique_ptr<IRuntimeNode> Input_;
     NQumir::NAst::TTypePtr OutputType_;
     TKernelCompiler::TFilterDispatch Dispatch_;
-    std::vector<char> SelectionBuf_;
+    std::vector<uint8_t> SelectionBuf_;
 };
 
 } // namespace NQqb

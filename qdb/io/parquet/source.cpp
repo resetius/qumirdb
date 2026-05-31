@@ -39,9 +39,6 @@ TTypePtr ArrowTypeToQumir(const std::shared_ptr<arrow::DataType>& type) {
 struct TBatchData {
     std::shared_ptr<arrow::RecordBatch> Batch;
     std::vector<TColumn> Columns;
-    std::vector<std::vector<char>> Masks;
-    std::vector<std::vector<char>> BoolData;
-    std::vector<std::vector<int64_t>> Offsets;
 };
 
 void DestroyBatch(TRowSet* rs) {
@@ -137,29 +134,20 @@ bool TParquetSource::Next(TRowSet& rowSet) {
     auto* data = new TBatchData;
     data->Batch = batch;
     data->Columns.resize(numCols);
-    data->Masks.resize(numCols);
-    data->BoolData.resize(numCols);
-    data->Offsets.resize(numCols);
 
     for (int32_t i = 0; i < numCols; ++i) {
         auto arr = batch->column(i);
         TColumn& col = data->Columns[i];
+        col.Offsets = nullptr;
+        col.OffsetWidth = 0;
+        col.DataBitOffset = 0;
+        col.Mask = nullptr;
+        col.MaskBitOffset = 0;
 
         if (arr->null_count() > 0) {
-            int64_t offset = arr->offset();
-            const uint8_t* bits = arr->null_bitmap_data();
-            data->Masks[i].resize(len);
-            for (int64_t j = 0; j < len; ++j) {
-                int64_t pos = offset + j;
-                uint8_t valid = (bits[pos >> 3] >> (pos & 7)) & 1;
-                data->Masks[i][j] = valid ? 0 : 1;
-            }
-            col.Mask = data->Masks[i].data();
-        } else {
-            col.Mask = nullptr;
+            col.Mask = arr->null_bitmap_data();
+            col.MaskBitOffset = static_cast<int32_t>(arr->offset());
         }
-
-        col.Offsets = nullptr;
 
         switch (arr->type_id()) {
             case arrow::Type::INT8:
@@ -179,35 +167,26 @@ bool TParquetSource::Next(TRowSet& rowSet) {
                 break;
             }
             case arrow::Type::BOOL: {
-                auto typed = std::static_pointer_cast<arrow::BooleanArray>(arr);
-                data->BoolData[i].resize(len);
-                for (int64_t j = 0; j < len; ++j) {
-                    data->BoolData[i][j] = typed->Value(j) ? 1 : 0;
-                }
-                col.Data = data->BoolData[i].data();
+                auto bitmap = arr->data()->buffers[1];
+                col.Data = const_cast<char*>(reinterpret_cast<const char*>(bitmap->data()));
+                col.DataBitOffset = static_cast<int32_t>(arr->offset());
                 break;
             }
             case arrow::Type::STRING: {
                 auto typed = std::static_pointer_cast<arrow::StringArray>(arr);
-                const int32_t* src = typed->raw_value_offsets();
+                const int32_t* src = typed->raw_value_offsets() + arr->offset();
                 int32_t base = src[0];
-                data->Offsets[i].resize(len + 1);
-                for (int64_t j = 0; j <= len; ++j) {
-                    data->Offsets[i][j] = src[j] - base;
-                }
-                col.Offsets = data->Offsets[i].data();
+                col.Offsets = const_cast<int32_t*>(src);
+                col.OffsetWidth = 4;
                 col.Data = const_cast<char*>(reinterpret_cast<const char*>(typed->raw_data()) + base);
                 break;
             }
             case arrow::Type::LARGE_STRING: {
                 auto typed = std::static_pointer_cast<arrow::LargeStringArray>(arr);
-                const int64_t* src = typed->raw_value_offsets();
+                const int64_t* src = typed->raw_value_offsets() + arr->offset();
                 int64_t base = src[0];
-                data->Offsets[i].resize(len + 1);
-                for (int64_t j = 0; j <= len; ++j) {
-                    data->Offsets[i][j] = src[j] - base;
-                }
-                col.Offsets = data->Offsets[i].data();
+                col.Offsets = const_cast<int64_t*>(src);
+                col.OffsetWidth = 8;
                 col.Data = const_cast<char*>(reinterpret_cast<const char*>(typed->raw_data()) + base);
                 break;
             }
