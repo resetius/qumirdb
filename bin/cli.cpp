@@ -4,6 +4,9 @@
 #include <qdb/ops/filter.h>
 #include <qdb/ops/project.h>
 #include <qdb/ops/source.h>
+#include <qdb/ops/used_columns.h>
+
+#include <qumir/codegen/llvm/llvm_initializer.h>
 
 #include <cstring>
 #include <iostream>
@@ -84,6 +87,8 @@ NQqb::TSchema SchemaFromType(
 } // namespace
 
 int main(int argc, char** argv) {
+    NQumir::NCodeGen::TLLVMInitializer llvmInit;
+
     std::string inputFile;
     TFormatSpec formatSpec;
     int maxRowSets = -1;
@@ -180,9 +185,9 @@ int main(int argc, char** argv) {
         }
 
         if (!projectCols.empty()) {
-            std::vector<NQqb::TProjectionSpec> specs;
+            std::vector<std::pair<std::string, std::string>> specs;
             for (const auto& col : projectCols) {
-                specs.push_back({col, col}); // expression = column name (bare identifier)
+                specs.emplace_back(col, col);
             }
             auto result = NQqb::MakeProject(plan, std::move(specs));
             if (!result) {
@@ -193,6 +198,8 @@ int main(int argc, char** argv) {
         }
 
         // Build physical plan
+        NQqb::ApplyColumnPruning(plan);
+
         NQqb::TPhysicalPlanner planner;
         auto executor = planner.Build(plan);
 

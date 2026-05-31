@@ -18,6 +18,7 @@ public:
 
     const TSchema& Schema() const override;
     bool Next(TRowSet& rowSet) override;
+    void RestrictColumns(const std::unordered_set<std::string>& names) override;
 
 private:
     std::unique_ptr<parquet::arrow::FileReader> FileReader_;

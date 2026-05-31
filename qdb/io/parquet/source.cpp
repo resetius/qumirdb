@@ -6,6 +6,8 @@
 #include <arrow/io/api.h>
 #include <parquet/arrow/reader.h>
 
+#include <numeric>
+
 #include <qumir/parser/type.h>
 
 namespace NQqb {
@@ -84,6 +86,40 @@ TParquetSource::TParquetSource(const std::string& path) {
 }
 
 TParquetSource::~TParquetSource() = default;
+
+void TParquetSource::RestrictColumns(const std::unordered_set<std::string>& names) {
+    if (names.empty()) {
+        return;
+    }
+
+    std::vector<int> indices;
+    for (int i = 0; i < static_cast<int>(Names_.size()); ++i) {
+        if (names.count(Names_[i])) {
+            indices.push_back(i);
+        }
+    }
+
+    int numRgs = FileReader_->parquet_reader()->metadata()->num_row_groups();
+    std::vector<int> rowGroups(numRgs);
+    std::iota(rowGroups.begin(), rowGroups.end(), 0);
+
+    auto result = FileReader_->GetRecordBatchReader(rowGroups, indices);
+    if (!result.ok()) {
+        throw std::runtime_error(result.status().ToString());
+    }
+    Reader_ = std::move(*result);
+
+    Names_.clear();
+    Columns_.clear();
+    for (const auto& field : Reader_->schema()->fields()) {
+        Names_.push_back(field->name());
+        Columns_.push_back({
+            .Name = Names_.back(),
+            .Type = ArrowTypeToQumir(field->type()),
+        });
+    }
+    Schema_ = TSchema{std::span<const TColumnSchema>(Columns_)};
+}
 
 const TSchema& TParquetSource::Schema() const {
     return Schema_;

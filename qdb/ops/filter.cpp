@@ -1,39 +1,35 @@
 #include <qdb/ops/filter.h>
-#include <qdb/ops/parse_kernel.h>
 
-#include <qumir/parser/ast.h>
+#include <qumir/parser/core/lexer.h>
+#include <qumir/parser/core/parser.h>
+#include <qumir/parser/core/printer.h>
+
+#include <sstream>
 
 namespace NQqb {
 
-TFilterOperator::TFilterOperator(TOperatorPtr input, std::string predicate, NQumir::NAst::TExprPtr kernel)
+TFilterOperator::TFilterOperator(TOperatorPtr input, NQumir::NAst::TExprPtr predicate)
     : Input_(std::move(input))
     , Predicate_(std::move(predicate))
-    , Kernel_(std::move(kernel))
 {
-    Type = Input_->Type; // filter doesn't change schema
+    Type = Input_->Type;
 }
 
 const std::string TFilterOperator::ToString() const {
-    auto* fun = static_cast<NQumir::NAst::TFunDecl*>(Kernel_.get());
-    std::string bodyStr = fun && fun->Body ? fun->Body->ToString() : "?";
-    return "(rel filter " + Input_->ToString() + " " + bodyStr + ")";
+    using namespace NQumir::NAst::NCore;
+    return "(rel filter " + Input_->ToString() + " " + PrintAst(Predicate_) + ")";
 }
 
 std::expected<TOperatorPtr, NQumir::TError>
 MakeFilter(TOperatorPtr input, const std::string& predicate) {
-    using namespace NQumir::NAst;
-
-    auto* structType = static_cast<TStructType*>(input->Type.get());
-    if (!structType) {
-        return std::unexpected(NQumir::TError("filter input must have TStructType"));
+    std::istringstream ss(predicate);
+    NQumir::NAst::NCore::TTokenStream tokens(ss);
+    NQumir::NAst::NCore::TParser parser;
+    auto parsed = parser.Parse(tokens);
+    if (!parsed) {
+        return std::unexpected(parsed.error());
     }
-
-    auto kernel = NInternal::ParseAndAnnotate(*structType, predicate);
-    if (!kernel) {
-        return std::unexpected(kernel.error());
-    }
-
-    return std::make_shared<TFilterOperator>(std::move(input), predicate, std::move(*kernel));
+    return std::make_shared<TFilterOperator>(std::move(input), std::move(*parsed));
 }
 
 } // namespace NQqb
