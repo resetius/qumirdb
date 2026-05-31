@@ -2,10 +2,11 @@
 
 #include <qdb/ops/operator.h>
 
+#include <unordered_set>
+#include <string>
+
 namespace NQqb {
 
-// Wraps ISource as a relational operator.
-// Converts TSchema → TStructType (stored in TExpr::Type).
 class TSourceOperator : public IOperator {
 public:
     static constexpr const char* OpId = "source";
@@ -15,17 +16,20 @@ public:
     std::string_view RelName() const override { return OpId; }
     ISource& GetSource() const { return Source_; }
 
-    // Children() = {} — no inputs
-    // Type = TStructType built from source's TSchema
+    const std::unordered_set<std::string>& RequiredColumns() const { return RequiredColumns_; }
+    void SetRequiredColumns(std::unordered_set<std::string> cols) { RequiredColumns_ = std::move(cols); }
 
     const std::string ToString() const override;
 
 private:
     ISource& Source_;
+    std::unordered_set<std::string> RequiredColumns_; // empty = all columns
 };
 
-// Builds a TStructType from TSchema.
-// Useful for other operators that need to convert schema → type.
 NQumir::NAst::TTypePtr StructTypeFromSchema(const TSchema& schema);
+
+// Transformation pass: walks the plan tree, collects used columns via
+// CollectUsedColumns, and calls SetRequiredColumns on all TSourceOperator nodes.
+void ApplyColumnPruning(const TOperatorPtr& root);
 
 } // namespace NQqb

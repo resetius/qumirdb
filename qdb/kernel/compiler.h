@@ -22,7 +22,7 @@ public:
     // Returns a dispatch lambda that calls the compiled kernel.
     TFilterDispatch CompileFilter(
         const NQumir::NAst::TStructType& inputType,
-        const std::string& predicate);
+        const NQumir::NAst::TExprPtr& predicate);
 
 };
 

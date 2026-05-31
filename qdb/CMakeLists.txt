@@ -10,6 +10,7 @@ add_library(qumirdb
     ops/filter.cpp
     ops/project.cpp
     ops/parse_kernel.cpp
+    ops/used_columns.cpp
     kernel/gen.cpp
     kernel/compiler.cpp
     exec/source_exec.cpp
