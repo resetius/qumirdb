@@ -39,7 +39,6 @@ struct TBatchData {
     std::vector<TColumn> Columns;
     std::vector<std::vector<char>> Masks;
     std::vector<std::vector<char>> BoolData;
-    std::vector<std::vector<double>> WideFloats;
     std::vector<std::vector<int64_t>> Offsets;
 };
 
@@ -104,7 +103,6 @@ bool TParquetSource::Next(TRowSet& rowSet) {
     data->Columns.resize(numCols);
     data->Masks.resize(numCols);
     data->BoolData.resize(numCols);
-    data->WideFloats.resize(numCols);
     data->Offsets.resize(numCols);
 
     for (int32_t i = 0; i < numCols; ++i) {
@@ -141,12 +139,7 @@ bool TParquetSource::Next(TRowSet& rowSet) {
                 break;
             }
             case arrow::Type::FLOAT: {
-                auto typed = std::static_pointer_cast<arrow::FloatArray>(arr);
-                data->WideFloats[i].resize(len);
-                for (int64_t j = 0; j < len; ++j) {
-                    data->WideFloats[i][j] = typed->Value(j);
-                }
-                col.Data = reinterpret_cast<char*>(data->WideFloats[i].data());
+                col.Data = NumericData(arr);
                 break;
             }
             case arrow::Type::BOOL: {
