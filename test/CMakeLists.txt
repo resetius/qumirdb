@@ -7,7 +7,7 @@ macro(ut name source)
     target_link_libraries(${name} qumirdb ${GTEST_LIBRARIES})
     target_include_directories(${name} PRIVATE ${GTEST_INCLUDE_DIRS})
     target_link_directories(${name} PRIVATE ${GTEST_LIBRARY_DIRS})
-    add_test(NAME ${name} COMMAND ${name} --gtest_output=xml:${name}.xml)
+    add_test(NAME ${name} COMMAND ${name} --gtest_output=xml:${CMAKE_CURRENT_BINARY_DIR}/${name}.xml)
 endmacro()
 
 ut(test_io test_io.cpp)
