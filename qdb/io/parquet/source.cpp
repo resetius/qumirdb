@@ -1,9 +1,11 @@
 #include <qdb/io/parquet/source.h>
 
 #include <stdexcept>
+#include <cstdlib>
 
 #include <arrow/api.h>
 #include <arrow/io/api.h>
+#include <arrow/memory_pool.h>
 #include <parquet/arrow/reader.h>
 
 #include <numeric>
@@ -52,12 +54,46 @@ char* NumericData(const std::shared_ptr<arrow::Array>& arr) {
     return const_cast<char*>(reinterpret_cast<const char*>(raw)) + arr->offset() * byteWidth;
 }
 
+arrow::MemoryPool* GetMemoryPool() {
+    static arrow::MemoryPool* pool = []() -> arrow::MemoryPool* {
+        const char* env = std::getenv("QDB_ARROW_MEMORY_POOL");
+        std::string_view mode = env ? std::string_view(env) : std::string_view{};
+
+        if (mode == "system") {
+            return arrow::system_memory_pool();
+        }
+        if (mode == "default") {
+            return arrow::default_memory_pool();
+        }
+        if (mode == "jemalloc") {
+            arrow::MemoryPool* jemalloc = nullptr;
+            if (arrow::jemalloc_memory_pool(&jemalloc).ok() && jemalloc) {
+                return jemalloc;
+            }
+            return arrow::default_memory_pool();
+        }
+        if (mode == "mimalloc") {
+            arrow::MemoryPool* mimalloc = nullptr;
+            if (arrow::mimalloc_memory_pool(&mimalloc).ok() && mimalloc) {
+                return mimalloc;
+            }
+            return arrow::default_memory_pool();
+        }
+        arrow::MemoryPool* jemalloc = nullptr;
+        if (arrow::jemalloc_memory_pool(&jemalloc).ok() && jemalloc) {
+            return jemalloc;
+        }
+        return arrow::default_memory_pool();
+    }();
+    return pool;
+}
+
 } // namespace
 
 TParquetSource::TParquetSource(const std::string& path) {
     auto infile = arrow::io::ReadableFile::Open(path).ValueOrDie();
 
-    auto fileReaderResult = parquet::arrow::OpenFile(infile, arrow::default_memory_pool());
+    auto fileReaderResult = parquet::arrow::OpenFile(infile, GetMemoryPool());
     if (!fileReaderResult.ok()) {
         throw std::runtime_error(fileReaderResult.status().ToString());
     }
