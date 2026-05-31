@@ -13,6 +13,7 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <vector>
 #include <chrono>
 
@@ -21,12 +22,27 @@ namespace {
 struct TFormatSpec {
     std::string Name = "console";
     char Separator = ',';
+    bool NoEscape = false;
 };
 
 TFormatSpec ParseFormat(const std::string& spec) {
     TFormatSpec result;
     if (!spec.starts_with('<')) {
-        result.Name = spec;
+        auto comma = spec.find(',');
+        result.Name = comma == std::string::npos ? spec : spec.substr(0, comma);
+        if (comma != std::string::npos) {
+            std::string_view flags(spec.c_str() + comma + 1, spec.size() - comma - 1);
+            if (flags == "noescape") {
+                result.NoEscape = true;
+            } else if (flags == "escape") {
+                result.NoEscape = false;
+            } else {
+                throw std::invalid_argument("unknown format flag: " + std::string(flags));
+            }
+        }
+        if (result.Name == "csv" && comma == std::string::npos) {
+            result.NoEscape = true;
+        }
         return result;
     }
     auto close = spec.find('>');
@@ -46,6 +62,22 @@ TFormatSpec ParseFormat(const std::string& spec) {
         }
     }
     result.Name = spec.substr(close + 1);
+    auto comma = result.Name.find(',');
+    bool hasFlags = comma != std::string::npos;
+    if (comma != std::string::npos) {
+        std::string flags = result.Name.substr(comma + 1);
+        result.Name = result.Name.substr(0, comma);
+        if (flags == "noescape") {
+            result.NoEscape = true;
+        } else if (flags == "escape") {
+            result.NoEscape = false;
+        } else {
+            throw std::invalid_argument("unknown format flag: " + flags);
+        }
+    }
+    if (result.Name == "csv" && !hasFlags) {
+        result.NoEscape = true;
+    }
     return result;
 }
 
@@ -112,8 +144,8 @@ int main(int argc, char** argv) {
                     std::cerr << "Invalid format spec: " << e.what() << "\n";
                     return 1;
                 }
-                if (formatSpec.Name != "console" && formatSpec.Name != "csv") {
-                    std::cerr << "Unknown format: " << formatSpec.Name << " (use console or csv)\n";
+                if (formatSpec.Name != "console" && formatSpec.Name != "csv" && formatSpec.Name != "null") {
+                    std::cerr << "Unknown format: " << formatSpec.Name << " (use console, csv, or null)\n";
                     return 1;
                 }
             } else {
@@ -154,8 +186,11 @@ int main(int argc, char** argv) {
                          "  --project col1,col2,...      Project (select) columns\n"
                          "  --format <spec>              Output format (default: console)\n"
                          "    console                    Aligned table (PostgreSQL style)\n"
-                         "    csv                        CSV with default separator ','\n"
-                         "    <separator=X>csv           CSV with custom separator X\n"
+                         "    csv                        CSV without quoting/escaping\n"
+                         "    csv,escape                 CSV with quoting/escaping\n"
+                         "    <separator=X>csv           CSV with custom separator X (no escaping)\n"
+                         "    <separator=X>csv,escape    CSV with custom separator X and escaping\n"
+                         "    null                       Consume rows without formatting or output\n"
                          "  --rowsets <n>                Stop after n rowsets\n"
                          "  --help|-h                    Show this help message\n";
             return 0;
@@ -209,7 +244,9 @@ int main(int argc, char** argv) {
         auto schema = SchemaFromType(executor->OutputType(), outputNames, outputColumns);
         std::unique_ptr<NQqb::ISink> sink;
         if (formatSpec.Name == "csv") {
-            sink = std::make_unique<NQqb::TCsvSink>(schema, std::cout, formatSpec.Separator);
+            sink = std::make_unique<NQqb::TCsvSink>(schema, std::cout, formatSpec.Separator, formatSpec.NoEscape);
+        } else if (formatSpec.Name == "null") {
+            sink = std::make_unique<NQqb::TNullSink>(schema);
         } else {
             sink = std::make_unique<NQqb::TConsoleSink>(schema, std::cout);
         }

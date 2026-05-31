@@ -10,15 +10,18 @@ namespace NQqb {
 
 struct TColumn {
     char* Data;
-    char* Mask; // nulls
-    int64_t* Offsets; // for variable length types
+    int32_t DataBitOffset = 0; // bit offset for bitmap-backed columns (bool)
+    const uint8_t* Mask; // Arrow null bitmap; nullptr if all valid
+    int32_t MaskBitOffset = 0;
+    void* Offsets; // raw offsets buffer for variable-length types; null for fixed-width
+    uint8_t OffsetWidth; // 4 for STRING, 8 for LARGE_STRING, 0 otherwise
 };
 
 struct TRowSet {
     TColumn* Columns;
     int32_t ColumnCount;
     int32_t RowCount;
-    bool* Selection; // nullptr = all rows selected; Selection[i]==false skips row i
+    uint8_t* Selection; // nullptr = all rows selected; Selection[i]==0 skips row i
 
     void (*Destroy)(TRowSet*);
     void* Private;

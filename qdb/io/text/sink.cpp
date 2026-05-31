@@ -2,6 +2,7 @@
 
 #include <format>
 #include <iomanip>
+#include <string_view>
 #include <string>
 
 #include <qumir/parser/type.h>
@@ -12,8 +13,32 @@ namespace {
 
 using namespace NQumir::NAst;
 
+bool IsMasked(const TColumn& col, int32_t row) {
+    if (!col.Mask) {
+        return false;
+    }
+    const int64_t bitIndex = static_cast<int64_t>(col.MaskBitOffset) + row;
+    const uint8_t byte = col.Mask[bitIndex >> 3];
+    return ((byte >> (bitIndex & 7)) & 1) == 0;
+}
+
+bool IsBitSet(const TColumn& col, int32_t row) {
+    const auto* bits = reinterpret_cast<const uint8_t*>(col.Data);
+    const int64_t bitIndex = static_cast<int64_t>(col.DataBitOffset) + row;
+    return ((bits[bitIndex >> 3] >> (bitIndex & 7)) & 1) != 0;
+}
+
+template <typename TOffset>
+std::string_view StringViewValue(const TColumn& col, int32_t row) {
+    const auto* offsets = static_cast<const TOffset*>(col.Offsets);
+    const TOffset base = offsets[0];
+    const TOffset start = offsets[row] - base;
+    const TOffset end = offsets[row + 1] - base;
+    return std::string_view(col.Data + start, static_cast<size_t>(end - start));
+}
+
 std::string FormatValue(const TColumn& col, int32_t row, const TTypePtr& type) {
-    if (col.Mask && col.Mask[row]) {
+    if (IsMasked(col, row)) {
         return "NULL";
     }
     if (!type) {
@@ -41,11 +66,12 @@ std::string FormatValue(const TColumn& col, int32_t row, const TTypePtr& type) {
     } else if (TMaybeType<TFloatType>(type)) {
         return std::format("{}", reinterpret_cast<const double*>(col.Data)[row]);
     } else if (TMaybeType<TBoolType>(type)) {
-        return col.Data[row] ? "true" : "false";
+        return IsBitSet(col, row) ? "true" : "false";
     } else if (TMaybeType<TStringType>(type)) {
-        int64_t start = col.Offsets[row];
-        int64_t end = col.Offsets[row + 1];
-        return std::string(col.Data + start, end - start);
+        if (col.OffsetWidth == 4) {
+            return std::string(StringViewValue<int32_t>(col, row));
+        }
+        return std::string(StringViewValue<int64_t>(col, row));
     } else if (TMaybeType<TSymbolType>(type)) {
         return std::string(1, col.Data[row]);
     }
@@ -75,6 +101,33 @@ std::string CsvEscape(const std::string& value, char sep) {
     }
     result += '"';
     return result;
+}
+
+template <typename TOffset>
+void WriteCsvString(std::ostream& out, const TColumn& col, int32_t row, char sep) {
+    const auto view = StringViewValue<TOffset>(col, row);
+    bool needsQuoting = view.find(sep) != std::string_view::npos
+        || view.find('"') != std::string_view::npos
+        || view.find('\n') != std::string_view::npos;
+    if (!needsQuoting) {
+        out.write(view.data(), static_cast<std::streamsize>(view.size()));
+        return;
+    }
+    out.put('"');
+    for (char c : view) {
+        if (c == '"') {
+            out.write("\"\"", 2);
+        } else {
+            out.put(c);
+        }
+    }
+    out.put('"');
+}
+
+template <typename TOffset>
+void WriteCsvStringRaw(std::ostream& out, const TColumn& col, int32_t row) {
+    const auto view = StringViewValue<TOffset>(col, row);
+    out.write(view.data(), static_cast<std::streamsize>(view.size()));
 }
 
 } // namespace
@@ -143,10 +196,11 @@ void TConsoleSink::Flush() {
 
 // TCsvSink
 
-TCsvSink::TCsvSink(const TSchema& schema, std::ostream& out, char separator)
+TCsvSink::TCsvSink(const TSchema& schema, std::ostream& out, char separator, bool noEscape)
     : Schema_(schema)
     , Out_(out)
     , Separator_(separator)
+    , NoEscape_(noEscape)
 {}
 
 void TCsvSink::Write(const TRowSet& rowSet) {
@@ -155,7 +209,7 @@ void TCsvSink::Write(const TRowSet& rowSet) {
             if (c > 0) {
                 Out_ << Separator_;
             }
-            Out_ << CsvEscape(std::string(Schema_.Columns[c].Name), Separator_);
+            Out_ << Schema_.Columns[c].Name;
         }
         Out_ << "\n";
         HeaderPrinted_ = true;
@@ -169,10 +223,30 @@ void TCsvSink::Write(const TRowSet& rowSet) {
             if (c > 0) {
                 Out_ << Separator_;
             }
-            Out_ << CsvEscape(FormatValue(rowSet.Columns[c], row, Schema_.Columns[c].Type), Separator_);
+            const auto& col = rowSet.Columns[c];
+            const auto& type = Schema_.Columns[c].Type;
+            if (NoEscape_ && TMaybeType<TStringType>(type)) {
+                if (col.OffsetWidth == 4) {
+                    WriteCsvStringRaw<int32_t>(Out_, col, row);
+                } else {
+                    WriteCsvStringRaw<int64_t>(Out_, col, row);
+                }
+            } else if (TMaybeType<TStringType>(type)) {
+                if (col.OffsetWidth == 4) {
+                    WriteCsvString<int32_t>(Out_, col, row, Separator_);
+                } else {
+                    WriteCsvString<int64_t>(Out_, col, row, Separator_);
+                }
+            } else {
+                Out_ << CsvEscape(FormatValue(col, row, type), Separator_);
+            }
         }
         Out_ << "\n";
     }
+}
+
+void TNullSink::Write(const TRowSet& rowSet) {
+    Rows_ += rowSet.RowCount;
 }
 
 } // namespace NQqb

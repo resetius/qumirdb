@@ -8,10 +8,11 @@
 namespace NQqb {
 namespace NKernel {
 
-// Replaces TIdentExpr nodes that match field names with TIndexExpr{ident, i}.
+// Replaces TIdentExpr nodes that match field names with row-wise access.
 void SubstFieldsInPlace(
     NQumir::NAst::TExprPtr& expr,
     const std::unordered_set<std::string>& fieldNames,
+    const std::unordered_set<std::string>& boolFieldNames,
     const NQumir::NAst::TExprPtr& indexIdent);
 
 // Builds a complete vectorized filter kernel AST from an unannotated predicate.
