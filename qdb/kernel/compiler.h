@@ -16,7 +16,7 @@ namespace NQqb {
 class TKernelCompiler {
 public:
     // Filter dispatch: called per batch to fill the selection buffer.
-    using TFilterDispatch = std::function<void(const TRowSet& rowSet, uint8_t* selection)>;
+    using TFilterDispatch = std::function<void(TRowSet& rowSet)>;
 
     // Compiles a filter kernel for the given input struct type and predicate.
     // Returns a dispatch lambda that calls the compiled kernel.

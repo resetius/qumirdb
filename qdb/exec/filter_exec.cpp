@@ -15,10 +15,9 @@ bool TRuntimeFilter::Next(TRowSet& rowSet) {
     if (!Input_->Next(rowSet)) {
         return false;
     }
-    SelectionBuf_.assign(rowSet.RowCount, 0);
-    auto* selection = SelectionBuf_.data();
-    Dispatch_(rowSet, selection);
-    rowSet.Selection = selection;
+    SelectionBuf_.resize(rowSet.RowCount);
+    rowSet.Selection = SelectionBuf_.data();
+    Dispatch_(rowSet);
     return true;
 }
 
