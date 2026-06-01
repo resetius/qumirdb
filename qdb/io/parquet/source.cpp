@@ -93,7 +93,17 @@ arrow::MemoryPool* GetMemoryPool() {
 TParquetSource::TParquetSource(const std::string& path) {
     auto infile = arrow::io::ReadableFile::Open(path).ValueOrDie();
 
-    auto fileReaderResult = parquet::arrow::OpenFile(infile, GetMemoryPool());
+    parquet::ArrowReaderProperties arrowProps;
+    arrowProps.set_batch_size(1 << 18);
+    parquet::arrow::FileReaderBuilder builder;
+    auto status = builder
+        .memory_pool(GetMemoryPool())
+        ->properties(arrowProps)
+        ->Open(infile);
+    if (!status.ok()) {
+        throw std::runtime_error(status.ToString());
+    }
+    auto fileReaderResult = builder.Build();
     if (!fileReaderResult.ok()) {
         throw std::runtime_error(fileReaderResult.status().ToString());
     }

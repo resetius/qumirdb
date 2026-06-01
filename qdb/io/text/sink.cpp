@@ -1,7 +1,8 @@
 #include <qdb/io/text/sink.h>
 
-#include <format>
+#include <charconv>
 #include <iomanip>
+#include <cstdio>
 #include <string_view>
 #include <string>
 
@@ -37,70 +38,173 @@ std::string_view StringViewValue(const TColumn& col, int32_t row) {
     return std::string_view(col.Data + start, static_cast<size_t>(end - start));
 }
 
-std::string FormatValue(const TColumn& col, int32_t row, const TTypePtr& type) {
+template <typename TOffset>
+void CsvWriteEscapedView(std::ostream& out, std::string_view view, char sep) {
+    bool needsQuoting = view.find(sep) != std::string_view::npos
+        || view.find('"') != std::string_view::npos
+        || view.find('\n') != std::string_view::npos;
+    if (!needsQuoting) {
+        out.write(view.data(), static_cast<std::streamsize>(view.size()));
+        return;
+    }
+    out.put('"');
+    for (char c : view) {
+        if (c == '"') {
+            out.write("\"\"", 2);
+        } else {
+            out.put(c);
+        }
+    }
+    out.put('"');
+}
+
+template <typename T>
+std::string_view ToCharsView(std::ostream& out, T value, char* buffer, size_t size) {
+    auto [ptr, ec] = std::to_chars(buffer, buffer + size, value);
+    if (ec == std::errc{}) {
+        return std::string_view(buffer, static_cast<size_t>(ptr - buffer));
+    }
+    auto tmp = std::snprintf(buffer, size, "%g", static_cast<double>(value));
+    if (tmp < 0) {
+        return {};
+    }
+    return std::string_view(buffer, static_cast<size_t>(tmp));
+}
+
+std::string FormatCell(const TColumn& col, int32_t row, const TTypePtr& type) {
     if (IsMasked(col, row)) {
         return "NULL";
     }
     if (!type) {
         return "?";
     }
+    char buf[64];
+    if (auto t = TMaybeType<TIntegerType>(type)) {
+        auto intType = t.Cast();
+        const char* ptr = col.Data + row * (intType->BitWidth() / 8);
+        std::to_chars_result r;
+        if (intType->IsSigned()) {
+            int64_t v = 0;
+            switch (intType->BitWidth()) {
+                case 8:  v = *reinterpret_cast<const int8_t*>(ptr); break;
+                case 16: v = *reinterpret_cast<const int16_t*>(ptr); break;
+                case 32: v = *reinterpret_cast<const int32_t*>(ptr); break;
+                case 64: v = *reinterpret_cast<const int64_t*>(ptr); break;
+            }
+            r = std::to_chars(buf, buf + sizeof(buf), v);
+        } else {
+            uint64_t v = 0;
+            switch (intType->BitWidth()) {
+                case 8:  v = *reinterpret_cast<const uint8_t*>(ptr); break;
+                case 16: v = *reinterpret_cast<const uint16_t*>(ptr); break;
+                case 32: v = *reinterpret_cast<const uint32_t*>(ptr); break;
+                case 64: v = *reinterpret_cast<const uint64_t*>(ptr); break;
+            }
+            r = std::to_chars(buf, buf + sizeof(buf), v);
+        }
+        return std::string(buf, r.ptr);
+    }
+    if (TMaybeType<TFloatType>(type)) {
+        double v = reinterpret_cast<const double*>(col.Data)[row];
+        auto r = std::to_chars(buf, buf + sizeof(buf), v);
+        return std::string(buf, r.ptr);
+    }
+    if (TMaybeType<TBoolType>(type)) {
+        return IsBitSet(col, row) ? "true" : "false";
+    }
+    if (TMaybeType<TStringType>(type)) {
+        if (col.OffsetWidth == 4) {
+            auto sv = StringViewValue<int32_t>(col, row);
+            return std::string(sv);
+        }
+        auto sv = StringViewValue<int64_t>(col, row);
+        return std::string(sv);
+    }
+    if (TMaybeType<TSymbolType>(type)) {
+        return std::string(1, col.Data[row]);
+    }
+    return "?";
+}
+
+template <typename TOffset>
+void WriteValue(std::ostream& out, const TColumn& col, int32_t row, const TTypePtr& type) {
+    if (IsMasked(col, row)) {
+        out << "NULL";
+        return;
+    }
+    if (!type) {
+        out << '?';
+        return;
+    }
 
     if (auto t = TMaybeType<TIntegerType>(type)) {
         auto intType = t.Cast();
         const char* ptr = col.Data + row * (intType->BitWidth() / 8);
-        if (intType->IsSigned()) {
-            switch (intType->BitWidth()) {
-                case 8:  return std::format("{}", static_cast<int64_t>(*reinterpret_cast<const int8_t*>(ptr)));
-                case 16: return std::format("{}", *reinterpret_cast<const int16_t*>(ptr));
-                case 32: return std::format("{}", *reinterpret_cast<const int32_t*>(ptr));
-                case 64: return std::format("{}", *reinterpret_cast<const int64_t*>(ptr));
-            }
-        } else {
-            switch (intType->BitWidth()) {
-                case 8:  return std::format("{}", static_cast<uint64_t>(*reinterpret_cast<const uint8_t*>(ptr)));
-                case 16: return std::format("{}", *reinterpret_cast<const uint16_t*>(ptr));
-                case 32: return std::format("{}", *reinterpret_cast<const uint32_t*>(ptr));
-                case 64: return std::format("{}", *reinterpret_cast<const uint64_t*>(ptr));
-            }
+        char buffer[64];
+        switch (intType->BitWidth()) {
+            case 8:
+                if (intType->IsSigned()) {
+                    auto view = ToCharsView(out, static_cast<int64_t>(*reinterpret_cast<const int8_t*>(ptr)), buffer, sizeof(buffer));
+                    out.write(view.data(), static_cast<std::streamsize>(view.size()));
+                } else {
+                    auto view = ToCharsView(out, static_cast<uint64_t>(*reinterpret_cast<const uint8_t*>(ptr)), buffer, sizeof(buffer));
+                    out.write(view.data(), static_cast<std::streamsize>(view.size()));
+                }
+                return;
+            case 16:
+                if (intType->IsSigned()) {
+                    auto view = ToCharsView(out, static_cast<int64_t>(*reinterpret_cast<const int16_t*>(ptr)), buffer, sizeof(buffer));
+                    out.write(view.data(), static_cast<std::streamsize>(view.size()));
+                } else {
+                    auto view = ToCharsView(out, static_cast<uint64_t>(*reinterpret_cast<const uint16_t*>(ptr)), buffer, sizeof(buffer));
+                    out.write(view.data(), static_cast<std::streamsize>(view.size()));
+                }
+                return;
+            case 32:
+                if (intType->IsSigned()) {
+                    auto view = ToCharsView(out, static_cast<int64_t>(*reinterpret_cast<const int32_t*>(ptr)), buffer, sizeof(buffer));
+                    out.write(view.data(), static_cast<std::streamsize>(view.size()));
+                } else {
+                    auto view = ToCharsView(out, static_cast<uint64_t>(*reinterpret_cast<const uint32_t*>(ptr)), buffer, sizeof(buffer));
+                    out.write(view.data(), static_cast<std::streamsize>(view.size()));
+                }
+                return;
+            case 64:
+                if (intType->IsSigned()) {
+                    auto view = ToCharsView(out, static_cast<int64_t>(*reinterpret_cast<const int64_t*>(ptr)), buffer, sizeof(buffer));
+                    out.write(view.data(), static_cast<std::streamsize>(view.size()));
+                } else {
+                    auto view = ToCharsView(out, static_cast<uint64_t>(*reinterpret_cast<const uint64_t*>(ptr)), buffer, sizeof(buffer));
+                    out.write(view.data(), static_cast<std::streamsize>(view.size()));
+                }
+                return;
         }
     } else if (TMaybeType<TFloatType>(type)) {
-        return std::format("{}", reinterpret_cast<const double*>(col.Data)[row]);
+        char buffer[64];
+        auto view = ToCharsView(out, reinterpret_cast<const double*>(col.Data)[row], buffer, sizeof(buffer));
+        out.write(view.data(), static_cast<std::streamsize>(view.size()));
+        return;
     } else if (TMaybeType<TBoolType>(type)) {
-        return IsBitSet(col, row) ? "true" : "false";
+        out << (IsBitSet(col, row) ? "true" : "false");
+        return;
     } else if (TMaybeType<TStringType>(type)) {
-        if (col.OffsetWidth == 4) {
-            return std::string(StringViewValue<int32_t>(col, row));
+        if constexpr (std::is_same_v<TOffset, int32_t>) {
+            CsvWriteEscapedView<int32_t>(out, StringViewValue<int32_t>(col, row), ',');
+        } else {
+            CsvWriteEscapedView<int64_t>(out, StringViewValue<int64_t>(col, row), ',');
         }
-        return std::string(StringViewValue<int64_t>(col, row));
+        return;
     } else if (TMaybeType<TSymbolType>(type)) {
-        return std::string(1, col.Data[row]);
+        out.put(col.Data[row]);
+        return;
     }
 
-    return "?";
+    out << '?';
 }
 
 bool IsNumeric(const TTypePtr& type) {
     return static_cast<bool>(TMaybeType<TIntegerType>(type)) ||
            static_cast<bool>(TMaybeType<TFloatType>(type));
-}
-
-std::string CsvEscape(const std::string& value, char sep) {
-    bool needsQuoting = value.find(sep) != std::string::npos
-        || value.find('"') != std::string::npos
-        || value.find('\n') != std::string::npos;
-    if (!needsQuoting) {
-        return value;
-    }
-    std::string result = "\"";
-    for (char c : value) {
-        if (c == '"') {
-            result += "\"\"";
-        } else {
-            result += c;
-        }
-    }
-    result += '"';
-    return result;
 }
 
 template <typename TOffset>
@@ -151,7 +255,7 @@ void TConsoleSink::Write(const TRowSet& rowSet) {
         }
         std::vector<std::string> formatted(rowSet.ColumnCount);
         for (int32_t c = 0; c < rowSet.ColumnCount; ++c) {
-            formatted[c] = FormatValue(rowSet.Columns[c], row, Schema_.Columns[c].Type);
+            formatted[c] = FormatCell(rowSet.Columns[c], row, Schema_.Columns[c].Type);
             if (formatted[c].size() > Widths_[c]) {
                 Widths_[c] = formatted[c].size();
             }
@@ -238,7 +342,15 @@ void TCsvSink::Write(const TRowSet& rowSet) {
                     WriteCsvString<int64_t>(Out_, col, row, Separator_);
                 }
             } else {
-                Out_ << CsvEscape(FormatValue(col, row, type), Separator_);
+                if (TMaybeType<TStringType>(type)) {
+                    if (col.OffsetWidth == 4) {
+                        WriteCsvString<int32_t>(Out_, col, row, Separator_);
+                    } else {
+                        WriteCsvString<int64_t>(Out_, col, row, Separator_);
+                    }
+                } else {
+                    WriteValue<int64_t>(Out_, col, row, type);
+                }
             }
         }
         Out_ << "\n";

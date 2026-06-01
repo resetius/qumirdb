@@ -19,13 +19,13 @@ struct TColumn {
 
 struct TRowSet {
     TColumn* Columns;
-    int32_t ColumnCount;
-    int32_t RowCount;
+    int64_t ColumnCount;
+    int64_t RowCount;
     uint8_t* Selection; // nullptr = all rows selected; Selection[i]==0 skips row i
 
     void (*Destroy)(TRowSet*);
     void* Private;
-    int32_t RefCount;
+    int64_t RefCount;
 };
 
 inline void Retain(TRowSet* rs) {
