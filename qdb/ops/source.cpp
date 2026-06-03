@@ -16,8 +16,9 @@ NQumir::NAst::TTypePtr StructTypeFromSchema(const TSchema& schema) {
     return std::make_shared<NQumir::NAst::TStructType>(std::move(fields));
 }
 
-TSourceOperator::TSourceOperator(ISource& source)
+TSourceOperator::TSourceOperator(ISource& source, std::string path)
     : Source_(source)
+    , SourcePath_(std::move(path))
 {
     Type = StructTypeFromSchema(source.Schema());
 }

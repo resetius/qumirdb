@@ -18,7 +18,13 @@ static void PrintRel(NQumir::NAst::TExpr& expr, TPrinter& printer, TPrintFrame f
     const auto rel = op.RelName();
 
     if (rel == TSourceOperator::OpId) {
-        out << "(rel source)";
+        auto& src = static_cast<TSourceOperator&>(op);
+        out << "(rel source";
+        if (!src.SourcePath().empty()) {
+            out << ' ';
+            printer.PrintString(src.SourcePath(), '"');
+        }
+        out << ')';
         return;
     }
 

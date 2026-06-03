@@ -20,11 +20,15 @@ TNodeParserMap MakeRelParsers(TRelParserOptions options) {
         }
 
         if (nameTok.Name == TSourceOperator::OpId) {
+            auto pathTok = h.Next();
+            if (pathTok.Type != TToken::String) {
+                co_return IParseHandle::MakeError(pathTok, "(rel source) expects a path string");
+            }
             co_await h.Take(')');
             if (!opts.SourceFactory) {
                 co_return TError(loc, "(rel source) requires a SourceFactory");
             }
-            co_return opts.SourceFactory(loc);
+            co_return opts.SourceFactory(std::string_view(pathTok.Name), loc);
         }
 
         if (nameTok.Name == TFilterOperator::OpId) {

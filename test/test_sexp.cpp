@@ -113,10 +113,13 @@ TEST(SexpParser, Filter) {
     auto sourceOp = std::make_shared<TSourceOperator>(src);
 
     TRelParserOptions opts;
-    opts.SourceFactory = [&](NQumir::TLocation) -> TOperatorPtr { return sourceOp; };
+    opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
+    sourceOp = std::make_shared<TSourceOperator>(src, std::string(path));
+    return sourceOp;
+};
     auto p = MakeParser(std::move(opts));
 
-    auto expr = Parse(p, "(rel filter (rel source) (> x 5))");
+    auto expr = Parse(p, "(rel filter (rel source \"data.parquet\") (> x 5))");
     ASSERT_NE(expr, nullptr);
 
     EXPECT_EQ(expr->NodeName(), IOperator::NodeId);
@@ -132,10 +135,13 @@ TEST(SexpParser, Project) {
     auto sourceOp = std::make_shared<TSourceOperator>(src);
 
     TRelParserOptions opts;
-    opts.SourceFactory = [&](NQumir::TLocation) -> TOperatorPtr { return sourceOp; };
+    opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
+    sourceOp = std::make_shared<TSourceOperator>(src, std::string(path));
+    return sourceOp;
+};
     auto p = MakeParser(std::move(opts));
 
-    auto expr = Parse(p, "(rel project (rel source) (a x) (b y))");
+    auto expr = Parse(p, "(rel project (rel source \"data.parquet\") (a x) (b y))");
     ASSERT_NE(expr, nullptr);
 
     auto& proj = static_cast<TProjectOperator&>(*expr);
@@ -148,10 +154,13 @@ TEST(SexpParser, FilterPrintRoundtrip) {
     TStubSource src({"x"});
     auto sourceOp = std::make_shared<TSourceOperator>(src);
 
-    const std::string input = "(rel filter (rel source) (> x 5))";
+    const std::string input = "(rel filter (rel source \"data.parquet\") (> x 5))";
 
     TRelParserOptions opts;
-    opts.SourceFactory = [&](NQumir::TLocation) -> TOperatorPtr { return sourceOp; };
+    opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
+    sourceOp = std::make_shared<TSourceOperator>(src, std::string(path));
+    return sourceOp;
+};
     auto p = MakeParser(std::move(opts));
 
     auto expr = Parse(p, input);
