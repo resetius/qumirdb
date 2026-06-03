@@ -11,10 +11,11 @@ class TSourceOperator : public IOperator {
 public:
     static constexpr const char* OpId = "source";
 
-    explicit TSourceOperator(ISource& source);
+    explicit TSourceOperator(ISource& source, std::string path = {});
 
     std::string_view RelName() const override { return OpId; }
     ISource& GetSource() const { return Source_; }
+    const std::string& SourcePath() const { return SourcePath_; }
 
     const std::unordered_set<std::string>& RequiredColumns() const { return RequiredColumns_; }
     void SetRequiredColumns(std::unordered_set<std::string> cols) { RequiredColumns_ = std::move(cols); }
@@ -23,6 +24,7 @@ public:
 
 private:
     ISource& Source_;
+    std::string SourcePath_;
     std::unordered_set<std::string> RequiredColumns_; // empty = all columns
 };
 
