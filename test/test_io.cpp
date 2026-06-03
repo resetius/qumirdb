@@ -102,9 +102,13 @@ TEST(IOTest, NullsInColumn) {
 
     const auto& col = rowSet.Columns[0];
     ASSERT_NE(col.Mask, nullptr);
-    EXPECT_EQ(col.Mask[0], 0); // valid
-    EXPECT_NE(col.Mask[1], 0); // null
-    EXPECT_EQ(col.Mask[2], 0); // valid
+    // Arrow validity bitmap: 1 = valid, 0 = null, bit-packed within each byte
+    auto isValid = [&](int row) {
+        return (col.Mask[row / 8] >> (row % 8)) & 1;
+    };
+    EXPECT_NE(isValid(0), 0); // row 0: valid
+    EXPECT_EQ(isValid(1), 0); // row 1: null
+    EXPECT_NE(isValid(2), 0); // row 2: valid
 
     std::ostringstream out;
     NQqb::TConsoleSink sink(source.Schema(), out);
