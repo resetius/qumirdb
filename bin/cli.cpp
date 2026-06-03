@@ -17,6 +17,27 @@
 #include <vector>
 #include <chrono>
 
+/*
+
+example:
+
+functional style:
+(rel project (o_orderkey o_totalprice)
+    (rel filter (> o_totalprice 1000.0)
+        (rel scan 'lineitem.parquet' (optional-push-down)
+        )
+    )
+)
+
+or?
+pipe style:
+(rel scan 'lineitem.parquet' (optional-push-down)
+    (rel filter (> o_totalprice 1000.0)
+        (rel project (o_orderkey o_totalprice)))
+)
+
+*/
+
 namespace {
 
 struct TFormatSpec {

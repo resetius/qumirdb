@@ -12,6 +12,8 @@ add_library(qumirdb
     ops/project.cpp
     ops/parse_kernel.cpp
     ops/used_columns.cpp
+    sexp/printer.cpp
+    sexp/parser.cpp
     kernel/gen.cpp
     kernel/compiler.cpp
     exec/source_exec.cpp

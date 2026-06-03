@@ -11,3 +11,4 @@ macro(ut name source)
 endmacro()
 
 ut(test_io test_io.cpp)
+ut(test_sexp test_sexp.cpp)

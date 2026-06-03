@@ -21,6 +21,8 @@ struct IOperator : NQumir::NAst::TExpr {
 
     // Specific operator name: "source", "filter", "project"
     virtual std::string_view RelName() const = 0;
+
+    void Accept(NQumir::NAst::IVisitor& visitor) override { visitor.VisitOtherwise(*this); }
 };
 
 using TOperatorPtr = std::shared_ptr<IOperator>;
