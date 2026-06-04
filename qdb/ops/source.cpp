@@ -22,56 +22,13 @@ TSourceOperator::TSourceOperator(ISource& source, std::string path)
     : Source_(source)
     , SourcePath_(std::move(path))
 {
-    Type = StructTypeFromSchema(source.Schema());
+    Type = std::make_shared<NQumir::NAst::TFunctionType>(
+        std::vector<NQumir::NAst::TTypePtr>{},
+        StructTypeFromSchema(source.Schema()));
 }
 
 const std::string TSourceOperator::ToString() const {
     return "(rel source)";
-}
-
-static std::unordered_set<std::string> CollectUsedColumns(const TOperatorPtr& op) {
-    if (TMaybeOp<TSourceOperator>(op)) {
-        return {};
-    }
-    if (auto maybe = TMaybeOp<TFilterOperator>(op)) {
-        auto filter = maybe.Cast();
-        auto cols = CollectUsedColumns(filter->Input());
-        for (auto& c : FindUnboundVars(filter->Predicate())) {
-            cols.insert(c);
-        }
-        return cols;
-    }
-    if (auto maybe = TMaybeOp<TProjectOperator>(op)) {
-        auto project = maybe.Cast();
-        auto cols = CollectUsedColumns(project->Input());
-        for (const auto& proj : project->Projections()) {
-            for (auto& c : FindUnboundVars(proj.Expression)) {
-                cols.insert(c);
-            }
-        }
-        return cols;
-    }
-    return {};
-}
-
-void ApplyColumnPruning(const TOperatorPtr& root) {
-    auto used = CollectUsedColumns(root);
-    if (used.empty()) {
-        return;
-    }
-
-    std::function<void(const TOperatorPtr&)> walk = [&](const TOperatorPtr& op) {
-        if (auto maybe = TMaybeOp<TSourceOperator>(op)) {
-            maybe.Cast()->SetRequiredColumns(used);
-            return;
-        }
-        for (const auto& child : op->Children()) {
-            if (auto maybeOp = NQumir::NAst::TMaybeNode<IOperator>(child)) {
-                walk(maybeOp.Cast());
-            }
-        }
-    };
-    walk(root);
 }
 
 } // namespace NQqb

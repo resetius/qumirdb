@@ -14,24 +14,17 @@ public:
     explicit TSourceOperator(ISource& source, std::string path = {});
 
     std::string_view RelName() const override { return OpId; }
+    std::unordered_set<std::string> ComputeReferencedColumns() const override { return {}; }
     ISource& GetSource() const { return Source_; }
     const std::string& SourcePath() const { return SourcePath_; }
-
-    const std::unordered_set<std::string>& RequiredColumns() const { return RequiredColumns_; }
-    void SetRequiredColumns(std::unordered_set<std::string> cols) { RequiredColumns_ = std::move(cols); }
 
     const std::string ToString() const override;
 
 private:
     ISource& Source_;
     std::string SourcePath_;
-    std::unordered_set<std::string> RequiredColumns_; // empty = all columns
 };
 
 NQumir::NAst::TTypePtr StructTypeFromSchema(const TSchema& schema);
-
-// Transformation pass: walks the plan tree, collects unbound column references,
-// and calls SetRequiredColumns on all TSourceOperator nodes.
-void ApplyColumnPruning(const TOperatorPtr& root);
 
 } // namespace NQqb

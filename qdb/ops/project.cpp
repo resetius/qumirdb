@@ -1,5 +1,7 @@
 #include <qdb/ops/project.h>
 
+#include <qdb/pipeline/unbound_vars.h>
+
 #include <qumir/parser/ast.h>
 #include <qumir/parser/core/lexer.h>
 #include <qumir/parser/core/parser.h>
@@ -14,24 +16,33 @@ TProjectOperator::TProjectOperator(TOperatorPtr input, std::vector<TProjectionSp
     : Input_(std::move(input))
     , Projections_(std::move(projections))
 {
-    auto* inputType = static_cast<NQumir::NAst::TStructType*>(Input_->Type.get());
+    auto* inputStruct = static_cast<NQumir::NAst::TStructType*>(Input_->OutputColumns().get());
     std::vector<std::pair<std::string, NQumir::NAst::TTypePtr>> outFields;
-    if (inputType) {
+    if (inputStruct) {
         for (const auto& proj : Projections_) {
             NQumir::NAst::TTypePtr fieldType;
-            // For a simple identity projection (ident expr), resolve type from input.
             if (auto ident = NQumir::NAst::TMaybeNode<NQumir::NAst::TIdentExpr>(proj.Expression)) {
-                for (const auto& [name, type] : inputType->Fields) {
-                    if (name == ident.Cast()->Name) {
-                        fieldType = type;
-                        break;
-                    }
+                for (const auto& [name, type] : inputStruct->Fields) {
+                    if (name == ident.Cast()->Name) { fieldType = type; break; }
                 }
             }
             outFields.emplace_back(proj.Name, fieldType);
         }
     }
-    Type = std::make_shared<NQumir::NAst::TStructType>(std::move(outFields));
+    // ParamTypes[0] = full input schema initially; narrowed by column push-down.
+    Type = std::make_shared<NQumir::NAst::TFunctionType>(
+        std::vector<NQumir::NAst::TTypePtr>{Input_->OutputColumns()},
+        std::make_shared<NQumir::NAst::TStructType>(std::move(outFields)));
+}
+
+std::unordered_set<std::string> TProjectOperator::ComputeReferencedColumns() const {
+    std::unordered_set<std::string> refs;
+    for (const auto& proj : Projections_) {
+        for (auto& col : FindUnboundVars(proj.Expression)) {
+            refs.insert(col);
+        }
+    }
+    return refs;
 }
 
 const std::string TProjectOperator::ToString() const {

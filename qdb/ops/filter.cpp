@@ -1,8 +1,11 @@
 #include <qdb/ops/filter.h>
 
+#include <qdb/pipeline/unbound_vars.h>
+
 #include <qumir/parser/core/lexer.h>
 #include <qumir/parser/core/parser.h>
 #include <qumir/parser/core/printer.h>
+#include <qumir/parser/type.h>
 
 #include <sstream>
 
@@ -12,7 +15,15 @@ TFilterOperator::TFilterOperator(TOperatorPtr input, NQumir::NAst::TExprPtr pred
     : Input_(std::move(input))
     , Predicate_(std::move(predicate))
 {
-    Type = Input_->Type;
+    // Filter is schema-preserving: output = required = input's output schema.
+    auto schema = Input_->OutputColumns();
+    Type = std::make_shared<NQumir::NAst::TFunctionType>(
+        std::vector<NQumir::NAst::TTypePtr>{schema},
+        schema);
+}
+
+std::unordered_set<std::string> TFilterOperator::ComputeReferencedColumns() const {
+    return FindUnboundVars(Predicate_);
 }
 
 const std::string TFilterOperator::ToString() const {
