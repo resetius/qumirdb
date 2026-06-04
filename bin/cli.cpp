@@ -2,7 +2,6 @@
 #include <qdb/io/parquet/source.h>
 #include <qdb/io/text/sink.h>
 #include <qdb/ops/source.h>
-#include <qdb/ops/used_columns.h>
 #include <qdb/sexp/parser.h>
 
 #include <qumir/codegen/llvm/llvm_initializer.h>

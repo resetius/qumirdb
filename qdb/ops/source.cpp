@@ -1,9 +1,11 @@
 #include <qdb/ops/source.h>
-#include <qdb/ops/used_columns.h>
 #include <qdb/ops/filter.h>
 #include <qdb/ops/project.h>
+#include <qdb/pipeline/unbound_vars.h>
 
 #include <qumir/parser/type.h>
+
+#include <functional>
 
 namespace NQqb {
 
@@ -27,14 +29,37 @@ const std::string TSourceOperator::ToString() const {
     return "(rel source)";
 }
 
+static std::unordered_set<std::string> CollectUsedColumns(const TOperatorPtr& op) {
+    if (TMaybeOp<TSourceOperator>(op)) {
+        return {};
+    }
+    if (auto maybe = TMaybeOp<TFilterOperator>(op)) {
+        auto filter = maybe.Cast();
+        auto cols = CollectUsedColumns(filter->Input());
+        for (auto& c : FindUnboundVars(filter->Predicate())) {
+            cols.insert(c);
+        }
+        return cols;
+    }
+    if (auto maybe = TMaybeOp<TProjectOperator>(op)) {
+        auto project = maybe.Cast();
+        auto cols = CollectUsedColumns(project->Input());
+        for (const auto& proj : project->Projections()) {
+            for (auto& c : FindUnboundVars(proj.Expression)) {
+                cols.insert(c);
+            }
+        }
+        return cols;
+    }
+    return {};
+}
+
 void ApplyColumnPruning(const TOperatorPtr& root) {
     auto used = CollectUsedColumns(root);
     if (used.empty()) {
         return;
     }
 
-    // Walk to every TSourceOperator in the subtree and set required columns.
-    // For a linear plan (no joins yet) there is exactly one source.
     std::function<void(const TOperatorPtr&)> walk = [&](const TOperatorPtr& op) {
         if (auto maybe = TMaybeOp<TSourceOperator>(op)) {
             maybe.Cast()->SetRequiredColumns(used);

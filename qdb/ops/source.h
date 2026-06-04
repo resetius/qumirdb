@@ -30,8 +30,8 @@ private:
 
 NQumir::NAst::TTypePtr StructTypeFromSchema(const TSchema& schema);
 
-// Transformation pass: walks the plan tree, collects used columns via
-// CollectUsedColumns, and calls SetRequiredColumns on all TSourceOperator nodes.
+// Transformation pass: walks the plan tree, collects unbound column references,
+// and calls SetRequiredColumns on all TSourceOperator nodes.
 void ApplyColumnPruning(const TOperatorPtr& root);
 
 } // namespace NQqb
