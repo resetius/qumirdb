@@ -3,26 +3,35 @@
 #include <qdb/io/io.h>
 
 #include <qumir/parser/ast.h>
+#include <qumir/parser/type.h>
+
+#include <string>
+#include <unordered_set>
 
 namespace NQqb {
 
-// Base for all relational operators.
-//
-// Inherits TExpr so the operator tree is a first-class AST:
-//   - Type      : output TStructType (fields = columns)
-//   - Children(): input operators
-//   - ToString(): core-lang style "(rel <name> ...)"
-//
-// Future: parsed directly from "(rel filter ...)" in core-lang.
 struct IOperator : NQumir::NAst::TExpr {
     static constexpr const char* NodeId = "Rel";
 
     const std::string_view NodeName() const override { return NodeId; }
-
-    // Specific operator name: "source", "filter", "project"
     virtual std::string_view RelName() const = 0;
-
     void Accept(NQumir::NAst::IVisitor& visitor) override { visitor.VisitOtherwise(*this); }
+
+    // Columns referenced in this node's own expressions (predicate / projections).
+    // Excludes what input operators produce — only own references.
+    virtual std::unordered_set<std::string> ComputeReferencedColumns() const = 0;
+
+    // Output schema: TFunctionType::ReturnType.
+    NQumir::NAst::TTypePtr OutputColumns() const {
+        return static_cast<NQumir::NAst::TFunctionType*>(Type.get())->ReturnType;
+    }
+
+    // Required input schema: TFunctionType::ParamTypes[0].
+    // Null for source (no upstream operator) and before typing pass.
+    NQumir::NAst::TTypePtr RequiredColumns() const {
+        auto* fun = static_cast<NQumir::NAst::TFunctionType*>(Type.get());
+        return fun->ParamTypes.empty() ? nullptr : fun->ParamTypes[0];
+    }
 };
 
 using TOperatorPtr = std::shared_ptr<IOperator>;

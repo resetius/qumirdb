@@ -2,6 +2,8 @@
 #include <qdb/io/parquet/source.h>
 #include <qdb/io/text/sink.h>
 #include <qdb/ops/source.h>
+#include <qdb/pipeline/column_pruning.h>
+#include <qdb/pipeline/typing.h>
 #include <qdb/sexp/parser.h>
 
 #include <qumir/codegen/llvm/llvm_initializer.h>
@@ -219,6 +221,7 @@ int main(int argc, char** argv) {
             return 1;
         }
 
+        NQqb::AnnotateTypes(plan);
         NQqb::ApplyColumnPruning(plan);
 
         NQqb::TPhysicalPlanner planner;

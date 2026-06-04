@@ -14,6 +14,8 @@ add_library(qumirdb
     sexp/printer.cpp
     sexp/parser.cpp
     pipeline/unbound_vars.cpp
+    pipeline/typing.cpp
+    pipeline/column_pruning.cpp
     kernel/gen.cpp
     kernel/compiler.cpp
     exec/source_exec.cpp
@@ -23,8 +25,18 @@ add_library(qumirdb
 )
 target_include_directories(qumirdb PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)
 target_compile_features(qumirdb PUBLIC cxx_std_23)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(qumirdb PUBLIC
+        "$<LINK_GROUP:RESCAN,qumir,qumir_runtime,qumir_codegen_llvm>"
+    )
+else()
+    target_link_libraries(qumirdb PUBLIC
+        qumir
+        qumir_runtime
+        qumir_codegen_llvm
+    )
+endif()
 target_link_libraries(qumirdb PUBLIC
-    "$<LINK_GROUP:RESCAN,qumir,qumir_runtime,qumir_codegen_llvm>"
     PkgConfig::ARROW
     PkgConfig::PARQUET
 )

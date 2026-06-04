@@ -16,10 +16,14 @@ namespace NQqb {
 std::unique_ptr<IRuntimeNode> TPhysicalPlanner::Build(const TOperatorPtr& root) {
     if (auto maybe = TMaybeOp<TSourceOperator>(root)) {
         auto src = maybe.Cast();
-        if (!src->RequiredColumns().empty()) {
-            src->GetSource().RestrictColumns(src->RequiredColumns());
+        // After column pruning, RequiredColumns() holds the narrowed struct.
+        // If set, restrict the physical scan to those columns.
+        if (auto required = src->RequiredColumns()) {
+            auto* st = static_cast<NQumir::NAst::TStructType*>(required.get());
+            std::unordered_set<std::string> cols;
+            for (auto& [name, _] : st->Fields) cols.insert(name);
+            src->GetSource().RestrictColumns(cols);
         }
-        // Build type from the actual post-restriction schema.
         auto actualType = StructTypeFromSchema(src->GetSource().Schema());
         return std::make_unique<TRuntimeSource>(src->GetSource(), actualType);
     }
@@ -68,7 +72,7 @@ std::unique_ptr<IRuntimeNode> TPhysicalPlanner::Build(const TOperatorPtr& root) 
 
         return std::make_unique<TRuntimeProject>(
             std::move(input),
-            project->Type,
+            project->OutputColumns(),
             std::move(columnIndices));
     }
 
