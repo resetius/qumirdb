@@ -5,6 +5,7 @@
 
 #include <qdb/modules/qumirdb.h>
 
+#include <algorithm>
 #include <array>
 #include <filesystem>
 #include <fstream>
@@ -13,6 +14,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace {
@@ -846,6 +848,132 @@ TEST(AggregationKernel, OzFinalizeCopiesDenseKeysAndAggregateBuffers) {
     EXPECT_EQ(outputSums, (std::array<int64_t, 3>{27, 12, 11}));
     EXPECT_EQ(outputMins, (std::array<int64_t, 3>{-3, 5, 11}));
     EXPECT_EQ(outputMaxs, (std::array<int64_t, 3>{20, 7, 11}));
+
+    EXPECT_TRUE(aggregate(&table, nullptr, nullptr, 0, 6));
+}
+
+TEST(AggregationKernel, OzStressAggregationHandlesLargeDeterministicInput) {
+    void* countEntry = nullptr;
+    void* finalizeEntry = nullptr;
+    void* checkEntry = nullptr;
+    std::string error;
+    auto countRunner = CompileKernel("count.oz", countEntry, error);
+    ASSERT_NE(countEntry, nullptr) << error;
+    auto finalizeRunner = CompileKernel("finalize.oz", finalizeEntry, error);
+    ASSERT_NE(finalizeEntry, nullptr) << error;
+    auto checkRunner = CompileKernel("check_invariants.oz", checkEntry, error);
+    ASSERT_NE(checkEntry, nullptr) << error;
+
+    using TBatchFn = int64_t(*)(THashTable*, int64_t*, int64_t*, int64_t, int64_t);
+    using TFinalizeFn = int64_t(*)(
+        THashTable*, int64_t*, int64_t*, int64_t*, int64_t*, int64_t*, int64_t);
+    using TCheckFn = bool(*)(int64_t*, int64_t*, int64_t);
+    auto aggregate = reinterpret_cast<TBatchFn>(countEntry);
+    auto finalize = reinterpret_cast<TFinalizeFn>(finalizeEntry);
+    auto check = reinterpret_cast<TCheckFn>(checkEntry);
+
+    struct TGroupStats {
+        int64_t Count = 0;
+        int64_t Sum = 0;
+        int64_t Min = 0;
+        int64_t Max = 0;
+    };
+
+    constexpr size_t rowCount = 2000;
+    std::vector<int64_t> keys(rowCount);
+    std::vector<int64_t> values(rowCount);
+    std::unordered_map<int64_t, TGroupStats> reference;
+
+    uint64_t state = 88172645463325252ULL;
+    auto next = [&state]() -> uint64_t {
+        state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+        return state;
+    };
+    for (size_t i = 0; i < rowCount; ++i) {
+        const int64_t key = static_cast<int64_t>(next() % 301) - 150;
+        const int64_t value = static_cast<int64_t>(next() % 2001) - 1000;
+        keys[i] = key;
+        values[i] = value;
+        auto& group = reference[key];
+        if (group.Count == 0) {
+            group.Min = value;
+            group.Max = value;
+        } else {
+            group.Min = std::min(group.Min, value);
+            group.Max = std::max(group.Max, value);
+        }
+        group.Count += 1;
+        group.Sum += value;
+    }
+
+    THashTable table;
+    ASSERT_TRUE(aggregate(&table, nullptr, nullptr, 4, 0));
+
+    constexpr size_t batchCount = 3;
+    size_t offset = 0;
+    for (size_t batch = 0; batch < batchCount; ++batch) {
+        const size_t remaining = rowCount - offset;
+        const size_t batchSize =
+            (batch + 1 == batchCount) ? remaining : remaining / (batchCount - batch);
+        ASSERT_TRUE(aggregate(&table, keys.data() + offset, values.data() + offset,
+                              static_cast<int64_t>(batchSize), 1));
+        offset += batchSize;
+    }
+    ASSERT_EQ(offset, rowCount);
+
+    auto dumpTable = [&table]() {
+        std::ostringstream out;
+        out << "Capacity=" << table.Capacity << " Size=" << table.Size << "\n";
+        for (int64_t slot = 0; slot < table.Capacity; ++slot) {
+            if (table.Dist[slot] != -1) {
+                out << "  slot " << slot << ": key=" << table.Keys[slot]
+                    << " dist=" << table.Dist[slot]
+                    << " slotId=" << table.SlotId[slot] << "\n";
+            }
+        }
+        return out.str();
+    };
+
+    ASSERT_EQ(table.Size, static_cast<int64_t>(reference.size())) << dumpTable();
+    ASSERT_GE(table.Capacity, 256) << dumpTable();
+    ASSERT_TRUE(check(table.Keys, table.Dist, table.Capacity)) << dumpTable();
+
+    std::vector<bool> seenSlotId(table.Size, false);
+    for (int64_t slot = 0; slot < table.Capacity; ++slot) {
+        if (table.Dist[slot] != -1) {
+            const int64_t slotId = table.SlotId[slot];
+            ASSERT_GE(slotId, 0) << dumpTable();
+            ASSERT_LT(slotId, table.Size) << dumpTable();
+            ASSERT_FALSE(seenSlotId[slotId]) << "duplicate dense slot id " << slotId << "\n"
+                                              << dumpTable();
+            seenSlotId[slotId] = true;
+        }
+    }
+    for (bool present : seenSlotId) {
+        ASSERT_TRUE(present) << dumpTable();
+    }
+
+    std::vector<int64_t> outputKeys(table.Size);
+    std::vector<int64_t> outputCounts(table.Size);
+    std::vector<int64_t> outputSums(table.Size);
+    std::vector<int64_t> outputMins(table.Size);
+    std::vector<int64_t> outputMaxs(table.Size);
+    ASSERT_EQ(finalize(&table, outputKeys.data(), outputCounts.data(), outputSums.data(),
+                       outputMins.data(), outputMaxs.data(), table.Size),
+              table.Size);
+
+    for (int64_t i = 0; i < table.Size; ++i) {
+        const int64_t key = outputKeys[i];
+        auto it = reference.find(key);
+        ASSERT_NE(it, reference.end()) << "unexpected key " << key << "\n" << dumpTable();
+        const auto& group = it->second;
+        EXPECT_EQ(outputCounts[i], group.Count) << "key " << key << "\n" << dumpTable();
+        EXPECT_EQ(outputSums[i], group.Sum) << "key " << key << "\n" << dumpTable();
+        EXPECT_EQ(outputMins[i], group.Min) << "key " << key << "\n" << dumpTable();
+        EXPECT_EQ(outputMaxs[i], group.Max) << "key " << key << "\n" << dumpTable();
+        reference.erase(it);
+    }
+    EXPECT_TRUE(reference.empty()) << "missing " << reference.size() << " keys\n" << dumpTable();
 
     EXPECT_TRUE(aggregate(&table, nullptr, nullptr, 0, 6));
 }
