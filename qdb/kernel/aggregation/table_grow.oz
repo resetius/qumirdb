@@ -71,6 +71,9 @@
 
   (fun rh_rehash ((var ht <ref HashTable>) (var new_capacity i64)) -> bool
     (block
+      (if (|| (< new_capacity (: 1 i64))
+              (> new_capacity (: 1152921504606846975 i64)))
+        (block (return #f)))
       (var bytes = (* new_capacity (: 8 i64)))
       (var new_keys = (cast (call qdb_alloc bytes) <ptr i64>))
       (var new_dist = (cast (call qdb_alloc bytes) <ptr i64>))
@@ -129,8 +132,12 @@
         (block (return existing)))
       (var capacity = (field ht Capacity))
       (var size = (field ht Size))
-      (if (> (* (+ size (: 1 i64)) (: 4 i64)) (* capacity (: 3 i64)))
+      ;; size <= capacity and capacity is a power of two, so this comparison
+      ;; avoids multiplying either side and cannot overflow.
+      (if (> (+ size (: 1 i64)) (- capacity (/ capacity (: 4 i64))))
         (block
+          (if (> capacity (: 576460752303423487 i64))
+            (block (return (: -1 i64))))
           (if (! (call rh_rehash ht (* capacity (: 2 i64))))
             (block (return (: -1 i64))))
           (= capacity (field ht Capacity))))
@@ -170,7 +177,8 @@
           (= probes (+ probes (: 1 i64)))))
       (return (: -1 i64))))
 
-  ;; op=0 inserts, op!=0 performs a read-only lookup. This function is last.
+  ;; op=0 inserts, op=1 performs lookup, op=2 explicitly requests rehash to
+  ;; key (used by allocation failure and overflow tests). This function is last.
   (fun aggregation_table_grow ((var ht <ref HashTable>)
                                (var key i64)
                                (var op i64)) -> i64
@@ -178,4 +186,6 @@
       (return
         (if (== op (: 0 i64))
           (call rh_insert_table ht key)
-          (call rh_lookup_table ht key))))))
+          (if (== op (: 1 i64))
+            (call rh_lookup_table ht key)
+            (cast (call rh_rehash ht key) i64)))))))
