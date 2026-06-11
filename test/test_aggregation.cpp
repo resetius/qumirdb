@@ -3,6 +3,7 @@
 #include <qumir/codegen/llvm/llvm_initializer.h>
 #include <qumir/runner/runner_llvm.h>
 
+#include <qdb/kernel/lib.h>
 #include <qdb/modules/qumirdb.h>
 
 #include <algorithm>
@@ -976,6 +977,69 @@ TEST(AggregationKernel, OzStressAggregationHandlesLargeDeterministicInput) {
     EXPECT_TRUE(reference.empty()) << "missing " << reference.size() << " keys\n" << dumpTable();
 
     EXPECT_TRUE(aggregate(&table, nullptr, nullptr, 0, 6));
+}
+
+TEST(AggregationKernel, OzMergedLibraryCompilesGeneratedEntryPoint) {
+    using namespace NQumir;
+
+    auto library = NQqb::NKernel::ParseFunctionLibrary(
+        ReadKernel("count.oz"), {"aggregate_batch", "aggregation_count"});
+    ASSERT_TRUE(library) << library.error().ToString();
+
+    // Trivial generated entry, mirroring aggregation_table_lifecycle's
+    // op-dispatch shape but calling count_init/count_destroy from the merged
+    // library to confirm the merge mechanism without TRowSet/HashTable
+    // aggregation semantics.
+    constexpr const char* entrySource = R"(
+(block
+  (fun lib_smoke ((var ht <ref HashTable>) (var capacity i64) (var op i64)) -> i64
+    (block
+      (return
+        (if (== op (: 0 i64))
+          (cast (call count_init ht capacity) i64)
+          (block
+            (call count_destroy ht)
+            (: 1 i64)))))))
+)";
+    auto entryFun = NQqb::NKernel::ParseFunctionLibrary(entrySource);
+    ASSERT_TRUE(entryFun) << entryFun.error().ToString();
+    ASSERT_EQ(entryFun->size(), 1u);
+
+    auto merged = NQqb::NKernel::MergeKernelLibrary(*library, entryFun->front());
+
+    TLLVMRunnerOptions options;
+    options.CoreInput = true;
+    options.NativeCode = true;
+    options.AllowOverloads = true;
+
+    TLLVMRunner runner(options);
+    runner.RegisterModule(std::make_shared<NRegistry::QumirDbModule>(), true);
+
+    std::string error;
+    void* entry = runner.CompileKernelAst(merged, &error);
+    ASSERT_NE(entry, nullptr) << error;
+
+    using TLibSmokeFn = int64_t(*)(THashTable*, int64_t, int64_t);
+    auto smoke = reinterpret_cast<TLibSmokeFn>(entry);
+
+    THashTable table;
+    ASSERT_TRUE(smoke(&table, 8, 0));
+    ASSERT_NE(table.Keys, nullptr);
+    ASSERT_NE(table.Dist, nullptr);
+    ASSERT_NE(table.SlotId, nullptr);
+    ASSERT_NE(table.GroupKeys, nullptr);
+    ASSERT_NE(table.AggBuffers, nullptr);
+    EXPECT_EQ(table.Capacity, 8);
+    EXPECT_EQ(table.Size, 0);
+    EXPECT_EQ(table.NumAggs, 4);
+    EXPECT_EQ(table.NumKeys, 1);
+
+    EXPECT_TRUE(smoke(&table, 0, 1));
+    EXPECT_EQ(table.Keys, nullptr);
+    EXPECT_EQ(table.AggBuffers, nullptr);
+    EXPECT_EQ(table.Capacity, 0);
+    EXPECT_EQ(table.Size, 0);
+    EXPECT_EQ(table.NumAggs, 0);
 }
 
 int main(int argc, char** argv) {
