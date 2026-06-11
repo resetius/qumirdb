@@ -527,6 +527,52 @@ TEST(AggregationKernel, OzTableRehashRejectsAllocationSizeOverflow) {
     EXPECT_TRUE(lifecycle(&table, 0, 1));
 }
 
+TEST(AggregationKernel, OzCountUsesStableDenseSlotsAcrossGrow) {
+    void* entry = nullptr;
+    std::string error;
+    auto runner = CompileKernel("count.oz", entry, error);
+    ASSERT_NE(entry, nullptr) << error;
+
+    using TCountFn = int64_t(*)(THashTable*, int64_t, int64_t);
+    auto count = reinterpret_cast<TCountFn>(entry);
+    THashTable table;
+
+    ASSERT_TRUE(count(&table, 4, 0));
+    ASSERT_NE(table.GroupKeys, nullptr);
+    ASSERT_NE(table.AggBuffers, nullptr);
+    ASSERT_NE(table.AggBuffers[0], nullptr);
+    EXPECT_EQ(table.NumAggs, 1);
+    EXPECT_EQ(table.Size, 0);
+    EXPECT_EQ(count(&table, 999, 2), -1);
+
+    constexpr std::array<int64_t, 20> input = {
+        10, 20, 10, -1, 30, 20, 40, 50, 10, 60,
+        70, 80, 90, 100, 110, 120, -1, 50, 120, 120};
+    constexpr std::array<int64_t, 13> uniqueKeys = {
+        10, 20, -1, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120};
+    constexpr std::array<int64_t, 13> expectedCounts = {
+        3, 2, 2, 1, 1, 2, 1, 1, 1, 1, 1, 1, 3};
+
+    for (int64_t key : input) {
+        ASSERT_NE(count(&table, key, 1), -1) << "key " << key;
+    }
+
+    EXPECT_EQ(table.Capacity, 32);
+    ASSERT_EQ(table.Size, static_cast<int64_t>(uniqueKeys.size()));
+    for (size_t i = 0; i < uniqueKeys.size(); ++i) {
+        EXPECT_EQ(table.GroupKeys[i], uniqueKeys[i]);
+        EXPECT_EQ(table.AggBuffers[0][i], expectedCounts[i]);
+        EXPECT_EQ(count(&table, uniqueKeys[i], 2), expectedCounts[i]);
+    }
+
+    EXPECT_TRUE(count(&table, 0, 3));
+    EXPECT_EQ(table.Keys, nullptr);
+    EXPECT_EQ(table.GroupKeys, nullptr);
+    EXPECT_EQ(table.AggBuffers, nullptr);
+    EXPECT_EQ(table.Capacity, 0);
+    EXPECT_EQ(table.Size, 0);
+}
+
 int main(int argc, char** argv) {
     if (argc > 1) {
         KernelDir = argv[1];
