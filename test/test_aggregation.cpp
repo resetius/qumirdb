@@ -527,7 +527,7 @@ TEST(AggregationKernel, OzTableRehashRejectsAllocationSizeOverflow) {
     EXPECT_TRUE(lifecycle(&table, 0, 1));
 }
 
-TEST(AggregationKernel, OzCountAndSumReducersUseStableDenseSlotsAcrossGrow) {
+TEST(AggregationKernel, OzI64ReducersUseStableDenseSlotsAcrossGrow) {
     void* entry = nullptr;
     std::string error;
     auto runner = CompileKernel("count.oz", entry, error);
@@ -542,22 +542,32 @@ TEST(AggregationKernel, OzCountAndSumReducersUseStableDenseSlotsAcrossGrow) {
     ASSERT_NE(table.AggBuffers, nullptr);
     ASSERT_NE(table.AggBuffers[0], nullptr);
     ASSERT_NE(table.AggBuffers[1], nullptr);
-    EXPECT_EQ(table.NumAggs, 2);
+    ASSERT_NE(table.AggBuffers[2], nullptr);
+    ASSERT_NE(table.AggBuffers[3], nullptr);
+    EXPECT_EQ(table.NumAggs, 4);
     EXPECT_EQ(table.Size, 0);
     EXPECT_EQ(count(&table, 999, 0, 2), -1);
 
-    constexpr std::array<int64_t, 20> input = {
+    constexpr std::array<int64_t, 22> input = {
         10, 20, 10, -1, 30, 20, 40, 50, 10, 60,
-        70, 80, 90, 100, 110, 120, -1, 50, 120, 120};
-    constexpr std::array<int64_t, 20> values = {
+        70, 80, 90, 100, 110, 120, -1, 50, 120, 120, 130, 140};
+    constexpr std::array<int64_t, 22> values = {
         5, 7, -2, 11, 13, 17, 19, 23, 29, 31,
-        37, 41, 43, 47, 53, 59, -3, -5, 61, -7};
-    constexpr std::array<int64_t, 13> uniqueKeys = {
-        10, 20, -1, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120};
-    constexpr std::array<int64_t, 13> expectedCounts = {
-        3, 2, 2, 1, 1, 2, 1, 1, 1, 1, 1, 1, 3};
-    constexpr std::array<int64_t, 13> expectedSums = {
-        32, 24, 8, 13, 19, 18, 31, 37, 41, 43, 47, 53, 113};
+        37, 41, 43, 47, 53, 59, -3, -5, 61, -7,
+        std::numeric_limits<int64_t>::max(), std::numeric_limits<int64_t>::min()};
+    constexpr std::array<int64_t, 15> uniqueKeys = {
+        10, 20, -1, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140};
+    constexpr std::array<int64_t, 15> expectedCounts = {
+        3, 2, 2, 1, 1, 2, 1, 1, 1, 1, 1, 1, 3, 1, 1};
+    constexpr std::array<int64_t, 15> expectedSums = {
+        32, 24, 8, 13, 19, 18, 31, 37, 41, 43, 47, 53, 113,
+        std::numeric_limits<int64_t>::max(), std::numeric_limits<int64_t>::min()};
+    constexpr std::array<int64_t, 15> expectedMins = {
+        -2, 7, -3, 13, 19, -5, 31, 37, 41, 43, 47, 53, -7,
+        std::numeric_limits<int64_t>::max(), std::numeric_limits<int64_t>::min()};
+    constexpr std::array<int64_t, 15> expectedMaxs = {
+        29, 17, 11, 13, 19, 23, 31, 37, 41, 43, 47, 53, 61,
+        std::numeric_limits<int64_t>::max(), std::numeric_limits<int64_t>::min()};
 
     for (size_t i = 0; i < input.size(); ++i) {
         ASSERT_NE(count(&table, input[i], values[i], 1), -1) << "key " << input[i];
@@ -569,11 +579,15 @@ TEST(AggregationKernel, OzCountAndSumReducersUseStableDenseSlotsAcrossGrow) {
         EXPECT_EQ(table.GroupKeys[i], uniqueKeys[i]);
         EXPECT_EQ(table.AggBuffers[0][i], expectedCounts[i]);
         EXPECT_EQ(table.AggBuffers[1][i], expectedSums[i]);
+        EXPECT_EQ(table.AggBuffers[2][i], expectedMins[i]);
+        EXPECT_EQ(table.AggBuffers[3][i], expectedMaxs[i]);
         EXPECT_EQ(count(&table, uniqueKeys[i], 0, 2), expectedCounts[i]);
         EXPECT_EQ(count(&table, uniqueKeys[i], 0, 3), expectedSums[i]);
+        EXPECT_EQ(count(&table, uniqueKeys[i], 0, 4), expectedMins[i]);
+        EXPECT_EQ(count(&table, uniqueKeys[i], 0, 5), expectedMaxs[i]);
     }
 
-    EXPECT_TRUE(count(&table, 0, 0, 4));
+    EXPECT_TRUE(count(&table, 0, 0, 6));
     EXPECT_EQ(table.Keys, nullptr);
     EXPECT_EQ(table.GroupKeys, nullptr);
     EXPECT_EQ(table.AggBuffers, nullptr);
