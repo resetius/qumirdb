@@ -425,6 +425,20 @@ TEST(AggregationKernel, OzTableLifecycleAllocatesInitializesAndDestroys) {
     EXPECT_EQ(table.Size, 0);
 }
 
+TEST(AggregationKernel, OzTableLifecycleRejectsAllocationSizeOverflow) {
+    void* entry = nullptr;
+    std::string error;
+    auto runner = CompileKernel("table_lifecycle.oz", entry, error);
+    ASSERT_NE(entry, nullptr) << error;
+
+    using TLifecycleFn = int64_t(*)(THashTable*, int64_t, int64_t);
+    auto lifecycle = reinterpret_cast<TLifecycleFn>(entry);
+    THashTable table;
+    EXPECT_FALSE(lifecycle(&table, INT64_C(1152921504606846976), 0));
+    EXPECT_EQ(table.Keys, nullptr);
+    EXPECT_EQ(table.Capacity, 0);
+}
+
 TEST(AggregationKernel, OzTableGrowsAndPreservesStableSlotIds) {
     void* lifecycleEntry = nullptr;
     void* growEntry = nullptr;
@@ -487,6 +501,29 @@ TEST(AggregationKernel, OzTableGrowsAndPreservesStableSlotIds) {
         EXPECT_TRUE(present);
     }
 
+    EXPECT_TRUE(lifecycle(&table, 0, 1));
+}
+
+TEST(AggregationKernel, OzTableRehashRejectsAllocationSizeOverflow) {
+    void* lifecycleEntry = nullptr;
+    void* growEntry = nullptr;
+    std::string error;
+    auto lifecycleRunner = CompileKernel("table_lifecycle.oz", lifecycleEntry, error);
+    ASSERT_NE(lifecycleEntry, nullptr) << error;
+    auto growRunner = CompileKernel("table_grow.oz", growEntry, error);
+    ASSERT_NE(growEntry, nullptr) << error;
+
+    using TLifecycleFn = int64_t(*)(THashTable*, int64_t, int64_t);
+    using TGrowFn = int64_t(*)(THashTable*, int64_t, int64_t);
+    auto lifecycle = reinterpret_cast<TLifecycleFn>(lifecycleEntry);
+    auto grow = reinterpret_cast<TGrowFn>(growEntry);
+    THashTable table;
+    ASSERT_TRUE(lifecycle(&table, 4, 0));
+    int64_t* const oldKeys = table.Keys;
+    EXPECT_FALSE(grow(&table, INT64_C(1152921504606846976), 2));
+    EXPECT_EQ(table.Keys, oldKeys);
+    EXPECT_EQ(table.Capacity, 4);
+    EXPECT_EQ(table.Size, 0);
     EXPECT_TRUE(lifecycle(&table, 0, 1));
 }
 

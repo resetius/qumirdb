@@ -5,10 +5,16 @@
 extern "C" {
 
 void* qdb_alloc(int64_t size) {
+    if (size < 0) {
+        return nullptr;
+    }
     return std::malloc(static_cast<size_t>(size));
 }
 
 void* qdb_realloc(void* ptr, int64_t size) {
+    if (size < 0) {
+        return nullptr;
+    }
     return std::realloc(ptr, static_cast<size_t>(size));
 }
 

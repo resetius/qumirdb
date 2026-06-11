@@ -1,7 +1,8 @@
 (block
   (fun rh_table_init ((var ht <ref HashTable>) (var capacity i64)) -> bool
     (block
-      (if (< capacity (: 1 i64))
+      (if (|| (< capacity (: 1 i64))
+              (> capacity (: 1152921504606846975 i64)))
         (block
           (return #f)))
       (var bytes = (* capacity (: 8 i64)))
