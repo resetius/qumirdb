@@ -8,6 +8,16 @@
       (= h (* h (: 2685821657736338717 u64)))
       (return (cast h i64))))
 
+  ;; Standalone prototypes of reducers that will later be injected from the
+  ;; Aggregation node into the generated AST.
+  (fun agg_count_step ((var prev i64) (var value i64) (var is_new bool)) -> i64
+    (block
+      (return (+ prev (: 1 i64)))))
+
+  (fun agg_sum_i64_step ((var prev i64) (var value i64) (var is_new bool)) -> i64
+    (block
+      (return (+ prev value))))
+
   (fun count_lookup ((var ht <ref HashTable>) (var key i64)) -> i64
     (block
       (var capacity = (field ht Capacity))
@@ -78,19 +88,22 @@
       (var slot_ids = (cast (call qdb_alloc bytes) <ptr i64>))
       (var group_keys = (cast (call qdb_alloc bytes) <ptr i64>))
       (var counts = (cast (call qdb_alloc bytes) <ptr i64>))
-      (var agg_buffers = (cast (call qdb_alloc (: 8 i64)) <ptr <ptr i64>>))
+      (var sums = (cast (call qdb_alloc bytes) <ptr i64>))
+      (var agg_buffers = (cast (call qdb_alloc (: 16 i64)) <ptr <ptr i64>>))
       (if (|| (== (cast keys i64) (: 0 i64))
               (|| (== (cast dist i64) (: 0 i64))
                   (|| (== (cast slot_ids i64) (: 0 i64))
                       (|| (== (cast group_keys i64) (: 0 i64))
                           (|| (== (cast counts i64) (: 0 i64))
-                              (== (cast agg_buffers i64) (: 0 i64)))))))
+                              (|| (== (cast sums i64) (: 0 i64))
+                                  (== (cast agg_buffers i64) (: 0 i64))))))))
         (block
           (if (!= (cast keys i64) (: 0 i64)) (block (call qdb_free (cast keys <ptr i8>))))
           (if (!= (cast dist i64) (: 0 i64)) (block (call qdb_free (cast dist <ptr i8>))))
           (if (!= (cast slot_ids i64) (: 0 i64)) (block (call qdb_free (cast slot_ids <ptr i8>))))
           (if (!= (cast group_keys i64) (: 0 i64)) (block (call qdb_free (cast group_keys <ptr i8>))))
           (if (!= (cast counts i64) (: 0 i64)) (block (call qdb_free (cast counts <ptr i8>))))
+          (if (!= (cast sums i64) (: 0 i64)) (block (call qdb_free (cast sums <ptr i8>))))
           (if (!= (cast agg_buffers i64) (: 0 i64)) (block (call qdb_free (cast agg_buffers <ptr i8>))))
           (return #f)))
       (var i i64)
@@ -102,8 +115,10 @@
           (= slot_ids [i] (: -1 i64))
           (= group_keys [i] (: 0 i64))
           (= counts [i] (: 0 i64))
+          (= sums [i] (: 0 i64))
           (= i (+ i (: 1 i64)))))
       (= agg_buffers [(: 0 i64)] counts)
+      (= agg_buffers [(: 1 i64)] sums)
       (field_assign ht Keys keys)
       (field_assign ht Dist dist)
       (field_assign ht SlotId slot_ids)
@@ -111,7 +126,7 @@
       (field_assign ht AggBuffers agg_buffers)
       (field_assign ht Capacity capacity)
       (field_assign ht Size (: 0 i64))
-      (field_assign ht NumAggs (: 1 i64))
+      (field_assign ht NumAggs (: 2 i64))
       (field_assign ht NumKeys (: 1 i64))
       (return #t)))
 
@@ -121,8 +136,11 @@
       (if (!= (cast agg_buffers i64) (: 0 i64))
         (block
           (var counts = (index agg_buffers (: 0 i64)))
+          (var sums = (index agg_buffers (: 1 i64)))
           (if (!= (cast counts i64) (: 0 i64))
             (block (call qdb_free (cast counts <ptr i8>))))
+          (if (!= (cast sums i64) (: 0 i64))
+            (block (call qdb_free (cast sums <ptr i8>))))
           (call qdb_free (cast agg_buffers <ptr i8>))))
       (if (!= (cast (field ht Keys) i64) (: 0 i64)) (block (call qdb_free (cast (field ht Keys) <ptr i8>))))
       (if (!= (cast (field ht Dist) i64) (: 0 i64)) (block (call qdb_free (cast (field ht Dist) <ptr i8>))))
@@ -148,17 +166,20 @@
       (var new_slot_ids = (cast (call qdb_alloc bytes) <ptr i64>))
       (var new_group_keys = (cast (call qdb_alloc bytes) <ptr i64>))
       (var new_counts = (cast (call qdb_alloc bytes) <ptr i64>))
+      (var new_sums = (cast (call qdb_alloc bytes) <ptr i64>))
       (if (|| (== (cast new_keys i64) (: 0 i64))
               (|| (== (cast new_dist i64) (: 0 i64))
                   (|| (== (cast new_slot_ids i64) (: 0 i64))
                       (|| (== (cast new_group_keys i64) (: 0 i64))
-                          (== (cast new_counts i64) (: 0 i64))))))
+                          (|| (== (cast new_counts i64) (: 0 i64))
+                              (== (cast new_sums i64) (: 0 i64)))))))
         (block
           (if (!= (cast new_keys i64) (: 0 i64)) (block (call qdb_free (cast new_keys <ptr i8>))))
           (if (!= (cast new_dist i64) (: 0 i64)) (block (call qdb_free (cast new_dist <ptr i8>))))
           (if (!= (cast new_slot_ids i64) (: 0 i64)) (block (call qdb_free (cast new_slot_ids <ptr i8>))))
           (if (!= (cast new_group_keys i64) (: 0 i64)) (block (call qdb_free (cast new_group_keys <ptr i8>))))
           (if (!= (cast new_counts i64) (: 0 i64)) (block (call qdb_free (cast new_counts <ptr i8>))))
+          (if (!= (cast new_sums i64) (: 0 i64)) (block (call qdb_free (cast new_sums <ptr i8>))))
           (return #f)))
       (var i i64)
       (= i (: 0 i64))
@@ -169,6 +190,7 @@
           (= new_slot_ids [i] (: -1 i64))
           (= new_group_keys [i] (: 0 i64))
           (= new_counts [i] (: 0 i64))
+          (= new_sums [i] (: 0 i64))
           (= i (+ i (: 1 i64)))))
       (var old_keys = (field ht Keys))
       (var old_dist = (field ht Dist))
@@ -176,6 +198,7 @@
       (var old_group_keys = (field ht GroupKeys))
       (var agg_buffers = (field ht AggBuffers))
       (var old_counts = (index agg_buffers (: 0 i64)))
+      (var old_sums = (index agg_buffers (: 1 i64)))
       (var old_capacity = (field ht Capacity))
       (var size = (field ht Size))
       (= i (: 0 i64))
@@ -191,6 +214,7 @@
                   (call qdb_free (cast new_slot_ids <ptr i8>))
                   (call qdb_free (cast new_group_keys <ptr i8>))
                   (call qdb_free (cast new_counts <ptr i8>))
+                  (call qdb_free (cast new_sums <ptr i8>))
                   (return #f)))))
           (= i (+ i (: 1 i64)))))
       (= i (: 0 i64))
@@ -198,8 +222,10 @@
         (block
           (= new_group_keys [i] (index old_group_keys i))
           (= new_counts [i] (index old_counts i))
+          (= new_sums [i] (index old_sums i))
           (= i (+ i (: 1 i64)))))
       (= agg_buffers [(: 0 i64)] new_counts)
+      (= agg_buffers [(: 1 i64)] new_sums)
       (field_assign ht Keys new_keys)
       (field_assign ht Dist new_dist)
       (field_assign ht SlotId new_slot_ids)
@@ -210,16 +236,21 @@
       (call qdb_free (cast old_slot_ids <ptr i8>))
       (call qdb_free (cast old_group_keys <ptr i8>))
       (call qdb_free (cast old_counts <ptr i8>))
+      (call qdb_free (cast old_sums <ptr i8>))
       (return #t)))
 
-  (fun count_update ((var ht <ref HashTable>) (var key i64)) -> i64
+  (fun count_update ((var ht <ref HashTable>) (var key i64) (var value i64)) -> i64
     (block
       (var dense_slot = (call count_lookup ht key))
       (var agg_buffers = (field ht AggBuffers))
       (var counts = (index agg_buffers (: 0 i64)))
+      (var sums = (index agg_buffers (: 1 i64)))
       (if (!= dense_slot (: -1 i64))
         (block
-          (= counts [dense_slot] (+ (index counts dense_slot) (: 1 i64)))
+          (= counts [dense_slot]
+             (call agg_count_step (index counts dense_slot) value #f))
+          (= sums [dense_slot]
+             (call agg_sum_i64_step (index sums dense_slot) value #f))
           (return dense_slot)))
       (var capacity = (field ht Capacity))
       (var size = (field ht Size))
@@ -230,7 +261,8 @@
             (block (return (: -1 i64))))
           (= capacity (field ht Capacity))
           (= agg_buffers (field ht AggBuffers))
-          (= counts (index agg_buffers (: 0 i64)))))
+          (= counts (index agg_buffers (: 0 i64)))
+          (= sums (index agg_buffers (: 1 i64)))))
       (var keys = (field ht Keys))
       (var dist = (field ht Dist))
       (var slot_ids = (field ht SlotId))
@@ -239,30 +271,36 @@
       (var group_keys = (field ht GroupKeys))
       (= group_keys [size] key)
       (= counts [size] (: 0 i64))
-      (= counts [size] (+ (index counts size) (: 1 i64)))
+      (= sums [size] (: 0 i64))
+      (= counts [size] (call agg_count_step (index counts size) value #t))
+      (= sums [size] (call agg_sum_i64_step (index sums size) value #t))
       (field_assign ht Size (+ size (: 1 i64)))
       (return size)))
 
-  ;; op=0 init(capacity=arg), op=1 update(key=arg), op=2 lookup count by key,
-  ;; op=3 destroy. This concrete function is last.
+  ;; op=0 init(capacity=key), op=1 update(key,value), op=2 lookup count,
+  ;; op=3 lookup sum, op=4 destroy. This concrete function is last.
   (fun aggregation_count ((var ht <ref HashTable>)
-                          (var arg i64)
+                          (var key i64)
+                          (var value i64)
                           (var op i64)) -> i64
     (block
       (return
         (if (== op (: 0 i64))
-          (cast (call count_init ht arg) i64)
+          (cast (call count_init ht key) i64)
           (if (== op (: 1 i64))
-            (call count_update ht arg)
-            (if (== op (: 2 i64))
+            (call count_update ht key value)
+            (if (|| (== op (: 2 i64)) (== op (: 3 i64)))
               (block
-                (var dense_slot = (call count_lookup ht arg))
+                (var dense_slot = (call count_lookup ht key))
                 (if (== dense_slot (: -1 i64))
                   (: -1 i64)
                   (block
                     (var agg_buffers = (field ht AggBuffers))
-                    (var counts = (index agg_buffers (: 0 i64)))
-                    (index counts dense_slot))))
+                    (var buffer =
+                      (if (== op (: 2 i64))
+                        (index agg_buffers (: 0 i64))
+                        (index agg_buffers (: 1 i64))))
+                    (index buffer dense_slot))))
               (block
                 (call count_destroy ht)
                 (: 1 i64)))))))))
