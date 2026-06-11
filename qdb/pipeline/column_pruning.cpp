@@ -1,5 +1,6 @@
 #include <qdb/pipeline/column_pruning.h>
 
+#include <qdb/ops/aggregate.h>
 #include <qdb/ops/filter.h>
 #include <qdb/ops/project.h>
 #include <qdb/ops/source.h>
@@ -28,9 +29,9 @@ void ApplyColumnPruning(const TOperatorPtr& root) {
         auto own = op->ComputeReferencedColumns();
 
         std::unordered_set<std::string> required;
-        if (TMaybeOp<TProjectOperator>(op)) {
-            // Project defines a new schema: its required input = only what its
-            // projection expressions reference.
+        if (TMaybeOp<TProjectOperator>(op) || TMaybeOp<TAggregateOperator>(op)) {
+            // Project/aggregate define a new schema: required input = only what
+            // their own expressions (projections / group keys / agg args) reference.
             required = std::move(own);
         } else {
             // Filter/source pass rows through: must satisfy own refs + parent needs.

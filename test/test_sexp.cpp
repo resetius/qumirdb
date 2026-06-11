@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <qdb/ops/aggregate.h>
 #include <qdb/ops/filter.h>
 #include <qdb/ops/project.h>
 #include <qdb/ops/source.h>
@@ -88,6 +89,15 @@ TEST(SexpPrinter, Project) {
     EXPECT_EQ(PrintAst(*proj, MakePrintOpts()), "(rel project (rel source) (a x) (b y))");
 }
 
+TEST(SexpPrinter, Aggregate) {
+    TStubSource src({"x", "y"});
+    auto source = std::make_shared<TSourceOperator>(src);
+    auto agg = MakeAggregate(source, {"x"}, {{"cnt", "count", ""}, {"s", "sum", "y"}});
+    ASSERT_TRUE(agg.has_value());
+    EXPECT_EQ(PrintAst(*agg, MakePrintOpts()),
+              "(rel aggregate (rel source) (keys x) (agg cnt count) (agg s sum y))");
+}
+
 TEST(SexpPrinter, FilterOfProject) {
     TStubSource src({"x", "y"});
     auto source = std::make_shared<TSourceOperator>(src);
@@ -165,6 +175,37 @@ TEST(SexpParser, FilterPrintRoundtrip) {
 
     auto expr = Parse(p, input);
     ASSERT_NE(expr, nullptr);
+
+    auto printed = PrintAst(std::static_pointer_cast<TExpr>(expr), MakePrintOpts());
+    EXPECT_EQ(printed, input);
+}
+
+TEST(SexpParser, AggregatePrintRoundtrip) {
+    TStubSource src({"x", "y"});
+    auto sourceOp = std::make_shared<TSourceOperator>(src);
+
+    const std::string input = "(rel aggregate (rel source \"data.parquet\") (keys x) (agg cnt count) (agg s sum y))";
+
+    TRelParserOptions opts;
+    opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
+    sourceOp = std::make_shared<TSourceOperator>(src, std::string(path));
+    return sourceOp;
+};
+    auto p = MakeParser(std::move(opts));
+
+    auto expr = Parse(p, input);
+    ASSERT_NE(expr, nullptr);
+
+    auto& agg = static_cast<TAggregateOperator&>(*expr);
+    ASSERT_EQ(agg.GroupKeys().size(), 1u);
+    EXPECT_EQ(agg.GroupKeys()[0], "x");
+    ASSERT_EQ(agg.Aggs().size(), 2u);
+    EXPECT_EQ(agg.Aggs()[0].Name, "cnt");
+    EXPECT_EQ(agg.Aggs()[0].Func, "count");
+    EXPECT_EQ(agg.Aggs()[0].Arg, nullptr);
+    EXPECT_EQ(agg.Aggs()[1].Name, "s");
+    EXPECT_EQ(agg.Aggs()[1].Func, "sum");
+    EXPECT_NE(agg.Aggs()[1].Arg, nullptr);
 
     auto printed = PrintAst(std::static_pointer_cast<TExpr>(expr), MakePrintOpts());
     EXPECT_EQ(printed, input);
