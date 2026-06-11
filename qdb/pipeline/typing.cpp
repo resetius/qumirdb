@@ -1,5 +1,6 @@
 #include <qdb/pipeline/typing.h>
 
+#include <qdb/ops/aggregate.h>
 #include <qdb/ops/filter.h>
 #include <qdb/ops/project.h>
 #include <qdb/ops/source.h>
@@ -51,6 +52,15 @@ void AnnotateTypes(const TOperatorPtr& root) {
         root->Type = std::make_shared<TFunctionType>(
             std::vector<TTypePtr>{proj->Input()->OutputColumns()},
             std::make_shared<TStructType>(std::move(outFields)));
+        return;
+    }
+
+    if (auto maybe = TMaybeOp<TAggregateOperator>(root)) {
+        auto agg = maybe.Cast();
+        auto inputSchema = agg->Input()->OutputColumns();
+        root->Type = std::make_shared<TFunctionType>(
+            std::vector<TTypePtr>{inputSchema},
+            ComputeAggregateOutputType(inputSchema, agg->GroupKeys(), agg->Aggs()));
         return;
     }
 }

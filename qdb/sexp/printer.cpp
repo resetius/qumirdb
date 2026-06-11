@@ -1,5 +1,6 @@
 #include <qdb/sexp/printer.h>
 
+#include <qdb/ops/aggregate.h>
 #include <qdb/ops/filter.h>
 #include <qdb/ops/operator.h>
 #include <qdb/ops/project.h>
@@ -50,6 +51,34 @@ static void PrintRel(NQumir::NAst::TExpr& expr, TPrinter& printer, TPrintFrame f
             printer.PrintIdentifier(spec.Name);
             printer.Space();
             printer.PrintExpr(spec.Expression, frame.AllowTypeWrap, frame.Level + 2);
+            out << ')';
+        }
+        out << ')';
+        return;
+    }
+
+    if (rel == TAggregateOperator::OpId) {
+        auto& agg = static_cast<TAggregateOperator&>(op);
+        out << "(rel aggregate";
+        printer.Separator(frame.Level + 1);
+        printer.PrintExpr(agg.Input(), frame.AllowTypeWrap, frame.Level + 1);
+        printer.Separator(frame.Level + 1);
+        out << "(keys";
+        for (const auto& key : agg.GroupKeys()) {
+            printer.Space();
+            printer.PrintIdentifier(key);
+        }
+        out << ')';
+        for (const auto& spec : agg.Aggs()) {
+            printer.Separator(frame.Level + 1);
+            out << "(agg ";
+            printer.PrintIdentifier(spec.Name);
+            printer.Space();
+            printer.PrintIdentifier(spec.Func);
+            if (spec.Arg) {
+                printer.Space();
+                printer.PrintExpr(spec.Arg, frame.AllowTypeWrap, frame.Level + 2);
+            }
             out << ')';
         }
         out << ')';

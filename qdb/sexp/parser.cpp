@@ -1,5 +1,6 @@
 #include <qdb/sexp/parser.h>
 
+#include <qdb/ops/aggregate.h>
 #include <qdb/ops/filter.h>
 #include <qdb/ops/project.h>
 #include <qdb/ops/source.h>
@@ -58,6 +59,57 @@ TNodeParserMap MakeRelParsers(TRelParserOptions options) {
                 specs.push_back({projName.Name, std::move(projExpr)});
             }
             co_return std::make_shared<TProjectOperator>(std::move(input), std::move(specs));
+        }
+
+        if (nameTok.Name == TAggregateOperator::OpId) {
+            auto inputExpr = co_await h.Expr();
+            auto input = std::static_pointer_cast<IOperator>(inputExpr);
+
+            co_await h.Take('(');
+            auto keysTok = h.Next();
+            if (keysTok.Type != TToken::Identifier || keysTok.Name != "keys") {
+                co_return IParseHandle::MakeError(keysTok, "expected 'keys' after '(' in (rel aggregate ...)");
+            }
+            std::vector<std::string> groupKeys;
+            while (true) {
+                auto tok = h.Next();
+                if (IParseHandle::IsOp(tok, ')')) break;
+                if (tok.Type != TToken::Identifier) {
+                    co_return IParseHandle::MakeError(tok, "expected key column name");
+                }
+                groupKeys.push_back(tok.Name);
+            }
+
+            std::vector<TAggregateSpec> aggs;
+            while (true) {
+                auto tok = h.Next();
+                if (IParseHandle::IsOp(tok, ')')) break;
+                if (!IParseHandle::IsOp(tok, '(')) {
+                    co_return IParseHandle::MakeError(tok, "expected '(' before aggregate spec");
+                }
+                auto aggTok = h.Next();
+                if (aggTok.Type != TToken::Identifier || aggTok.Name != "agg") {
+                    co_return IParseHandle::MakeError(aggTok, "expected 'agg'");
+                }
+                auto outName = h.Next();
+                if (outName.Type != TToken::Identifier) {
+                    co_return IParseHandle::MakeError(outName, "expected aggregate output name");
+                }
+                auto funcTok = h.Next();
+                if (funcTok.Type != TToken::Identifier) {
+                    co_return IParseHandle::MakeError(funcTok, "expected aggregate function name");
+                }
+                TExprPtr arg;
+                auto closeTok = h.Next();
+                if (!IParseHandle::IsOp(closeTok, ')')) {
+                    h.Unget(closeTok);
+                    arg = co_await h.Expr();
+                    co_await h.Take(')');
+                }
+                aggs.push_back({outName.Name, funcTok.Name, std::move(arg)});
+            }
+
+            co_return std::make_shared<TAggregateOperator>(std::move(input), std::move(groupKeys), std::move(aggs));
         }
 
         co_return IParseHandle::MakeError(nameTok, "unknown rel operator: " + nameTok.Name);

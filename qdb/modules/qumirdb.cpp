@@ -1,5 +1,7 @@
 #include "qumirdb.h"
 
+#include <qdb/modules/qumirdb_runtime.h>
+
 #include <qumir/parser/ast.h>
 #include <qumir/parser/operator.h>
 
@@ -82,9 +84,55 @@ QumirDbModule::QumirDbModule() {
             {"RefCount", i64Type},
         });
 
+    auto ptrI64Type = std::make_shared<TPointerType>(i64Type);
+    auto ptrPtrI64Type = std::make_shared<TPointerType>(ptrI64Type);
+
+    // HashTable C layout (Stage 1: integer keys; aggregate accumulators are
+    // all stored as int64_t regardless of the output column type). Every
+    // array field is int64_t-based (including Dist/SlotId) so the embedded
+    // Robin Hood kernel (kernel/rh_source.h) never has to mix integer
+    // widths.
+    //
+    // Open-addressing arrays (Robin Hood, swap-on-insert; size == Capacity):
+    // offset  0: Keys       int64_t*   <ptr i64>      probe table, Capacity*NumKeys, row-major
+    // offset  8: Dist       int64_t*   <ptr i64>      probe distance; -1 = empty slot
+    // offset 16: SlotId     int64_t*   <ptr i64>      dense-storage slot id for the occupied entry
+    //
+    // Dense storage, indexed by stable SlotId (never moves; size == Capacity):
+    // offset 24: GroupKeys  int64_t*   <ptr i64>      Capacity*NumKeys, row-major
+    // offset 32: AggBuffers int64_t**  <ptr <ptr i64>> NumAggs pointers, each -> int64_t[Capacity]
+    //
+    // Scratch buffers (NumKeys elements each):
+    // offset 40: Scratch    int64_t*   <ptr i64>      ping-pong buffer used by rh_insert_slot's swaps
+    // offset 48: Scratch2   int64_t*   <ptr i64>      ping-pong buffer used by rh_insert_slot's swaps
+    // offset 56: QueryKey   int64_t*   <ptr i64>      staging buffer for the row currently being looked up
+    //
+    // Scalars:
+    // offset 64: Capacity   int64_t    i64   (power of two; 0 before first grow)
+    // offset 72: Size       int64_t    i64   (number of groups in dense storage)
+    // offset 80: NumAggs    int64_t    i64
+    // offset 88: NumKeys    int64_t    i64
+    // sizeof = 96
+    auto hashTableType = std::make_shared<TStructType>(
+        std::vector<std::pair<std::string, TTypePtr>>{
+            {"Keys", ptrI64Type},
+            {"Dist", ptrI64Type},
+            {"SlotId", ptrI64Type},
+            {"GroupKeys", ptrI64Type},
+            {"AggBuffers", ptrPtrI64Type},
+            {"Scratch", ptrI64Type},
+            {"Scratch2", ptrI64Type},
+            {"QueryKey", ptrI64Type},
+            {"Capacity", i64Type},
+            {"Size", i64Type},
+            {"NumAggs", i64Type},
+            {"NumKeys", i64Type},
+        });
+
     ExternalTypes_ = {
         { .Name = "TColumn", .Type = columnType },
         { .Name = "TRowSet", .Type = rowSetType },
+        { .Name = "HashTable", .Type = hashTableType },
     };
 
     ExternalFunctions_ = {
@@ -119,6 +167,38 @@ QumirDbModule::QumirDbModule() {
                 block->Type = std::move(bodyType);
                 return block;
             },
+        },
+        {
+            .Name = "qdb_alloc",
+            .MangledName = "qdb_alloc",
+            .Ptr = reinterpret_cast<void*>(static_cast<void*(*)(int64_t)>(qdb_alloc)),
+            .Packed = +[](const uint64_t* args, size_t) -> uint64_t {
+                return reinterpret_cast<uint64_t>(qdb_alloc(static_cast<int64_t>(args[0])));
+            },
+            .ArgTypes = { i64Type },
+            .ReturnType = ptrI8Type,
+        },
+        {
+            .Name = "qdb_realloc",
+            .MangledName = "qdb_realloc",
+            .Ptr = reinterpret_cast<void*>(static_cast<void*(*)(void*, int64_t)>(qdb_realloc)),
+            .Packed = +[](const uint64_t* args, size_t) -> uint64_t {
+                return reinterpret_cast<uint64_t>(
+                    qdb_realloc(reinterpret_cast<void*>(args[0]), static_cast<int64_t>(args[1])));
+            },
+            .ArgTypes = { ptrI8Type, i64Type },
+            .ReturnType = ptrI8Type,
+        },
+        {
+            .Name = "qdb_free",
+            .MangledName = "qdb_free",
+            .Ptr = reinterpret_cast<void*>(static_cast<void(*)(void*)>(qdb_free)),
+            .Packed = +[](const uint64_t* args, size_t) -> uint64_t {
+                qdb_free(reinterpret_cast<void*>(args[0]));
+                return 0;
+            },
+            .ArgTypes = { ptrI8Type },
+            .ReturnType = std::make_shared<TVoidType>(),
         },
     };
 }
