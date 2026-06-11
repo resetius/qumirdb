@@ -23,17 +23,6 @@ void Collect(
         return;
     }
 
-    if (auto node = TMaybeNode<TLetExpr>(expr)) {
-        auto let = node.Cast();
-        auto innerBound = bound;
-        for (const auto& b : let->Bindings) {
-            Collect(b.Value, innerBound, out);
-            innerBound.insert(b.Name);
-        }
-        Collect(let->Body, innerBound, out);
-        return;
-    }
-
     if (auto node = TMaybeNode<TFunDecl>(expr)) {
         auto fun = node.Cast();
         auto innerBound = bound;

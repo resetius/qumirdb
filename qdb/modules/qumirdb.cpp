@@ -94,10 +94,15 @@ QumirDbModule::QumirDbModule() {
             .ArgTypes = { ptrU8Type, i64Type, i64Type },
             .ReturnType = boolType,
             .Inline = [boolType, i64Type](std::vector<TExprPtr> args) -> TExprPtr {
-                std::vector<TLetExpr::TBinding> bindings;
-                bindings.push_back({ .Name = "$$bitmap", .Value = args[0] });
-                bindings.push_back({ .Name = "$$index", .Value = args[1] });
-                bindings.push_back({ .Name = "$$bitoff", .Value = args[2] });
+                std::vector<TExprPtr> stmts;
+                auto addVar = [&](const std::string& name, TExprPtr value) {
+                    auto var = std::make_shared<TVarStmt>(TLocation{}, name, nullptr);
+                    var->Init = std::move(value);
+                    stmts.push_back(std::move(var));
+                };
+                addVar("$$bitmap", args[0]);
+                addVar("$$index", args[1]);
+                addVar("$$bitoff", args[2]);
 
                 auto bitIndex = binary("+", ident("$$index"), ident("$$bitoff"), i64Type);
                 auto byteIndex = binary(">>", bitIndex, number(i64Type, 3), i64Type);
@@ -107,7 +112,12 @@ QumirDbModule::QumirDbModule() {
                 auto shifted = binary(">>", byteAsI64, bitPos, i64Type);
                 auto masked = binary("&", shifted, number(i64Type, 1), i64Type);
                 auto body = binary("!=", masked, number(i64Type, 0), boolType);
-                return std::make_shared<TLetExpr>(TLocation{}, std::move(bindings), std::move(body));
+
+                auto bodyType = body->Type;
+                stmts.push_back(std::move(body));
+                auto block = std::make_shared<TBlockExpr>(TLocation{}, std::move(stmts));
+                block->Type = std::move(bodyType);
+                return block;
             },
         },
     };
