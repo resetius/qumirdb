@@ -23,3 +23,9 @@ Pure core-language examples may also be run with `qumiri` or compiled with
 the concrete entry-point function last. A wrapper that calls generic functions
 may instantiate specializations after itself, so callable test entry points
 must remain concrete until the runner exposes explicit entry-point selection.
+
+Stage J pair-key experiments are intentionally split across separate sources:
+`generic_dispatch_i64.oz`, `generic_dispatch_pair_i64.oz`,
+`generic_pair_fixed.oz`, and `generic_pair_rehash.oz`. Files whose wrapper calls
+a generic function give the wrapper the same ABI as the specialization that the
+current runner returns.
