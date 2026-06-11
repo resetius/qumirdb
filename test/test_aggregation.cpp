@@ -62,6 +62,13 @@ struct THashTable {
     int64_t NumKeys = 0;
 };
 
+struct TPairI64Key {
+    int64_t First;
+    int64_t Second;
+
+    bool operator==(const TPairI64Key&) const = default;
+};
+
 static_assert(sizeof(THashTable) == 96);
 
 uint64_t HashI64(int64_t key) {
@@ -109,6 +116,160 @@ TEST(AggregationKernel, GenericKeyEqualityDispatchesToI64Overload) {
     EXPECT_TRUE(equal(-17, -17));
     EXPECT_FALSE(equal(1, -1));
     EXPECT_FALSE(equal(42, 43));
+}
+
+TEST(AggregationKernel, GenericHashDispatchesToConcretePairOverload) {
+    void* i64Entry = nullptr;
+    void* pairEntry = nullptr;
+    std::string error;
+    auto i64Runner = CompileKernel("generic_dispatch_i64.oz", i64Entry, error);
+    ASSERT_NE(i64Entry, nullptr) << error;
+    auto pairRunner = CompileKernel("generic_dispatch_pair_i64.oz", pairEntry, error);
+    ASSERT_NE(pairEntry, nullptr) << error;
+
+    using TI64DispatchFn = int64_t(*)(int64_t);
+    using TPairDispatchFn = int64_t(*)(TPairI64Key);
+    auto dispatchI64 = reinterpret_cast<TI64DispatchFn>(i64Entry);
+    auto dispatchPair = reinterpret_cast<TPairDispatchFn>(pairEntry);
+    EXPECT_EQ(dispatchI64(7), 1007);
+    EXPECT_EQ(dispatchPair({7, 13}), 713);
+}
+
+TEST(AggregationKernel, GenericPairRobinHoodHandlesCollisionsDuplicatesAndReducers) {
+    void* entry = nullptr;
+    std::string error;
+    auto runner = CompileKernel("generic_pair_fixed.oz", entry, error);
+    ASSERT_NE(entry, nullptr) << error;
+
+    using TPairBatchFn = int64_t(*)(
+        TPairI64Key*, int64_t*, int64_t*, int64_t, int64_t*, TPairI64Key*,
+        int64_t*, int64_t*, TPairI64Key*, int64_t*, int64_t);
+    auto process = reinterpret_cast<TPairBatchFn>(entry);
+    constexpr int64_t capacity = 8;
+    std::array<TPairI64Key, capacity> keys{};
+    std::array<int64_t, capacity> dist{};
+    std::array<int64_t, capacity> slotIds{};
+    std::array<TPairI64Key, capacity> groupKeys{};
+    std::array<int64_t, capacity> counts{};
+    std::array<int64_t, capacity> sums{};
+    dist.fill(-1);
+    slotIds.fill(-1);
+    int64_t size = 0;
+
+    std::array<TPairI64Key, 7> input = {
+        TPairI64Key{1, 10}, {2, 20}, {1, 10}, {3, 30}, {4, 40}, {2, 20}, {5, 50}};
+    std::array<int64_t, 7> values = {5, 7, 11, 13, 17, -2, 19};
+    ASSERT_EQ(process(keys.data(), dist.data(), slotIds.data(), capacity, &size,
+                      groupKeys.data(), counts.data(), sums.data(), input.data(),
+                      values.data(), input.size()), 5);
+
+    EXPECT_EQ(size, 5);
+    EXPECT_EQ(groupKeys[0], (TPairI64Key{1, 10}));
+    EXPECT_EQ(groupKeys[1], (TPairI64Key{2, 20}));
+    EXPECT_EQ(groupKeys[2], (TPairI64Key{3, 30}));
+    EXPECT_EQ(groupKeys[3], (TPairI64Key{4, 40}));
+    EXPECT_EQ(groupKeys[4], (TPairI64Key{5, 50}));
+    EXPECT_EQ((std::array<int64_t, 5>{counts[0], counts[1], counts[2], counts[3], counts[4]}),
+              (std::array<int64_t, 5>{2, 2, 1, 1, 1}));
+    EXPECT_EQ((std::array<int64_t, 5>{sums[0], sums[1], sums[2], sums[3], sums[4]}),
+              (std::array<int64_t, 5>{16, 5, 13, 17, 19}));
+
+    std::array<bool, capacity> seen{};
+    for (int64_t slot = 0; slot < capacity; ++slot) {
+        if (dist[slot] >= 0) {
+            ASSERT_GE(slotIds[slot], 0);
+            ASSERT_LT(slotIds[slot], size);
+            EXPECT_FALSE(seen[slotIds[slot]]);
+            seen[slotIds[slot]] = true;
+        }
+    }
+    for (int64_t slot = 0; slot < size; ++slot) {
+        EXPECT_TRUE(seen[slot]);
+    }
+}
+
+TEST(AggregationKernel, GenericPairRehashPreservesSlotsAndAggregationState) {
+    void* processEntry = nullptr;
+    void* rehashEntry = nullptr;
+    std::string error;
+    auto processRunner = CompileKernel("generic_pair_fixed.oz", processEntry, error);
+    ASSERT_NE(processEntry, nullptr) << error;
+    auto rehashRunner = CompileKernel("generic_pair_rehash.oz", rehashEntry, error);
+    ASSERT_NE(rehashEntry, nullptr) << error;
+
+    using TPairBatchFn = int64_t(*)(
+        TPairI64Key*, int64_t*, int64_t*, int64_t, int64_t*, TPairI64Key*,
+        int64_t*, int64_t*, TPairI64Key*, int64_t*, int64_t);
+    using TPairRehashFn = int64_t(*)(
+        TPairI64Key*, int64_t*, int64_t*, int64_t, int64_t, TPairI64Key*,
+        int64_t*, int64_t*, TPairI64Key*, int64_t*, int64_t*, int64_t,
+        TPairI64Key*, int64_t*, int64_t*);
+    auto process = reinterpret_cast<TPairBatchFn>(processEntry);
+    auto rehash = reinterpret_cast<TPairRehashFn>(rehashEntry);
+
+    constexpr int64_t oldCapacity = 8;
+    constexpr int64_t newCapacity = 16;
+    std::array<TPairI64Key, oldCapacity> oldKeys{};
+    std::array<int64_t, oldCapacity> oldDist{};
+    std::array<int64_t, oldCapacity> oldSlotIds{};
+    std::array<TPairI64Key, oldCapacity> oldGroupKeys{};
+    std::array<int64_t, oldCapacity> oldCounts{};
+    std::array<int64_t, oldCapacity> oldSums{};
+    oldDist.fill(-1);
+    oldSlotIds.fill(-1);
+    int64_t size = 0;
+    std::array<TPairI64Key, 5> initialKeys = {
+        TPairI64Key{1, 2}, {3, 4}, {5, 6}, {1, 2}, {7, 8}};
+    std::array<int64_t, 5> initialValues = {10, 20, 30, 5, 40};
+    ASSERT_EQ(process(oldKeys.data(), oldDist.data(), oldSlotIds.data(), oldCapacity,
+                      &size, oldGroupKeys.data(), oldCounts.data(), oldSums.data(),
+                      initialKeys.data(), initialValues.data(), initialKeys.size()), 4);
+
+    std::array<TPairI64Key, newCapacity> newKeys{};
+    std::array<int64_t, newCapacity> newDist{};
+    std::array<int64_t, newCapacity> newSlotIds{};
+    std::array<TPairI64Key, newCapacity> newGroupKeys{};
+    std::array<int64_t, newCapacity> newCounts{};
+    std::array<int64_t, newCapacity> newSums{};
+    ASSERT_EQ(rehash(oldKeys.data(), oldDist.data(), oldSlotIds.data(), oldCapacity,
+                     size, oldGroupKeys.data(), oldCounts.data(), oldSums.data(),
+                     newKeys.data(), newDist.data(), newSlotIds.data(), newCapacity,
+                     newGroupKeys.data(), newCounts.data(), newSums.data()), size);
+
+    EXPECT_EQ(newGroupKeys[0], (TPairI64Key{1, 2}));
+    EXPECT_EQ(newGroupKeys[1], (TPairI64Key{3, 4}));
+    EXPECT_EQ(newGroupKeys[2], (TPairI64Key{5, 6}));
+    EXPECT_EQ(newGroupKeys[3], (TPairI64Key{7, 8}));
+    EXPECT_EQ((std::array<int64_t, 4>{newCounts[0], newCounts[1], newCounts[2], newCounts[3]}),
+              (std::array<int64_t, 4>{2, 1, 1, 1}));
+    EXPECT_EQ((std::array<int64_t, 4>{newSums[0], newSums[1], newSums[2], newSums[3]}),
+              (std::array<int64_t, 4>{15, 20, 30, 40}));
+
+    std::array<TPairI64Key, 3> moreKeys = {
+        TPairI64Key{3, 4}, {9, 10}, {11, 12}};
+    std::array<int64_t, 3> moreValues = {-7, 50, 60};
+    ASSERT_EQ(process(newKeys.data(), newDist.data(), newSlotIds.data(), newCapacity,
+                      &size, newGroupKeys.data(), newCounts.data(), newSums.data(),
+                      moreKeys.data(), moreValues.data(), moreKeys.size()), 6);
+    EXPECT_EQ(newGroupKeys[4], (TPairI64Key{9, 10}));
+    EXPECT_EQ(newGroupKeys[5], (TPairI64Key{11, 12}));
+    EXPECT_EQ(newCounts[1], 2);
+    EXPECT_EQ(newSums[1], 13);
+    EXPECT_EQ(newCounts[4], 1);
+    EXPECT_EQ(newSums[4], 50);
+
+    std::array<bool, newCapacity> seen{};
+    for (int64_t slot = 0; slot < newCapacity; ++slot) {
+        if (newDist[slot] >= 0) {
+            ASSERT_GE(newSlotIds[slot], 0);
+            ASSERT_LT(newSlotIds[slot], size);
+            EXPECT_FALSE(seen[newSlotIds[slot]]);
+            seen[newSlotIds[slot]] = true;
+        }
+    }
+    for (int64_t slot = 0; slot < size; ++slot) {
+        EXPECT_TRUE(seen[slot]);
+    }
 }
 
 TEST(AggregationKernel, GenericKeyPointerReadWriteAndSwap) {
