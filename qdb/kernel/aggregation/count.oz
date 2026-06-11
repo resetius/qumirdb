@@ -337,21 +337,39 @@
       (field_assign ht Size (+ size (: 1 i64)))
       (return size)))
 
-  ;; op=0 init, op=1 update, op=2 count, op=3 sum, op=4 min, op=5 max,
-  ;; op=6 destroy. This concrete function is last.
+  (fun aggregate_batch ((var ht <ref HashTable>)
+                        (var input_keys <ptr i64>)
+                        (var input_values <ptr i64>)
+                        (var length i64)) -> bool
+    (block
+      (if (< length (: 0 i64)) (block (return #f)))
+      (var row i64)
+      (= row (: 0 i64))
+      (while (< row length)
+        (block
+          (if (== (call count_update ht (index input_keys row)
+                   (index input_values row)) (: -1 i64))
+            (block (return #f)))
+          (= row (+ row (: 1 i64)))))
+      (return #t)))
+
+  ;; op=0 init(capacity=arg), op=1 batch update(length=arg), op=2 count,
+  ;; op=3 sum, op=4 min, op=5 max, op=6 destroy. For lookup modes the key is
+  ;; passed through arg. This concrete function is last.
   (fun aggregation_count ((var ht <ref HashTable>)
-                          (var key i64)
-                          (var value i64)
+                          (var input_keys <ptr i64>)
+                          (var input_values <ptr i64>)
+                          (var arg i64)
                           (var op i64)) -> i64
     (block
       (return
         (if (== op (: 0 i64))
-          (cast (call count_init ht key) i64)
+          (cast (call count_init ht arg) i64)
           (if (== op (: 1 i64))
-            (call count_update ht key value)
+            (cast (call aggregate_batch ht input_keys input_values arg) i64)
             (if (&& (>= op (: 2 i64)) (<= op (: 5 i64)))
               (block
-                (var dense_slot = (call count_lookup ht key))
+                (var dense_slot = (call count_lookup ht arg))
                 (if (== dense_slot (: -1 i64))
                   (: -1 i64)
                   (block

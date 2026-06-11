@@ -533,11 +533,11 @@ TEST(AggregationKernel, OzI64ReducersUseStableDenseSlotsAcrossGrow) {
     auto runner = CompileKernel("count.oz", entry, error);
     ASSERT_NE(entry, nullptr) << error;
 
-    using TCountFn = int64_t(*)(THashTable*, int64_t, int64_t, int64_t);
+    using TCountFn = int64_t(*)(THashTable*, int64_t*, int64_t*, int64_t, int64_t);
     auto count = reinterpret_cast<TCountFn>(entry);
     THashTable table;
 
-    ASSERT_TRUE(count(&table, 4, 0, 0));
+    ASSERT_TRUE(count(&table, nullptr, nullptr, 4, 0));
     ASSERT_NE(table.GroupKeys, nullptr);
     ASSERT_NE(table.AggBuffers, nullptr);
     ASSERT_NE(table.AggBuffers[0], nullptr);
@@ -546,7 +546,7 @@ TEST(AggregationKernel, OzI64ReducersUseStableDenseSlotsAcrossGrow) {
     ASSERT_NE(table.AggBuffers[3], nullptr);
     EXPECT_EQ(table.NumAggs, 4);
     EXPECT_EQ(table.Size, 0);
-    EXPECT_EQ(count(&table, 999, 0, 2), -1);
+    EXPECT_EQ(count(&table, nullptr, nullptr, 999, 2), -1);
 
     constexpr std::array<int64_t, 22> input = {
         10, 20, 10, -1, 30, 20, 40, 50, 10, 60,
@@ -569,9 +569,8 @@ TEST(AggregationKernel, OzI64ReducersUseStableDenseSlotsAcrossGrow) {
         29, 17, 11, 13, 19, 23, 31, 37, 41, 43, 47, 53, 61,
         std::numeric_limits<int64_t>::max(), std::numeric_limits<int64_t>::min()};
 
-    for (size_t i = 0; i < input.size(); ++i) {
-        ASSERT_NE(count(&table, input[i], values[i], 1), -1) << "key " << input[i];
-    }
+    ASSERT_TRUE(count(&table, const_cast<int64_t*>(input.data()),
+                      const_cast<int64_t*>(values.data()), input.size(), 1));
 
     EXPECT_EQ(table.Capacity, 32);
     ASSERT_EQ(table.Size, static_cast<int64_t>(uniqueKeys.size()));
@@ -581,18 +580,113 @@ TEST(AggregationKernel, OzI64ReducersUseStableDenseSlotsAcrossGrow) {
         EXPECT_EQ(table.AggBuffers[1][i], expectedSums[i]);
         EXPECT_EQ(table.AggBuffers[2][i], expectedMins[i]);
         EXPECT_EQ(table.AggBuffers[3][i], expectedMaxs[i]);
-        EXPECT_EQ(count(&table, uniqueKeys[i], 0, 2), expectedCounts[i]);
-        EXPECT_EQ(count(&table, uniqueKeys[i], 0, 3), expectedSums[i]);
-        EXPECT_EQ(count(&table, uniqueKeys[i], 0, 4), expectedMins[i]);
-        EXPECT_EQ(count(&table, uniqueKeys[i], 0, 5), expectedMaxs[i]);
+        EXPECT_EQ(count(&table, nullptr, nullptr, uniqueKeys[i], 2), expectedCounts[i]);
+        EXPECT_EQ(count(&table, nullptr, nullptr, uniqueKeys[i], 3), expectedSums[i]);
+        EXPECT_EQ(count(&table, nullptr, nullptr, uniqueKeys[i], 4), expectedMins[i]);
+        EXPECT_EQ(count(&table, nullptr, nullptr, uniqueKeys[i], 5), expectedMaxs[i]);
     }
 
-    EXPECT_TRUE(count(&table, 0, 0, 6));
+    EXPECT_TRUE(count(&table, nullptr, nullptr, 0, 6));
     EXPECT_EQ(table.Keys, nullptr);
     EXPECT_EQ(table.GroupKeys, nullptr);
     EXPECT_EQ(table.AggBuffers, nullptr);
     EXPECT_EQ(table.Capacity, 0);
     EXPECT_EQ(table.Size, 0);
+}
+
+TEST(AggregationKernel, OzBatchAggregationHandlesEmptySingleGroupAndUniqueInputs) {
+    void* entry = nullptr;
+    std::string error;
+    auto runner = CompileKernel("count.oz", entry, error);
+    ASSERT_NE(entry, nullptr) << error;
+
+    using TBatchFn = int64_t(*)(THashTable*, int64_t*, int64_t*, int64_t, int64_t);
+    auto aggregate = reinterpret_cast<TBatchFn>(entry);
+
+    {
+        THashTable table;
+        ASSERT_TRUE(aggregate(&table, nullptr, nullptr, 4, 0));
+        EXPECT_TRUE(aggregate(&table, nullptr, nullptr, 0, 1));
+        EXPECT_EQ(table.Size, 0);
+        EXPECT_FALSE(aggregate(&table, nullptr, nullptr, -1, 1));
+        EXPECT_EQ(table.Size, 0);
+        EXPECT_TRUE(aggregate(&table, nullptr, nullptr, 0, 6));
+    }
+
+    {
+        THashTable table;
+        std::array<int64_t, 4> keys = {7, 7, 7, 7};
+        std::array<int64_t, 4> values = {5, -2, 11, 3};
+        ASSERT_TRUE(aggregate(&table, nullptr, nullptr, 4, 0));
+        ASSERT_TRUE(aggregate(&table, keys.data(), values.data(), keys.size(), 1));
+        ASSERT_EQ(table.Size, 1);
+        EXPECT_EQ(table.GroupKeys[0], 7);
+        EXPECT_EQ(table.AggBuffers[0][0], 4);
+        EXPECT_EQ(table.AggBuffers[1][0], 17);
+        EXPECT_EQ(table.AggBuffers[2][0], -2);
+        EXPECT_EQ(table.AggBuffers[3][0], 11);
+        EXPECT_TRUE(aggregate(&table, nullptr, nullptr, 0, 6));
+    }
+
+    {
+        THashTable table;
+        std::array<int64_t, 8> keys = {3, 5, 7, 9, 11, 13, 15, 17};
+        std::array<int64_t, 8> values = {30, 50, 70, 90, 110, 130, 150, 170};
+        ASSERT_TRUE(aggregate(&table, nullptr, nullptr, 4, 0));
+        ASSERT_TRUE(aggregate(&table, keys.data(), values.data(), keys.size(), 1));
+        EXPECT_EQ(table.Size, 8);
+        EXPECT_EQ(table.Capacity, 16);
+        for (size_t i = 0; i < keys.size(); ++i) {
+            EXPECT_EQ(table.GroupKeys[i], keys[i]);
+            EXPECT_EQ(table.AggBuffers[0][i], 1);
+            EXPECT_EQ(table.AggBuffers[1][i], values[i]);
+            EXPECT_EQ(table.AggBuffers[2][i], values[i]);
+            EXPECT_EQ(table.AggBuffers[3][i], values[i]);
+        }
+        EXPECT_TRUE(aggregate(&table, nullptr, nullptr, 0, 6));
+    }
+}
+
+TEST(AggregationKernel, OzFinalizeCopiesDenseKeysAndAggregateBuffers) {
+    void* aggregateEntry = nullptr;
+    void* finalizeEntry = nullptr;
+    std::string error;
+    auto aggregateRunner = CompileKernel("count.oz", aggregateEntry, error);
+    ASSERT_NE(aggregateEntry, nullptr) << error;
+    auto finalizeRunner = CompileKernel("finalize.oz", finalizeEntry, error);
+    ASSERT_NE(finalizeEntry, nullptr) << error;
+
+    using TBatchFn = int64_t(*)(THashTable*, int64_t*, int64_t*, int64_t, int64_t);
+    using TFinalizeFn = int64_t(*)(
+        THashTable*, int64_t*, int64_t*, int64_t*, int64_t*, int64_t*, int64_t);
+    auto aggregate = reinterpret_cast<TBatchFn>(aggregateEntry);
+    auto finalize = reinterpret_cast<TFinalizeFn>(finalizeEntry);
+
+    THashTable table;
+    std::array<int64_t, 6> keys = {4, 2, 4, 8, 2, 4};
+    std::array<int64_t, 6> values = {10, 7, -3, 11, 5, 20};
+    ASSERT_TRUE(aggregate(&table, nullptr, nullptr, 4, 0));
+    ASSERT_TRUE(aggregate(&table, keys.data(), values.data(), keys.size(), 1));
+    ASSERT_EQ(table.Size, 3);
+
+    std::array<int64_t, 3> outputKeys = {-1, -1, -1};
+    std::array<int64_t, 3> outputCounts = {-1, -1, -1};
+    std::array<int64_t, 3> outputSums = {-1, -1, -1};
+    std::array<int64_t, 3> outputMins = {-1, -1, -1};
+    std::array<int64_t, 3> outputMaxs = {-1, -1, -1};
+
+    EXPECT_EQ(finalize(&table, outputKeys.data(), outputCounts.data(),
+                       outputSums.data(), outputMins.data(), outputMaxs.data(), 2), -1);
+    EXPECT_EQ(outputKeys[0], -1);
+    ASSERT_EQ(finalize(&table, outputKeys.data(), outputCounts.data(),
+                       outputSums.data(), outputMins.data(), outputMaxs.data(), 3), 3);
+    EXPECT_EQ(outputKeys, (std::array<int64_t, 3>{4, 2, 8}));
+    EXPECT_EQ(outputCounts, (std::array<int64_t, 3>{3, 2, 1}));
+    EXPECT_EQ(outputSums, (std::array<int64_t, 3>{27, 12, 11}));
+    EXPECT_EQ(outputMins, (std::array<int64_t, 3>{-3, 5, 11}));
+    EXPECT_EQ(outputMaxs, (std::array<int64_t, 3>{20, 7, 11}));
+
+    EXPECT_TRUE(aggregate(&table, nullptr, nullptr, 0, 6));
 }
 
 int main(int argc, char** argv) {
