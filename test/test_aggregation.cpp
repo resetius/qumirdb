@@ -3,6 +3,8 @@
 #include <qumir/codegen/llvm/llvm_initializer.h>
 #include <qumir/runner/runner_llvm.h>
 
+#include <qdb/modules/qumirdb.h>
+
 #include <array>
 #include <filesystem>
 #include <fstream>
@@ -40,9 +42,27 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileKernel(
     options.NativeCode = true;
 
     auto runner = std::make_unique<NQumir::TLLVMRunner>(options);
+    runner->RegisterModule(std::make_shared<NQumir::NRegistry::QumirDbModule>(), true);
     entry = runner->CompileKernel(ReadKernel(name), &error);
     return runner;
 }
+
+struct THashTable {
+    int64_t* Keys = nullptr;
+    int64_t* Dist = nullptr;
+    int64_t* SlotId = nullptr;
+    int64_t* GroupKeys = nullptr;
+    int64_t** AggBuffers = nullptr;
+    int64_t* Scratch = nullptr;
+    int64_t* Scratch2 = nullptr;
+    int64_t* QueryKey = nullptr;
+    int64_t Capacity = 0;
+    int64_t Size = 0;
+    int64_t NumAggs = 0;
+    int64_t NumKeys = 0;
+};
+
+static_assert(sizeof(THashTable) == 96);
 
 uint64_t HashI64(int64_t key) {
     uint64_t h = static_cast<uint64_t>(key);
@@ -372,6 +392,102 @@ TEST(AggregationKernel, StableDenseSlotIdsSurviveDisplacement) {
     for (int64_t slot = 0; slot < size; ++slot) {
         EXPECT_TRUE(seen[slot]);
     }
+}
+
+TEST(AggregationKernel, OzTableLifecycleAllocatesInitializesAndDestroys) {
+    void* entry = nullptr;
+    std::string error;
+    auto runner = CompileKernel("table_lifecycle.oz", entry, error);
+    ASSERT_NE(entry, nullptr) << error;
+
+    using TLifecycleFn = int64_t(*)(THashTable*, int64_t, int64_t);
+    auto lifecycle = reinterpret_cast<TLifecycleFn>(entry);
+    THashTable table;
+
+    ASSERT_TRUE(lifecycle(&table, 8, 0));
+    ASSERT_NE(table.Keys, nullptr);
+    ASSERT_NE(table.Dist, nullptr);
+    ASSERT_NE(table.SlotId, nullptr);
+    EXPECT_EQ(table.Capacity, 8);
+    EXPECT_EQ(table.Size, 0);
+    EXPECT_EQ(table.NumKeys, 1);
+    for (int64_t i = 0; i < table.Capacity; ++i) {
+        EXPECT_EQ(table.Keys[i], 0);
+        EXPECT_EQ(table.Dist[i], -1);
+        EXPECT_EQ(table.SlotId[i], -1);
+    }
+
+    EXPECT_TRUE(lifecycle(&table, 0, 1));
+    EXPECT_EQ(table.Keys, nullptr);
+    EXPECT_EQ(table.Dist, nullptr);
+    EXPECT_EQ(table.SlotId, nullptr);
+    EXPECT_EQ(table.Capacity, 0);
+    EXPECT_EQ(table.Size, 0);
+}
+
+TEST(AggregationKernel, OzTableGrowsAndPreservesStableSlotIds) {
+    void* lifecycleEntry = nullptr;
+    void* growEntry = nullptr;
+    void* checkEntry = nullptr;
+    std::string error;
+    auto lifecycleRunner = CompileKernel("table_lifecycle.oz", lifecycleEntry, error);
+    ASSERT_NE(lifecycleEntry, nullptr) << error;
+    auto growRunner = CompileKernel("table_grow.oz", growEntry, error);
+    ASSERT_NE(growEntry, nullptr) << error;
+    auto checkRunner = CompileKernel("check_invariants.oz", checkEntry, error);
+    ASSERT_NE(checkEntry, nullptr) << error;
+
+    using TLifecycleFn = int64_t(*)(THashTable*, int64_t, int64_t);
+    using TGrowFn = int64_t(*)(THashTable*, int64_t, int64_t);
+    using TCheckFn = bool(*)(int64_t*, int64_t*, int64_t);
+    auto lifecycle = reinterpret_cast<TLifecycleFn>(lifecycleEntry);
+    auto insertOrLookup = reinterpret_cast<TGrowFn>(growEntry);
+    auto check = reinterpret_cast<TCheckFn>(checkEntry);
+
+    THashTable table;
+    ASSERT_TRUE(lifecycle(&table, 4, 0));
+    constexpr std::array<int64_t, 20> input = {
+        0, 1, -1, 17, 33, 49, 65, 81, 97, 113,
+        129, 145, 161, 177, 193, 209, 225, 241, 257, 273};
+    constexpr std::array<int64_t, 4> expectedCapacities = {4, 8, 16, 32};
+    size_t capacityIndex = 0;
+
+    for (size_t i = 0; i < input.size(); ++i) {
+        const int64_t oldCapacity = table.Capacity;
+        EXPECT_EQ(insertOrLookup(&table, input[i], 0), static_cast<int64_t>(i));
+        ASSERT_EQ(table.Size, static_cast<int64_t>(i + 1));
+        if (table.Capacity != oldCapacity) {
+            ++capacityIndex;
+            ASSERT_LT(capacityIndex, expectedCapacities.size());
+            EXPECT_EQ(table.Capacity, expectedCapacities[capacityIndex]);
+        }
+        EXPECT_TRUE(check(table.Keys, table.Dist, table.Capacity));
+        for (size_t keyIndex = 0; keyIndex <= i; ++keyIndex) {
+            EXPECT_EQ(insertOrLookup(&table, input[keyIndex], 1),
+                      static_cast<int64_t>(keyIndex));
+        }
+    }
+
+    EXPECT_EQ(capacityIndex, expectedCapacities.size() - 1);
+    const int64_t sizeBeforeDuplicate = table.Size;
+    EXPECT_EQ(insertOrLookup(&table, input[3], 0), 3);
+    EXPECT_EQ(table.Size, sizeBeforeDuplicate);
+    EXPECT_EQ(table.Capacity, 32);
+
+    std::array<bool, input.size()> seen{};
+    for (int64_t i = 0; i < table.Capacity; ++i) {
+        if (table.Dist[i] >= 0) {
+            ASSERT_GE(table.SlotId[i], 0);
+            ASSERT_LT(table.SlotId[i], table.Size);
+            EXPECT_FALSE(seen[table.SlotId[i]]);
+            seen[table.SlotId[i]] = true;
+        }
+    }
+    for (bool present : seen) {
+        EXPECT_TRUE(present);
+    }
+
+    EXPECT_TRUE(lifecycle(&table, 0, 1));
 }
 
 int main(int argc, char** argv) {
