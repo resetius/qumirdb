@@ -195,6 +195,153 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileGenericI64TableEntry(
     return runner;
 }
 
+std::unique_ptr<NQumir::TLLVMRunner> CompileGenericI64DenseEntry(
+    const std::string& entrySource,
+    bool genericEntry,
+    void*& entry,
+    std::string& error)
+{
+    using namespace NQumir;
+
+    NAst::TStructType input({{"key", std::make_shared<NAst::TIntegerType>()}});
+    auto key = NQqb::NKernel::BuildAggregateKeyDescriptor(input, {"key"});
+    auto library = NQqb::NKernel::GenKeyOperationFunDecls(key);
+    auto reducers = NQqb::NKernel::GenReducerFunDecls({"sum", "count"});
+    library.insert(library.end(), reducers.begin(), reducers.end());
+    library.push_back(NQqb::NKernel::GenApplyReducersFunDecl(2));
+
+    auto dense = NQqb::NKernel::ParseFunctionLibrary(
+        ReadKernel("aggregation_dense_generic.oz"));
+    if (!dense) {
+        error = "aggregation_dense_generic.oz: " + dense.error().ToString();
+        return {};
+    }
+    auto parsedEntry = NQqb::NKernel::ParseFunctionLibrary(entrySource);
+    if (!parsedEntry || parsedEntry->size() != 1) {
+        error = parsedEntry ? "generic dense entry must contain one function"
+                            : parsedEntry.error().ToString();
+        return {};
+    }
+
+    std::vector<NAst::TExprPtr> stmts = std::move(library);
+    if (genericEntry) {
+        stmts.push_back(parsedEntry->front());
+        stmts.insert(stmts.end(), dense->begin(), dense->end());
+    } else {
+        stmts.insert(stmts.end(), dense->begin(), dense->end());
+        stmts.push_back(parsedEntry->front());
+    }
+
+    TLLVMRunnerOptions options;
+    options.CoreInput = true;
+    options.NativeCode = true;
+    options.AllowOverloads = true;
+    auto runner = std::make_unique<TLLVMRunner>(options);
+    runner->RegisterModule(std::make_shared<NQumir::NRegistry::QumirDbModule>(), true);
+    auto program = std::make_shared<NAst::TBlockExpr>(
+        NQumir::TLocation{}, std::move(stmts));
+    entry = runner->CompileKernelAst(program, &error);
+    return runner;
+}
+
+std::unique_ptr<NQumir::TLLVMRunner> CompileGenericI64FullUpdate(
+    const std::string& entrySource,
+    void*& entry,
+    std::string& error)
+{
+    using namespace NQumir;
+
+    NAst::TStructType input({{"key", std::make_shared<NAst::TIntegerType>()}});
+    auto key = NQqb::NKernel::BuildAggregateKeyDescriptor(input, {"key"});
+    auto stmts = NQqb::NKernel::GenKeyOperationFunDecls(key);
+    auto reducers = NQqb::NKernel::GenReducerFunDecls({"sum", "count"});
+    stmts.insert(stmts.end(), reducers.begin(), reducers.end());
+    stmts.push_back(NQqb::NKernel::GenApplyReducersFunDecl(2));
+
+    constexpr const char* warmupSource = R"(
+(block
+  (fun warmup_rehash ((var keys_ref <ptr <ptr u8>>)
+                      (var dist_ref <ptr <ptr i64>>)
+                      (var slot_ids_ref <ptr <ptr i64>>)
+                      (var capacity_ref <ptr i64>)
+                      (var key_size i64)
+                      (var key i64)
+                      (var new_capacity i64)) -> bool
+    (block
+      (return (call agg_rehash_key_bytes keys_ref dist_ref slot_ids_ref
+                    capacity_ref key_size key new_capacity))))
+  (fun warmup_upsert ((var keys <ptr u8>)
+                      (var dist <ptr i64>)
+                      (var slot_ids <ptr i64>)
+                      (var capacity i64)
+                      (var size <ptr i64>)
+                      (var key i64)
+                      (var out_is_new <ptr i64>)) -> i64
+    (block
+      (return (call agg_upsert_key_bytes keys dist slot_ids capacity size key
+                    out_is_new))))
+  (fun warmup_dense_grow ((var group_keys_ref <ptr <ptr u8>>)
+                          (var agg_buffers_ref <ptr <ptr <ptr i64>>>)
+                          (var old_capacity i64)
+                          (var new_capacity i64)
+                          (var size i64)
+                          (var key_size i64)
+                          (var num_aggs i64)
+                          (var key i64)) -> bool
+    (block
+      (return (call agg_dense_grow group_keys_ref agg_buffers_ref old_capacity
+                    new_capacity size key_size num_aggs key))))
+  (fun warmup_dense_update ((var group_keys <ptr u8>)
+                            (var agg_buffers <ptr <ptr i64>>)
+                            (var dense_slot i64)
+                            (var key i64)
+                            (var value i64)
+                            (var is_new bool))
+    (block
+      (call agg_dense_update group_keys agg_buffers dense_slot key value
+            is_new))))
+)";
+    auto warmups = NQqb::NKernel::ParseFunctionLibrary(warmupSource);
+    if (!warmups) {
+        error = warmups.error().ToString();
+        return {};
+    }
+    stmts.insert(stmts.end(), warmups->begin(), warmups->end());
+
+    auto parsedEntry = NQqb::NKernel::ParseFunctionLibrary(entrySource);
+    if (!parsedEntry || parsedEntry->size() != 1) {
+        error = parsedEntry ? "full update entry must contain one function"
+                            : parsedEntry.error().ToString();
+        return {};
+    }
+    stmts.push_back(parsedEntry->front());
+
+    for (const char* name : {
+             "robin_hood_generic.oz",
+             "robin_hood_rehash_generic.oz",
+             "aggregation_table_generic.oz",
+             "aggregation_dense_generic.oz",
+             "aggregation_update_generic.oz"}) {
+        auto parsed = NQqb::NKernel::ParseFunctionLibrary(ReadKernel(name));
+        if (!parsed) {
+            error = std::string(name) + ": " + parsed.error().ToString();
+            return {};
+        }
+        stmts.insert(stmts.end(), parsed->begin(), parsed->end());
+    }
+
+    TLLVMRunnerOptions options;
+    options.CoreInput = true;
+    options.NativeCode = true;
+    options.AllowOverloads = true;
+    auto runner = std::make_unique<TLLVMRunner>(options);
+    runner->RegisterModule(std::make_shared<NQumir::NRegistry::QumirDbModule>(), true);
+    auto program = std::make_shared<NAst::TBlockExpr>(
+        NQumir::TLocation{}, std::move(stmts));
+    entry = runner->CompileKernelAst(program, &error);
+    return runner;
+}
+
 // Builds agg_dispatch (L2c's GenAggregateKernelAst, numAggs = funcs.size())
 // merged with reduce_0..reduce_{N-1}/agg_apply_reducers (L2a/L2b-1, generated
 // for `funcs`) and count.oz's NumAggs-generic agg_init/agg_rehash/agg_update/
@@ -956,6 +1103,273 @@ TEST(AggregationKernel, GenericOpaqueTableLifecycleGrowsAndDestroys) {
     EXPECT_EQ(slotIds, nullptr);
     EXPECT_EQ(capacity, 0);
     EXPECT_EQ(size, 0);
+}
+
+TEST(AggregationKernel, GenericDenseStoragePreservesKeysAndReducerStatesAcrossGrow) {
+    constexpr const char* initSource = R"(
+(block
+  (fun aggregation_dense_init_i64 ((var group_keys_out <ptr <ptr u8>>)
+                                   (var agg_buffers_out <ptr <ptr <ptr i64>>>)
+                                   (var capacity i64)
+                                   (var key_size i64)
+                                   (var num_aggs i64)) -> bool
+    (block
+      (return (call agg_dense_init group_keys_out agg_buffers_out capacity
+                    key_size num_aggs)))))
+)";
+    constexpr const char* updateSource = R"(
+(block
+  (fun aggregation_dense_update_i64 ((var group_keys <ptr u8>)
+                                     (var agg_buffers <ptr <ptr i64>>)
+                                     (var dense_slot i64)
+                                     (var key i64)
+                                     (var value i64)
+                                     (var is_new bool))
+    (block
+      (call agg_dense_update group_keys agg_buffers dense_slot key value
+            is_new))))
+)";
+    constexpr const char* growSource = R"(
+(block
+  (fun aggregation_dense_grow_i64 ((var group_keys_ref <ptr <ptr u8>>)
+                                   (var agg_buffers_ref <ptr <ptr <ptr i64>>>)
+                                   (var old_capacity i64)
+                                   (var new_capacity i64)
+                                   (var size i64)
+                                   (var key_size i64)
+                                   (var num_aggs i64)
+                                   (var key_witness i64)) -> bool
+    (block
+      (return (call agg_dense_grow group_keys_ref agg_buffers_ref old_capacity
+                    new_capacity size key_size num_aggs key_witness)))))
+)";
+    constexpr const char* destroySource = R"(
+(block
+  (fun aggregation_dense_destroy_i64 ((var group_keys_ref <ptr <ptr u8>>)
+                                      (var agg_buffers_ref <ptr <ptr <ptr i64>>>)
+                                      (var num_aggs i64)) -> i64
+    (block
+      (call agg_dense_destroy group_keys_ref agg_buffers_ref num_aggs)
+      (return (: 1 i64)))))
+)";
+
+    void* initEntry = nullptr;
+    void* updateEntry = nullptr;
+    void* growEntry = nullptr;
+    void* destroyEntry = nullptr;
+    std::string error;
+    auto initRunner = CompileGenericI64DenseEntry(
+        initSource, false, initEntry, error);
+    ASSERT_NE(initEntry, nullptr) << error;
+    auto updateRunner = CompileGenericI64DenseEntry(
+        updateSource, true, updateEntry, error);
+    ASSERT_NE(updateEntry, nullptr) << error;
+    auto growRunner = CompileGenericI64DenseEntry(
+        growSource, true, growEntry, error);
+    ASSERT_NE(growEntry, nullptr) << error;
+    auto destroyRunner = CompileGenericI64DenseEntry(
+        destroySource, false, destroyEntry, error);
+    ASSERT_NE(destroyEntry, nullptr) << error;
+
+    using TInitFn = bool(*)(uint8_t**, int64_t***, int64_t, int64_t, int64_t);
+    using TUpdateFn = void(*)(uint8_t*, int64_t**, int64_t, int64_t, int64_t, bool);
+    using TGrowFn = bool(*)(
+        uint8_t**, int64_t***, int64_t, int64_t, int64_t, int64_t, int64_t,
+        int64_t);
+    using TDestroyFn = int64_t(*)(uint8_t**, int64_t***, int64_t);
+    auto init = reinterpret_cast<TInitFn>(initEntry);
+    auto update = reinterpret_cast<TUpdateFn>(updateEntry);
+    auto grow = reinterpret_cast<TGrowFn>(growEntry);
+    auto destroy = reinterpret_cast<TDestroyFn>(destroyEntry);
+
+    uint8_t* groupKeys = nullptr;
+    int64_t** aggBuffers = nullptr;
+    constexpr int64_t keySize = sizeof(int64_t);
+    constexpr int64_t numAggs = 2;
+    ASSERT_TRUE(init(&groupKeys, &aggBuffers, 4, keySize, numAggs));
+    ASSERT_NE(groupKeys, nullptr);
+    ASSERT_NE(aggBuffers, nullptr);
+
+    update(groupKeys, aggBuffers, 0, 10, 7, true);
+    update(groupKeys, aggBuffers, 1, 20, 3, true);
+    update(groupKeys, aggBuffers, 0, 10, 5, false);
+    update(groupKeys, aggBuffers, 2, -4, 11, true);
+    EXPECT_EQ(aggBuffers[0][0], 12);
+    EXPECT_EQ(aggBuffers[1][0], 2);
+    EXPECT_EQ(aggBuffers[0][1], 3);
+    EXPECT_EQ(aggBuffers[1][1], 1);
+    EXPECT_EQ(aggBuffers[0][2], 11);
+    EXPECT_EQ(aggBuffers[1][2], 1);
+
+    ASSERT_TRUE(grow(&groupKeys, &aggBuffers, 4, 8, 3, keySize, numAggs, 0));
+    std::array<int64_t, 3> expectedKeys = {10, 20, -4};
+    for (int64_t slot = 0; slot < 3; ++slot) {
+        int64_t key = 0;
+        std::memcpy(&key, groupKeys + slot * keySize, sizeof(key));
+        EXPECT_EQ(key, expectedKeys[slot]);
+    }
+    EXPECT_EQ(aggBuffers[0][0], 12);
+    EXPECT_EQ(aggBuffers[1][0], 2);
+    EXPECT_EQ(aggBuffers[0][1], 3);
+    EXPECT_EQ(aggBuffers[1][1], 1);
+    EXPECT_EQ(aggBuffers[0][2], 11);
+    EXPECT_EQ(aggBuffers[1][2], 1);
+
+    update(groupKeys, aggBuffers, 1, 20, 9, false);
+    EXPECT_EQ(aggBuffers[0][1], 12);
+    EXPECT_EQ(aggBuffers[1][1], 2);
+
+    EXPECT_EQ(destroy(&groupKeys, &aggBuffers, numAggs), 1);
+    EXPECT_EQ(groupKeys, nullptr);
+    EXPECT_EQ(aggBuffers, nullptr);
+}
+
+TEST(AggregationKernel, GenericFullUpdateGrowsProbeAndDenseStorageTogether) {
+    constexpr const char* probeInitSource = R"(
+(block
+  (fun full_probe_init ((var keys_out <ptr <ptr u8>>)
+                        (var dist_out <ptr <ptr i64>>)
+                        (var slot_ids_out <ptr <ptr i64>>)
+                        (var capacity_out <ptr i64>)
+                        (var size_out <ptr i64>)
+                        (var capacity i64)
+                        (var key_size i64)) -> bool
+    (block
+      (return (call agg_table_init_bytes keys_out dist_out slot_ids_out
+                    capacity_out size_out capacity key_size)))))
+)";
+    constexpr const char* denseInitSource = R"(
+(block
+  (fun full_dense_init ((var group_keys_out <ptr <ptr u8>>)
+                        (var agg_buffers_out <ptr <ptr <ptr i64>>>)
+                        (var capacity i64)
+                        (var key_size i64)
+                        (var num_aggs i64)) -> bool
+    (block
+      (return (call agg_dense_init group_keys_out agg_buffers_out capacity
+                    key_size num_aggs)))))
+)";
+    constexpr const char* updateSource = R"(
+(block
+  (fun full_update_i64 ((var keys_ref <ptr <ptr u8>>)
+                        (var dist_ref <ptr <ptr i64>>)
+                        (var slot_ids_ref <ptr <ptr i64>>)
+                        (var group_keys_ref <ptr <ptr u8>>)
+                        (var agg_buffers_ref <ptr <ptr <ptr i64>>>)
+                        (var capacity_ref <ptr i64>)
+                        (var size_ref <ptr i64>)
+                        (var key_size i64)
+                        (var num_aggs i64)
+                        (var key i64)
+                        (var value i64)
+                        (var out_is_new <ptr i64>)) -> i64
+    (block
+      (return (call agg_table_update_full keys_ref dist_ref slot_ids_ref
+                    group_keys_ref agg_buffers_ref capacity_ref size_ref
+                    key_size num_aggs key value out_is_new)))))
+)";
+    constexpr const char* probeDestroySource = R"(
+(block
+  (fun full_probe_destroy ((var keys_ref <ptr <ptr u8>>)
+                           (var dist_ref <ptr <ptr i64>>)
+                           (var slot_ids_ref <ptr <ptr i64>>)
+                           (var capacity_ref <ptr i64>)
+                           (var size_ref <ptr i64>)) -> i64
+    (block
+      (call agg_table_destroy_bytes keys_ref dist_ref slot_ids_ref
+            capacity_ref size_ref)
+      (return (: 1 i64)))))
+)";
+    constexpr const char* denseDestroySource = R"(
+(block
+  (fun full_dense_destroy ((var group_keys_ref <ptr <ptr u8>>)
+                           (var agg_buffers_ref <ptr <ptr <ptr i64>>>)
+                           (var num_aggs i64)) -> i64
+    (block
+      (call agg_dense_destroy group_keys_ref agg_buffers_ref num_aggs)
+      (return (: 1 i64)))))
+)";
+
+    void* probeInitEntry = nullptr;
+    void* denseInitEntry = nullptr;
+    void* updateEntry = nullptr;
+    void* probeDestroyEntry = nullptr;
+    void* denseDestroyEntry = nullptr;
+    std::string error;
+    auto probeInitRunner = CompileGenericI64TableEntry(
+        probeInitSource, false, probeInitEntry, error);
+    ASSERT_NE(probeInitEntry, nullptr) << error;
+    auto denseInitRunner = CompileGenericI64DenseEntry(
+        denseInitSource, false, denseInitEntry, error);
+    ASSERT_NE(denseInitEntry, nullptr) << error;
+    auto updateRunner = CompileGenericI64FullUpdate(updateSource, updateEntry, error);
+    ASSERT_NE(updateEntry, nullptr) << error;
+    auto probeDestroyRunner = CompileGenericI64TableEntry(
+        probeDestroySource, false, probeDestroyEntry, error);
+    ASSERT_NE(probeDestroyEntry, nullptr) << error;
+    auto denseDestroyRunner = CompileGenericI64DenseEntry(
+        denseDestroySource, false, denseDestroyEntry, error);
+    ASSERT_NE(denseDestroyEntry, nullptr) << error;
+
+    using TProbeInitFn = bool(*)(
+        uint8_t**, int64_t**, int64_t**, int64_t*, int64_t*, int64_t, int64_t);
+    using TDenseInitFn = bool(*)(uint8_t**, int64_t***, int64_t, int64_t, int64_t);
+    using TUpdateFn = int64_t(*)(
+        uint8_t**, int64_t**, int64_t**, uint8_t**, int64_t***,
+        int64_t*, int64_t*, int64_t, int64_t, int64_t, int64_t, int64_t*);
+    using TProbeDestroyFn = int64_t(*)(
+        uint8_t**, int64_t**, int64_t**, int64_t*, int64_t*);
+    using TDenseDestroyFn = int64_t(*)(uint8_t**, int64_t***, int64_t);
+
+    uint8_t* keys = nullptr;
+    int64_t* dist = nullptr;
+    int64_t* slotIds = nullptr;
+    uint8_t* groupKeys = nullptr;
+    int64_t** aggBuffers = nullptr;
+    int64_t capacity = 0;
+    int64_t size = 0;
+    constexpr int64_t keySize = sizeof(int64_t);
+    constexpr int64_t numAggs = 2;
+    ASSERT_TRUE(reinterpret_cast<TProbeInitFn>(probeInitEntry)(
+        &keys, &dist, &slotIds, &capacity, &size, 4, keySize));
+    ASSERT_TRUE(reinterpret_cast<TDenseInitFn>(denseInitEntry)(
+        &groupKeys, &aggBuffers, capacity, keySize, numAggs));
+    auto update = reinterpret_cast<TUpdateFn>(updateEntry);
+
+    constexpr std::array<int64_t, 10> inputKeys =
+        {7, 9, 7, -3, 11, 9, 13, 15, -3, 17};
+    constexpr std::array<int64_t, 10> inputValues =
+        {5, 2, 8, 4, 1, 6, 3, 7, 10, 9};
+    std::unordered_map<int64_t, std::pair<int64_t, int64_t>> expected;
+    std::unordered_map<int64_t, int64_t> denseSlots;
+    for (size_t i = 0; i < inputKeys.size(); ++i) {
+        int64_t isNew = -1;
+        const int64_t dense = update(
+            &keys, &dist, &slotIds, &groupKeys, &aggBuffers,
+            &capacity, &size, keySize, numAggs, inputKeys[i], inputValues[i],
+            &isNew);
+        ASSERT_GE(dense, 0);
+        auto [it, inserted] = denseSlots.emplace(inputKeys[i], dense);
+        EXPECT_EQ(isNew, inserted ? 1 : 0);
+        EXPECT_EQ(dense, it->second);
+        expected[inputKeys[i]].first += inputValues[i];
+        expected[inputKeys[i]].second += 1;
+    }
+    EXPECT_EQ(capacity, 16);
+    EXPECT_EQ(size, static_cast<int64_t>(expected.size()));
+
+    for (const auto& [key, dense] : denseSlots) {
+        int64_t storedKey = 0;
+        std::memcpy(&storedKey, groupKeys + dense * keySize, sizeof(storedKey));
+        EXPECT_EQ(storedKey, key);
+        EXPECT_EQ(aggBuffers[0][dense], expected[key].first);
+        EXPECT_EQ(aggBuffers[1][dense], expected[key].second);
+    }
+
+    EXPECT_EQ(reinterpret_cast<TDenseDestroyFn>(denseDestroyEntry)(
+        &groupKeys, &aggBuffers, numAggs), 1);
+    EXPECT_EQ(reinterpret_cast<TProbeDestroyFn>(probeDestroyEntry)(
+        &keys, &dist, &slotIds, &capacity, &size), 1);
 }
 
 TEST(AggregationKernel, GenericKeyEqualityDispatchesToI64Overload) {
