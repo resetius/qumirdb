@@ -15,6 +15,40 @@
 
 namespace NQqb {
 
+void TPhysicalPlanner::PrintRuntimePlan(const TOperatorPtr& root) const {
+    if (!Diagnostics_) {
+        return;
+    }
+    *Diagnostics_ << "\n========== RUNTIME PLAN ==========\n";
+    PrintRuntimePlan(root, 0);
+    *Diagnostics_ << "==================================\n";
+}
+
+void TPhysicalPlanner::PrintRuntimePlan(const TOperatorPtr& root, int depth) const {
+    const std::string indent(static_cast<size_t>(depth) * 2, ' ');
+    *Diagnostics_ << indent;
+    if (auto node = TMaybeOp<TSourceOperator>(root)) {
+        *Diagnostics_ << "source " << node.Cast()->SourcePath() << "\n";
+        return;
+    }
+    if (auto node = TMaybeOp<TFilterOperator>(root)) {
+        *Diagnostics_ << "filter [JIT: AST -> IR -> LLVM]\n";
+        PrintRuntimePlan(node.Cast()->Input(), depth + 1);
+        return;
+    }
+    if (auto node = TMaybeOp<TProjectOperator>(root)) {
+        *Diagnostics_ << "project [column mapping]\n";
+        PrintRuntimePlan(node.Cast()->Input(), depth + 1);
+        return;
+    }
+    if (auto node = TMaybeOp<TAggregateOperator>(root)) {
+        *Diagnostics_ << "aggregate [JIT: update + finalize]\n";
+        PrintRuntimePlan(node.Cast()->Input(), depth + 1);
+        return;
+    }
+    *Diagnostics_ << "unknown\n";
+}
+
 std::unique_ptr<IRuntimeNode> TPhysicalPlanner::Build(const TOperatorPtr& root) {
     if (auto maybe = TMaybeOp<TSourceOperator>(root)) {
         auto src = maybe.Cast();
@@ -38,7 +72,7 @@ std::unique_ptr<IRuntimeNode> TPhysicalPlanner::Build(const TOperatorPtr& root) 
         if (!inputType) {
             throw std::runtime_error("filter input must have TStructType");
         }
-        TKernelCompiler compiler;
+        TKernelCompiler compiler(Diagnostics_);
         auto dispatch = compiler.CompileFilter(*inputType, filter->Predicate());
         return std::make_unique<TRuntimeFilter>(
             std::move(input),
@@ -86,7 +120,7 @@ std::unique_ptr<IRuntimeNode> TPhysicalPlanner::Build(const TOperatorPtr& root) 
             throw std::runtime_error("aggregate input must have TStructType");
         }
 
-        TKernelCompiler compiler;
+        TKernelCompiler compiler(Diagnostics_);
         auto kernels = compiler.CompileAggregate(*inputType, agg->GroupKeys(), agg->Aggs());
 
         // Output type from the physical (pruned) input type, not the logical

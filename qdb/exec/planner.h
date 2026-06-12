@@ -4,6 +4,7 @@
 #include <qdb/ops/operator.h>
 
 #include <memory>
+#include <ostream>
 
 namespace NQqb {
 
@@ -17,7 +18,17 @@ namespace NQqb {
 //   - TAggregateOperator → TRuntimeAggregate ✓
 class TPhysicalPlanner {
 public:
+    explicit TPhysicalPlanner(std::ostream* diagnostics = nullptr)
+        : Diagnostics_(diagnostics)
+    {}
+
+    void PrintRuntimePlan(const TOperatorPtr& root) const;
     std::unique_ptr<IRuntimeNode> Build(const TOperatorPtr& root);
+
+private:
+    void PrintRuntimePlan(const TOperatorPtr& root, int depth) const;
+
+    std::ostream* Diagnostics_ = nullptr;
 };
 
 } // namespace NQqb

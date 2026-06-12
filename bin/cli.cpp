@@ -5,6 +5,7 @@
 #include <qdb/pipeline/column_pruning.h>
 #include <qdb/pipeline/typing.h>
 #include <qdb/sexp/parser.h>
+#include <qdb/sexp/printer.h>
 
 #include <qumir/codegen/llvm/llvm_initializer.h>
 #include <qumir/parser/core/lexer.h>
@@ -224,7 +225,17 @@ int main(int argc, char** argv) {
         NQqb::AnnotateTypes(plan);
         NQqb::ApplyColumnPruning(plan);
 
-        NQqb::TPhysicalPlanner planner;
+        std::cerr << "========== LOGICAL PLAN ==========\n";
+        NQumir::NAst::NCore::PrintAst(
+            std::cerr,
+            plan,
+            NQumir::NAst::NCore::TPrintOptions{
+                .NodePrinters = NQqb::NSexp::MakeRelPrinters(),
+            });
+        std::cerr << "\n==================================\n";
+
+        NQqb::TPhysicalPlanner planner(&std::cerr);
+        planner.PrintRuntimePlan(plan);
         auto executor = planner.Build(plan);
 
         std::vector<std::string> outputNames;
