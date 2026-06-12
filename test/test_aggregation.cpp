@@ -18,6 +18,7 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace {
@@ -35,10 +36,22 @@ std::string ReadKernel(const std::string& name) {
     return source.str();
 }
 
+// count.oz's NumAggs-generic table functions (L2b-2): agg_update calls
+// agg_apply_reducers, which only exists when generated per query
+// (GenApplyReducersFunDecl, L2b-1). Kernels built without that generated
+// function must exclude these when parsing count.oz.
+const std::unordered_set<std::string> kAggTableGenericFuncs = {
+    "agg_init", "agg_rehash", "agg_update", "agg_destroy"};
+
+// finalize.oz's NumAggs-generic agg_finalize (L2b-2) — excluded so that
+// CompileKernel("finalize.oz", ...)'s entry point remains aggregation_finalize.
+const std::unordered_set<std::string> kAggFinalizeGenericFuncs = {"agg_finalize"};
+
 std::unique_ptr<NQumir::TLLVMRunner> CompileKernel(
     const std::string& name,
     void*& entry,
-    std::string& error)
+    std::string& error,
+    const std::unordered_set<std::string>& exclude = {})
 {
     NQumir::TLLVMRunnerOptions options;
     options.CoreInput = true;
@@ -48,7 +61,26 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileKernel(
 
     auto runner = std::make_unique<NQumir::TLLVMRunner>(options);
     runner->RegisterModule(std::make_shared<NQumir::NRegistry::QumirDbModule>(), true);
-    entry = runner->CompileKernel(ReadKernel(name), &error);
+
+    if (exclude.empty()) {
+        entry = runner->CompileKernel(ReadKernel(name), &error);
+        return runner;
+    }
+
+    auto library = NQqb::NKernel::ParseFunctionLibrary(ReadKernel(name), exclude);
+    if (!library) {
+        error = "ParseFunctionLibrary: " + library.error().ToString();
+        return runner;
+    }
+    if (library->empty()) {
+        error = name + ": no functions remain after exclude";
+        return runner;
+    }
+    auto funcs = std::move(*library);
+    auto entryFun = std::move(funcs.back());
+    funcs.pop_back();
+    auto merged = NQqb::NKernel::MergeKernelLibrary(std::move(funcs), std::move(entryFun));
+    entry = runner->CompileKernelAst(merged, &error);
     return runner;
 }
 
@@ -75,8 +107,10 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileAggregateDispatch(
         fieldIndices, keyField, argField, columnType, rowSetType, hashTableType);
     auto entryFun = TMaybeNode<TBlockExpr>(entryAst).Cast()->Stmts.front();
 
+    auto countExclude = kAggTableGenericFuncs;
+    countExclude.insert({"aggregate_batch", "aggregation_count"});
     auto library = NQqb::NKernel::ParseFunctionLibrary(
-        ReadKernel("count.oz"), {"aggregate_batch", "aggregation_count"});
+        ReadKernel("count.oz"), countExclude);
     if (!library) {
         throw std::runtime_error("count.oz: " + library.error().ToString());
     }
@@ -233,6 +267,82 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileApplyReducersSmoke(
     auto runner = std::make_unique<NQumir::TLLVMRunner>(options);
 
     auto merged = NQqb::NKernel::MergeKernelLibrary(std::move(library), std::move(smokeEntry));
+    entry = runner->CompileKernelAst(merged, &error);
+    return runner;
+}
+
+// Builds the NumAggs-generic table library (L2b-2): agg_init/agg_rehash/
+// agg_update/agg_destroy from count.oz (sharing rh_hash_i64/count_lookup/
+// count_insert_existing with the fixed-NumAggs=4 count_init/count_update/...
+// above) and agg_finalize from finalize.oz. Merges it with reduce_0..reduce_{N-1}
+// (GenReducerFunDecls) + agg_apply_reducers (GenApplyReducersFunDecl, L2b-1)
+// for `funcs`, plus a small op-dispatched smoke entry mirroring
+// aggregation_count's lifecycle dispatch (0=init, 1=update, 2=finalize,
+// 3=destroy) but generic in num_aggs (a runtime argument here, not baked in).
+std::unique_ptr<NQumir::TLLVMRunner> CompileAggTableSmoke(
+    const std::vector<std::string>& funcs,
+    void*& entry,
+    std::string& error)
+{
+    auto countLib = NQqb::NKernel::ParseFunctionLibrary(
+        ReadKernel("count.oz"),
+        {"agg_count_step", "agg_sum_i64_step", "agg_min_i64_step", "agg_max_i64_step",
+         "count_init", "count_rehash", "count_update", "count_destroy",
+         "aggregate_batch", "aggregation_count"});
+    if (!countLib) {
+        throw std::runtime_error("count.oz: " + countLib.error().ToString());
+    }
+    auto finalizeLib = NQqb::NKernel::ParseFunctionLibrary(
+        ReadKernel("finalize.oz"), {"aggregation_finalize"});
+    if (!finalizeLib) {
+        throw std::runtime_error("finalize.oz: " + finalizeLib.error().ToString());
+    }
+
+    constexpr const char* entrySource = R"(
+(block
+  (fun agg_table_smoke ((var ht <ref HashTable>)
+                        (var key i64) (var value i64)
+                        (var output_keys <ptr i64>)
+                        (var output_buffers <ptr <ptr i64>>)
+                        (var output_capacity i64)
+                        (var capacity_arg i64)
+                        (var num_aggs i64)
+                        (var op i64)) -> i64
+    (block
+      (return
+        (if (== op (: 0 i64))
+          (cast (call agg_init ht capacity_arg num_aggs) i64)
+          (if (== op (: 1 i64))
+            (call agg_update ht key value)
+            (if (== op (: 2 i64))
+              (call agg_finalize ht output_keys output_buffers output_capacity)
+              (block
+                (call agg_destroy ht)
+                (: 1 i64)))))))))
+)";
+    auto entryFun = NQqb::NKernel::ParseFunctionLibrary(entrySource);
+    if (!entryFun) {
+        throw std::runtime_error("agg_table_smoke: " + entryFun.error().ToString());
+    }
+
+    // reduce_0..reduce_{N-1} and agg_apply_reducers must precede countLib's
+    // agg_update, which calls agg_apply_reducers (type annotation is a single
+    // in-order pass over the merged block: a callee's FunDecl must already be
+    // type-annotated before the caller that references it).
+    std::vector<NQumir::NAst::TExprPtr> library = NQqb::NKernel::GenReducerFunDecls(funcs);
+    library.push_back(NQqb::NKernel::GenApplyReducersFunDecl(funcs.size()));
+    library.insert(library.end(), countLib->begin(), countLib->end());
+    library.insert(library.end(), finalizeLib->begin(), finalizeLib->end());
+
+    NQumir::TLLVMRunnerOptions options;
+    options.CoreInput = true;
+    options.NativeCode = true;
+    options.AllowOverloads = true;
+
+    auto runner = std::make_unique<NQumir::TLLVMRunner>(options);
+    runner->RegisterModule(std::make_shared<NQumir::NRegistry::QumirDbModule>(), true);
+
+    auto merged = NQqb::NKernel::MergeKernelLibrary(std::move(library), entryFun->front());
     entry = runner->CompileKernelAst(merged, &error);
     return runner;
 }
@@ -881,7 +991,7 @@ TEST(AggregationKernel, OzTableRehashRejectsAllocationSizeOverflow) {
 TEST(AggregationKernel, OzI64ReducersUseStableDenseSlotsAcrossGrow) {
     void* entry = nullptr;
     std::string error;
-    auto runner = CompileKernel("count.oz", entry, error);
+    auto runner = CompileKernel("count.oz", entry, error, kAggTableGenericFuncs);
     ASSERT_NE(entry, nullptr) << error;
 
     using TCountFn = int64_t(*)(THashTable*, int64_t*, int64_t*, int64_t, int64_t);
@@ -948,7 +1058,7 @@ TEST(AggregationKernel, OzI64ReducersUseStableDenseSlotsAcrossGrow) {
 TEST(AggregationKernel, OzBatchAggregationHandlesEmptySingleGroupAndUniqueInputs) {
     void* entry = nullptr;
     std::string error;
-    auto runner = CompileKernel("count.oz", entry, error);
+    auto runner = CompileKernel("count.oz", entry, error, kAggTableGenericFuncs);
     ASSERT_NE(entry, nullptr) << error;
 
     using TBatchFn = int64_t(*)(THashTable*, int64_t*, int64_t*, int64_t, int64_t);
@@ -1002,9 +1112,9 @@ TEST(AggregationKernel, OzFinalizeCopiesDenseKeysAndAggregateBuffers) {
     void* aggregateEntry = nullptr;
     void* finalizeEntry = nullptr;
     std::string error;
-    auto aggregateRunner = CompileKernel("count.oz", aggregateEntry, error);
+    auto aggregateRunner = CompileKernel("count.oz", aggregateEntry, error, kAggTableGenericFuncs);
     ASSERT_NE(aggregateEntry, nullptr) << error;
-    auto finalizeRunner = CompileKernel("finalize.oz", finalizeEntry, error);
+    auto finalizeRunner = CompileKernel("finalize.oz", finalizeEntry, error, kAggFinalizeGenericFuncs);
     ASSERT_NE(finalizeEntry, nullptr) << error;
 
     using TBatchFn = int64_t(*)(THashTable*, int64_t*, int64_t*, int64_t, int64_t);
@@ -1045,9 +1155,9 @@ TEST(AggregationKernel, OzStressAggregationHandlesLargeDeterministicInput) {
     void* finalizeEntry = nullptr;
     void* checkEntry = nullptr;
     std::string error;
-    auto countRunner = CompileKernel("count.oz", countEntry, error);
+    auto countRunner = CompileKernel("count.oz", countEntry, error, kAggTableGenericFuncs);
     ASSERT_NE(countEntry, nullptr) << error;
-    auto finalizeRunner = CompileKernel("finalize.oz", finalizeEntry, error);
+    auto finalizeRunner = CompileKernel("finalize.oz", finalizeEntry, error, kAggFinalizeGenericFuncs);
     ASSERT_NE(finalizeEntry, nullptr) << error;
     auto checkRunner = CompileKernel("check_invariants.oz", checkEntry, error);
     ASSERT_NE(checkEntry, nullptr) << error;
@@ -1169,8 +1279,10 @@ TEST(AggregationKernel, OzStressAggregationHandlesLargeDeterministicInput) {
 TEST(AggregationKernel, OzMergedLibraryCompilesGeneratedEntryPoint) {
     using namespace NQumir;
 
+    auto countExclude = kAggTableGenericFuncs;
+    countExclude.insert({"aggregate_batch", "aggregation_count"});
     auto library = NQqb::NKernel::ParseFunctionLibrary(
-        ReadKernel("count.oz"), {"aggregate_batch", "aggregation_count"});
+        ReadKernel("count.oz"), countExclude);
     ASSERT_TRUE(library) << library.error().ToString();
 
     // Trivial generated entry, mirroring aggregation_table_lifecycle's
@@ -1505,6 +1617,99 @@ TEST(AggregationKernel, OzApplyReducersUpdatesAllBuffersByStaticName) {
         apply(buffers.data(), /*dense_slot=*/0, /*value=*/23, /*is_new=*/0);
         EXPECT_EQ(sums[0], 123); // sum: prev + value
     }
+}
+
+// L2b-2: NumAggs-generic agg_init/agg_rehash/agg_update/agg_destroy/
+// agg_finalize for N=2, a non-default aggregate set/order ({sum, max}
+// instead of count.oz's {count, sum, min, max}).
+TEST(AggregationKernel, OzGenericAggTableHandlesNonDefaultAggregateSet) {
+    void* entry = nullptr;
+    std::string error;
+    auto runner = CompileAggTableSmoke({"sum", "max"}, entry, error);
+    ASSERT_NE(entry, nullptr) << error;
+
+    using TSmokeFn = int64_t(*)(THashTable*, int64_t, int64_t,
+        int64_t*, int64_t**, int64_t, int64_t, int64_t, int64_t);
+    auto smoke = reinterpret_cast<TSmokeFn>(entry);
+
+    THashTable table;
+    ASSERT_TRUE(smoke(&table, 0, 0, nullptr, nullptr, 0, /*capacity_arg=*/2, /*num_aggs=*/2, /*op=init*/0));
+    ASSERT_NE(table.AggBuffers, nullptr);
+    ASSERT_NE(table.AggBuffers[0], nullptr);
+    ASSERT_NE(table.AggBuffers[1], nullptr);
+    EXPECT_EQ(table.NumAggs, 2);
+    EXPECT_EQ(table.Capacity, 2);
+
+    // Unique keys in insertion order: 1, 2, 3, 4, 5 -> forces grow 2 -> 4 -> 8.
+    constexpr std::array<int64_t, 8> keys =   {1, 2, 1, 3, 2, 1, 4, 5};
+    constexpr std::array<int64_t, 8> values = {10, -3, 5, 7, 20, -1, 100, 2};
+    for (size_t i = 0; i < keys.size(); ++i) {
+        EXPECT_GE(smoke(&table, keys[i], values[i], nullptr, nullptr, 0, 0, 0, /*op=update*/1), 0);
+    }
+
+    EXPECT_EQ(table.Capacity, 8);
+    ASSERT_EQ(table.Size, 5);
+
+    constexpr std::array<int64_t, 5> expectedKeys = {1, 2, 3, 4, 5};
+    constexpr std::array<int64_t, 5> expectedSums  = {14, 17, 7, 100, 2};
+    constexpr std::array<int64_t, 5> expectedMaxs  = {10, 20, 7, 100, 2};
+
+    std::array<int64_t, 5> outputKeys{};
+    std::array<int64_t, 5> outputSums{};
+    std::array<int64_t, 5> outputMaxs{};
+    std::array<int64_t*, 2> outputBuffers{outputSums.data(), outputMaxs.data()};
+
+    EXPECT_EQ(smoke(&table, 0, 0, outputKeys.data(), outputBuffers.data(), 5, 0, 0, /*op=finalize*/2), 5);
+    EXPECT_EQ(outputKeys, expectedKeys);
+    EXPECT_EQ(outputSums, expectedSums);
+    EXPECT_EQ(outputMaxs, expectedMaxs);
+
+    EXPECT_TRUE(smoke(&table, 0, 0, nullptr, nullptr, 0, 0, 0, /*op=destroy*/3));
+    EXPECT_EQ(table.AggBuffers, nullptr);
+    EXPECT_EQ(table.NumAggs, 0);
+}
+
+// L2b-2 with N=1: a lone count(*) aggregate, exercising the agg-buffer loops
+// at the smallest non-trivial N.
+TEST(AggregationKernel, OzGenericAggTableHandlesSingleCountAggregate) {
+    void* entry = nullptr;
+    std::string error;
+    auto runner = CompileAggTableSmoke({"count"}, entry, error);
+    ASSERT_NE(entry, nullptr) << error;
+
+    using TSmokeFn = int64_t(*)(THashTable*, int64_t, int64_t,
+        int64_t*, int64_t**, int64_t, int64_t, int64_t, int64_t);
+    auto smoke = reinterpret_cast<TSmokeFn>(entry);
+
+    THashTable table;
+    ASSERT_TRUE(smoke(&table, 0, 0, nullptr, nullptr, 0, /*capacity_arg=*/2, /*num_aggs=*/1, /*op=init*/0));
+    ASSERT_NE(table.AggBuffers, nullptr);
+    ASSERT_NE(table.AggBuffers[0], nullptr);
+    EXPECT_EQ(table.NumAggs, 1);
+    EXPECT_EQ(table.Capacity, 2);
+
+    // Unique keys in insertion order: 7, 3, 9 -> forces grow 2 -> 4.
+    constexpr std::array<int64_t, 6> keys = {7, 7, 3, 7, 3, 9};
+    for (int64_t key : keys) {
+        EXPECT_GE(smoke(&table, key, 0, nullptr, nullptr, 0, 0, 0, /*op=update*/1), 0);
+    }
+
+    EXPECT_EQ(table.Capacity, 4);
+    ASSERT_EQ(table.Size, 3);
+
+    constexpr std::array<int64_t, 3> expectedKeys = {7, 3, 9};
+    constexpr std::array<int64_t, 3> expectedCounts = {3, 2, 1};
+
+    std::array<int64_t, 3> outputKeys{};
+    std::array<int64_t, 3> outputCounts{};
+    std::array<int64_t*, 1> outputBuffers{outputCounts.data()};
+
+    EXPECT_EQ(smoke(&table, 0, 0, outputKeys.data(), outputBuffers.data(), 3, 0, 0, /*op=finalize*/2), 3);
+    EXPECT_EQ(outputKeys, expectedKeys);
+    EXPECT_EQ(outputCounts, expectedCounts);
+
+    EXPECT_TRUE(smoke(&table, 0, 0, nullptr, nullptr, 0, 0, 0, /*op=destroy*/3));
+    EXPECT_EQ(table.AggBuffers, nullptr);
 }
 
 int main(int argc, char** argv) {
