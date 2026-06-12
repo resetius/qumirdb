@@ -3,6 +3,8 @@
 #include <qumir/codegen/llvm/llvm_initializer.h>
 #include <qumir/runner/runner_llvm.h>
 
+#include <qdb/io/io.h>
+#include <qdb/kernel/gen.h>
 #include <qdb/kernel/lib.h>
 #include <qdb/modules/qumirdb.h>
 
@@ -47,6 +49,48 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileKernel(
     auto runner = std::make_unique<NQumir::TLLVMRunner>(options);
     runner->RegisterModule(std::make_shared<NQumir::NRegistry::QumirDbModule>(), true);
     entry = runner->CompileKernel(ReadKernel(name), &error);
+    return runner;
+}
+
+// Builds agg_dispatch (L2's GenAggregateKernelAst) merged with count.oz's
+// library (L1's MergeKernelLibrary) and compiles it via CompileKernelAst.
+std::unique_ptr<NQumir::TLLVMRunner> CompileAggregateDispatch(
+    const std::unordered_map<std::string, int32_t>& fieldIndices,
+    const std::string& keyField,
+    const std::optional<std::string>& argField,
+    void*& entry,
+    std::string& error)
+{
+    using namespace NQumir::NAst;
+
+    auto dbModule = std::make_shared<NQumir::NRegistry::QumirDbModule>();
+    TTypePtr columnType, rowSetType, hashTableType;
+    for (const auto& et : dbModule->ExternalTypes()) {
+        if (et.Name == "TColumn") columnType = et.Type;
+        else if (et.Name == "TRowSet") rowSetType = et.Type;
+        else if (et.Name == "HashTable") hashTableType = et.Type;
+    }
+
+    auto entryAst = NQqb::NKernel::GenAggregateKernelAst(
+        fieldIndices, keyField, argField, columnType, rowSetType, hashTableType);
+    auto entryFun = TMaybeNode<TBlockExpr>(entryAst).Cast()->Stmts.front();
+
+    auto library = NQqb::NKernel::ParseFunctionLibrary(
+        ReadKernel("count.oz"), {"aggregate_batch", "aggregation_count"});
+    if (!library) {
+        throw std::runtime_error("count.oz: " + library.error().ToString());
+    }
+
+    NQumir::TLLVMRunnerOptions options;
+    options.CoreInput = true;
+    options.NativeCode = true;
+    options.AllowOverloads = true;
+
+    auto runner = std::make_unique<NQumir::TLLVMRunner>(options);
+    runner->RegisterModule(dbModule, true);
+
+    auto merged = NQqb::NKernel::MergeKernelLibrary(*library, std::move(entryFun));
+    entry = runner->CompileKernelAst(merged, &error);
     return runner;
 }
 
@@ -1040,6 +1084,144 @@ TEST(AggregationKernel, OzMergedLibraryCompilesGeneratedEntryPoint) {
     EXPECT_EQ(table.Capacity, 0);
     EXPECT_EQ(table.Size, 0);
     EXPECT_EQ(table.NumAggs, 0);
+}
+
+TEST(AggregationKernel, OzAggregateDispatchUpdatesHashTableFromRowSet) {
+    std::unordered_map<std::string, int32_t> fieldIndices = {{"k", 0}, {"v", 1}};
+    void* entry = nullptr;
+    std::string error;
+    auto runner = CompileAggregateDispatch(fieldIndices, "k", std::string("v"), entry, error);
+    ASSERT_NE(entry, nullptr) << error;
+
+    using TDispatchFn = int64_t(*)(THashTable*, NQqb::TRowSet*, int64_t, int64_t);
+    auto dispatch = reinterpret_cast<TDispatchFn>(entry);
+
+    THashTable table;
+    ASSERT_TRUE(dispatch(&table, nullptr, 4, 0));
+
+    struct TGroupStats {
+        int64_t Count = 0;
+        int64_t Sum = 0;
+        int64_t Min = 0;
+        int64_t Max = 0;
+    };
+    std::unordered_map<int64_t, TGroupStats> reference;
+    auto accumulate = [&](int64_t key, int64_t value) {
+        auto& group = reference[key];
+        if (group.Count == 0) {
+            group.Min = value;
+            group.Max = value;
+        } else {
+            group.Min = std::min(group.Min, value);
+            group.Max = std::max(group.Max, value);
+        }
+        group.Count += 1;
+        group.Sum += value;
+    };
+
+    // Batch 1: 4 rows, the last one is filtered out by Selection.
+    {
+        std::vector<int64_t> keys = {1, 2, 1, 3};
+        std::vector<int64_t> vals = {10, 20, 5, 7};
+        std::vector<uint8_t> selection = {1, 1, 1, 0};
+        NQqb::TColumn cols[2] = {};
+        cols[0].Data = reinterpret_cast<char*>(keys.data());
+        cols[1].Data = reinterpret_cast<char*>(vals.data());
+        NQqb::TRowSet rowSet{};
+        rowSet.Columns = cols;
+        rowSet.ColumnCount = 2;
+        rowSet.RowCount = static_cast<int64_t>(keys.size());
+        rowSet.Selection = selection.data();
+
+        EXPECT_EQ(dispatch(&table, &rowSet, 0, 1), 0);
+        for (size_t i = 0; i < keys.size(); ++i) {
+            if (selection[i]) {
+                accumulate(keys[i], vals[i]);
+            }
+        }
+    }
+
+    // Batch 2: no Selection (every row processed).
+    {
+        std::vector<int64_t> keys = {2, 4};
+        std::vector<int64_t> vals = {3, 100};
+        NQqb::TColumn cols[2] = {};
+        cols[0].Data = reinterpret_cast<char*>(keys.data());
+        cols[1].Data = reinterpret_cast<char*>(vals.data());
+        NQqb::TRowSet rowSet{};
+        rowSet.Columns = cols;
+        rowSet.ColumnCount = 2;
+        rowSet.RowCount = static_cast<int64_t>(keys.size());
+        rowSet.Selection = nullptr;
+
+        EXPECT_EQ(dispatch(&table, &rowSet, 0, 1), 0);
+        for (size_t i = 0; i < keys.size(); ++i) {
+            accumulate(keys[i], vals[i]);
+        }
+    }
+
+    ASSERT_EQ(table.Size, static_cast<int64_t>(reference.size()));
+    for (int64_t slot = 0; slot < table.Capacity; ++slot) {
+        if (table.Dist[slot] == -1) continue;
+        const int64_t key = table.Keys[slot];
+        const int64_t denseSlot = table.SlotId[slot];
+        auto it = reference.find(key);
+        ASSERT_NE(it, reference.end()) << "unexpected key " << key;
+        const auto& group = it->second;
+        EXPECT_EQ(table.AggBuffers[0][denseSlot], group.Count) << "key " << key;
+        EXPECT_EQ(table.AggBuffers[1][denseSlot], group.Sum) << "key " << key;
+        EXPECT_EQ(table.AggBuffers[2][denseSlot], group.Min) << "key " << key;
+        EXPECT_EQ(table.AggBuffers[3][denseSlot], group.Max) << "key " << key;
+    }
+
+    EXPECT_TRUE(dispatch(&table, nullptr, 0, 6));
+}
+
+TEST(AggregationKernel, OzAggregateDispatchCountStarWithoutArgColumn) {
+    std::unordered_map<std::string, int32_t> fieldIndices = {{"k", 0}};
+    void* entry = nullptr;
+    std::string error;
+    auto runner = CompileAggregateDispatch(fieldIndices, "k", std::nullopt, entry, error);
+    ASSERT_NE(entry, nullptr) << error;
+
+    using TDispatchFn = int64_t(*)(THashTable*, NQqb::TRowSet*, int64_t, int64_t);
+    auto dispatch = reinterpret_cast<TDispatchFn>(entry);
+
+    THashTable table;
+    ASSERT_TRUE(dispatch(&table, nullptr, 4, 0));
+
+    std::vector<int64_t> keys = {1, 1, 2, 1, 2, 3};
+    NQqb::TColumn cols[1] = {};
+    cols[0].Data = reinterpret_cast<char*>(keys.data());
+    NQqb::TRowSet rowSet{};
+    rowSet.Columns = cols;
+    rowSet.ColumnCount = 1;
+    rowSet.RowCount = static_cast<int64_t>(keys.size());
+    rowSet.Selection = nullptr;
+
+    EXPECT_EQ(dispatch(&table, &rowSet, 0, 1), 0);
+
+    std::unordered_map<int64_t, int64_t> counts;
+    for (int64_t key : keys) {
+        counts[key] += 1;
+    }
+
+    ASSERT_EQ(table.Size, static_cast<int64_t>(counts.size()));
+    for (int64_t slot = 0; slot < table.Capacity; ++slot) {
+        if (table.Dist[slot] == -1) continue;
+        const int64_t key = table.Keys[slot];
+        const int64_t denseSlot = table.SlotId[slot];
+        auto it = counts.find(key);
+        ASSERT_NE(it, counts.end()) << "unexpected key " << key;
+        EXPECT_EQ(table.AggBuffers[0][denseSlot], it->second) << "count, key " << key;
+        // No arg column: agg_dispatch passes a constant 0 as the value, so
+        // sum/min/max collapse to 0 for every group.
+        EXPECT_EQ(table.AggBuffers[1][denseSlot], 0) << "sum, key " << key;
+        EXPECT_EQ(table.AggBuffers[2][denseSlot], 0) << "min, key " << key;
+        EXPECT_EQ(table.AggBuffers[3][denseSlot], 0) << "max, key " << key;
+    }
+
+    EXPECT_TRUE(dispatch(&table, nullptr, 0, 6));
 }
 
 int main(int argc, char** argv) {
