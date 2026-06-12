@@ -94,6 +94,107 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileKernel(
     return runner;
 }
 
+std::unique_ptr<NQumir::TLLVMRunner> CompileGenericI64TableEntry(
+    const std::string& entrySource,
+    bool includeGenericOperations,
+    void*& entry,
+    std::string& error)
+{
+    using namespace NQumir;
+
+    std::vector<NAst::TExprPtr> library;
+    if (includeGenericOperations) {
+        NAst::TStructType input({{"key", std::make_shared<NAst::TIntegerType>()}});
+        auto key = NQqb::NKernel::BuildAggregateKeyDescriptor(input, {"key"});
+        library = NQqb::NKernel::GenKeyOperationFunDecls(key);
+    }
+    for (const char* name : {"robin_hood_generic.oz", "robin_hood_rehash_generic.oz"}) {
+        if (!includeGenericOperations) {
+            continue;
+        }
+        auto parsed = NQqb::NKernel::ParseFunctionLibrary(ReadKernel(name));
+        if (!parsed) {
+            error = std::string(name) + ": " + parsed.error().ToString();
+            return {};
+        }
+        library.insert(library.end(), parsed->begin(), parsed->end());
+    }
+    const std::unordered_set<std::string> exclude = includeGenericOperations
+        ? std::unordered_set<std::string>{}
+        : std::unordered_set<std::string>{
+              "agg_upsert_key_bytes", "agg_rehash_key_bytes",
+              "agg_upsert_grow_key_bytes"};
+    auto table = NQqb::NKernel::ParseFunctionLibrary(
+        ReadKernel("aggregation_table_generic.oz"), exclude);
+    if (!table) {
+        error = "aggregation_table_generic.oz: " + table.error().ToString();
+        return {};
+    }
+    library.insert(library.end(), table->begin(), table->end());
+    auto parsedEntry = NQqb::NKernel::ParseFunctionLibrary(entrySource);
+    if (!parsedEntry || parsedEntry->size() != 1) {
+        error = parsedEntry ? "generic table entry must contain one function"
+                            : parsedEntry.error().ToString();
+        return {};
+    }
+
+    TLLVMRunnerOptions options;
+    options.CoreInput = true;
+    options.NativeCode = true;
+    options.AllowOverloads = true;
+    auto runner = std::make_unique<TLLVMRunner>(options);
+    runner->RegisterModule(std::make_shared<NQumir::NRegistry::QumirDbModule>(), true);
+    std::vector<NAst::TExprPtr> programStmts;
+    if (includeGenericOperations) {
+        constexpr const char* warmupSource = R"(
+(block
+  (fun aggregation_generic_rehash_i64_warmup
+       ((var keys_ref <ptr <ptr u8>>)
+        (var dist_ref <ptr <ptr i64>>)
+        (var slot_ids_ref <ptr <ptr i64>>)
+        (var capacity_ref <ptr i64>)
+        (var key_size i64)
+        (var key i64)
+        (var new_capacity i64)) -> bool
+    (block
+      (return (call agg_rehash_key_bytes keys_ref dist_ref slot_ids_ref
+                    capacity_ref key_size key new_capacity))))
+  (fun aggregation_generic_upsert_i64_warmup
+       ((var keys <ptr u8>)
+        (var dist <ptr i64>)
+        (var slot_ids <ptr i64>)
+        (var capacity i64)
+        (var size <ptr i64>)
+        (var key i64)
+        (var out_is_new <ptr i64>)) -> i64
+    (block
+      (return (call agg_upsert_key_bytes keys dist slot_ids capacity size key
+                    out_is_new)))))
+)";
+        auto warmups = NQqb::NKernel::ParseFunctionLibrary(warmupSource);
+        if (!warmups || warmups->size() != 2) {
+            error = "failed to parse generic table specialization warmups";
+            return {};
+        }
+
+        // Pre-specialize leaves first. The runtime entry then instantiates
+        // only agg_upsert_grow<Key>, making that ABI-compatible clone the last
+        // lowered function returned by CompileKernelAst.
+        programStmts.reserve(3 + library.size());
+        programStmts.push_back(library[0]);
+        programStmts.push_back(library[1]);
+        programStmts.insert(programStmts.end(), warmups->begin(), warmups->end());
+        programStmts.insert(programStmts.end(), library.begin() + 2, library.end());
+    } else {
+        programStmts = std::move(library);
+    }
+    programStmts.push_back(parsedEntry->front());
+    auto program = std::make_shared<NAst::TBlockExpr>(
+        NQumir::TLocation{}, std::move(programStmts));
+    entry = runner->CompileKernelAst(program, &error);
+    return runner;
+}
+
 // Builds agg_dispatch (L2c's GenAggregateKernelAst, numAggs = funcs.size())
 // merged with reduce_0..reduce_{N-1}/agg_apply_reducers (L2a/L2b-1, generated
 // for `funcs`) and count.oz's NumAggs-generic agg_init/agg_rehash/agg_update/
@@ -525,6 +626,7 @@ TEST(AggregationKernel, MergedInjectedI64KeyOpsDriveGenericRobinHoodUpsert) {
     options.NativeCode = true;
     options.AllowOverloads = true;
     TLLVMRunner runner(options);
+    runner.RegisterModule(std::make_shared<NQumir::NRegistry::QumirDbModule>(), true);
     std::string error;
     void* fn = runner.CompileKernelAst(program, &error);
     ASSERT_NE(fn, nullptr) << error;
@@ -660,12 +762,14 @@ TEST(AggregationKernel, OpaqueByteKeyStorageIsCastOnlyInsideGenericTableAst) {
     auto robinHood = NQqb::NKernel::ParseFunctionLibrary(ReadKernel("robin_hood_generic.oz"));
     ASSERT_TRUE(robinHood) << robinHood.error().ToString();
     auto table = NQqb::NKernel::ParseFunctionLibrary(
-        ReadKernel("aggregation_table_generic.oz"));
+        ReadKernel("aggregation_table_generic.oz"), {
+            "agg_table_init_bytes", "agg_table_destroy_bytes",
+            "agg_rehash_key_bytes", "agg_upsert_grow_key_bytes"});
     ASSERT_TRUE(table) << table.error().ToString();
 
     constexpr const char* entrySource = R"(
 (block
-  (fun aggregation_byte_storage_i64 ((var key_bytes <ptr i8>)
+  (fun aggregation_byte_storage_i64 ((var key_bytes <ptr u8>)
                                      (var dist <ptr i64>)
                                      (var slot_ids <ptr i64>)
                                      (var capacity i64)
@@ -690,15 +794,16 @@ TEST(AggregationKernel, OpaqueByteKeyStorageIsCastOnlyInsideGenericTableAst) {
     options.NativeCode = true;
     options.AllowOverloads = true;
     TLLVMRunner runner(options);
+    runner.RegisterModule(std::make_shared<NQumir::NRegistry::QumirDbModule>(), true);
     std::string error;
     void* fn = runner.CompileKernelAst(program, &error);
     ASSERT_NE(fn, nullptr) << error;
 
     using TUpsertFn = int64_t(*)(
-        int8_t*, int64_t*, int64_t*, int64_t, int64_t*, int64_t, int64_t*);
+        uint8_t*, int64_t*, int64_t*, int64_t, int64_t*, int64_t, int64_t*);
     auto upsert = reinterpret_cast<TUpsertFn>(fn);
     constexpr int64_t capacity = 8;
-    std::array<int8_t, capacity * sizeof(int64_t)> keyBytes{};
+    std::array<uint8_t, capacity * sizeof(int64_t)> keyBytes{};
     std::array<int64_t, capacity> dist{};
     std::array<int64_t, capacity> slotIds{};
     dist.fill(-1);
@@ -726,6 +831,131 @@ TEST(AggregationKernel, OpaqueByteKeyStorageIsCastOnlyInsideGenericTableAst) {
         found = true;
     }
     EXPECT_TRUE(found);
+}
+
+TEST(AggregationKernel, GenericOpaqueTableLifecycleGrowsAndDestroys) {
+    constexpr const char* initSource = R"(
+(block
+  (fun aggregation_generic_table_init ((var keys_out <ptr <ptr u8>>)
+                                       (var dist_out <ptr <ptr i64>>)
+                                       (var slot_ids_out <ptr <ptr i64>>)
+                                       (var capacity_out <ptr i64>)
+                                       (var size_out <ptr i64>)
+                                       (var capacity i64)
+                                       (var key_size i64)) -> bool
+    (block
+      (return (call agg_table_init_bytes keys_out dist_out slot_ids_out
+                    capacity_out size_out capacity key_size)))))
+)";
+    constexpr const char* upsertSource = R"(
+(block
+  (fun aggregation_generic_table_upsert ((var keys_ref <ptr <ptr u8>>)
+                                         (var dist_ref <ptr <ptr i64>>)
+                                         (var slot_ids_ref <ptr <ptr i64>>)
+                                         (var capacity_ref <ptr i64>)
+                                         (var size_ref <ptr i64>)
+                                         (var key_size i64)
+                                         (var key i64)
+                                         (var out_is_new <ptr i64>)) -> i64
+    (block
+      (return (call agg_upsert_grow_key_bytes keys_ref dist_ref slot_ids_ref
+                    capacity_ref size_ref key_size key out_is_new)))))
+)";
+    constexpr const char* destroySource = R"(
+(block
+  (fun aggregation_generic_table_destroy ((var keys_ref <ptr <ptr u8>>)
+                                          (var dist_ref <ptr <ptr i64>>)
+                                          (var slot_ids_ref <ptr <ptr i64>>)
+                                          (var capacity_ref <ptr i64>)
+                                          (var size_ref <ptr i64>)) -> i64
+    (block
+      (call agg_table_destroy_bytes keys_ref dist_ref slot_ids_ref
+            capacity_ref size_ref)
+      (return (: 1 i64)))))
+)";
+
+    void* initEntry = nullptr;
+    void* upsertEntry = nullptr;
+    void* destroyEntry = nullptr;
+    std::string error;
+    auto initRunner = CompileGenericI64TableEntry(
+        initSource, false, initEntry, error);
+    ASSERT_NE(initRunner, nullptr) << error;
+    ASSERT_NE(initEntry, nullptr) << error;
+    auto upsertRunner = CompileGenericI64TableEntry(
+        upsertSource, true, upsertEntry, error);
+    ASSERT_NE(upsertRunner, nullptr) << error;
+    ASSERT_NE(upsertEntry, nullptr) << error;
+    auto destroyRunner = CompileGenericI64TableEntry(
+        destroySource, false, destroyEntry, error);
+    ASSERT_NE(destroyRunner, nullptr) << error;
+    ASSERT_NE(destroyEntry, nullptr) << error;
+
+    using TInitFn = bool(*)(
+        uint8_t**, int64_t**, int64_t**, int64_t*, int64_t*, int64_t, int64_t);
+    using TUpsertFn = int64_t(*)(
+        uint8_t**, int64_t**, int64_t**, int64_t*, int64_t*, int64_t,
+        int64_t, int64_t*);
+    using TDestroyFn = int64_t(*)(
+        uint8_t**, int64_t**, int64_t**, int64_t*, int64_t*);
+    auto init = reinterpret_cast<TInitFn>(initEntry);
+    auto upsert = reinterpret_cast<TUpsertFn>(upsertEntry);
+    auto destroy = reinterpret_cast<TDestroyFn>(destroyEntry);
+
+    uint8_t* keys = nullptr;
+    int64_t* dist = nullptr;
+    int64_t* slotIds = nullptr;
+    int64_t capacity = 0;
+    int64_t size = 0;
+    constexpr int64_t keySize = sizeof(int64_t);
+    ASSERT_TRUE(init(&keys, &dist, &slotIds, &capacity, &size, 4, keySize));
+    ASSERT_NE(keys, nullptr);
+    ASSERT_NE(dist, nullptr);
+    ASSERT_NE(slotIds, nullptr);
+    EXPECT_EQ(capacity, 4);
+
+    constexpr std::array<int64_t, 12> input = {
+        0, 1, -1, 17, 33, 49, 65, 81, 97, 113, 129, 145};
+    for (size_t i = 0; i < input.size(); ++i) {
+        int64_t isNew = -1;
+        EXPECT_EQ(upsert(&keys, &dist, &slotIds, &capacity, &size, keySize,
+                         input[i], &isNew), static_cast<int64_t>(i));
+        EXPECT_EQ(isNew, 1);
+        EXPECT_EQ(size, static_cast<int64_t>(i + 1));
+    }
+    EXPECT_EQ(capacity, 16);
+
+    for (size_t i = 0; i < input.size(); ++i) {
+        int64_t isNew = -1;
+        EXPECT_EQ(upsert(&keys, &dist, &slotIds, &capacity, &size, keySize,
+                         input[i], &isNew), static_cast<int64_t>(i));
+        EXPECT_EQ(isNew, 0);
+    }
+    EXPECT_EQ(size, static_cast<int64_t>(input.size()));
+
+    std::array<bool, input.size()> seen{};
+    for (int64_t slot = 0; slot < capacity; ++slot) {
+        if (dist[slot] == -1) {
+            continue;
+        }
+        ASSERT_GE(slotIds[slot], 0);
+        ASSERT_LT(slotIds[slot], size);
+        EXPECT_FALSE(seen[slotIds[slot]]);
+        seen[slotIds[slot]] = true;
+        int64_t stored = 0;
+        std::memcpy(&stored, keys + slot * keySize, sizeof(stored));
+        EXPECT_EQ(stored, input[slotIds[slot]]);
+    }
+    for (bool present : seen) {
+        EXPECT_TRUE(present);
+    }
+
+    EXPECT_EQ(destroy(&keys, &dist, &slotIds, &capacity, &size), 1);
+    EXPECT_EQ(keys, nullptr);
+    EXPECT_EQ(dist, nullptr);
+    EXPECT_EQ(slotIds, nullptr);
+    EXPECT_EQ(capacity, 0);
+    EXPECT_EQ(size, 0);
 }
 
 TEST(AggregationKernel, GenericKeyEqualityDispatchesToI64Overload) {
