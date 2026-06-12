@@ -4,6 +4,7 @@
 #include <qumir/parser/operator.h>
 #include <qumir/location.h>
 
+#include <algorithm>
 #include <stdexcept>
 
 namespace NQqb {
@@ -371,6 +372,158 @@ NQumir::NAst::TExprPtr GenAggregateKernelAst(
         std::move(params), funBody, i64Type);
 
     return std::make_shared<TBlockExpr>(loc, std::vector<TExprPtr>{funDecl});
+}
+
+NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
+    const NQumir::NAst::TStructType& inputType,
+    const TAggregateKeyDescriptor& key,
+    const std::optional<std::string>& argField,
+    size_t numAggs,
+    NQumir::NAst::TTypePtr columnType,
+    NQumir::NAst::TTypePtr rowSetType,
+    NQumir::NAst::TTypePtr hashTableType)
+{
+    using namespace NQumir::NAst;
+    NQumir::TLocation loc{};
+
+    if (!key.IsScalar()) {
+        throw std::invalid_argument(
+            "GenGenericAggregateDispatchAst: composite keys are not implemented yet");
+    }
+
+    auto i64Type = std::make_shared<TIntegerType>();
+    auto u8Type = std::make_shared<TIntegerType>(TIntegerType::U8);
+    auto boolType = std::make_shared<TBoolType>();
+    auto ptrU8Type = std::make_shared<TPointerType>(u8Type);
+    auto ptrKeyType = std::make_shared<TPointerType>(key.KeyType);
+    auto ptrI64Type = std::make_shared<TPointerType>(i64Type);
+
+    auto ident = [&](const std::string& name) -> TExprPtr {
+        return std::make_shared<TIdentExpr>(loc, name);
+    };
+    auto number = [&](int64_t value, TTypePtr type) -> TExprPtr {
+        auto result = std::make_shared<TNumberExpr>(loc, value);
+        result->Type = std::move(type);
+        return result;
+    };
+    auto numI64 = [&](int64_t value) { return number(value, i64Type); };
+    auto binary = [&](const char* op, TExprPtr left, TExprPtr right) -> TExprPtr {
+        return std::make_shared<TBinaryExpr>(
+            loc, TOperator(op), std::move(left), std::move(right));
+    };
+    auto call = [&](const std::string& name, std::vector<TExprPtr> args) -> TExprPtr {
+        return std::make_shared<TCallExpr>(loc, ident(name), std::move(args));
+    };
+    auto cast = [&](TExprPtr expr, TTypePtr type) -> TExprPtr {
+        return std::make_shared<TCastExpr>(loc, std::move(expr), std::move(type));
+    };
+    auto assign = [&](const std::string& name, TExprPtr value) -> TExprPtr {
+        return std::make_shared<TAssignExpr>(loc, name, std::move(value));
+    };
+    auto var = [&](const std::string& name, TTypePtr type) -> TExprPtr {
+        return std::make_shared<TVarStmt>(loc, name, std::move(type));
+    };
+    auto block = [&](std::vector<TExprPtr> stmts) -> TExprPtr {
+        return std::make_shared<TBlockExpr>(loc, std::move(stmts));
+    };
+    auto field = [&](const std::string& object, const std::string& name) -> TExprPtr {
+        return std::make_shared<TFieldAccessExpr>(loc, ident(object), name);
+    };
+
+    auto hashTableRefType = std::make_shared<TReferenceType>(
+        std::make_shared<TNamedType>("HashTable", hashTableType));
+    auto rowSetRefType = std::make_shared<TReferenceType>(
+        std::make_shared<TNamedType>("TRowSet", rowSetType));
+    std::vector<TParam> params = {
+        std::make_shared<TVarStmt>(loc, "ht", hashTableRefType),
+        std::make_shared<TVarStmt>(loc, "batch", rowSetRefType),
+        std::make_shared<TVarStmt>(loc, "arg", i64Type),
+        std::make_shared<TVarStmt>(loc, "op", i64Type),
+    };
+
+    auto ptrColumnType = [&]() -> TTypePtr {
+        auto* rowSet = static_cast<TStructType*>(rowSetType.get());
+        for (const auto& [name, type] : rowSet->Fields) {
+            if (name == "Columns") {
+                return type;
+            }
+        }
+        return std::make_shared<TPointerType>(columnType);
+    }();
+    auto columnData = [&](int32_t index, TTypePtr pointerType) -> TExprPtr {
+        auto column = std::make_shared<TIndexExpr>(
+            loc, ident("cols"), numI64(index));
+        auto data = std::make_shared<TFieldAccessExpr>(loc, column, "Data");
+        return cast(cast(data, i64Type), std::move(pointerType));
+    };
+
+    std::vector<TExprPtr> update;
+    update.push_back(var("n", i64Type));
+    update.push_back(assign("n", field("batch", "RowCount")));
+    update.push_back(var("selection", ptrU8Type));
+    update.push_back(assign("selection", field("batch", "Selection")));
+    update.push_back(var("cols", ptrColumnType));
+    update.push_back(assign("cols", field("batch", "Columns")));
+    update.push_back(var("keys", ptrKeyType));
+    update.push_back(assign("keys", columnData(key.Fields.front().ColumnIndex, ptrKeyType)));
+    if (argField) {
+        auto arg = std::find_if(inputType.Fields.begin(), inputType.Fields.end(),
+            [&](const auto& item) { return item.first == *argField; });
+        if (arg == inputType.Fields.end()) {
+            throw std::invalid_argument(
+                "GenGenericAggregateDispatchAst: unknown argument column '" + *argField + "'");
+        }
+        auto argType = TMaybeType<TIntegerType>(UnwrapNamedType(arg->second));
+        if (!argType || argType.Cast()->Kind != TIntegerType::I64) {
+            throw std::invalid_argument(
+                "GenGenericAggregateDispatchAst: aggregate argument must be i64");
+        }
+        const auto index = static_cast<int32_t>(std::distance(inputType.Fields.begin(), arg));
+        update.push_back(var("values", ptrI64Type));
+        update.push_back(assign("values", columnData(index, ptrI64Type)));
+    }
+    update.push_back(var("selection_is_null", boolType));
+    update.push_back(assign("selection_is_null",
+        binary("==", cast(ident("selection"), i64Type), numI64(0))));
+    update.push_back(var("dense_slot", i64Type));
+    update.push_back(var("i", i64Type));
+    update.push_back(assign("i", numI64(0)));
+
+    auto selected = binary("||", ident("selection_is_null"),
+        binary("!=", std::make_shared<TIndexExpr>(loc, ident("selection"), ident("i")),
+            number(0, u8Type)));
+    TExprPtr value = argField
+        ? std::make_shared<TIndexExpr>(loc, ident("values"), ident("i"))
+        : numI64(0);
+    auto updateCall = call("aht_update", {
+        ident("ht"),
+        std::make_shared<TIndexExpr>(loc, ident("keys"), ident("i")),
+        std::move(value),
+    });
+    auto process = block({assign("dense_slot", std::move(updateCall))});
+    auto loop = block({
+        std::make_shared<TIfExpr>(loc, std::move(selected), std::move(process), nullptr),
+        assign("i", binary("+", ident("i"), numI64(1))),
+    });
+    update.push_back(std::make_shared<TWhileStmtExpr>(
+        loc, binary("<", ident("i"), ident("n")), std::move(loop)));
+    update.push_back(numI64(0));
+
+    auto init = cast(call("aht_init", {
+        ident("ht"), ident("arg"), numI64(static_cast<int64_t>(numAggs)),
+        numI64(static_cast<int64_t>(key.Size)),
+    }), i64Type);
+    auto destroy = block({call("aht_destroy", {ident("ht")}), numI64(1)});
+    auto dispatch = std::make_shared<TIfExpr>(loc,
+        binary("==", ident("op"), numI64(0)), std::move(init),
+        std::make_shared<TIfExpr>(loc,
+            binary("==", ident("op"), numI64(1)), block(std::move(update)),
+            std::move(destroy)));
+    auto body = std::make_shared<TBlockExpr>(loc,
+        std::vector<TExprPtr>{std::make_shared<TReturnExpr>(loc, dispatch)});
+    auto function = std::make_shared<TFunDecl>(
+        loc, "agg_dispatch", std::move(params), std::move(body), i64Type);
+    return std::make_shared<TBlockExpr>(loc, std::vector<TExprPtr>{function});
 }
 
 std::vector<NQumir::NAst::TExprPtr> GenReducerFunDecls(

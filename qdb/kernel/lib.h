@@ -1,5 +1,7 @@
 #pragma once
 
+#include <qdb/kernel/aggregate_key.h>
+
 #include <qumir/error.h>
 #include <qumir/parser/ast.h>
 
@@ -33,6 +35,20 @@ ParseFunctionLibrary(
 NQumir::NAst::TExprPtr MergeKernelLibrary(
     std::vector<NQumir::NAst::TExprPtr> library,
     NQumir::NAst::TExprPtr entry);
+
+// Composes one generic aggregation update program in dependency order:
+// key operations, reducers, generic rehash/table libraries, then the named
+// dispatch entry. The returned AST is unresolved and must be compiled with
+// AllowOverloads=true and explicit entry name "agg_dispatch".
+std::expected<NQumir::NAst::TExprPtr, NQumir::TError>
+BuildGenericAggregateProgramAst(
+    const NQumir::NAst::TStructType& inputType,
+    const TAggregateKeyDescriptor& key,
+    const std::optional<std::string>& argField,
+    const std::vector<std::string>& reducers,
+    NQumir::NAst::TTypePtr columnType,
+    NQumir::NAst::TTypePtr rowSetType,
+    NQumir::NAst::TTypePtr hashTableType);
 
 } // namespace NKernel
 } // namespace NQqb

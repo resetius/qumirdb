@@ -71,6 +71,20 @@ NQumir::NAst::TExprPtr GenAggregateKernelAst(
     NQumir::NAst::TTypePtr rowSetType,
     NQumir::NAst::TTypePtr hashTableType);
 
+// Builds the generic aggregation dispatch entry over aht_init/aht_update/
+// aht_destroy from aggregation_hashtable_generic.oz. Key extraction is driven
+// by the descriptor instead of a hardcoded i64 field. The first connected
+// production slice supports a scalar key and an optional i64 value column;
+// composite materialization is added as the next M5 step.
+NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
+    const NQumir::NAst::TStructType& inputType,
+    const TAggregateKeyDescriptor& key,
+    const std::optional<std::string>& argField,
+    size_t numAggs,
+    NQumir::NAst::TTypePtr columnType,
+    NQumir::NAst::TTypePtr rowSetType,
+    NQumir::NAst::TTypePtr hashTableType);
+
 // Generates N = funcs.size() FunDecls named reduce_0..reduce_{N-1}, each with
 // the predefined reducer contract from PLAN_AGGREGATION.md section 4:
 //   reduce_i(i64 prev, i64 value, bool is_new) -> i64

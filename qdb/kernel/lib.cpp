@@ -1,5 +1,7 @@
 #include <qdb/kernel/lib.h>
 
+#include <qdb/kernel/gen.h>
+
 #include <qumir/parser/core/lexer.h>
 #include <qumir/parser/core/parser.h>
 
@@ -64,6 +66,46 @@ NQumir::NAst::TExprPtr MergeKernelLibrary(
 
     library.push_back(std::move(entry));
     return std::make_shared<TBlockExpr>(TLocation{}, std::move(library));
+}
+
+std::expected<NQumir::NAst::TExprPtr, NQumir::TError>
+BuildGenericAggregateProgramAst(
+    const NQumir::NAst::TStructType& inputType,
+    const TAggregateKeyDescriptor& key,
+    const std::optional<std::string>& argField,
+    const std::vector<std::string>& reducers,
+    NQumir::NAst::TTypePtr columnType,
+    NQumir::NAst::TTypePtr rowSetType,
+    NQumir::NAst::TTypePtr hashTableType)
+{
+    std::vector<NQumir::NAst::TExprPtr> stmts = GenKeyOperationFunDecls(key);
+    auto reducerDecls = GenReducerFunDecls(reducers);
+    stmts.insert(stmts.end(), reducerDecls.begin(), reducerDecls.end());
+    stmts.push_back(GenApplyReducersFunDecl(reducers.size()));
+
+    for (const char* name : {
+             "robin_hood_rehash_generic.oz",
+             "aggregation_hashtable_generic.oz",
+         }) {
+        auto parsed = ParseFunctionLibrary(ReadAggregationKernel(name));
+        if (!parsed) {
+            return std::unexpected(NQumir::TError(
+                std::string(name) + ": " + parsed.error().ToString()));
+        }
+        stmts.insert(stmts.end(), parsed->begin(), parsed->end());
+    }
+
+    auto entry = GenGenericAggregateDispatchAst(
+        inputType, key, argField, reducers.size(), std::move(columnType),
+        std::move(rowSetType), std::move(hashTableType));
+    auto block = NQumir::NAst::TMaybeNode<NQumir::NAst::TBlockExpr>(entry);
+    if (!block || block.Cast()->Stmts.size() != 1) {
+        return std::unexpected(NQumir::TError(
+            "generic aggregate dispatch generator returned an invalid entry block"));
+    }
+    stmts.push_back(block.Cast()->Stmts.front());
+    return std::make_shared<NQumir::NAst::TBlockExpr>(
+        NQumir::TLocation{}, std::move(stmts));
 }
 
 } // namespace NKernel
