@@ -43,5 +43,19 @@ NQumir::NAst::TExprPtr GenAggregateKernelAst(
     NQumir::NAst::TTypePtr rowSetType,
     NQumir::NAst::TTypePtr hashTableType);
 
+// Generates N = funcs.size() FunDecls named reduce_0..reduce_{N-1}, each with
+// the predefined reducer contract from PLAN_AGGREGATION.md section 4:
+//   reduce_i(i64 prev, i64 value, bool is_new) -> i64
+// funcs[i] selects the body ("count"|"sum"|"min"|"max" — the same bodies as
+// count.oz's agg_count_step/agg_sum_i64_step/agg_min_i64_step/agg_max_i64_step),
+// generated under the positional name reduce_i. N is exactly funcs.size(),
+// not a fixed builtin set.
+//
+// The result is meant for static injection via MergeKernelLibrary before
+// kernel compilation: generated table code calls reduce_0..reduce_{N-1}
+// directly by name (no function pointers, no runtime dispatch on Func).
+std::vector<NQumir::NAst::TExprPtr> GenReducerFunDecls(
+    const std::vector<std::string>& funcs);
+
 } // namespace NKernel
 } // namespace NQqb

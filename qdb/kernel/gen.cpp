@@ -4,6 +4,8 @@
 #include <qumir/parser/operator.h>
 #include <qumir/location.h>
 
+#include <stdexcept>
+
 namespace NQqb {
 namespace NKernel {
 
@@ -292,6 +294,62 @@ NQumir::NAst::TExprPtr GenAggregateKernelAst(
         std::move(params), funBody, i64Type);
 
     return std::make_shared<TBlockExpr>(loc, std::vector<TExprPtr>{funDecl});
+}
+
+std::vector<NQumir::NAst::TExprPtr> GenReducerFunDecls(
+    const std::vector<std::string>& funcs)
+{
+    using namespace NQumir::NAst;
+    NQumir::TLocation loc{};
+
+    auto i64Type = std::make_shared<TIntegerType>();
+    auto boolType = std::make_shared<TBoolType>();
+
+    auto ident = [&](const std::string& name) {
+        return std::make_shared<TIdentExpr>(loc, name);
+    };
+    auto numI64 = [&](int64_t value) -> TExprPtr {
+        auto expr = std::make_shared<TNumberExpr>(loc, value);
+        expr->Type = i64Type;
+        return expr;
+    };
+    auto binary = [&](const char* op, TExprPtr l, TExprPtr r) -> TExprPtr {
+        return std::make_shared<TBinaryExpr>(loc, TOperator(op), std::move(l), std::move(r));
+    };
+
+    std::vector<TExprPtr> result;
+    result.reserve(funcs.size());
+    for (size_t i = 0; i < funcs.size(); ++i) {
+        std::vector<TParam> params = {
+            std::make_shared<TVarStmt>(loc, "prev", i64Type),
+            std::make_shared<TVarStmt>(loc, "value", i64Type),
+            std::make_shared<TVarStmt>(loc, "is_new", boolType),
+        };
+
+        TExprPtr resultExpr;
+        const std::string& func = funcs[i];
+        if (func == "count") {
+            resultExpr = binary("+", ident("prev"), numI64(1));
+        } else if (func == "sum") {
+            resultExpr = binary("+", ident("prev"), ident("value"));
+        } else if (func == "min") {
+            resultExpr = std::make_shared<TIfExpr>(loc, ident("is_new"), ident("value"),
+                std::make_shared<TIfExpr>(loc, binary("<", ident("value"), ident("prev")),
+                    ident("value"), ident("prev")));
+        } else if (func == "max") {
+            resultExpr = std::make_shared<TIfExpr>(loc, ident("is_new"), ident("value"),
+                std::make_shared<TIfExpr>(loc, binary(">", ident("value"), ident("prev")),
+                    ident("value"), ident("prev")));
+        } else {
+            throw std::invalid_argument("GenReducerFunDecls: unknown aggregate function: " + func);
+        }
+
+        auto body = std::make_shared<TBlockExpr>(loc,
+            std::vector<TExprPtr>{ std::make_shared<TReturnExpr>(loc, std::move(resultExpr)) });
+        result.push_back(std::make_shared<TFunDecl>(loc, "reduce_" + std::to_string(i),
+            std::move(params), std::move(body), i64Type));
+    }
+    return result;
 }
 
 } // namespace NKernel
