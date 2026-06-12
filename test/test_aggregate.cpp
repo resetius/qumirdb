@@ -21,6 +21,7 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 using namespace NQqb;
@@ -485,6 +486,103 @@ TEST(AggregateE2E, MixedI32F64CompositeKeyPreservesLayoutAndTypedColumns) {
         ASSERT_NE(it, reference.end());
         EXPECT_EQ(outCounts[i], it->second.first);
         EXPECT_EQ(outSums[i], it->second.second);
+    }
+    Release(&result);
+}
+
+TEST(AggregateE2E, PlannerUsesPhysicalPrunedSchemaForKeyDescriptor) {
+    class TPruningSource final : public ISource {
+    public:
+        TPruningSource() {
+            OriginalColumns_ = {
+                {"unused", std::make_shared<TStringType>()},
+                {"key_i32", std::make_shared<TIntegerType>(TIntegerType::I32)},
+                {"value", std::make_shared<TIntegerType>(TIntegerType::I64)},
+                {"key_f64", std::make_shared<TFloatType>()},
+            };
+            PhysicalColumns_ = {
+                {"value", std::make_shared<TIntegerType>(TIntegerType::I64)},
+                {"key_f64", std::make_shared<TFloatType>()},
+                {"key_i32", std::make_shared<TIntegerType>(TIntegerType::I32)},
+            };
+            CurrentSchema_ = TSchema{OriginalColumns_};
+        }
+
+        const TSchema& Schema() const override {
+            return CurrentSchema_;
+        }
+
+        void RestrictColumns(const std::unordered_set<std::string>& names) override {
+            RestrictedColumns_ = names;
+            CurrentSchema_ = TSchema{PhysicalColumns_};
+        }
+
+        bool Next(TRowSet& rowSet) override {
+            if (Done_) {
+                return false;
+            }
+            Columns_[0].Data = reinterpret_cast<char*>(Values_.data());
+            Columns_[1].Data = reinterpret_cast<char*>(F64Keys_.data());
+            Columns_[2].Data = reinterpret_cast<char*>(I32Keys_.data());
+            rowSet = TRowSet{
+                .Columns = Columns_.data(),
+                .ColumnCount = static_cast<int64_t>(Columns_.size()),
+                .RowCount = static_cast<int64_t>(Values_.size()),
+                .Selection = nullptr,
+                .Destroy = nullptr,
+                .Private = nullptr,
+                .RefCount = 1,
+            };
+            Done_ = true;
+            return true;
+        }
+
+        const std::unordered_set<std::string>& RestrictedColumns() const {
+            return RestrictedColumns_;
+        }
+
+    private:
+        std::vector<TColumnSchema> OriginalColumns_;
+        std::vector<TColumnSchema> PhysicalColumns_;
+        TSchema CurrentSchema_{};
+        std::unordered_set<std::string> RestrictedColumns_;
+        std::vector<int64_t> Values_ = {5, 7, 11, 13, -2, 17};
+        std::vector<double> F64Keys_ = {1.25, 2.5, 1.25, 3.75, 2.5, 4.125};
+        std::vector<int32_t> I32Keys_ = {10, 20, 10, 30, 20, 40};
+        std::array<TColumn, 3> Columns_{};
+        bool Done_ = false;
+    } source;
+
+    auto root = ParsePlan(
+        "(rel aggregate (rel source \"data.parquet\") "
+        "(keys key_i32 key_f64) (agg s sum value))",
+        source);
+    TPhysicalPlanner planner;
+    auto runtime = planner.Build(root);
+
+    EXPECT_EQ(source.RestrictedColumns(),
+        (std::unordered_set<std::string>{"key_i32", "key_f64", "value"}));
+    auto outputType = TMaybeType<TStructType>(runtime->OutputType());
+    ASSERT_TRUE(outputType);
+    ASSERT_EQ(outputType.Cast()->Fields.size(), 3u);
+    EXPECT_TRUE(TMaybeType<TIntegerType>(outputType.Cast()->Fields[0].second));
+    EXPECT_TRUE(TMaybeType<TFloatType>(outputType.Cast()->Fields[1].second));
+
+    std::map<std::pair<int32_t, double>, int64_t> expected = {
+        {{10, 1.25}, 16}, {{20, 2.5}, 5},
+        {{30, 3.75}, 13}, {{40, 4.125}, 17},
+    };
+    TRowSet result{};
+    ASSERT_TRUE(runtime->Next(result));
+    ASSERT_EQ(result.ColumnCount, 3);
+    ASSERT_EQ(result.RowCount, static_cast<int64_t>(expected.size()));
+    auto* outI32 = reinterpret_cast<int32_t*>(result.Columns[0].Data);
+    auto* outF64 = reinterpret_cast<double*>(result.Columns[1].Data);
+    auto* outSums = reinterpret_cast<int64_t*>(result.Columns[2].Data);
+    for (int64_t i = 0; i < result.RowCount; ++i) {
+        auto it = expected.find({outI32[i], outF64[i]});
+        ASSERT_NE(it, expected.end());
+        EXPECT_EQ(outSums[i], it->second);
     }
     Release(&result);
 }

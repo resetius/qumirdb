@@ -119,7 +119,7 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
         if (!TMaybeType<TIntegerType>(type) && !TMaybeType<TFloatType>(type)) {
             throw NQumir::TError(
                 "CompileAggregate: group key column '" + field.ColumnName +
-                "' must be integer or f64 (Stage 1)");
+                "' must be fixed-width integer or f64");
         }
     }
     std::vector<std::string> funcs;
@@ -134,12 +134,12 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
         if (agg.Arg) {
             auto ident = TMaybeNode<TIdentExpr>(agg.Arg);
             if (!ident) {
-                throw NQumir::TError("CompileAggregate: aggregate argument must be a column reference (Stage 1)");
+                throw NQumir::TError("CompileAggregate: aggregate argument must be a column reference");
             }
             const std::string& name = ident.Cast()->Name;
             if (argField && *argField != name) {
                 throw NQumir::TError(
-                    "CompileAggregate: Stage 1 supports a single shared value column for "
+                    "CompileAggregate: reducers currently support a single shared value column for "
                     "all aggregates, got '" + *argField + "' and '" + name + "'");
             }
             argField = name;
@@ -149,7 +149,7 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
         !TMaybeType<TIntegerType>(UnwrapNamedType(requireField(*argField)))) {
         throw NQumir::TError(
             "CompileAggregate: aggregate argument column '" + *argField +
-            "' must be integer (Stage 1)");
+            "' must be integer while reducer states are i64");
     }
 
     auto dbModule = std::make_shared<NQumir::NRegistry::QumirDbModule>();

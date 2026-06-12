@@ -72,12 +72,11 @@ public:
     // Compiles the per-query generic update and finalize programs for `aggs`
     // grouped by `groupKeys`, over rows of `inputType`.
     //
-    // Stage 1 constraints (NQumir::TError thrown if violated):
+    // Current aggregate-value constraints (NQumir::TError if violated):
     // - one or more fixed-width integer/f64 group keys;
     // - agg.Func in {count, sum, min, max};
-    // - every agg with Arg references the same single integer column (Stage 1:
-    //   one shared value column and i64 reducer state for all aggregates); count(*) aggs
-    //   (Arg == nullptr) pass a constant 0 instead.
+    // - every agg with Arg references the same single integer column;
+    // - all reducer states are i64. count(*) aggs (Arg == nullptr) pass 0.
     TAggregateKernels CompileAggregate(
         const NQumir::NAst::TStructType& inputType,
         const std::vector<std::string>& groupKeys,
