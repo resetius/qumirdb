@@ -19,6 +19,7 @@ add_library(qumirdb
     pipeline/typing.cpp
     pipeline/column_pruning.cpp
     kernel/gen.cpp
+    kernel/aggregate_key.cpp
     kernel/lib.cpp
     kernel/compiler.cpp
     exec/source_exec.cpp

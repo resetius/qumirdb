@@ -1,5 +1,7 @@
 #pragma once
 
+#include <qdb/kernel/aggregate_key.h>
+
 #include <qumir/parser/ast.h>
 #include <qumir/parser/type.h>
 
@@ -20,6 +22,14 @@ namespace NKernel {
 // library that GenAggregateKernelAst's agg_dispatch (L2c) must be merged
 // with.
 extern const std::unordered_set<std::string> kCountOzFixedFuncs;
+
+// Generates concrete overloads consumed by the generic Robin Hood library:
+//   rh_hash(Key) -> i64
+//   rh_key_equal(Key, Key) -> bool
+// The first migration step supports scalar i64. Other fixed-width scalar and
+// struct representations are added without changing the generic Oz library.
+std::vector<NQumir::NAst::TExprPtr> GenKeyOperationFunDecls(
+    const TAggregateKeyDescriptor& key);
 
 void SubstFieldsInPlace(
     NQumir::NAst::TExprPtr& expr,

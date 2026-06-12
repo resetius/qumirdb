@@ -14,6 +14,71 @@ const std::unordered_set<std::string> kCountOzFixedFuncs = {
     "count_init", "count_rehash", "count_update", "count_destroy",
     "aggregate_batch", "aggregation_count"};
 
+std::vector<NQumir::NAst::TExprPtr> GenKeyOperationFunDecls(
+    const TAggregateKeyDescriptor& key)
+{
+    using namespace NQumir::NAst;
+    NQumir::TLocation loc{};
+
+    auto integer = TMaybeType<TIntegerType>(UnwrapNamedType(key.KeyType));
+    if (!key.IsScalar() || !integer || integer.Cast()->Kind != TIntegerType::I64) {
+        throw std::invalid_argument(
+            "GenKeyOperationFunDecls: only scalar i64 keys are implemented");
+    }
+
+    auto i64Type = std::make_shared<TIntegerType>(TIntegerType::I64);
+    auto u64Type = std::make_shared<TIntegerType>(TIntegerType::U64);
+    auto boolType = std::make_shared<TBoolType>();
+    auto ident = [&](const std::string& name) -> TExprPtr {
+        return std::make_shared<TIdentExpr>(loc, name);
+    };
+    auto number = [&](int64_t value, const TTypePtr& type) -> TExprPtr {
+        auto result = std::make_shared<TNumberExpr>(loc, value);
+        result->Type = type;
+        return result;
+    };
+    auto binary = [&](const char* op, TExprPtr left, TExprPtr right) -> TExprPtr {
+        return std::make_shared<TBinaryExpr>(
+            loc, TOperator(op), std::move(left), std::move(right));
+    };
+    auto assignHash = [&](TExprPtr value) -> TExprPtr {
+        return std::make_shared<TAssignExpr>(loc, "h", std::move(value));
+    };
+
+    std::vector<TExprPtr> hashBody;
+    hashBody.push_back(std::make_shared<TVarStmt>(loc, "h", u64Type));
+    hashBody.push_back(assignHash(std::make_shared<TCastExpr>(loc, ident("key"), u64Type)));
+    hashBody.push_back(assignHash(binary("xor", ident("h"),
+        binary(">>", ident("h"), number(12, u64Type)))));
+    hashBody.push_back(assignHash(binary("xor", ident("h"),
+        binary("<<", ident("h"), number(25, u64Type)))));
+    hashBody.push_back(assignHash(binary("xor", ident("h"),
+        binary(">>", ident("h"), number(27, u64Type)))));
+    hashBody.push_back(assignHash(binary("*", ident("h"),
+        number(2685821657736338717LL, u64Type))));
+    hashBody.push_back(std::make_shared<TReturnExpr>(loc,
+        std::make_shared<TCastExpr>(loc, ident("h"), i64Type)));
+
+    std::vector<TParam> hashParams = {
+        std::make_shared<TVarStmt>(loc, "key", key.KeyType),
+    };
+    auto hash = std::make_shared<TFunDecl>(loc, "rh_hash", std::move(hashParams),
+        std::make_shared<TBlockExpr>(loc, std::move(hashBody)), i64Type);
+
+    std::vector<TParam> equalParams = {
+        std::make_shared<TVarStmt>(loc, "left", key.KeyType),
+        std::make_shared<TVarStmt>(loc, "right", key.KeyType),
+    };
+    std::vector<TExprPtr> equalBody = {
+        std::make_shared<TReturnExpr>(loc,
+            binary("==", ident("left"), ident("right"))),
+    };
+    auto equal = std::make_shared<TFunDecl>(loc, "rh_key_equal", std::move(equalParams),
+        std::make_shared<TBlockExpr>(loc, std::move(equalBody)), boolType);
+
+    return {std::move(hash), std::move(equal)};
+}
+
 void SubstFieldsInPlace(
     NQumir::NAst::TExprPtr& expr,
     const std::unordered_set<std::string>& fieldNames,
