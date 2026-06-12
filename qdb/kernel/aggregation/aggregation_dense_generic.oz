@@ -1,0 +1,176 @@
+(block
+  (pragma language overloads)
+
+  (fun agg_dense_init ((var group_keys_out <ptr <ptr u8>>)
+                       (var agg_buffers_out <ptr <ptr <ptr i64>>>)
+                       (var capacity i64)
+                       (var key_size i64)
+                       (var num_aggs i64)) -> bool
+    (block
+      (if (|| (< capacity (: 1 i64))
+              (|| (< key_size (: 1 i64))
+                  (|| (< num_aggs (: 1 i64))
+                      (|| (> capacity (/ (: 9223372036854775807 i64) key_size))
+                          (> capacity (: 1152921504606846975 i64))))))
+        (block (return #f)))
+      (var key_bytes = (* capacity key_size))
+      (var state_bytes = (* capacity (: 8 i64)))
+      (var pointer_bytes = (* num_aggs (: 8 i64)))
+      (var group_keys = (cast (call qdb_alloc key_bytes) <ptr u8>))
+      (var agg_buffers =
+        (cast (call qdb_alloc pointer_bytes) <ptr <ptr i64>>))
+      (var allocation_failed bool)
+      (= allocation_failed
+        (|| (== (cast group_keys i64) (: 0 i64))
+            (== (cast agg_buffers i64) (: 0 i64))))
+      (var agg i64)
+      (= agg (: 0 i64))
+      (var allocated_aggs i64)
+      (= allocated_aggs (: 0 i64))
+      (while (&& (! allocation_failed) (< agg num_aggs))
+        (block
+          (var buffer = (cast (call qdb_alloc state_bytes) <ptr i64>))
+          (= agg_buffers [agg] buffer)
+          (if (== (cast buffer i64) (: 0 i64))
+            (block (= allocation_failed #t))
+            (block (= allocated_aggs (+ allocated_aggs (: 1 i64)))))
+          (= agg (+ agg (: 1 i64)))))
+      (if allocation_failed
+        (block
+          (= agg (: 0 i64))
+          (while (&& (!= (cast agg_buffers i64) (: 0 i64)) (< agg allocated_aggs))
+            (block
+              (var buffer = (index agg_buffers agg))
+              (if (!= (cast buffer i64) (: 0 i64))
+                (block (call qdb_free (cast buffer <ptr i8>))))
+              (= agg (+ agg (: 1 i64)))))
+          (if (!= (cast agg_buffers i64) (: 0 i64))
+            (block (call qdb_free (cast agg_buffers <ptr i8>))))
+          (if (!= (cast group_keys i64) (: 0 i64))
+            (block (call qdb_free (cast group_keys <ptr i8>))))
+          (return #f)))
+      (= agg (: 0 i64))
+      (while (< agg num_aggs)
+        (block
+          (var buffer = (index agg_buffers agg))
+          (var slot i64)
+          (= slot (: 0 i64))
+          (while (< slot capacity)
+            (block
+              (= buffer [slot] (: 0 i64))
+              (= slot (+ slot (: 1 i64)))))
+          (= agg (+ agg (: 1 i64)))))
+      (= group_keys_out [(: 0 i64)] group_keys)
+      (= agg_buffers_out [(: 0 i64)] agg_buffers)
+      (return #t)))
+
+  (fun agg_dense_destroy ((var group_keys_ref <ptr <ptr u8>>)
+                          (var agg_buffers_ref <ptr <ptr <ptr i64>>>)
+                          (var num_aggs i64))
+    (block
+      (var agg_buffers = (index agg_buffers_ref (: 0 i64)))
+      (if (!= (cast agg_buffers i64) (: 0 i64))
+        (block
+          (var agg i64)
+          (= agg (: 0 i64))
+          (while (< agg num_aggs)
+            (block
+              (var buffer = (index agg_buffers agg))
+              (if (!= (cast buffer i64) (: 0 i64))
+                (block (call qdb_free (cast buffer <ptr i8>))))
+              (= agg (+ agg (: 1 i64)))))
+          (call qdb_free (cast agg_buffers <ptr i8>))))
+      (var group_keys = (index group_keys_ref (: 0 i64)))
+      (if (!= (cast group_keys i64) (: 0 i64))
+        (block (call qdb_free (cast group_keys <ptr i8>))))
+      (= group_keys_ref [(: 0 i64)] (cast (: 0 i64) <ptr u8>))
+      (= agg_buffers_ref [(: 0 i64)] (cast (: 0 i64) <ptr <ptr i64>>))))
+
+  (fun agg_dense_grow ((var group_keys_ref <ptr <ptr u8>>)
+                       (var agg_buffers_ref <ptr <ptr <ptr i64>>>)
+                       (var old_capacity i64)
+                       (var new_capacity i64)
+                       (var size i64)
+                       (var key_size i64)
+                       (var num_aggs i64)
+                       (var key_witness <named Key (template readable mutable)>)) -> bool
+    (block
+      (if (|| (< new_capacity size)
+              (|| (< new_capacity (: 1 i64))
+                  (|| (< key_size (: 1 i64))
+                      (|| (< num_aggs (: 1 i64))
+                          (|| (> new_capacity
+                                (/ (: 9223372036854775807 i64) key_size))
+                              (> new_capacity (: 1152921504606846975 i64)))))))
+        (block (return #f)))
+      (var key_bytes = (* new_capacity key_size))
+      (var state_bytes = (* new_capacity (: 8 i64)))
+      (var pointer_bytes = (* num_aggs (: 8 i64)))
+      (var new_group_keys = (cast (call qdb_alloc key_bytes) <ptr u8>))
+      (var new_agg_buffers =
+        (cast (call qdb_alloc pointer_bytes) <ptr <ptr i64>>))
+      (var allocation_failed bool)
+      (= allocation_failed
+        (|| (== (cast new_group_keys i64) (: 0 i64))
+            (== (cast new_agg_buffers i64) (: 0 i64))))
+      (var allocated_aggs i64)
+      (= allocated_aggs (: 0 i64))
+      (var agg i64)
+      (= agg (: 0 i64))
+      (while (&& (! allocation_failed) (< agg num_aggs))
+        (block
+          (var buffer = (cast (call qdb_alloc state_bytes) <ptr i64>))
+          (= new_agg_buffers [agg] buffer)
+          (if (== (cast buffer i64) (: 0 i64))
+            (block (= allocation_failed #t))
+            (block (= allocated_aggs (+ allocated_aggs (: 1 i64)))))
+          (= agg (+ agg (: 1 i64)))))
+      (if allocation_failed
+        (block
+          (= agg (: 0 i64))
+          (while (&& (!= (cast new_agg_buffers i64) (: 0 i64))
+                     (< agg allocated_aggs))
+            (block
+              (call qdb_free
+                (cast (index new_agg_buffers agg) <ptr i8>))
+              (= agg (+ agg (: 1 i64)))))
+          (if (!= (cast new_agg_buffers i64) (: 0 i64))
+            (block (call qdb_free (cast new_agg_buffers <ptr i8>))))
+          (if (!= (cast new_group_keys i64) (: 0 i64))
+            (block (call qdb_free (cast new_group_keys <ptr i8>))))
+          (return #f)))
+      (var old_group_keys = (index group_keys_ref (: 0 i64)))
+      (var old_agg_buffers = (index agg_buffers_ref (: 0 i64)))
+      (var typed_old =
+        (cast old_group_keys <ptr <named Key (template readable mutable)>>))
+      (var typed_new =
+        (cast new_group_keys <ptr <named Key (template readable mutable)>>))
+      (var slot i64)
+      (= slot (: 0 i64))
+      (while (< slot size)
+        (block
+          (= typed_new [slot] (index typed_old slot))
+          (= agg (: 0 i64))
+          (while (< agg num_aggs)
+            (block
+              (var old_buffer = (index old_agg_buffers agg))
+              (var new_buffer = (index new_agg_buffers agg))
+              (= new_buffer [slot] (index old_buffer slot))
+              (= agg (+ agg (: 1 i64)))))
+          (= slot (+ slot (: 1 i64)))))
+      (call agg_dense_destroy group_keys_ref agg_buffers_ref num_aggs)
+      (= group_keys_ref [(: 0 i64)] new_group_keys)
+      (= agg_buffers_ref [(: 0 i64)] new_agg_buffers)
+      (return #t)))
+
+  (fun agg_dense_update ((var group_keys <ptr u8>)
+                         (var agg_buffers <ptr <ptr i64>>)
+                         (var dense_slot i64)
+                         (var key <named Key (template readable mutable)>)
+                         (var value i64)
+                         (var is_new bool))
+    (block
+      (var typed_group_keys =
+        (cast group_keys <ptr <named Key (template readable mutable)>>))
+      (if is_new (block (= typed_group_keys [dense_slot] key)))
+      (call agg_apply_reducers agg_buffers dense_slot value is_new))))
