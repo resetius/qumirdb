@@ -635,6 +635,11 @@ struct TPairI64Key {
     bool operator==(const TPairI64Key&) const = default;
 };
 
+struct TNestedI64Key {
+    int64_t First;
+    TPairI64Key Nested;
+};
+
 static_assert(sizeof(THashTable) == 104);
 static_assert(offsetof(THashTable, Keys) == 0);
 static_assert(offsetof(THashTable, GroupKeys) == 24);
@@ -664,6 +669,19 @@ uint64_t HashI64(int64_t key) {
     h ^= h << 25;
     h ^= h >> 27;
     return h * UINT64_C(2685821657736338717);
+}
+
+uint64_t HashCombineStep(uint64_t seed, uint64_t fieldHash) {
+    return seed ^ (fieldHash + UINT64_C(0x9e3779b97f4a7c15) +
+        (seed << 6) + (seed >> 2));
+}
+
+uint64_t HashCombineI64(std::initializer_list<int64_t> fields) {
+    uint64_t seed = 0;
+    for (int64_t field : fields) {
+        seed = HashCombineStep(seed, HashI64(field));
+    }
+    return seed;
 }
 
 std::vector<int64_t> KeysForHome(int64_t home, int64_t capacity, size_t count) {
@@ -1692,6 +1710,32 @@ TEST(AggregationKernel, GenericProgramBuilderSupportsI32KeysThroughGrowAndFinali
     EXPECT_EQ(dispatch(&table, nullptr, 0, 2), 1);
 }
 
+TEST(AggregationKernel, GeneratedIntegerHashContractIsStable) {
+    using namespace NQumir;
+    using namespace NQumir::NAst;
+
+    auto i64Type = std::make_shared<TIntegerType>();
+    TStructType inputType({{"key", i64Type}});
+    auto key = NQqb::NKernel::BuildAggregateKeyDescriptor(inputType, {"key"});
+    auto operations = NQqb::NKernel::GenKeyOperationFunDecls(key);
+    auto program = std::make_shared<TBlockExpr>(TLocation{}, std::move(operations));
+
+    TLLVMRunnerOptions options;
+    options.CoreInput = true;
+    options.NativeCode = true;
+    options.AllowOverloads = true;
+    TLLVMRunner runner(options);
+    std::string error;
+    void* entry = runner.CompileKernelAst(program, "rh_hash", &error);
+    ASSERT_NE(entry, nullptr) << error;
+
+    auto hash = reinterpret_cast<int64_t(*)(int64_t)>(entry);
+    EXPECT_EQ(static_cast<uint64_t>(hash(0)), UINT64_C(0x0000000000000000));
+    EXPECT_EQ(static_cast<uint64_t>(hash(1)), UINT64_C(0x47e4ce4b896cdd1d));
+    EXPECT_EQ(static_cast<uint64_t>(hash(-1)), UINT64_C(0xf92cc9e5c6000000));
+    EXPECT_EQ(static_cast<uint64_t>(hash(7)), HashI64(7));
+}
+
 TEST(AggregationKernel, GeneratedStructKeyOperationsWalkFieldsRecursively) {
     using namespace NQumir;
     using namespace NQumir::NAst;
@@ -1735,9 +1779,82 @@ TEST(AggregationKernel, GeneratedStructKeyOperationsWalkFieldsRecursively) {
     EXPECT_TRUE(equal({7, 11}, {7, 11}));
     EXPECT_FALSE(equal({7, 11}, {7, 12}));
     EXPECT_FALSE(equal({7, 11}, {8, 11}));
-    EXPECT_EQ(hash({7, 11}), hash({7, 11}));
+    EXPECT_EQ(static_cast<uint64_t>(hash({7, 11})),
+        UINT64_C(0xe364af588ba97749));
+    EXPECT_EQ(static_cast<uint64_t>(hash({11, 7})),
+        UINT64_C(0x406ed7f5a37183d3));
+    EXPECT_EQ(static_cast<uint64_t>(hash({7, 12})),
+        UINT64_C(0xe5a932ba60dba6fb));
+    EXPECT_EQ(static_cast<uint64_t>(hash({7, 11})), HashCombineI64({7, 11}));
     EXPECT_NE(hash({7, 11}), hash({11, 7}));
-    EXPECT_NE(hash({7, 11}), hash({7, 12}));
+
+    std::unique_ptr<TLLVMRunner> secondHashRunner;
+    error.clear();
+    void* secondHashEntry = compileEntry("rh_hash", secondHashRunner, error);
+    ASSERT_NE(secondHashEntry, nullptr) << error;
+    auto secondHash = reinterpret_cast<THashFn>(secondHashEntry);
+    EXPECT_EQ(hash({7, 11}), secondHash({7, 11}));
+    EXPECT_EQ(hash({11, 7}), secondHash({11, 7}));
+}
+
+TEST(AggregationKernel, GeneratedNestedStructHashPreservesTypeShape) {
+    using namespace NQumir;
+    using namespace NQumir::NAst;
+
+    auto i64Type = std::make_shared<TIntegerType>();
+    auto nestedType = std::make_shared<TStructType>(
+        std::vector<std::pair<std::string, TTypePtr>>{
+            {"second", i64Type}, {"third", i64Type}});
+    auto keyType = std::make_shared<TStructType>(
+        std::vector<std::pair<std::string, TTypePtr>>{
+            {"first", i64Type}, {"nested", nestedType}});
+    TStructType inputType({{"key", keyType}});
+    auto key = NQqb::NKernel::BuildAggregateKeyDescriptor(inputType, {"key"});
+    ASSERT_TRUE(key.IsScalar());
+    ASSERT_EQ(key.Size, sizeof(TNestedI64Key));
+
+    auto operations = NQqb::NKernel::GenKeyOperationFunDecls(key);
+    TLocation loc{};
+    auto ident = [&](const std::string& name) -> TExprPtr {
+        return std::make_shared<TIdentExpr>(loc, name);
+    };
+    auto nested = std::make_shared<TStructConstructExpr>(loc, nestedType,
+        std::vector<TExprPtr>{ident("second"), ident("third")});
+    auto outer = std::make_shared<TStructConstructExpr>(loc, keyType,
+        std::vector<TExprPtr>{ident("first"), std::move(nested)});
+    auto call = std::make_shared<TCallExpr>(loc, ident("rh_hash"),
+        std::vector<TExprPtr>{std::move(outer)});
+    std::vector<TParam> params = {
+        std::make_shared<TVarStmt>(loc, "first", i64Type),
+        std::make_shared<TVarStmt>(loc, "second", i64Type),
+        std::make_shared<TVarStmt>(loc, "third", i64Type),
+    };
+    auto wrapper = std::make_shared<TFunDecl>(loc, "hash_nested", params,
+        std::make_shared<TBlockExpr>(loc,
+            std::vector<TExprPtr>{std::make_shared<TReturnExpr>(loc, call)}),
+        i64Type);
+    wrapper->Type = std::make_shared<TFunctionType>(
+        std::vector<TTypePtr>{i64Type, i64Type, i64Type}, i64Type);
+    operations.push_back(std::move(wrapper));
+    auto program = std::make_shared<TBlockExpr>(loc, std::move(operations));
+    TLLVMRunnerOptions options;
+    options.CoreInput = true;
+    options.NativeCode = true;
+    options.AllowOverloads = true;
+    TLLVMRunner runner(options);
+    std::string error;
+    void* entry = runner.CompileKernelAst(program, "hash_nested", &error);
+    ASSERT_NE(entry, nullptr) << error;
+
+    auto hash = reinterpret_cast<int64_t(*)(int64_t, int64_t, int64_t)>(entry);
+    const uint64_t nestedHash = HashCombineI64({11, 13});
+    const uint64_t expected = HashCombineStep(
+        HashCombineStep(0, HashI64(7)), nestedHash);
+    EXPECT_EQ(nestedHash, UINT64_C(0x4e5714dd8ac8e8ab));
+    EXPECT_EQ(expected, UINT64_C(0x65568e194da3aaf3));
+    EXPECT_EQ(static_cast<uint64_t>(hash(7, 11, 13)), expected);
+    EXPECT_NE(static_cast<uint64_t>(hash(7, 11, 13)),
+        HashCombineI64({7, 11, 13}));
 }
 
 TEST(AggregationKernel, GeneratedF64KeyOperationsCanonicalizeZeroAndNaN) {
