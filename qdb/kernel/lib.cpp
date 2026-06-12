@@ -78,7 +78,13 @@ BuildGenericAggregateProgramAst(
     NQumir::NAst::TTypePtr rowSetType,
     NQumir::NAst::TTypePtr hashTableType)
 {
-    std::vector<NQumir::NAst::TExprPtr> stmts = GenKeyOperationFunDecls(key);
+    std::vector<NQumir::NAst::TExprPtr> stmts;
+    if (NQumir::NAst::TMaybeType<NQumir::NAst::TNamedType>(key.KeyType)) {
+        stmts.push_back(std::make_shared<NQumir::NAst::TTypeDeclStmt>(
+            NQumir::TLocation{}, key.KeyType));
+    }
+    auto keyOperations = GenKeyOperationFunDecls(key);
+    stmts.insert(stmts.end(), keyOperations.begin(), keyOperations.end());
     auto reducerDecls = GenReducerFunDecls(reducers);
     stmts.insert(stmts.end(), reducerDecls.begin(), reducerDecls.end());
     stmts.push_back(GenApplyReducersFunDecl(reducers.size()));
@@ -124,6 +130,11 @@ BuildGenericAggregateFinalizeProgramAst(
     if (!block || block.Cast()->Stmts.size() != 1) {
         return std::unexpected(NQumir::TError(
             "generic aggregate finalize generator returned an invalid entry block"));
+    }
+    if (NQumir::NAst::TMaybeType<NQumir::NAst::TNamedType>(key.KeyType)) {
+        parsed->insert(parsed->begin(),
+            std::make_shared<NQumir::NAst::TTypeDeclStmt>(
+                NQumir::TLocation{}, key.KeyType));
     }
     parsed->push_back(block.Cast()->Stmts.front());
     return std::make_shared<NQumir::NAst::TBlockExpr>(

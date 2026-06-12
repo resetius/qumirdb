@@ -33,7 +33,7 @@ constexpr int64_t kOpUpdate = 1;
 constexpr int64_t kOpDestroy = 2;
 
 struct TAggregateRowSetData {
-    std::vector<int64_t> Keys;
+    std::vector<uint8_t> Keys;
     std::vector<std::vector<int64_t>> AggBuffers;
     std::vector<TColumn> Columns;
 };
@@ -71,7 +71,7 @@ bool TRuntimeAggregate::Next(TRowSet& rowSet) {
     const int64_t size = reinterpret_cast<THashTable*>(ht.data())->Size;
 
     auto* data = new TAggregateRowSetData;
-    data->Keys.resize(size);
+    data->Keys.resize(size * Kernels_.KeySize);
     data->AggBuffers.resize(Kernels_.NumAggs);
     std::vector<int64_t*> outputBuffers(Kernels_.NumAggs);
     for (size_t i = 0; i < Kernels_.NumAggs; ++i) {

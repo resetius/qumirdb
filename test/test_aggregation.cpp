@@ -1572,6 +1572,158 @@ TEST(AggregationKernel, GenericProgramBuilderDispatchesSelectedRowSets) {
     EXPECT_EQ(table.Capacity, 0);
 }
 
+TEST(AggregationKernel, GenericProgramBuilderSupportsI32KeysThroughGrowAndFinalize) {
+    using namespace NQumir;
+    using namespace NQumir::NAst;
+
+    auto i32Type = std::make_shared<TIntegerType>(TIntegerType::I32);
+    auto i64Type = std::make_shared<TIntegerType>();
+    TStructType inputType({{"k", i32Type}, {"v", i64Type}});
+    auto key = NQqb::NKernel::BuildAggregateKeyDescriptor(inputType, {"k"});
+
+    auto dbModule = std::make_shared<NQumir::NRegistry::QumirDbModule>();
+    TTypePtr columnType;
+    TTypePtr rowSetType;
+    TTypePtr hashTableType;
+    for (const auto& external : dbModule->ExternalTypes()) {
+        if (external.Name == "TColumn") columnType = external.Type;
+        else if (external.Name == "TRowSet") rowSetType = external.Type;
+        else if (external.Name == "HashTable") hashTableType = external.Type;
+    }
+    ASSERT_NE(columnType, nullptr);
+    ASSERT_NE(rowSetType, nullptr);
+    ASSERT_NE(hashTableType, nullptr);
+
+    auto updateProgram = NQqb::NKernel::BuildGenericAggregateProgramAst(
+        inputType, key, std::string("v"), {"sum", "count"},
+        columnType, rowSetType, hashTableType);
+    ASSERT_TRUE(updateProgram.has_value()) << updateProgram.error().ToString();
+    auto finalizeProgram = NQqb::NKernel::BuildGenericAggregateFinalizeProgramAst(
+        key, hashTableType);
+    ASSERT_TRUE(finalizeProgram.has_value()) << finalizeProgram.error().ToString();
+
+    TLLVMRunnerOptions options;
+    options.CoreInput = true;
+    options.NativeCode = true;
+    options.AllowOverloads = true;
+    TLLVMRunner updateRunner(options);
+    updateRunner.RegisterModule(dbModule, true);
+    TLLVMRunner finalizeRunner(options);
+    finalizeRunner.RegisterModule(dbModule, true);
+
+    std::string error;
+    void* updateEntry = updateRunner.CompileKernelAst(
+        *updateProgram, "agg_dispatch", &error);
+    ASSERT_NE(updateEntry, nullptr) << error;
+    error.clear();
+    void* finalizeEntry = finalizeRunner.CompileKernelAst(
+        *finalizeProgram, "agg_finalize", &error);
+    ASSERT_NE(finalizeEntry, nullptr) << error;
+
+    using TDispatchFn = int64_t(*)(THashTable*, NQqb::TRowSet*, int64_t, int64_t);
+    using TFinalizeFn = int64_t(*)(THashTable*, int32_t*, int64_t**, int64_t);
+    auto dispatch = reinterpret_cast<TDispatchFn>(updateEntry);
+    auto finalize = reinterpret_cast<TFinalizeFn>(finalizeEntry);
+
+    THashTable table;
+    ASSERT_NE(dispatch(&table, nullptr, 4, 0), 0);
+    EXPECT_EQ(table.KeySize, sizeof(int32_t));
+
+    std::unordered_map<int32_t, std::pair<int64_t, int64_t>> expected;
+    auto runBatch = [&](std::vector<int32_t>& keys,
+                        std::vector<int64_t>& values,
+                        std::vector<uint8_t>* selection) {
+        NQqb::TColumn columns[2] = {};
+        columns[0].Data = reinterpret_cast<char*>(keys.data());
+        columns[1].Data = reinterpret_cast<char*>(values.data());
+        NQqb::TRowSet batch{};
+        batch.Columns = columns;
+        batch.ColumnCount = 2;
+        batch.RowCount = static_cast<int64_t>(keys.size());
+        batch.Selection = selection ? selection->data() : nullptr;
+        EXPECT_EQ(dispatch(&table, &batch, 0, 1), 0);
+        for (size_t i = 0; i < keys.size(); ++i) {
+            if (selection && !(*selection)[i]) continue;
+            expected[keys[i]].first += values[i];
+            expected[keys[i]].second += 1;
+        }
+    };
+
+    std::vector<int32_t> keys1 = {-1, 2, -1, 3, 4, 5};
+    std::vector<int64_t> values1 = {10, 20, 5, 7, 11, 13};
+    std::vector<uint8_t> selection1 = {1, 0, 1, 1, 0, 1};
+    runBatch(keys1, values1, &selection1);
+    std::vector<int32_t> keys2 = {
+        2, 6, 3, 7, 8, std::numeric_limits<int32_t>::min()};
+    std::vector<int64_t> values2 = {4, 8, -2, 9, 12, 6};
+    runBatch(keys2, values2, nullptr);
+
+    ASSERT_EQ(table.Size, static_cast<int64_t>(expected.size()));
+    ASSERT_GE(table.Capacity, 16);
+    std::vector<int32_t> outputKeys(table.Size);
+    std::vector<int64_t> outputSums(table.Size);
+    std::vector<int64_t> outputCounts(table.Size);
+    int64_t* outputBuffers[] = {outputSums.data(), outputCounts.data()};
+    ASSERT_EQ(finalize(
+        &table, outputKeys.data(), outputBuffers, outputKeys.size()), table.Size);
+    for (int64_t i = 0; i < table.Size; ++i) {
+        auto it = expected.find(outputKeys[i]);
+        ASSERT_NE(it, expected.end()) << "unexpected key " << outputKeys[i];
+        EXPECT_EQ(outputSums[i], it->second.first) << "key " << outputKeys[i];
+        EXPECT_EQ(outputCounts[i], it->second.second) << "key " << outputKeys[i];
+    }
+
+    EXPECT_EQ(dispatch(&table, nullptr, 0, 2), 1);
+}
+
+TEST(AggregationKernel, GeneratedStructKeyOperationsWalkFieldsRecursively) {
+    using namespace NQumir;
+    using namespace NQumir::NAst;
+
+    auto i64Type = std::make_shared<TIntegerType>();
+    TStructType inputType({{"first", i64Type}, {"second", i64Type}});
+    auto key = NQqb::NKernel::BuildAggregateKeyDescriptor(
+        inputType, {"first", "second"});
+    ASSERT_FALSE(key.IsScalar());
+
+    auto compileEntry = [&](const std::string& entryName,
+                            std::unique_ptr<TLLVMRunner>& runner,
+                            std::string& error) -> void* {
+        auto operations = NQqb::NKernel::GenKeyOperationFunDecls(key);
+        operations.insert(operations.begin(),
+            std::make_shared<TTypeDeclStmt>(TLocation{}, key.KeyType));
+        auto program = std::make_shared<TBlockExpr>(
+            TLocation{}, std::move(operations));
+        TLLVMRunnerOptions options;
+        options.CoreInput = true;
+        options.NativeCode = true;
+        options.AllowOverloads = true;
+        runner = std::make_unique<TLLVMRunner>(options);
+        return runner->CompileKernelAst(program, entryName, &error);
+    };
+
+    std::string error;
+    std::unique_ptr<TLLVMRunner> hashRunner;
+    void* hashEntry = compileEntry("rh_hash", hashRunner, error);
+    ASSERT_NE(hashEntry, nullptr) << error;
+    error.clear();
+    std::unique_ptr<TLLVMRunner> equalRunner;
+    void* equalEntry = compileEntry("rh_key_equal", equalRunner, error);
+    ASSERT_NE(equalEntry, nullptr) << error;
+
+    using THashFn = int64_t(*)(TPairI64Key);
+    using TEqualFn = bool(*)(TPairI64Key, TPairI64Key);
+    auto hash = reinterpret_cast<THashFn>(hashEntry);
+    auto equal = reinterpret_cast<TEqualFn>(equalEntry);
+
+    EXPECT_TRUE(equal({7, 11}, {7, 11}));
+    EXPECT_FALSE(equal({7, 11}, {7, 12}));
+    EXPECT_FALSE(equal({7, 11}, {8, 11}));
+    EXPECT_EQ(hash({7, 11}), hash({7, 11}));
+    EXPECT_NE(hash({7, 11}), hash({11, 7}));
+    EXPECT_NE(hash({7, 11}), hash({7, 12}));
+}
+
 TEST(AggregationKernel, GenericKeyEqualityDispatchesToI64Overload) {
     void* entry = nullptr;
     std::string error;

@@ -10,6 +10,150 @@
 namespace NQqb {
 namespace NKernel {
 
+namespace {
+
+NQumir::NAst::TIntegerType::EKind UnsignedIntegerKind(
+    NQumir::NAst::TIntegerType::EKind kind)
+{
+    using TIntegerType = NQumir::NAst::TIntegerType;
+    switch (kind) {
+        case TIntegerType::I8:
+        case TIntegerType::U8:
+            return TIntegerType::U8;
+        case TIntegerType::I16:
+        case TIntegerType::U16:
+            return TIntegerType::U16;
+        case TIntegerType::I32:
+        case TIntegerType::U32:
+            return TIntegerType::U32;
+        case TIntegerType::I64:
+        case TIntegerType::U64:
+            return TIntegerType::U64;
+    }
+    throw std::invalid_argument("unsupported integer kind");
+}
+
+NQumir::NAst::TExprPtr KeyValueExpr(
+    const std::string& root,
+    const std::vector<std::string>& path)
+{
+    using namespace NQumir::NAst;
+    NQumir::TLocation loc{};
+    TExprPtr result = std::make_shared<TIdentExpr>(loc, root);
+    for (const auto& field : path) {
+        result = std::make_shared<TFieldAccessExpr>(loc, std::move(result), field);
+    }
+    return result;
+}
+
+NQumir::NAst::TExprPtr HashKeyValue(
+    const NQumir::NAst::TTypePtr& originalType,
+    const std::string& root,
+    std::vector<std::string>& path,
+    std::vector<NQumir::NAst::TExprPtr>& body,
+    size_t& nextTemporary)
+{
+    using namespace NQumir::NAst;
+    NQumir::TLocation loc{};
+    const auto type = UnwrapNamedType(originalType);
+    auto u64Type = std::make_shared<TIntegerType>(TIntegerType::U64);
+    auto ident = [&](const std::string& name) -> TExprPtr {
+        return std::make_shared<TIdentExpr>(loc, name);
+    };
+    auto number = [&](int64_t value) -> TExprPtr {
+        auto result = std::make_shared<TNumberExpr>(loc, value);
+        result->Type = u64Type;
+        return result;
+    };
+    auto binary = [&](const char* op, TExprPtr left, TExprPtr right) -> TExprPtr {
+        return std::make_shared<TBinaryExpr>(
+            loc, TOperator(op), std::move(left), std::move(right));
+    };
+    auto assign = [&](const std::string& name, TExprPtr value) {
+        body.push_back(std::make_shared<TAssignExpr>(
+            loc, name, std::move(value)));
+    };
+
+    if (auto integer = TMaybeType<TIntegerType>(type)) {
+        const std::string name = "key_hash_" + std::to_string(nextTemporary++);
+        body.push_back(std::make_shared<TVarStmt>(loc, name, u64Type));
+        auto unsignedType = std::make_shared<TIntegerType>(
+            UnsignedIntegerKind(integer.Cast()->Kind));
+        auto bits = std::make_shared<TCastExpr>(
+            loc, KeyValueExpr(root, path), std::move(unsignedType));
+        assign(name, std::make_shared<TCastExpr>(loc, std::move(bits), u64Type));
+        assign(name, binary("xor", ident(name),
+            binary(">>", ident(name), number(12))));
+        assign(name, binary("xor", ident(name),
+            binary("<<", ident(name), number(25))));
+        assign(name, binary("xor", ident(name),
+            binary(">>", ident(name), number(27))));
+        assign(name, binary("*", ident(name), number(2685821657736338717LL)));
+        return ident(name);
+    }
+
+    if (auto structure = TMaybeType<TStructType>(type)) {
+        const std::string name = "key_hash_" + std::to_string(nextTemporary++);
+        body.push_back(std::make_shared<TVarStmt>(loc, name, u64Type));
+        assign(name, number(0));
+        for (const auto& [fieldName, fieldType] : structure.Cast()->Fields) {
+            path.push_back(fieldName);
+            auto fieldHash = HashKeyValue(
+                fieldType, root, path, body, nextTemporary);
+            path.pop_back();
+            // boost-style ordered combine over already mixed field hashes.
+            auto combined = binary("+", std::move(fieldHash), number(-7046029254386353131LL));
+            combined = binary("+", std::move(combined),
+                binary("<<", ident(name), number(6)));
+            combined = binary("+", std::move(combined),
+                binary(">>", ident(name), number(2)));
+            assign(name, binary("xor", ident(name), std::move(combined)));
+        }
+        return ident(name);
+    }
+
+    throw std::invalid_argument(
+        "GenKeyOperationFunDecls: unsupported key leaf type " +
+        (originalType ? originalType->ToString() : std::string("<null>")));
+}
+
+NQumir::NAst::TExprPtr EqualKeyValue(
+    const NQumir::NAst::TTypePtr& originalType,
+    std::vector<std::string>& path)
+{
+    using namespace NQumir::NAst;
+    NQumir::TLocation loc{};
+    const auto type = UnwrapNamedType(originalType);
+    auto binary = [&](const char* op, TExprPtr left, TExprPtr right) -> TExprPtr {
+        return std::make_shared<TBinaryExpr>(
+            loc, TOperator(op), std::move(left), std::move(right));
+    };
+    if (TMaybeType<TIntegerType>(type)) {
+        return binary("==", KeyValueExpr("left", path), KeyValueExpr("right", path));
+    }
+    if (auto structure = TMaybeType<TStructType>(type)) {
+        TExprPtr result;
+        for (const auto& [fieldName, fieldType] : structure.Cast()->Fields) {
+            path.push_back(fieldName);
+            auto fieldEqual = EqualKeyValue(fieldType, path);
+            path.pop_back();
+            result = result
+                ? binary("&&", std::move(result), std::move(fieldEqual))
+                : std::move(fieldEqual);
+        }
+        if (!result) {
+            throw std::invalid_argument(
+                "GenKeyOperationFunDecls: empty struct keys are not supported");
+        }
+        return result;
+    }
+    throw std::invalid_argument(
+        "GenKeyOperationFunDecls: unsupported equality leaf type " +
+        (originalType ? originalType->ToString() : std::string("<null>")));
+}
+
+} // namespace
+
 const std::unordered_set<std::string> kCountOzFixedFuncs = {
     "agg_count_step", "agg_sum_i64_step", "agg_min_i64_step", "agg_max_i64_step",
     "count_init", "count_rehash", "count_update", "count_destroy",
@@ -20,12 +164,6 @@ std::vector<NQumir::NAst::TExprPtr> GenKeyOperationFunDecls(
 {
     using namespace NQumir::NAst;
     NQumir::TLocation loc{};
-
-    auto integer = TMaybeType<TIntegerType>(UnwrapNamedType(key.KeyType));
-    if (!key.IsScalar() || !integer || integer.Cast()->Kind != TIntegerType::I64) {
-        throw std::invalid_argument(
-            "GenKeyOperationFunDecls: only scalar i64 keys are implemented");
-    }
 
     auto i64Type = std::make_shared<TIntegerType>(TIntegerType::I64);
     auto u64Type = std::make_shared<TIntegerType>(TIntegerType::U64);
@@ -42,23 +180,14 @@ std::vector<NQumir::NAst::TExprPtr> GenKeyOperationFunDecls(
         return std::make_shared<TBinaryExpr>(
             loc, TOperator(op), std::move(left), std::move(right));
     };
-    auto assignHash = [&](TExprPtr value) -> TExprPtr {
-        return std::make_shared<TAssignExpr>(loc, "h", std::move(value));
-    };
 
     std::vector<TExprPtr> hashBody;
-    hashBody.push_back(std::make_shared<TVarStmt>(loc, "h", u64Type));
-    hashBody.push_back(assignHash(std::make_shared<TCastExpr>(loc, ident("key"), u64Type)));
-    hashBody.push_back(assignHash(binary("xor", ident("h"),
-        binary(">>", ident("h"), number(12, u64Type)))));
-    hashBody.push_back(assignHash(binary("xor", ident("h"),
-        binary("<<", ident("h"), number(25, u64Type)))));
-    hashBody.push_back(assignHash(binary("xor", ident("h"),
-        binary(">>", ident("h"), number(27, u64Type)))));
-    hashBody.push_back(assignHash(binary("*", ident("h"),
-        number(2685821657736338717LL, u64Type))));
+    size_t nextTemporary = 0;
+    std::vector<std::string> path;
+    auto hashValue = HashKeyValue(
+        key.KeyType, "key", path, hashBody, nextTemporary);
     hashBody.push_back(std::make_shared<TReturnExpr>(loc,
-        std::make_shared<TCastExpr>(loc, ident("h"), i64Type)));
+        std::make_shared<TCastExpr>(loc, std::move(hashValue), i64Type)));
 
     std::vector<TParam> hashParams = {
         std::make_shared<TVarStmt>(loc, "key", key.KeyType),
@@ -72,9 +201,9 @@ std::vector<NQumir::NAst::TExprPtr> GenKeyOperationFunDecls(
         std::make_shared<TVarStmt>(loc, "left", key.KeyType),
         std::make_shared<TVarStmt>(loc, "right", key.KeyType),
     };
+    path.clear();
     std::vector<TExprPtr> equalBody = {
-        std::make_shared<TReturnExpr>(loc,
-            binary("==", ident("left"), ident("right"))),
+        std::make_shared<TReturnExpr>(loc, EqualKeyValue(key.KeyType, path)),
     };
     auto equal = std::make_shared<TFunDecl>(loc, "rh_key_equal", std::move(equalParams),
         std::make_shared<TBlockExpr>(loc, std::move(equalBody)), boolType);
@@ -397,6 +526,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
     auto ptrU8Type = std::make_shared<TPointerType>(u8Type);
     auto ptrKeyType = std::make_shared<TPointerType>(key.KeyType);
     auto ptrI64Type = std::make_shared<TPointerType>(i64Type);
+    TTypePtr valueType = i64Type;
 
     auto ident = [&](const std::string& name) -> TExprPtr {
         return std::make_shared<TIdentExpr>(loc, name);
@@ -474,13 +604,15 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
                 "GenGenericAggregateDispatchAst: unknown argument column '" + *argField + "'");
         }
         auto argType = TMaybeType<TIntegerType>(UnwrapNamedType(arg->second));
-        if (!argType || argType.Cast()->Kind != TIntegerType::I64) {
+        if (!argType) {
             throw std::invalid_argument(
-                "GenGenericAggregateDispatchAst: aggregate argument must be i64");
+                "GenGenericAggregateDispatchAst: aggregate argument must be integer");
         }
+        valueType = arg->second;
         const auto index = static_cast<int32_t>(std::distance(inputType.Fields.begin(), arg));
-        update.push_back(var("values", ptrI64Type));
-        update.push_back(assign("values", columnData(index, ptrI64Type)));
+        auto ptrValueType = std::make_shared<TPointerType>(valueType);
+        update.push_back(var("values", ptrValueType));
+        update.push_back(assign("values", columnData(index, ptrValueType)));
     }
     update.push_back(var("selection_is_null", boolType));
     update.push_back(assign("selection_is_null",
@@ -493,7 +625,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
         binary("!=", std::make_shared<TIndexExpr>(loc, ident("selection"), ident("i")),
             number(0, u8Type)));
     TExprPtr value = argField
-        ? std::make_shared<TIndexExpr>(loc, ident("values"), ident("i"))
+        ? cast(std::make_shared<TIndexExpr>(loc, ident("values"), ident("i")), i64Type)
         : numI64(0);
     auto updateCall = call("aht_update", {
         ident("ht"),
