@@ -3,6 +3,8 @@
 #include <qumir/codegen/llvm/llvm_initializer.h>
 #include <qumir/runner/runner_llvm.h>
 
+#include <qdb/exec/aggregate_exec.h>
+#include <qdb/exec/executor.h>
 #include <qdb/io/io.h>
 #include <qdb/kernel/compiler.h>
 #include <qdb/kernel/gen.h>
@@ -1877,6 +1879,152 @@ TEST(AggregationCompiler, CompileAggregateDispatchAndFinalize) {
     }
 
     EXPECT_TRUE(kernels.Dispatch(ht, nullptr, 0, /*op=destroy*/6));
+}
+
+// L4: TRuntimeAggregate over CompileAggregate's kernels, with no planner/sexp
+// involved. "Scenario K"-style input: 24 distinct keys in [-12, 11] over 200
+// rows split into 3 batches force the HashTable through several grows
+// (capacity 4 -> 8 -> 16 -> 32) with collisions and duplicate keys across
+// batches; result is compared against a std::unordered_map reference.
+TEST(AggregationExec, RuntimeAggregateMultiBatchGrowAndCollisions) {
+    using namespace NQumir::NAst;
+    NQumir::TLocation loc{};
+
+    auto i64Type = std::make_shared<TIntegerType>();
+    auto structType = std::make_shared<TStructType>(std::vector<std::pair<std::string, TTypePtr>>{
+        {"k", i64Type},
+        {"v", i64Type},
+    });
+    TTypePtr inputSchema = structType;
+
+    std::vector<NQqb::TAggregateSpec> aggs = {
+        {"c", "count", nullptr},
+        {"s", "sum", std::make_shared<TIdentExpr>(loc, "v")},
+        {"mn", "min", std::make_shared<TIdentExpr>(loc, "v")},
+        {"mx", "max", std::make_shared<TIdentExpr>(loc, "v")},
+    };
+
+    NQqb::TKernelCompiler compiler;
+    auto kernels = compiler.CompileAggregate(*structType, {"k"}, aggs);
+    auto outputType = NQqb::ComputeAggregateOutputType(inputSchema, {"k"}, aggs);
+
+    constexpr size_t rowCount = 200;
+    std::vector<int64_t> keys(rowCount);
+    std::vector<int64_t> values(rowCount);
+
+    struct TGroupStats {
+        int64_t Count = 0;
+        int64_t Sum = 0;
+        int64_t Min = 0;
+        int64_t Max = 0;
+        bool Seen = false;
+    };
+    std::unordered_map<int64_t, TGroupStats> reference;
+
+    uint64_t state = 88172645463325252ULL;
+    auto next = [&state]() -> uint64_t {
+        state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+        return state;
+    };
+    for (size_t i = 0; i < rowCount; ++i) {
+        const int64_t key = static_cast<int64_t>(next() % 24) - 12;
+        const int64_t value = static_cast<int64_t>(next() % 401) - 200;
+        keys[i] = key;
+        values[i] = value;
+        auto& group = reference[key];
+        if (!group.Seen) {
+            group.Min = value;
+            group.Max = value;
+            group.Seen = true;
+        } else {
+            group.Min = std::min(group.Min, value);
+            group.Max = std::max(group.Max, value);
+        }
+        group.Count += 1;
+        group.Sum += value;
+    }
+
+    // Split into 3 batches of uneven size.
+    constexpr size_t batchCount = 3;
+    std::vector<std::vector<NQqb::TColumn>> batchColumns(batchCount);
+    std::vector<NQqb::TRowSet> batches;
+    size_t offset = 0;
+    for (size_t batch = 0; batch < batchCount; ++batch) {
+        const size_t remaining = rowCount - offset;
+        const size_t batchSize =
+            (batch + 1 == batchCount) ? remaining : remaining / (batchCount - batch);
+
+        batchColumns[batch] = {
+            NQqb::TColumn{.Data = reinterpret_cast<char*>(keys.data() + offset)},
+            NQqb::TColumn{.Data = reinterpret_cast<char*>(values.data() + offset)},
+        };
+        batches.push_back(NQqb::TRowSet{
+            .Columns = batchColumns[batch].data(),
+            .ColumnCount = 2,
+            .RowCount = static_cast<int64_t>(batchSize),
+            .Selection = nullptr,
+            .Destroy = nullptr,
+            .Private = nullptr,
+            .RefCount = 1,
+        });
+        offset += batchSize;
+    }
+    ASSERT_EQ(offset, rowCount);
+
+    class TVectorRuntimeSource : public NQqb::IRuntimeNode {
+    public:
+        TVectorRuntimeSource(NQumir::NAst::TTypePtr outputType, std::vector<NQqb::TRowSet> batches)
+            : OutputType_(std::move(outputType))
+            , Batches_(std::move(batches))
+        {}
+
+        NQumir::NAst::TTypePtr OutputType() const override { return OutputType_; }
+
+        bool Next(NQqb::TRowSet& rowSet) override {
+            if (Index_ >= Batches_.size()) {
+                return false;
+            }
+            rowSet = Batches_[Index_++];
+            return true;
+        }
+
+    private:
+        NQumir::NAst::TTypePtr OutputType_;
+        std::vector<NQqb::TRowSet> Batches_;
+        size_t Index_ = 0;
+    };
+
+    auto input = std::make_unique<TVectorRuntimeSource>(inputSchema, std::move(batches));
+    NQqb::TRuntimeAggregate agg(std::move(input), outputType, std::move(kernels));
+
+    NQqb::TRowSet result{};
+    ASSERT_TRUE(agg.Next(result));
+    ASSERT_EQ(result.ColumnCount, static_cast<int64_t>(1 + aggs.size()));
+    ASSERT_EQ(result.RowCount, static_cast<int64_t>(reference.size()));
+
+    auto* outKeys = reinterpret_cast<int64_t*>(result.Columns[0].Data);
+    auto* outCounts = reinterpret_cast<int64_t*>(result.Columns[1].Data);
+    auto* outSums = reinterpret_cast<int64_t*>(result.Columns[2].Data);
+    auto* outMins = reinterpret_cast<int64_t*>(result.Columns[3].Data);
+    auto* outMaxs = reinterpret_cast<int64_t*>(result.Columns[4].Data);
+
+    std::unordered_set<int64_t> seenKeys;
+    for (int64_t i = 0; i < result.RowCount; ++i) {
+        const int64_t key = outKeys[i];
+        auto it = reference.find(key);
+        ASSERT_NE(it, reference.end()) << "unexpected key " << key;
+        EXPECT_TRUE(seenKeys.insert(key).second) << "duplicate key " << key;
+        EXPECT_EQ(outCounts[i], it->second.Count) << "key " << key;
+        EXPECT_EQ(outSums[i], it->second.Sum) << "key " << key;
+        EXPECT_EQ(outMins[i], it->second.Min) << "key " << key;
+        EXPECT_EQ(outMaxs[i], it->second.Max) << "key " << key;
+    }
+    EXPECT_EQ(seenKeys.size(), reference.size());
+
+    NQqb::Release(&result);
+
+    NQqb::TRowSet second{};
+    EXPECT_FALSE(agg.Next(second));
 }
 
 int main(int argc, char** argv) {
