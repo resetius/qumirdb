@@ -8,6 +8,7 @@
 #include <qdb/exec/planner.h>
 #include <qdb/io/io.h>
 #include <qdb/kernel/compiler.h>
+#include <qdb/kernel/aggregate_key.h>
 #include <qdb/kernel/gen.h>
 #include <qdb/kernel/lib.h>
 #include <qdb/modules/qumirdb.h>
@@ -18,6 +19,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -405,6 +407,75 @@ std::vector<int64_t> KeysForHome(int64_t home, int64_t capacity, size_t count) {
 
 } // namespace
 
+TEST(AggregationKeyDescriptor, BuildsScalarAndCompositeFixedWidthLayouts) {
+    using namespace NQumir::NAst;
+
+    auto i8 = std::make_shared<TIntegerType>(TIntegerType::I8);
+    auto i32 = std::make_shared<TIntegerType>(TIntegerType::I32);
+    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
+    auto u64 = std::make_shared<TIntegerType>(TIntegerType::U64);
+    auto f64 = std::make_shared<TFloatType>();
+    TStructType input({
+        {"small", i8}, {"id", i64}, {"id2", i64}, {"code", i32},
+        {"unsigned_id", u64}, {"score", f64}});
+
+    auto scalar = NQqb::NKernel::BuildAggregateKeyDescriptor(input, {"code"});
+    ASSERT_TRUE(scalar.IsScalar());
+    EXPECT_EQ(scalar.KeyType, i32);
+    EXPECT_EQ(scalar.Size, 4);
+    EXPECT_EQ(scalar.Alignment, 4);
+    ASSERT_EQ(scalar.Fields.size(), 1u);
+    EXPECT_EQ(scalar.Fields[0].ColumnIndex, 3);
+    EXPECT_EQ(scalar.Fields[0].Offset, 0);
+
+    auto i64Pair = NQqb::NKernel::BuildAggregateKeyDescriptor(input, {"id", "id2"});
+    EXPECT_EQ(i64Pair.Size, 16);
+    EXPECT_EQ(i64Pair.Alignment, 8);
+    EXPECT_EQ(i64Pair.Fields[0].Offset, 0);
+    EXPECT_EQ(i64Pair.Fields[1].Offset, 8);
+
+    auto pair = NQqb::NKernel::BuildAggregateKeyDescriptor(input, {"id", "score"});
+    EXPECT_FALSE(pair.IsScalar());
+    EXPECT_EQ(pair.Size, 16);
+    EXPECT_EQ(pair.Alignment, 8);
+    ASSERT_EQ(pair.Fields.size(), 2u);
+    EXPECT_EQ(pair.Fields[0].ColumnIndex, 1);
+    EXPECT_EQ(pair.Fields[0].Offset, 0);
+    EXPECT_EQ(pair.Fields[1].ColumnIndex, 5);
+    EXPECT_EQ(pair.Fields[1].Offset, 8);
+    auto named = TMaybeType<TNamedType>(pair.KeyType);
+    ASSERT_TRUE(named);
+    EXPECT_EQ(named.Cast()->Name, pair.TypeName);
+    EXPECT_NE(pair.TypeName, i64Pair.TypeName);
+    auto pairStruct = TMaybeType<TStructType>(named.Cast()->UnderlyingType);
+    ASSERT_TRUE(pairStruct);
+    ASSERT_EQ(pairStruct.Cast()->Fields.size(), 2u);
+    EXPECT_EQ(pairStruct.Cast()->Fields[0].first, "key_0");
+    EXPECT_EQ(pairStruct.Cast()->Fields[1].first, "key_1");
+
+    auto padded = NQqb::NKernel::BuildAggregateKeyDescriptor(input, {"small", "id"});
+    EXPECT_EQ(padded.Fields[0].Offset, 0);
+    EXPECT_EQ(padded.Fields[1].Offset, 8);
+    EXPECT_EQ(padded.Size, 16);
+    EXPECT_EQ(padded.Alignment, 8);
+
+    auto unsignedScalar = NQqb::NKernel::BuildAggregateKeyDescriptor(input, {"unsigned_id"});
+    EXPECT_EQ(unsignedScalar.KeyType, u64);
+    EXPECT_EQ(unsignedScalar.Size, 8);
+}
+
+TEST(AggregationKeyDescriptor, RejectsMissingVariableWidthAndEmptyKeys) {
+    using namespace NQumir::NAst;
+
+    TStructType input({
+        {"id", std::make_shared<TIntegerType>()},
+        {"name", std::make_shared<TStringType>()},
+    });
+    EXPECT_THROW(NQqb::NKernel::BuildAggregateKeyDescriptor(input, {}), NQumir::TError);
+    EXPECT_THROW(NQqb::NKernel::BuildAggregateKeyDescriptor(input, {"missing"}), NQumir::TError);
+    EXPECT_THROW(NQqb::NKernel::BuildAggregateKeyDescriptor(input, {"name"}), NQumir::TError);
+}
+
 TEST(AggregationKernel, GenericKeyDispatchInstantiatesI64) {
     void* entry = nullptr;
     std::string error;
@@ -416,6 +487,245 @@ TEST(AggregationKernel, GenericKeyDispatchInstantiatesI64) {
     EXPECT_EQ(smoke(0), 0);
     EXPECT_EQ(smoke(42), 42);
     EXPECT_EQ(smoke(-17), -17);
+}
+
+TEST(AggregationKernel, MergedInjectedI64KeyOpsDriveGenericRobinHoodUpsert) {
+    using namespace NQumir;
+
+    NAst::TStructType input({{"key", std::make_shared<NAst::TIntegerType>()}});
+    auto key = NQqb::NKernel::BuildAggregateKeyDescriptor(input, {"key"});
+    auto keyOps = NQqb::NKernel::GenKeyOperationFunDecls(key);
+    ASSERT_EQ(keyOps.size(), 2u);
+    auto robinHood = NQqb::NKernel::ParseFunctionLibrary(ReadKernel("robin_hood_generic.oz"));
+    ASSERT_TRUE(robinHood) << robinHood.error().ToString();
+
+    constexpr const char* entrySource = R"(
+(block
+  (fun aggregation_generic_upsert_i64 ((var keys <ptr i64>)
+                                       (var dist <ptr i64>)
+                                       (var slot_ids <ptr i64>)
+                                       (var capacity i64)
+                                       (var size <ptr i64>)
+                                       (var key i64)
+                                       (var out_is_new <ptr i64>)) -> i64
+    (block
+      (return (call rh_upsert keys dist slot_ids capacity size key out_is_new)))))
+)";
+    auto entry = NQqb::NKernel::ParseFunctionLibrary(entrySource);
+    ASSERT_TRUE(entry) << entry.error().ToString();
+    ASSERT_EQ(entry->size(), 1u);
+
+    std::vector<NAst::TExprPtr> library;
+    library.insert(library.end(), keyOps.begin(), keyOps.end());
+    library.insert(library.end(), robinHood->begin(), robinHood->end());
+    auto program = NQqb::NKernel::MergeKernelLibrary(std::move(library), entry->front());
+
+    TLLVMRunnerOptions options;
+    options.CoreInput = true;
+    options.NativeCode = true;
+    options.AllowOverloads = true;
+    TLLVMRunner runner(options);
+    std::string error;
+    void* fn = runner.CompileKernelAst(program, &error);
+    ASSERT_NE(fn, nullptr) << error;
+
+    using TUpsertFn = int64_t(*)(
+        int64_t*, int64_t*, int64_t*, int64_t, int64_t*, int64_t, int64_t*);
+    auto upsert = reinterpret_cast<TUpsertFn>(fn);
+    constexpr int64_t capacity = 8;
+    std::array<int64_t, capacity> keys{};
+    std::array<int64_t, capacity> dist{};
+    std::array<int64_t, capacity> slotIds{};
+    dist.fill(-1);
+    slotIds.fill(-1);
+    int64_t size = 0;
+    int64_t isNew = -1;
+
+    EXPECT_EQ(upsert(keys.data(), dist.data(), slotIds.data(), capacity,
+                     &size, 10, &isNew), 0);
+    EXPECT_EQ(isNew, 1);
+    EXPECT_EQ(size, 1);
+    EXPECT_EQ(upsert(keys.data(), dist.data(), slotIds.data(), capacity,
+                     &size, 20, &isNew), 1);
+    EXPECT_EQ(isNew, 1);
+    EXPECT_EQ(upsert(keys.data(), dist.data(), slotIds.data(), capacity,
+                     &size, 10, &isNew), 0);
+    EXPECT_EQ(isNew, 0);
+    EXPECT_EQ(size, 2);
+}
+
+TEST(AggregationKernel, MergedInjectedI64KeyOpsDriveGenericRobinHoodRehash) {
+    using namespace NQumir;
+
+    NAst::TStructType input({{"key", std::make_shared<NAst::TIntegerType>()}});
+    auto key = NQqb::NKernel::BuildAggregateKeyDescriptor(input, {"key"});
+    auto keyOps = NQqb::NKernel::GenKeyOperationFunDecls(key);
+    ASSERT_EQ(keyOps.size(), 2u);
+    auto robinHood = NQqb::NKernel::ParseFunctionLibrary(
+        ReadKernel("robin_hood_rehash_generic.oz"));
+    ASSERT_TRUE(robinHood) << robinHood.error().ToString();
+
+    constexpr const char* entrySource = R"(
+(block
+  (fun aggregation_generic_rehash_i64 ((var old_keys <ptr i64>)
+                                       (var old_dist <ptr i64>)
+                                       (var old_slot_ids <ptr i64>)
+                                       (var old_capacity i64)
+                                       (var new_keys <ptr i64>)
+                                       (var new_dist <ptr i64>)
+                                       (var new_slot_ids <ptr i64>)
+                                       (var new_capacity i64)) -> bool
+    (block
+      (return (call rh_rehash_into old_keys old_dist old_slot_ids old_capacity
+                                   new_keys new_dist new_slot_ids new_capacity)))))
+)";
+    auto entry = NQqb::NKernel::ParseFunctionLibrary(entrySource);
+    ASSERT_TRUE(entry) << entry.error().ToString();
+    ASSERT_EQ(entry->size(), 1u);
+
+    std::vector<NAst::TExprPtr> library;
+    library.insert(library.end(), keyOps.begin(), keyOps.end());
+    library.insert(library.end(), robinHood->begin(), robinHood->end());
+    auto program = NQqb::NKernel::MergeKernelLibrary(std::move(library), entry->front());
+
+    TLLVMRunnerOptions options;
+    options.CoreInput = true;
+    options.NativeCode = true;
+    options.AllowOverloads = true;
+    TLLVMRunner runner(options);
+    std::string error;
+    void* fn = runner.CompileKernelAst(program, &error);
+    ASSERT_NE(fn, nullptr) << error;
+
+    using TRehashFn = bool(*)(
+        int64_t*, int64_t*, int64_t*, int64_t,
+        int64_t*, int64_t*, int64_t*, int64_t);
+    auto rehash = reinterpret_cast<TRehashFn>(fn);
+
+    constexpr int64_t oldCapacity = 8;
+    constexpr int64_t newCapacity = 16;
+    std::array<int64_t, oldCapacity> oldKeys{};
+    std::array<int64_t, oldCapacity> oldDist{};
+    std::array<int64_t, oldCapacity> oldSlotIds{};
+    oldDist.fill(-1);
+    oldSlotIds.fill(-1);
+
+    // Three occupied consecutive slots model a valid collision chain. Rehash
+    // must preserve the dense ids even though physical slots can change.
+    oldKeys[2] = 10;
+    oldDist[2] = 0;
+    oldSlotIds[2] = 4;
+    oldKeys[3] = 20;
+    oldDist[3] = 1;
+    oldSlotIds[3] = 1;
+    oldKeys[4] = 30;
+    oldDist[4] = 2;
+    oldSlotIds[4] = 7;
+
+    std::array<int64_t, newCapacity> newKeys{};
+    std::array<int64_t, newCapacity> newDist{};
+    std::array<int64_t, newCapacity> newSlotIds{};
+    ASSERT_TRUE(rehash(oldKeys.data(), oldDist.data(), oldSlotIds.data(), oldCapacity,
+                       newKeys.data(), newDist.data(), newSlotIds.data(), newCapacity));
+
+    std::array<bool, 3> found{};
+    for (int64_t slot = 0; slot < newCapacity; ++slot) {
+        if (newDist[slot] == -1) {
+            continue;
+        }
+        if (newKeys[slot] == 10) {
+            EXPECT_EQ(newSlotIds[slot], 4);
+            found[0] = true;
+        } else if (newKeys[slot] == 20) {
+            EXPECT_EQ(newSlotIds[slot], 1);
+            found[1] = true;
+        } else if (newKeys[slot] == 30) {
+            EXPECT_EQ(newSlotIds[slot], 7);
+            found[2] = true;
+        } else {
+            ADD_FAILURE() << "unexpected key after rehash: " << newKeys[slot];
+        }
+    }
+    EXPECT_TRUE(found[0]);
+    EXPECT_TRUE(found[1]);
+    EXPECT_TRUE(found[2]);
+}
+
+TEST(AggregationKernel, OpaqueByteKeyStorageIsCastOnlyInsideGenericTableAst) {
+    using namespace NQumir;
+
+    NAst::TStructType input({{"key", std::make_shared<NAst::TIntegerType>()}});
+    auto key = NQqb::NKernel::BuildAggregateKeyDescriptor(input, {"key"});
+    auto keyOps = NQqb::NKernel::GenKeyOperationFunDecls(key);
+    auto robinHood = NQqb::NKernel::ParseFunctionLibrary(ReadKernel("robin_hood_generic.oz"));
+    ASSERT_TRUE(robinHood) << robinHood.error().ToString();
+    auto table = NQqb::NKernel::ParseFunctionLibrary(
+        ReadKernel("aggregation_table_generic.oz"));
+    ASSERT_TRUE(table) << table.error().ToString();
+
+    constexpr const char* entrySource = R"(
+(block
+  (fun aggregation_byte_storage_i64 ((var key_bytes <ptr i8>)
+                                     (var dist <ptr i64>)
+                                     (var slot_ids <ptr i64>)
+                                     (var capacity i64)
+                                     (var size <ptr i64>)
+                                     (var key i64)
+                                     (var out_is_new <ptr i64>)) -> i64
+    (block
+      (return (call agg_upsert_key_bytes key_bytes dist slot_ids capacity size
+                                         key out_is_new)))))
+)";
+    auto entry = NQqb::NKernel::ParseFunctionLibrary(entrySource);
+    ASSERT_TRUE(entry) << entry.error().ToString();
+
+    std::vector<NAst::TExprPtr> library;
+    library.insert(library.end(), keyOps.begin(), keyOps.end());
+    library.insert(library.end(), robinHood->begin(), robinHood->end());
+    library.insert(library.end(), table->begin(), table->end());
+    auto program = NQqb::NKernel::MergeKernelLibrary(std::move(library), entry->front());
+
+    TLLVMRunnerOptions options;
+    options.CoreInput = true;
+    options.NativeCode = true;
+    options.AllowOverloads = true;
+    TLLVMRunner runner(options);
+    std::string error;
+    void* fn = runner.CompileKernelAst(program, &error);
+    ASSERT_NE(fn, nullptr) << error;
+
+    using TUpsertFn = int64_t(*)(
+        int8_t*, int64_t*, int64_t*, int64_t, int64_t*, int64_t, int64_t*);
+    auto upsert = reinterpret_cast<TUpsertFn>(fn);
+    constexpr int64_t capacity = 8;
+    std::array<int8_t, capacity * sizeof(int64_t)> keyBytes{};
+    std::array<int64_t, capacity> dist{};
+    std::array<int64_t, capacity> slotIds{};
+    dist.fill(-1);
+    slotIds.fill(-1);
+    int64_t size = 0;
+    int64_t isNew = -1;
+
+    EXPECT_EQ(upsert(keyBytes.data(), dist.data(), slotIds.data(), capacity,
+                     &size, 42, &isNew), 0);
+    EXPECT_EQ(isNew, 1);
+    EXPECT_EQ(upsert(keyBytes.data(), dist.data(), slotIds.data(), capacity,
+                     &size, 42, &isNew), 0);
+    EXPECT_EQ(isNew, 0);
+    EXPECT_EQ(size, 1);
+
+    bool found = false;
+    for (int64_t slot = 0; slot < capacity; ++slot) {
+        if (dist[slot] == -1) {
+            continue;
+        }
+        int64_t stored = 0;
+        std::memcpy(&stored, keyBytes.data() + slot * sizeof(stored), sizeof(stored));
+        EXPECT_EQ(stored, 42);
+        EXPECT_EQ(slotIds[slot], 0);
+        found = true;
+    }
+    EXPECT_TRUE(found);
 }
 
 TEST(AggregationKernel, GenericKeyEqualityDispatchesToI64Overload) {

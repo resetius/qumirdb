@@ -1,4 +1,5 @@
 #include <qdb/kernel/compiler.h>
+#include <qdb/kernel/aggregate_key.h>
 #include <qdb/kernel/gen.h>
 #include <qdb/kernel/lib.h>
 #include <qdb/modules/qumirdb.h>
@@ -73,12 +74,6 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
 {
     using namespace NQumir::NAst;
 
-    if (groupKeys.size() != 1) {
-        throw NQumir::TError(
-            "CompileAggregate: Stage 1 supports exactly one group key, got " +
-            std::to_string(groupKeys.size()));
-    }
-
     auto fieldType = [&](const std::string& name) -> TTypePtr {
         for (const auto& [n, t] : inputType.Fields) {
             if (n == name) {
@@ -99,10 +94,13 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
         return intType && intType.Cast()->Kind == TIntegerType::I64;
     };
 
-    const std::string& keyField = groupKeys[0];
-    if (!isI64(requireField(keyField))) {
-        throw NQumir::TError("CompileAggregate: group key '" + keyField + "' must be i64 (Stage 1)");
+    const auto keyDescriptor = NKernel::BuildAggregateKeyDescriptor(inputType, groupKeys);
+    if (!keyDescriptor.IsScalar() || !isI64(keyDescriptor.KeyType)) {
+        throw NQumir::TError(
+            "CompileAggregate: generic key storage is not connected yet; "
+            "the compatibility path requires one i64 group key");
     }
+    const std::string& keyField = keyDescriptor.Fields.front().ColumnName;
 
     std::vector<std::string> funcs;
     funcs.reserve(aggs.size());
