@@ -5,12 +5,16 @@
 
 #include <qdb/exec/aggregate_exec.h>
 #include <qdb/exec/executor.h>
+#include <qdb/exec/planner.h>
 #include <qdb/io/io.h>
 #include <qdb/kernel/compiler.h>
 #include <qdb/kernel/gen.h>
 #include <qdb/kernel/lib.h>
 #include <qdb/modules/qumirdb.h>
 #include <qdb/ops/aggregate.h>
+#include <qdb/ops/source.h>
+#include <qdb/pipeline/column_pruning.h>
+#include <qdb/pipeline/typing.h>
 
 #include <algorithm>
 #include <array>
@@ -2025,6 +2029,132 @@ TEST(AggregationExec, RuntimeAggregateMultiBatchGrowAndCollisions) {
 
     NQqb::TRowSet second{};
     EXPECT_FALSE(agg.Next(second));
+}
+
+// L5: TPhysicalPlanner::Build wires TAggregateOperator (after AnnotateTypes +
+// ApplyColumnPruning) onto TRuntimeSource + TRuntimeAggregate, over an
+// in-memory ISource with multiple batches.
+TEST(AggregationExec, PlannerBuildsAggregateOverSource) {
+    using namespace NQumir::NAst;
+    NQumir::TLocation loc{};
+
+    std::vector<int64_t> keys = {1, 2, 1, 3, 2, 1, 4, 4};
+    std::vector<int64_t> vals = {10, 20, 5, 7, -3, 9, 100, -100};
+
+    class TVectorSource : public NQqb::ISource {
+    public:
+        TVectorSource(std::vector<std::string> names, std::vector<NQqb::TRowSet> batches)
+            : Names_(std::move(names))
+            , Batches_(std::move(batches))
+        {
+            for (auto& name : Names_) {
+                Cols_.push_back({name, std::make_shared<TIntegerType>()});
+            }
+            Schema_ = NQqb::TSchema{Cols_};
+        }
+
+        const NQqb::TSchema& Schema() const override { return Schema_; }
+
+        bool Next(NQqb::TRowSet& rowSet) override {
+            if (Index_ >= Batches_.size()) {
+                return false;
+            }
+            rowSet = Batches_[Index_++];
+            return true;
+        }
+
+    private:
+        std::vector<std::string> Names_;
+        std::vector<NQqb::TColumnSchema> Cols_;
+        NQqb::TSchema Schema_;
+        std::vector<NQqb::TRowSet> Batches_;
+        size_t Index_ = 0;
+    };
+
+    // 2 batches of 4 rows each; key=4 appears only in the second batch.
+    constexpr size_t batchSize = 4;
+    std::vector<std::vector<NQqb::TColumn>> batchColumns(2);
+    std::vector<NQqb::TRowSet> batches;
+    for (size_t b = 0; b < 2; ++b) {
+        batchColumns[b] = {
+            NQqb::TColumn{.Data = reinterpret_cast<char*>(keys.data() + b * batchSize)},
+            NQqb::TColumn{.Data = reinterpret_cast<char*>(vals.data() + b * batchSize)},
+        };
+        batches.push_back(NQqb::TRowSet{
+            .Columns = batchColumns[b].data(),
+            .ColumnCount = 2,
+            .RowCount = static_cast<int64_t>(batchSize),
+            .Selection = nullptr,
+            .Destroy = nullptr,
+            .Private = nullptr,
+            .RefCount = 1,
+        });
+    }
+
+    TVectorSource source({"k", "v"}, std::move(batches));
+    auto sourceOp = std::make_shared<NQqb::TSourceOperator>(source);
+
+    std::vector<NQqb::TAggregateSpec> aggs = {
+        {"c", "count", nullptr},
+        {"s", "sum", std::make_shared<TIdentExpr>(loc, "v")},
+        {"mn", "min", std::make_shared<TIdentExpr>(loc, "v")},
+        {"mx", "max", std::make_shared<TIdentExpr>(loc, "v")},
+    };
+    auto aggOp = std::make_shared<NQqb::TAggregateOperator>(sourceOp, std::vector<std::string>{"k"}, aggs);
+
+    NQqb::AnnotateTypes(aggOp);
+    NQqb::ApplyColumnPruning(aggOp);
+
+    NQqb::TPhysicalPlanner planner;
+    auto runtime = planner.Build(aggOp);
+
+    struct TGroupStats {
+        int64_t Count = 0;
+        int64_t Sum = 0;
+        int64_t Min = 0;
+        int64_t Max = 0;
+        bool Seen = false;
+    };
+    std::unordered_map<int64_t, TGroupStats> reference;
+    for (size_t i = 0; i < keys.size(); ++i) {
+        auto& group = reference[keys[i]];
+        if (!group.Seen) {
+            group.Min = vals[i];
+            group.Max = vals[i];
+            group.Seen = true;
+        } else {
+            group.Min = std::min(group.Min, vals[i]);
+            group.Max = std::max(group.Max, vals[i]);
+        }
+        group.Count += 1;
+        group.Sum += vals[i];
+    }
+
+    NQqb::TRowSet result{};
+    ASSERT_TRUE(runtime->Next(result));
+    ASSERT_EQ(result.ColumnCount, static_cast<int64_t>(1 + aggs.size()));
+    ASSERT_EQ(result.RowCount, static_cast<int64_t>(reference.size()));
+
+    auto* outKeys = reinterpret_cast<int64_t*>(result.Columns[0].Data);
+    auto* outCounts = reinterpret_cast<int64_t*>(result.Columns[1].Data);
+    auto* outSums = reinterpret_cast<int64_t*>(result.Columns[2].Data);
+    auto* outMins = reinterpret_cast<int64_t*>(result.Columns[3].Data);
+    auto* outMaxs = reinterpret_cast<int64_t*>(result.Columns[4].Data);
+
+    for (int64_t i = 0; i < result.RowCount; ++i) {
+        const int64_t key = outKeys[i];
+        auto it = reference.find(key);
+        ASSERT_NE(it, reference.end()) << "unexpected key " << key;
+        EXPECT_EQ(outCounts[i], it->second.Count) << "key " << key;
+        EXPECT_EQ(outSums[i], it->second.Sum) << "key " << key;
+        EXPECT_EQ(outMins[i], it->second.Min) << "key " << key;
+        EXPECT_EQ(outMaxs[i], it->second.Max) << "key " << key;
+    }
+
+    NQqb::Release(&result);
+
+    NQqb::TRowSet second{};
+    EXPECT_FALSE(runtime->Next(second));
 }
 
 int main(int argc, char** argv) {

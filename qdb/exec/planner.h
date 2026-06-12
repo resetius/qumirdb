@@ -11,9 +11,10 @@ namespace NQqb {
 // Compiles kernels (filter/project) to LLVM function pointers.
 //
 // Current status:
-//   - TSourceOperator  → TSourceExecutor  ✓
-//   - TFilterOperator  → TODO (kernel compilation pending)
-//   - TProjectOperator → column selection if exprs are identifiers, else TODO
+//   - TSourceOperator    → TRuntimeSource    ✓
+//   - TFilterOperator    → TRuntimeFilter    ✓
+//   - TProjectOperator   → column selection if exprs are identifiers, else TODO
+//   - TAggregateOperator → TRuntimeAggregate ✓
 class TPhysicalPlanner {
 public:
     std::unique_ptr<IRuntimeNode> Build(const TOperatorPtr& root);

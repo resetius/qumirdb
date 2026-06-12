@@ -1,7 +1,9 @@
 #include <qdb/exec/planner.h>
+#include <qdb/exec/aggregate_exec.h>
 #include <qdb/exec/filter_exec.h>
 #include <qdb/exec/project_exec.h>
 #include <qdb/exec/source_exec.h>
+#include <qdb/ops/aggregate.h>
 #include <qdb/ops/source.h>
 #include <qdb/ops/filter.h>
 #include <qdb/ops/project.h>
@@ -74,6 +76,27 @@ std::unique_ptr<IRuntimeNode> TPhysicalPlanner::Build(const TOperatorPtr& root) 
             std::move(input),
             project->OutputColumns(),
             std::move(columnIndices));
+    }
+
+    if (auto maybe = TMaybeOp<TAggregateOperator>(root)) {
+        auto agg = maybe.Cast();
+        auto input = Build(agg->Input());
+        auto* inputType = static_cast<NQumir::NAst::TStructType*>(input->OutputType().get());
+        if (!inputType) {
+            throw std::runtime_error("aggregate input must have TStructType");
+        }
+
+        TKernelCompiler compiler;
+        auto kernels = compiler.CompileAggregate(*inputType, agg->GroupKeys(), agg->Aggs());
+
+        // Output type from the physical (pruned) input type, not the logical
+        // OutputColumns() (which was computed from the pre-pruning schema).
+        auto outputType = ComputeAggregateOutputType(input->OutputType(), agg->GroupKeys(), agg->Aggs());
+
+        return std::make_unique<TRuntimeAggregate>(
+            std::move(input),
+            std::move(outputType),
+            std::move(kernels));
     }
 
     throw std::runtime_error("TPhysicalPlanner: unknown operator");
