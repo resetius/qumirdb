@@ -78,6 +78,16 @@ TAggregateKeyDescriptor BuildAggregateKeyDescriptor(
     size_t offset = 0;
     size_t maxAlignment = 1;
     std::vector<std::pair<std::string, TTypePtr>> structFields;
+    size_t paddingIndex = 0;
+
+    auto addPadding = [&](size_t targetOffset) {
+        while (offset < targetOffset) {
+            structFields.emplace_back(
+                "__qdb_padding_" + std::to_string(paddingIndex++),
+                std::make_shared<TIntegerType>(TIntegerType::U8));
+            ++offset;
+        }
+    };
 
     for (const auto& key : groupKeys) {
         int32_t columnIndex = -1;
@@ -94,7 +104,7 @@ TAggregateKeyDescriptor BuildAggregateKeyDescriptor(
         }
 
         const auto layout = TypeLayout(type);
-        offset = AlignUp(offset, layout.Alignment);
+        addPadding(AlignUp(offset, layout.Alignment));
         result.Fields.push_back({
             .ColumnName = key,
             .ColumnIndex = columnIndex,
@@ -110,6 +120,9 @@ TAggregateKeyDescriptor BuildAggregateKeyDescriptor(
 
     result.Alignment = std::min<size_t>(maxAlignment, 8);
     result.Size = AlignUp(offset, result.Alignment);
+    if (!result.IsScalar()) {
+        addPadding(result.Size);
+    }
     result.TypeName = KeyTypeName(result.Fields);
     if (result.IsScalar()) {
         result.KeyType = result.Fields.front().Type;
