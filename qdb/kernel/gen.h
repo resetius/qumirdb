@@ -86,9 +86,9 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
     NQumir::NAst::TTypePtr rowSetType,
     NQumir::NAst::TTypePtr hashTableType);
 
-// Builds the current scalar finalize ABI and forwards it to generic
-// aht_finalize<Key>. Composite keys will replace the single typed output key
-// pointer with generated projection into one output column per key field.
+// Builds the byte-oriented finalize ABI. C++ supplies one opaque u8 destination
+// per logical key field; the generated wrapper casts each destination to its
+// concrete pointer type and projects dense AoS Key values into SoA columns.
 NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
     const TAggregateKeyDescriptor& key,
     NQumir::NAst::TTypePtr hashTableType);

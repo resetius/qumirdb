@@ -1621,7 +1621,7 @@ TEST(AggregationKernel, GenericProgramBuilderSupportsI32KeysThroughGrowAndFinali
     ASSERT_NE(finalizeEntry, nullptr) << error;
 
     using TDispatchFn = int64_t(*)(THashTable*, NQqb::TRowSet*, int64_t, int64_t);
-    using TFinalizeFn = int64_t(*)(THashTable*, int32_t*, int64_t**, int64_t);
+    using TFinalizeFn = int64_t(*)(THashTable*, void**, int64_t**, int64_t);
     auto dispatch = reinterpret_cast<TDispatchFn>(updateEntry);
     auto finalize = reinterpret_cast<TFinalizeFn>(finalizeEntry);
 
@@ -1663,9 +1663,10 @@ TEST(AggregationKernel, GenericProgramBuilderSupportsI32KeysThroughGrowAndFinali
     std::vector<int32_t> outputKeys(table.Size);
     std::vector<int64_t> outputSums(table.Size);
     std::vector<int64_t> outputCounts(table.Size);
+    void* outputKeyBuffers[] = {outputKeys.data()};
     int64_t* outputBuffers[] = {outputSums.data(), outputCounts.data()};
     ASSERT_EQ(finalize(
-        &table, outputKeys.data(), outputBuffers, outputKeys.size()), table.Size);
+        &table, outputKeyBuffers, outputBuffers, outputKeys.size()), table.Size);
     for (int64_t i = 0; i < table.Size; ++i) {
         auto it = expected.find(outputKeys[i]);
         ASSERT_NE(it, expected.end()) << "unexpected key " << outputKeys[i];
@@ -1722,6 +1723,133 @@ TEST(AggregationKernel, GeneratedStructKeyOperationsWalkFieldsRecursively) {
     EXPECT_EQ(hash({7, 11}), hash({7, 11}));
     EXPECT_NE(hash({7, 11}), hash({11, 7}));
     EXPECT_NE(hash({7, 11}), hash({7, 12}));
+}
+
+TEST(AggregationKernel, GenericProgramBuilderMaterializesCompositeKeysAndGrows) {
+    using namespace NQumir;
+    using namespace NQumir::NAst;
+
+    auto i64Type = std::make_shared<TIntegerType>();
+    TStructType inputType({
+        {"k1", i64Type}, {"k2", i64Type}, {"v", i64Type}});
+    auto key = NQqb::NKernel::BuildAggregateKeyDescriptor(
+        inputType, {"k1", "k2"});
+    ASSERT_FALSE(key.IsScalar());
+    ASSERT_EQ(key.Size, sizeof(TPairI64Key));
+
+    auto dbModule = std::make_shared<NQumir::NRegistry::QumirDbModule>();
+    TTypePtr columnType;
+    TTypePtr rowSetType;
+    TTypePtr hashTableType;
+    for (const auto& external : dbModule->ExternalTypes()) {
+        if (external.Name == "TColumn") columnType = external.Type;
+        else if (external.Name == "TRowSet") rowSetType = external.Type;
+        else if (external.Name == "HashTable") hashTableType = external.Type;
+    }
+
+    auto updateProgram = NQqb::NKernel::BuildGenericAggregateProgramAst(
+        inputType, key, std::string("v"), {"sum", "count"},
+        columnType, rowSetType, hashTableType);
+    ASSERT_TRUE(updateProgram.has_value()) << updateProgram.error().ToString();
+    auto finalizeProgram = NQqb::NKernel::BuildGenericAggregateFinalizeProgramAst(
+        key, hashTableType);
+    ASSERT_TRUE(finalizeProgram.has_value()) << finalizeProgram.error().ToString();
+
+    TLLVMRunnerOptions options;
+    options.CoreInput = true;
+    options.NativeCode = true;
+    options.AllowOverloads = true;
+    TLLVMRunner updateRunner(options);
+    updateRunner.RegisterModule(dbModule, true);
+    TLLVMRunner finalizeRunner(options);
+    finalizeRunner.RegisterModule(dbModule, true);
+    std::string error;
+    void* updateEntry = updateRunner.CompileKernelAst(
+        *updateProgram, "agg_dispatch", &error);
+    ASSERT_NE(updateEntry, nullptr) << error;
+    error.clear();
+    void* finalizeEntry = finalizeRunner.CompileKernelAst(
+        *finalizeProgram, "agg_finalize", &error);
+    ASSERT_NE(finalizeEntry, nullptr) << error;
+
+    using TDispatchFn = int64_t(*)(THashTable*, NQqb::TRowSet*, int64_t, int64_t);
+    using TFinalizeFn = int64_t(*)(THashTable*, void**, int64_t**, int64_t);
+    auto dispatch = reinterpret_cast<TDispatchFn>(updateEntry);
+    auto finalize = reinterpret_cast<TFinalizeFn>(finalizeEntry);
+    THashTable table;
+    ASSERT_NE(dispatch(&table, nullptr, 4, 0), 0);
+    EXPECT_EQ(table.KeySize, sizeof(TPairI64Key));
+
+    struct TExpectedState {
+        int64_t Sum = 0;
+        int64_t Count = 0;
+    };
+    struct TPairHash {
+        size_t operator()(const TPairI64Key& value) const {
+            return std::hash<int64_t>{}(value.First) ^
+                (std::hash<int64_t>{}(value.Second) << 1);
+        }
+    };
+    std::unordered_map<TPairI64Key, TExpectedState, TPairHash> expected;
+    auto runBatch = [&](std::vector<int64_t>& first,
+                        std::vector<int64_t>& second,
+                        std::vector<int64_t>& values,
+                        std::vector<uint8_t>* selection) {
+        NQqb::TColumn columns[3] = {};
+        columns[0].Data = reinterpret_cast<char*>(first.data());
+        columns[1].Data = reinterpret_cast<char*>(second.data());
+        columns[2].Data = reinterpret_cast<char*>(values.data());
+        NQqb::TRowSet batch{};
+        batch.Columns = columns;
+        batch.ColumnCount = 3;
+        batch.RowCount = static_cast<int64_t>(first.size());
+        batch.Selection = selection ? selection->data() : nullptr;
+        EXPECT_EQ(dispatch(&table, &batch, 0, 1), 0);
+        for (size_t i = 0; i < first.size(); ++i) {
+            if (selection && !(*selection)[i]) continue;
+            auto& state = expected[{first[i], second[i]}];
+            state.Sum += values[i];
+            state.Count += 1;
+        }
+    };
+
+    std::vector<int64_t> first1 = {1, 2, 1, 3, 4, 5};
+    std::vector<int64_t> second1 = {10, 20, 10, 30, 40, 50};
+    std::vector<int64_t> values1 = {5, 7, 11, 13, 17, 19};
+    std::vector<uint8_t> selection1 = {1, 0, 1, 1, 0, 1};
+    runBatch(first1, second1, values1, &selection1);
+
+    std::vector<int64_t> first2 = {2, 6, 3, 7, 8, 1};
+    std::vector<int64_t> second2 = {20, 60, 30, 70, 80, 11};
+    std::vector<int64_t> values2 = {3, 23, -2, 29, 31, 37};
+    runBatch(first2, second2, values2, nullptr);
+
+    ASSERT_EQ(table.Size, static_cast<int64_t>(expected.size()));
+    ASSERT_GE(table.Capacity, 16);
+    auto* groupKeys = reinterpret_cast<const TPairI64Key*>(table.GroupKeys);
+    for (int64_t dense = 0; dense < table.Size; ++dense) {
+        auto it = expected.find(groupKeys[dense]);
+        ASSERT_NE(it, expected.end());
+        EXPECT_EQ(table.AggBuffers[0][dense], it->second.Sum);
+        EXPECT_EQ(table.AggBuffers[1][dense], it->second.Count);
+    }
+
+    std::vector<int64_t> outputFirst(table.Size);
+    std::vector<int64_t> outputSecond(table.Size);
+    std::vector<int64_t> outputSums(table.Size);
+    std::vector<int64_t> outputCounts(table.Size);
+    void* outputKeyBuffers[] = {outputFirst.data(), outputSecond.data()};
+    int64_t* outputBuffers[] = {outputSums.data(), outputCounts.data()};
+    ASSERT_EQ(finalize(
+        &table, outputKeyBuffers, outputBuffers, table.Size), table.Size);
+    for (int64_t dense = 0; dense < table.Size; ++dense) {
+        auto it = expected.find({outputFirst[dense], outputSecond[dense]});
+        ASSERT_NE(it, expected.end());
+        EXPECT_EQ(outputSums[dense], it->second.Sum);
+        EXPECT_EQ(outputCounts[dense], it->second.Count);
+    }
+
+    EXPECT_EQ(dispatch(&table, nullptr, 0, 2), 1);
 }
 
 TEST(AggregationKernel, GenericKeyEqualityDispatchesToI64Overload) {
@@ -3155,7 +3283,8 @@ TEST(AggregationCompiler, CompileAggregateDispatchAndFinalize) {
     std::array<int64_t*, 4> outputBuffers{
         outputCounts.data(), outputSums.data(), outputMins.data(), outputMaxs.data()};
 
-    EXPECT_EQ(kernels.Finalize(ht, outputKeys.data(), outputBuffers.data(), 3), 3);
+    std::array<void*, 1> outputKeyBuffers{outputKeys.data()};
+    EXPECT_EQ(kernels.Finalize(ht, outputKeyBuffers.data(), outputBuffers.data(), 3), 3);
 
     struct TGroupStats {
         int64_t Count = 0;

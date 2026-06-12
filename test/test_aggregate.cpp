@@ -29,7 +29,7 @@ using namespace NQumir::NAst;
 
 namespace {
 
-// In-memory ISource over pre-built TRowSet batches, schema {k: i64, v: i64}.
+// In-memory ISource over pre-built TRowSet batches.
 struct TVectorSource : ISource {
     std::vector<std::string> Names;
     std::vector<TColumnSchema> Cols;
@@ -37,12 +37,22 @@ struct TVectorSource : ISource {
     std::vector<TRowSet> Batches;
     size_t Index = 0;
 
-    TVectorSource(std::vector<std::string> names, std::vector<TRowSet> batches)
+    TVectorSource(
+        std::vector<std::string> names,
+        std::vector<TRowSet> batches,
+        std::vector<TTypePtr> types = {})
         : Names(std::move(names))
         , Batches(std::move(batches))
     {
-        for (auto& name : Names) {
-            Cols.push_back({name, std::make_shared<TIntegerType>(TIntegerType::I64)});
+        if (types.empty()) {
+            types.resize(Names.size(),
+                std::make_shared<TIntegerType>(TIntegerType::I64));
+        }
+        if (types.size() != Names.size()) {
+            throw std::invalid_argument("TVectorSource names/types size mismatch");
+        }
+        for (size_t i = 0; i < Names.size(); ++i) {
+            Cols.push_back({Names[i], std::move(types[i])});
         }
         Schema_ = TSchema{Cols};
     }
@@ -222,6 +232,129 @@ TEST(AggregateE2E, SingleGroup) {
 
     TRowSet second{};
     EXPECT_FALSE(runtime->Next(second));
+}
+
+TEST(AggregateE2E, CompositeIntegerKeysProduceSeparateColumns) {
+    struct TPair {
+        int64_t First;
+        int64_t Second;
+
+        bool operator==(const TPair&) const = default;
+    };
+    struct TPairHash {
+        size_t operator()(const TPair& value) const {
+            return std::hash<int64_t>{}(value.First) ^
+                (std::hash<int64_t>{}(value.Second) << 1);
+        }
+    };
+
+    std::vector<int64_t> first = {
+        1, 2, 1, 3, 4, 5, 2, 6, 3, 7, 8, 1};
+    std::vector<int64_t> second = {
+        10, 20, 10, 30, 40, 50, 20, 60, 30, 70, 80, 11};
+    std::vector<int64_t> values = {
+        5, 7, 11, 13, 17, 19, 3, 23, -2, 29, 31, 37};
+
+    constexpr size_t batchSize = 6;
+    std::vector<std::vector<TColumn>> batchColumns(2);
+    std::vector<TRowSet> batches;
+    for (size_t b = 0; b < 2; ++b) {
+        batchColumns[b] = {
+            TColumn{.Data = reinterpret_cast<char*>(first.data() + b * batchSize)},
+            TColumn{.Data = reinterpret_cast<char*>(second.data() + b * batchSize)},
+            TColumn{.Data = reinterpret_cast<char*>(values.data() + b * batchSize)},
+        };
+        batches.push_back(TRowSet{
+            .Columns = batchColumns[b].data(),
+            .ColumnCount = 3,
+            .RowCount = static_cast<int64_t>(batchSize),
+            .Selection = nullptr,
+            .Destroy = nullptr,
+            .Private = nullptr,
+            .RefCount = 1,
+        });
+    }
+
+    TVectorSource source({"k1", "k2", "v"}, std::move(batches));
+    auto root = ParsePlan(
+        "(rel aggregate (rel source \"data.parquet\") (keys k1 k2) "
+        "(agg c count) (agg s sum v))",
+        source);
+    TPhysicalPlanner planner;
+    auto runtime = planner.Build(root);
+
+    std::unordered_map<TPair, std::pair<int64_t, int64_t>, TPairHash> reference;
+    for (size_t i = 0; i < first.size(); ++i) {
+        auto& state = reference[{first[i], second[i]}];
+        state.first += 1;
+        state.second += values[i];
+    }
+
+    TRowSet result{};
+    ASSERT_TRUE(runtime->Next(result));
+    ASSERT_EQ(result.ColumnCount, 4); // k1, k2, count, sum
+    ASSERT_EQ(result.RowCount, static_cast<int64_t>(reference.size()));
+    auto* outFirst = reinterpret_cast<int64_t*>(result.Columns[0].Data);
+    auto* outSecond = reinterpret_cast<int64_t*>(result.Columns[1].Data);
+    auto* outCounts = reinterpret_cast<int64_t*>(result.Columns[2].Data);
+    auto* outSums = reinterpret_cast<int64_t*>(result.Columns[3].Data);
+    for (int64_t i = 0; i < result.RowCount; ++i) {
+        auto it = reference.find({outFirst[i], outSecond[i]});
+        ASSERT_NE(it, reference.end());
+        EXPECT_EQ(outCounts[i], it->second.first);
+        EXPECT_EQ(outSums[i], it->second.second);
+    }
+    Release(&result);
+}
+
+TEST(AggregateE2E, ScalarI32KeyPreservesTypedOutput) {
+    std::vector<int32_t> keys = {-1, 2, -1, 3, 4, 5, 2, 6, 3, 7, 8, -1};
+    std::vector<int64_t> values = {5, 7, 11, 13, 17, 19, 3, 23, -2, 29, 31, 37};
+    std::vector<TColumn> columns = {
+        TColumn{.Data = reinterpret_cast<char*>(keys.data())},
+        TColumn{.Data = reinterpret_cast<char*>(values.data())},
+    };
+    std::vector<TRowSet> batches = {TRowSet{
+        .Columns = columns.data(),
+        .ColumnCount = 2,
+        .RowCount = static_cast<int64_t>(keys.size()),
+        .Selection = nullptr,
+        .Destroy = nullptr,
+        .Private = nullptr,
+        .RefCount = 1,
+    }};
+    TVectorSource source(
+        {"k", "v"}, std::move(batches),
+        {std::make_shared<TIntegerType>(TIntegerType::I32),
+         std::make_shared<TIntegerType>(TIntegerType::I64)});
+    auto root = ParsePlan(
+        "(rel aggregate (rel source \"data.parquet\") (keys k) "
+        "(agg c count) (agg s sum v))",
+        source);
+    TPhysicalPlanner planner;
+    auto runtime = planner.Build(root);
+
+    std::unordered_map<int32_t, std::pair<int64_t, int64_t>> reference;
+    for (size_t i = 0; i < keys.size(); ++i) {
+        auto& state = reference[keys[i]];
+        state.first += 1;
+        state.second += values[i];
+    }
+
+    TRowSet result{};
+    ASSERT_TRUE(runtime->Next(result));
+    ASSERT_EQ(result.ColumnCount, 3);
+    ASSERT_EQ(result.RowCount, static_cast<int64_t>(reference.size()));
+    auto* outKeys = reinterpret_cast<int32_t*>(result.Columns[0].Data);
+    auto* outCounts = reinterpret_cast<int64_t*>(result.Columns[1].Data);
+    auto* outSums = reinterpret_cast<int64_t*>(result.Columns[2].Data);
+    for (int64_t i = 0; i < result.RowCount; ++i) {
+        auto it = reference.find(outKeys[i]);
+        ASSERT_NE(it, reference.end());
+        EXPECT_EQ(outCounts[i], it->second.first);
+        EXPECT_EQ(outSums[i], it->second.second);
+    }
+    Release(&result);
 }
 
 int main(int argc, char** argv) {

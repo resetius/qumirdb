@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 
@@ -33,7 +34,19 @@ constexpr int64_t kOpUpdate = 1;
 constexpr int64_t kOpDestroy = 2;
 
 struct TAggregateRowSetData {
-    std::vector<uint8_t> Keys;
+    struct TAlignedByteBuffer {
+        void Resize(size_t byteSize) {
+            Words.resize((byteSize + sizeof(uint64_t) - 1) / sizeof(uint64_t));
+        }
+
+        void* Data() {
+            return Words.data();
+        }
+
+        std::vector<uint64_t> Words;
+    };
+
+    std::vector<TAlignedByteBuffer> Keys;
     std::vector<std::vector<int64_t>> AggBuffers;
     std::vector<TColumn> Columns;
 };
@@ -71,7 +84,12 @@ bool TRuntimeAggregate::Next(TRowSet& rowSet) {
     const int64_t size = reinterpret_cast<THashTable*>(ht.data())->Size;
 
     auto* data = new TAggregateRowSetData;
-    data->Keys.resize(size * Kernels_.KeySize);
+    data->Keys.resize(Kernels_.OutputKeys.size());
+    std::vector<void*> outputKeyBuffers(Kernels_.OutputKeys.size());
+    for (size_t i = 0; i < Kernels_.OutputKeys.size(); ++i) {
+        data->Keys[i].Resize(size * Kernels_.OutputKeys[i].Size);
+        outputKeyBuffers[i] = data->Keys[i].Data();
+    }
     data->AggBuffers.resize(Kernels_.NumAggs);
     std::vector<int64_t*> outputBuffers(Kernels_.NumAggs);
     for (size_t i = 0; i < Kernels_.NumAggs; ++i) {
@@ -79,11 +97,18 @@ bool TRuntimeAggregate::Next(TRowSet& rowSet) {
         outputBuffers[i] = data->AggBuffers[i].data();
     }
 
-    Kernels_.Finalize(ht.data(), data->Keys.data(), outputBuffers.data(), size);
+    const int64_t finalized = Kernels_.Finalize(
+        ht.data(), outputKeyBuffers.data(), outputBuffers.data(), size);
     Kernels_.Dispatch(ht.data(), nullptr, 0, kOpDestroy);
+    if (finalized != size) {
+        delete data;
+        throw std::runtime_error("aggregate finalize returned an unexpected row count");
+    }
 
-    data->Columns.reserve(1 + Kernels_.NumAggs);
-    data->Columns.push_back(TColumn{.Data = reinterpret_cast<char*>(data->Keys.data())});
+    data->Columns.reserve(Kernels_.OutputKeys.size() + Kernels_.NumAggs);
+    for (auto& buffer : data->Keys) {
+        data->Columns.push_back(TColumn{.Data = reinterpret_cast<char*>(buffer.Data())});
+    }
     for (auto& buffer : data->AggBuffers) {
         data->Columns.push_back(TColumn{.Data = reinterpret_cast<char*>(buffer.data())});
     }

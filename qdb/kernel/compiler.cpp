@@ -113,16 +113,13 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
         }
         return type;
     };
-    auto isI64 = [](const TTypePtr& type) {
-        auto intType = TMaybeType<TIntegerType>(type);
-        return intType && intType.Cast()->Kind == TIntegerType::I64;
-    };
-
     const auto keyDescriptor = NKernel::BuildAggregateKeyDescriptor(inputType, groupKeys);
-    if (!keyDescriptor.IsScalar() ||
-        !TMaybeType<TIntegerType>(UnwrapNamedType(keyDescriptor.KeyType))) {
-        throw NQumir::TError(
-            "CompileAggregate: one scalar integer group key is required");
+    for (const auto& field : keyDescriptor.Fields) {
+        if (!TMaybeType<TIntegerType>(UnwrapNamedType(field.Type))) {
+            throw NQumir::TError(
+                "CompileAggregate: group key column '" + field.ColumnName +
+                "' must be integer (Stage 1)");
+        }
     }
     std::vector<std::string> funcs;
     funcs.reserve(aggs.size());
@@ -205,16 +202,19 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
     }
 
     using TDispatchFn = int64_t(*)(void*, TRowSet*, int64_t, int64_t);
-    using TFinalizeFn = int64_t(*)(void*, void*, int64_t**, int64_t);
+    using TFinalizeFn = int64_t(*)(void*, void**, int64_t**, int64_t);
 
     TAggregateKernels kernels;
     kernels.NumAggs = funcs.size();
-    kernels.KeySize = keyDescriptor.Size;
+    kernels.OutputKeys.reserve(keyDescriptor.Fields.size());
+    for (const auto& field : keyDescriptor.Fields) {
+        kernels.OutputKeys.push_back({field.Size, field.Alignment});
+    }
     kernels.Dispatch = [dispatchFn, dispatchRunner](void* ht, TRowSet* batch, int64_t arg, int64_t op) {
         return reinterpret_cast<TDispatchFn>(dispatchFn)(ht, batch, arg, op);
     };
-    kernels.Finalize = [finalizeFn, finalizeRunner](void* ht, void* outputKeys, int64_t** outputBuffers, int64_t outputCapacity) {
-        return reinterpret_cast<TFinalizeFn>(finalizeFn)(ht, outputKeys, outputBuffers, outputCapacity);
+    kernels.Finalize = [finalizeFn, finalizeRunner](void* ht, void** outputKeyBuffers, int64_t** outputBuffers, int64_t outputCapacity) {
+        return reinterpret_cast<TFinalizeFn>(finalizeFn)(ht, outputKeyBuffers, outputBuffers, outputCapacity);
     };
     return kernels;
 }
