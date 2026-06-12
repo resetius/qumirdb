@@ -11,6 +11,11 @@
 namespace NQqb {
 namespace NKernel {
 
+// Reads an aggregation kernel source file (qdb/kernel/aggregation/<name>),
+// resolved relative to this source file's location so it works regardless
+// of the caller's current working directory.
+std::string ReadAggregationKernel(const std::string& name);
+
 // Parses `source` as a top-level (block (fun ...) ...) and returns its
 // FunDecl statements, in order, skipping any whose Name is in `exclude`.
 // The result is unresolved/unannotated, like GenFilterKernelAst's output:

@@ -9,6 +9,11 @@
 namespace NQqb {
 namespace NKernel {
 
+const std::unordered_set<std::string> kCountOzFixedFuncs = {
+    "agg_count_step", "agg_sum_i64_step", "agg_min_i64_step", "agg_max_i64_step",
+    "count_init", "count_rehash", "count_update", "count_destroy",
+    "aggregate_batch", "aggregation_count"};
+
 void SubstFieldsInPlace(
     NQumir::NAst::TExprPtr& expr,
     const std::unordered_set<std::string>& fieldNames,
@@ -134,6 +139,7 @@ NQumir::NAst::TExprPtr GenAggregateKernelAst(
     const std::unordered_map<std::string, int32_t>& fieldIndices,
     const std::string& keyField,
     const std::optional<std::string>& argField,
+    size_t numAggs,
     NQumir::NAst::TTypePtr columnType,
     NQumir::NAst::TTypePtr rowSetType,
     NQumir::NAst::TTypePtr hashTableType)
@@ -255,7 +261,7 @@ NQumir::NAst::TExprPtr GenAggregateKernelAst(
 
     auto processRow = block({
         assign("value", valueExpr),
-        assign("dense_slot", call("count_update", {
+        assign("dense_slot", call("agg_update", {
             ident("ht"),
             std::make_shared<TIndexExpr>(loc, ident("keys"), ident("i")),
             ident("value"),
@@ -273,11 +279,13 @@ NQumir::NAst::TExprPtr GenAggregateKernelAst(
     auto updateBranch = block(std::move(updateStmts));
 
     // ---- op == 0: init ----
-    auto initBranch = castTo(call("count_init", {ident("ht"), ident("arg")}), i64Type);
+    auto initBranch = castTo(call("agg_init", {
+        ident("ht"), ident("arg"), numI64(static_cast<int64_t>(numAggs)),
+    }), i64Type);
 
     // ---- otherwise: destroy ----
     auto destroyBranch = block({
-        call("count_destroy", {ident("ht")}),
+        call("agg_destroy", {ident("ht")}),
         numI64(1),
     });
 
