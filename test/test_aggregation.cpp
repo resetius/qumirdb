@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -722,6 +723,20 @@ TEST(AggregationKeyDescriptor, BuildsScalarAndCompositeFixedWidthLayouts) {
     ASSERT_EQ(pairStruct.Cast()->Fields.size(), 2u);
     EXPECT_EQ(pairStruct.Cast()->Fields[0].first, "key_0");
     EXPECT_EQ(pairStruct.Cast()->Fields[1].first, "key_1");
+
+    auto mixed = NQqb::NKernel::BuildAggregateKeyDescriptor(input, {"code", "score"});
+    EXPECT_EQ(mixed.Fields[0].Offset, 0);
+    EXPECT_EQ(mixed.Fields[1].Offset, 8);
+    EXPECT_EQ(mixed.Size, 16);
+    auto mixedNamed = TMaybeType<TNamedType>(mixed.KeyType);
+    ASSERT_TRUE(mixedNamed);
+    auto mixedStruct = TMaybeType<TStructType>(mixedNamed.Cast()->UnderlyingType);
+    ASSERT_TRUE(mixedStruct);
+    ASSERT_EQ(mixedStruct.Cast()->Fields.size(), 6u);
+    EXPECT_EQ(mixedStruct.Cast()->Fields[0].first, "key_0");
+    EXPECT_EQ(mixedStruct.Cast()->Fields[1].first, "__qdb_padding_0");
+    EXPECT_EQ(mixedStruct.Cast()->Fields[4].first, "__qdb_padding_3");
+    EXPECT_EQ(mixedStruct.Cast()->Fields[5].first, "key_1");
 
     auto padded = NQqb::NKernel::BuildAggregateKeyDescriptor(input, {"small", "id"});
     EXPECT_EQ(padded.Fields[0].Offset, 0);
@@ -1723,6 +1738,52 @@ TEST(AggregationKernel, GeneratedStructKeyOperationsWalkFieldsRecursively) {
     EXPECT_EQ(hash({7, 11}), hash({7, 11}));
     EXPECT_NE(hash({7, 11}), hash({11, 7}));
     EXPECT_NE(hash({7, 11}), hash({7, 12}));
+}
+
+TEST(AggregationKernel, GeneratedF64KeyOperationsCanonicalizeZeroAndNaN) {
+    using namespace NQumir;
+    using namespace NQumir::NAst;
+
+    auto f64Type = std::make_shared<TFloatType>();
+    TStructType inputType({{"key", f64Type}});
+    auto key = NQqb::NKernel::BuildAggregateKeyDescriptor(inputType, {"key"});
+
+    auto compileEntry = [&](const std::string& entryName,
+                            std::unique_ptr<TLLVMRunner>& runner,
+                            std::string& error) -> void* {
+        auto operations = NQqb::NKernel::GenKeyOperationFunDecls(key);
+        auto program = std::make_shared<TBlockExpr>(TLocation{}, std::move(operations));
+        TLLVMRunnerOptions options;
+        options.CoreInput = true;
+        options.NativeCode = true;
+        options.AllowOverloads = true;
+        runner = std::make_unique<TLLVMRunner>(options);
+        runner->RegisterModule(
+            std::make_shared<NQumir::NRegistry::QumirDbModule>(), true);
+        return runner->CompileKernelAst(program, entryName, &error);
+    };
+
+    std::string error;
+    std::unique_ptr<TLLVMRunner> hashRunner;
+    void* hashEntry = compileEntry("rh_hash", hashRunner, error);
+    ASSERT_NE(hashEntry, nullptr) << error;
+    error.clear();
+    std::unique_ptr<TLLVMRunner> equalRunner;
+    void* equalEntry = compileEntry("rh_key_equal", equalRunner, error);
+    ASSERT_NE(equalEntry, nullptr) << error;
+
+    auto hash = reinterpret_cast<int64_t(*)(double)>(hashEntry);
+    auto equal = reinterpret_cast<bool(*)(double, double)>(equalEntry);
+    const double nan1 = std::numeric_limits<double>::quiet_NaN();
+    const double nan2 = std::bit_cast<double>(UINT64_C(0x7ff0000000000001));
+
+    EXPECT_TRUE(equal(0.0, -0.0));
+    EXPECT_EQ(hash(0.0), hash(-0.0));
+    EXPECT_TRUE(equal(nan1, nan2));
+    EXPECT_EQ(hash(nan1), hash(nan2));
+    EXPECT_FALSE(equal(nan1, 1.0));
+    EXPECT_FALSE(equal(1.0, 2.0));
+    EXPECT_NE(hash(1.0), hash(2.0));
 }
 
 TEST(AggregationKernel, GenericProgramBuilderMaterializesCompositeKeysAndGrows) {

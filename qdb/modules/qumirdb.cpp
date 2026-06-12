@@ -5,6 +5,8 @@
 #include <qumir/parser/ast.h>
 #include <qumir/parser/operator.h>
 
+#include <bit>
+
 namespace NQumir {
 namespace NRegistry {
 
@@ -39,6 +41,8 @@ QumirDbModule::QumirDbModule() {
     auto i8Type = std::make_shared<TIntegerType>(TIntegerType::I8);
     auto i32Type = std::make_shared<TIntegerType>(TIntegerType::I32);
     auto i64Type = std::make_shared<TIntegerType>();
+    auto u64Type = std::make_shared<TIntegerType>(TIntegerType::U64);
+    auto f64Type = std::make_shared<TFloatType>();
     auto u8Type = std::make_shared<TIntegerType>(TIntegerType::U8);
     auto voidPtrType = std::make_shared<TPointerType>(i64Type);
     auto ptrU8Type = std::make_shared<TPointerType>(u8Type);
@@ -199,6 +203,16 @@ QumirDbModule::QumirDbModule() {
             },
             .ArgTypes = { ptrI8Type },
             .ReturnType = std::make_shared<TVoidType>(),
+        },
+        {
+            .Name = "qdb_f64_bits",
+            .MangledName = "qdb_f64_bits",
+            .Ptr = reinterpret_cast<void*>(static_cast<uint64_t(*)(double)>(qdb_f64_bits)),
+            .Packed = +[](const uint64_t* args, size_t) -> uint64_t {
+                return qdb_f64_bits(std::bit_cast<double>(args[0]));
+            },
+            .ArgTypes = {f64Type},
+            .ReturnType = u64Type,
         },
     };
 }

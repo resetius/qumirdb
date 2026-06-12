@@ -73,7 +73,7 @@ public:
     // grouped by `groupKeys`, over rows of `inputType`.
     //
     // Stage 1 constraints (NQumir::TError thrown if violated):
-    // - one or more fixed-width integer group keys;
+    // - one or more fixed-width integer/f64 group keys;
     // - agg.Func in {count, sum, min, max};
     // - every agg with Arg references the same single integer column (Stage 1:
     //   one shared value column and i64 reducer state for all aggregates); count(*) aggs

@@ -115,10 +115,11 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
     };
     const auto keyDescriptor = NKernel::BuildAggregateKeyDescriptor(inputType, groupKeys);
     for (const auto& field : keyDescriptor.Fields) {
-        if (!TMaybeType<TIntegerType>(UnwrapNamedType(field.Type))) {
+        const auto type = UnwrapNamedType(field.Type);
+        if (!TMaybeType<TIntegerType>(type) && !TMaybeType<TFloatType>(type)) {
             throw NQumir::TError(
                 "CompileAggregate: group key column '" + field.ColumnName +
-                "' must be integer (Stage 1)");
+                "' must be integer or f64 (Stage 1)");
         }
     }
     std::vector<std::string> funcs;
