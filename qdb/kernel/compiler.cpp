@@ -95,10 +95,10 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
     };
 
     const auto keyDescriptor = NKernel::BuildAggregateKeyDescriptor(inputType, groupKeys);
-    if (!keyDescriptor.IsScalar() || !isI64(keyDescriptor.KeyType)) {
+    if (!keyDescriptor.IsScalar() ||
+        !TMaybeType<TIntegerType>(UnwrapNamedType(keyDescriptor.KeyType))) {
         throw NQumir::TError(
-            "CompileAggregate: generic key storage is not connected yet; "
-            "the compatibility path requires one i64 group key");
+            "CompileAggregate: one scalar integer group key is required");
     }
     std::vector<std::string> funcs;
     funcs.reserve(aggs.size());
@@ -123,8 +123,11 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
             argField = name;
         }
     }
-    if (argField && !isI64(requireField(*argField))) {
-        throw NQumir::TError("CompileAggregate: aggregate argument column '" + *argField + "' must be i64 (Stage 1)");
+    if (argField &&
+        !TMaybeType<TIntegerType>(UnwrapNamedType(requireField(*argField)))) {
+        throw NQumir::TError(
+            "CompileAggregate: aggregate argument column '" + *argField +
+            "' must be integer (Stage 1)");
     }
 
     auto dbModule = std::make_shared<NQumir::NRegistry::QumirDbModule>();
@@ -173,14 +176,15 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
     }
 
     using TDispatchFn = int64_t(*)(void*, TRowSet*, int64_t, int64_t);
-    using TFinalizeFn = int64_t(*)(void*, int64_t*, int64_t**, int64_t);
+    using TFinalizeFn = int64_t(*)(void*, void*, int64_t**, int64_t);
 
     TAggregateKernels kernels;
     kernels.NumAggs = funcs.size();
+    kernels.KeySize = keyDescriptor.Size;
     kernels.Dispatch = [dispatchFn, dispatchRunner](void* ht, TRowSet* batch, int64_t arg, int64_t op) {
         return reinterpret_cast<TDispatchFn>(dispatchFn)(ht, batch, arg, op);
     };
-    kernels.Finalize = [finalizeFn, finalizeRunner](void* ht, int64_t* outputKeys, int64_t** outputBuffers, int64_t outputCapacity) {
+    kernels.Finalize = [finalizeFn, finalizeRunner](void* ht, void* outputKeys, int64_t** outputBuffers, int64_t outputCapacity) {
         return reinterpret_cast<TFinalizeFn>(finalizeFn)(ht, outputKeys, outputBuffers, outputCapacity);
     };
     return kernels;

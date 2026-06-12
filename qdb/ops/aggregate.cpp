@@ -32,10 +32,12 @@ TTypePtr AggResultType(const std::string& func, const TTypePtr& argType) {
     if (func == "count") {
         return std::make_shared<TIntegerType>(); // i64
     }
-    if (func == "sum" && argType && argType->TypeName() == TIntegerType::TypeId) {
-        return std::make_shared<TIntegerType>(); // sum of integers promotes to i64
+    if (argType && argType->TypeName() == TIntegerType::TypeId) {
+        // Current reducers and aggregate buffers use i64 state for every
+        // integer aggregate, including min/max over narrow integer inputs.
+        return std::make_shared<TIntegerType>();
     }
-    // sum (non-integer) / min / max: result has the same type as the argument.
+    // Non-integer reducers are not connected yet; preserve the declared type.
     return argType;
 }
 

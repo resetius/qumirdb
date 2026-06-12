@@ -24,12 +24,13 @@ namespace NQqb {
 // modules/qumirdb.cpp).
 using TAggregateDispatch = std::function<int64_t(void* ht, TRowSet* batch, int64_t arg, int64_t op)>;
 
-// agg_finalize(ref HashTable ht, <ptr i64> outputKeys, <ptr <ptr i64>>
+// agg_finalize(ref HashTable ht, <ptr Key> outputKeys, <ptr <ptr i64>>
 // outputBuffers, i64 outputCapacity) -> i64. outputBuffers must have NumAggs
 // entries, each pointing to an int64_t[outputCapacity] buffer, in the same
 // order as the `aggs` passed to CompileAggregate. Returns ht.Size (number of
-// groups), or -1 if outputCapacity < ht.Size.
-using TAggregateFinalize = std::function<int64_t(void* ht, int64_t* outputKeys, int64_t** outputBuffers, int64_t outputCapacity)>;
+// groups), or -1 if outputCapacity < ht.Size. C++ owns outputKeys as an opaque
+// byte buffer; the generated wrapper supplies the concrete <ptr Key> type.
+using TAggregateFinalize = std::function<int64_t(void* ht, void* outputKeys, int64_t** outputBuffers, int64_t outputCapacity)>;
 
 // The compiled kernels for one Aggregation query: Dispatch handles
 // init/update/destroy of the HashTable (via agg_dispatch's op-codes),
@@ -38,6 +39,7 @@ struct TAggregateKernels {
     TAggregateDispatch Dispatch;
     TAggregateFinalize Finalize;
     size_t NumAggs = 0;
+    size_t KeySize = 0;
 };
 
 // Compiles qumir core-lang kernel sources to LLVM JIT function pointers.
@@ -61,11 +63,11 @@ public:
     // grouped by `groupKeys`, over rows of `inputType`.
     //
     // Stage 1 constraints (NQumir::TError thrown if violated):
-    // - exactly one group key, of type i64 (until generated key operations and
-    //   output projection are implemented for the remaining descriptor types);
+    // - exactly one scalar integer group key (composite materialization and
+    //   output projection are implemented separately);
     // - agg.Func in {count, sum, min, max};
-    // - every agg with Arg references the same single i64 column (Stage 1:
-    //   one shared value column for all aggregates); count(*) aggs
+    // - every agg with Arg references the same single integer column (Stage 1:
+    //   one shared value column and i64 reducer state for all aggregates); count(*) aggs
     //   (Arg == nullptr) pass a constant 0 instead.
     TAggregateKernels CompileAggregate(
         const NQumir::NAst::TStructType& inputType,
