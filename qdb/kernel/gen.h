@@ -12,6 +12,15 @@
 namespace NQqb {
 namespace NKernel {
 
+// count.oz's fixed-NumAggs=4 functions and old op-coded entry points
+// (count_init/count_rehash/count_update/count_destroy/agg_*_step/
+// aggregate_batch/aggregation_count). Excluding these from count.oz keeps
+// rh_hash_i64/count_lookup/count_insert_existing (shared) plus the
+// NumAggs-generic agg_init/agg_rehash/agg_update/agg_destroy (L2b-2) — the
+// library that GenAggregateKernelAst's agg_dispatch (L2c) must be merged
+// with.
+extern const std::unordered_set<std::string> kCountOzFixedFuncs;
+
 void SubstFieldsInPlace(
     NQumir::NAst::TExprPtr& expr,
     const std::unordered_set<std::string>& fieldNames,
@@ -28,18 +37,26 @@ NQumir::NAst::TExprPtr GenFilterKernelAst(
 
 // Builds an op-dispatched aggregation update kernel:
 //   agg_dispatch(ref HashTable ht, ref TRowSet batch, i64 arg, i64 op) -> i64
-// op == 0: count_init(ht, arg)              (init, capacity = arg)
-// op == 1: for each selected row in batch, count_update(ht, key, value)
+// op == 0: agg_init(ht, arg, numAggs)       (init, capacity = arg)
+// op == 1: for each selected row in batch, agg_update(ht, key, value)
 //          (value = the argField column, or constant 0 if argField is unset)
-// otherwise: count_destroy(ht)
+// otherwise: agg_destroy(ht)
 // keyField and argField (if set) must name i64 columns (Stage 1: integer
 // keys/args only); fieldIndices maps their names to TRowSet.Columns indices.
-// The result calls count_init/count_update/count_destroy, so it must be
-// merged with count.oz's FunDecls (see MergeKernelLibrary) before compiling.
+// numAggs is the query's aggregate count, baked into the agg_init call.
+// The result calls agg_init/agg_update/agg_destroy (L2b's NumAggs-generic
+// table, which itself calls agg_apply_reducers), so it must be merged (see
+// MergeKernelLibrary) with count.oz's NumAggs-generic FunDecls and with
+// reduce_0..reduce_{numAggs-1}/agg_apply_reducers (GenReducerFunDecls/
+// GenApplyReducersFunDecl) before compiling. The reducers and
+// agg_apply_reducers must precede agg_update in the merged Stmts order
+// (type annotation is a single forward pass — see PLAN_AGGREGATION.md's
+// L2b-2 notes).
 NQumir::NAst::TExprPtr GenAggregateKernelAst(
     const std::unordered_map<std::string, int32_t>& fieldIndices,
     const std::string& keyField,
     const std::optional<std::string>& argField,
+    size_t numAggs,
     NQumir::NAst::TTypePtr columnType,
     NQumir::NAst::TTypePtr rowSetType,
     NQumir::NAst::TTypePtr hashTableType);

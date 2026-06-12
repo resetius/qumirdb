@@ -4,9 +4,11 @@
 #include <qumir/runner/runner_llvm.h>
 
 #include <qdb/io/io.h>
+#include <qdb/kernel/compiler.h>
 #include <qdb/kernel/gen.h>
 #include <qdb/kernel/lib.h>
 #include <qdb/modules/qumirdb.h>
+#include <qdb/ops/aggregate.h>
 
 #include <algorithm>
 #include <array>
@@ -84,12 +86,15 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileKernel(
     return runner;
 }
 
-// Builds agg_dispatch (L2's GenAggregateKernelAst) merged with count.oz's
-// library (L1's MergeKernelLibrary) and compiles it via CompileKernelAst.
+// Builds agg_dispatch (L2c's GenAggregateKernelAst, numAggs = funcs.size())
+// merged with reduce_0..reduce_{N-1}/agg_apply_reducers (L2a/L2b-1, generated
+// for `funcs`) and count.oz's NumAggs-generic agg_init/agg_rehash/agg_update/
+// agg_destroy library (L2b-2), then compiles via CompileKernelAst.
 std::unique_ptr<NQumir::TLLVMRunner> CompileAggregateDispatch(
     const std::unordered_map<std::string, int32_t>& fieldIndices,
     const std::string& keyField,
     const std::optional<std::string>& argField,
+    const std::vector<std::string>& funcs,
     void*& entry,
     std::string& error)
 {
@@ -104,15 +109,13 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileAggregateDispatch(
     }
 
     auto entryAst = NQqb::NKernel::GenAggregateKernelAst(
-        fieldIndices, keyField, argField, columnType, rowSetType, hashTableType);
+        fieldIndices, keyField, argField, funcs.size(), columnType, rowSetType, hashTableType);
     auto entryFun = TMaybeNode<TBlockExpr>(entryAst).Cast()->Stmts.front();
 
-    auto countExclude = kAggTableGenericFuncs;
-    countExclude.insert({"aggregate_batch", "aggregation_count"});
-    auto library = NQqb::NKernel::ParseFunctionLibrary(
-        ReadKernel("count.oz"), countExclude);
-    if (!library) {
-        throw std::runtime_error("count.oz: " + library.error().ToString());
+    auto countLib = NQqb::NKernel::ParseFunctionLibrary(
+        ReadKernel("count.oz"), NQqb::NKernel::kCountOzFixedFuncs);
+    if (!countLib) {
+        throw std::runtime_error("count.oz: " + countLib.error().ToString());
     }
 
     NQumir::TLLVMRunnerOptions options;
@@ -123,7 +126,15 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileAggregateDispatch(
     auto runner = std::make_unique<NQumir::TLLVMRunner>(options);
     runner->RegisterModule(dbModule, true);
 
-    auto merged = NQqb::NKernel::MergeKernelLibrary(*library, std::move(entryFun));
+    // reduce_0..reduce_{N-1} and agg_apply_reducers must precede countLib's
+    // agg_update, which calls agg_apply_reducers (type annotation is a single
+    // in-order pass over the merged block: a callee's FunDecl must already be
+    // type-annotated before the caller that references it).
+    std::vector<TExprPtr> library = NQqb::NKernel::GenReducerFunDecls(funcs);
+    library.push_back(NQqb::NKernel::GenApplyReducersFunDecl(funcs.size()));
+    library.insert(library.end(), countLib->begin(), countLib->end());
+
+    auto merged = NQqb::NKernel::MergeKernelLibrary(std::move(library), std::move(entryFun));
     entry = runner->CompileKernelAst(merged, &error);
     return runner;
 }
@@ -285,10 +296,7 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileAggTableSmoke(
     std::string& error)
 {
     auto countLib = NQqb::NKernel::ParseFunctionLibrary(
-        ReadKernel("count.oz"),
-        {"agg_count_step", "agg_sum_i64_step", "agg_min_i64_step", "agg_max_i64_step",
-         "count_init", "count_rehash", "count_update", "count_destroy",
-         "aggregate_batch", "aggregation_count"});
+        ReadKernel("count.oz"), NQqb::NKernel::kCountOzFixedFuncs);
     if (!countLib) {
         throw std::runtime_error("count.oz: " + countLib.error().ToString());
     }
@@ -1345,7 +1353,8 @@ TEST(AggregationKernel, OzAggregateDispatchUpdatesHashTableFromRowSet) {
     std::unordered_map<std::string, int32_t> fieldIndices = {{"k", 0}, {"v", 1}};
     void* entry = nullptr;
     std::string error;
-    auto runner = CompileAggregateDispatch(fieldIndices, "k", std::string("v"), entry, error);
+    auto runner = CompileAggregateDispatch(
+        fieldIndices, "k", std::string("v"), {"count", "sum", "min", "max"}, entry, error);
     ASSERT_NE(entry, nullptr) << error;
 
     using TDispatchFn = int64_t(*)(THashTable*, NQqb::TRowSet*, int64_t, int64_t);
@@ -1436,7 +1445,8 @@ TEST(AggregationKernel, OzAggregateDispatchCountStarWithoutArgColumn) {
     std::unordered_map<std::string, int32_t> fieldIndices = {{"k", 0}};
     void* entry = nullptr;
     std::string error;
-    auto runner = CompileAggregateDispatch(fieldIndices, "k", std::nullopt, entry, error);
+    auto runner = CompileAggregateDispatch(
+        fieldIndices, "k", std::nullopt, {"count", "sum", "min", "max"}, entry, error);
     ASSERT_NE(entry, nullptr) << error;
 
     using TDispatchFn = int64_t(*)(THashTable*, NQqb::TRowSet*, int64_t, int64_t);
@@ -1474,6 +1484,74 @@ TEST(AggregationKernel, OzAggregateDispatchCountStarWithoutArgColumn) {
         EXPECT_EQ(table.AggBuffers[1][denseSlot], 0) << "sum, key " << key;
         EXPECT_EQ(table.AggBuffers[2][denseSlot], 0) << "min, key " << key;
         EXPECT_EQ(table.AggBuffers[3][denseSlot], 0) << "max, key " << key;
+    }
+
+    EXPECT_TRUE(dispatch(&table, nullptr, 0, 6));
+}
+
+TEST(AggregationKernel, OzAggregateDispatchHandlesNonDefaultAggregateSet) {
+    // N=2, non-default composition/order ({"sum","max"} instead of the usual
+    // {"count","sum","min","max"}): agg_dispatch (L2c) is built from
+    // GenAggregateKernelAst(..., numAggs=2, ...) merged with reduce_0=sum/
+    // reduce_1=max + agg_apply_reducers for exactly these two functions, so
+    // AggBuffers[0]/[1] hold per-group sum/max with no count/min slots.
+    std::unordered_map<std::string, int32_t> fieldIndices = {{"k", 0}, {"v", 1}};
+    void* entry = nullptr;
+    std::string error;
+    auto runner = CompileAggregateDispatch(
+        fieldIndices, "k", std::string("v"), {"sum", "max"}, entry, error);
+    ASSERT_NE(entry, nullptr) << error;
+
+    using TDispatchFn = int64_t(*)(THashTable*, NQqb::TRowSet*, int64_t, int64_t);
+    auto dispatch = reinterpret_cast<TDispatchFn>(entry);
+
+    THashTable table;
+    ASSERT_TRUE(dispatch(&table, nullptr, 4, 0));
+    EXPECT_EQ(table.NumAggs, 2);
+
+    struct TGroupStats {
+        int64_t Sum = 0;
+        int64_t Max = 0;
+        bool Seen = false;
+    };
+    std::unordered_map<int64_t, TGroupStats> reference;
+    auto accumulate = [&](int64_t key, int64_t value) {
+        auto& group = reference[key];
+        if (!group.Seen) {
+            group.Max = value;
+            group.Seen = true;
+        } else {
+            group.Max = std::max(group.Max, value);
+        }
+        group.Sum += value;
+    };
+
+    std::vector<int64_t> keys = {1, 2, 1, 3, 2, 1};
+    std::vector<int64_t> vals = {10, 20, 5, 7, -3, 9};
+    NQqb::TColumn cols[2] = {};
+    cols[0].Data = reinterpret_cast<char*>(keys.data());
+    cols[1].Data = reinterpret_cast<char*>(vals.data());
+    NQqb::TRowSet rowSet{};
+    rowSet.Columns = cols;
+    rowSet.ColumnCount = 2;
+    rowSet.RowCount = static_cast<int64_t>(keys.size());
+    rowSet.Selection = nullptr;
+
+    EXPECT_EQ(dispatch(&table, &rowSet, 0, 1), 0);
+    for (size_t i = 0; i < keys.size(); ++i) {
+        accumulate(keys[i], vals[i]);
+    }
+
+    ASSERT_EQ(table.Size, static_cast<int64_t>(reference.size()));
+    for (int64_t slot = 0; slot < table.Capacity; ++slot) {
+        if (table.Dist[slot] == -1) continue;
+        const int64_t key = table.Keys[slot];
+        const int64_t denseSlot = table.SlotId[slot];
+        auto it = reference.find(key);
+        ASSERT_NE(it, reference.end()) << "unexpected key " << key;
+        const auto& group = it->second;
+        EXPECT_EQ(table.AggBuffers[0][denseSlot], group.Sum) << "sum, key " << key;
+        EXPECT_EQ(table.AggBuffers[1][denseSlot], group.Max) << "max, key " << key;
     }
 
     EXPECT_TRUE(dispatch(&table, nullptr, 0, 6));
@@ -1710,6 +1788,95 @@ TEST(AggregationKernel, OzGenericAggTableHandlesSingleCountAggregate) {
 
     EXPECT_TRUE(smoke(&table, 0, 0, nullptr, nullptr, 0, 0, 0, /*op=destroy*/3));
     EXPECT_EQ(table.AggBuffers, nullptr);
+}
+
+// L3: TKernelCompiler::CompileAggregate over a synthetic TStructType, exercising
+// Dispatch (agg_dispatch, built from L2a+L2b+L2c generators) and Finalize
+// (agg_finalize, L2b-2) end to end with no planner/exec involved.
+TEST(AggregationCompiler, CompileAggregateDispatchAndFinalize) {
+    using namespace NQumir::NAst;
+    NQumir::TLocation loc{};
+
+    auto i64Type = std::make_shared<TIntegerType>();
+    TStructType inputType(std::vector<std::pair<std::string, TTypePtr>>{
+        {"k", i64Type},
+        {"v", i64Type},
+    });
+
+    std::vector<NQqb::TAggregateSpec> aggs = {
+        {"c", "count", nullptr},
+        {"s", "sum", std::make_shared<TIdentExpr>(loc, "v")},
+        {"mn", "min", std::make_shared<TIdentExpr>(loc, "v")},
+        {"mx", "max", std::make_shared<TIdentExpr>(loc, "v")},
+    };
+
+    NQqb::TKernelCompiler compiler;
+    auto kernels = compiler.CompileAggregate(inputType, {"k"}, aggs);
+    EXPECT_EQ(kernels.NumAggs, 4u);
+
+    std::array<uint8_t, NQqb::TKernelCompiler::kHashTableSize> htBuf{};
+    void* ht = htBuf.data();
+
+    ASSERT_TRUE(kernels.Dispatch(ht, nullptr, /*capacity=*/4, /*op=init*/0));
+
+    std::vector<int64_t> keys = {1, 2, 1, 3, 2, 1};
+    std::vector<int64_t> vals = {10, 20, 5, 7, -3, 9};
+    NQqb::TColumn cols[2] = {};
+    cols[0].Data = reinterpret_cast<char*>(keys.data());
+    cols[1].Data = reinterpret_cast<char*>(vals.data());
+    NQqb::TRowSet rowSet{};
+    rowSet.Columns = cols;
+    rowSet.ColumnCount = 2;
+    rowSet.RowCount = static_cast<int64_t>(keys.size());
+    rowSet.Selection = nullptr;
+
+    EXPECT_EQ(kernels.Dispatch(ht, &rowSet, 0, /*op=update*/1), 0);
+
+    auto* table = reinterpret_cast<THashTable*>(ht);
+    ASSERT_EQ(table->Size, 3);
+
+    std::array<int64_t, 3> outputKeys{};
+    std::array<int64_t, 3> outputCounts{};
+    std::array<int64_t, 3> outputSums{};
+    std::array<int64_t, 3> outputMins{};
+    std::array<int64_t, 3> outputMaxs{};
+    std::array<int64_t*, 4> outputBuffers{
+        outputCounts.data(), outputSums.data(), outputMins.data(), outputMaxs.data()};
+
+    EXPECT_EQ(kernels.Finalize(ht, outputKeys.data(), outputBuffers.data(), 3), 3);
+
+    struct TGroupStats {
+        int64_t Count = 0;
+        int64_t Sum = 0;
+        int64_t Min = 0;
+        int64_t Max = 0;
+        bool Seen = false;
+    };
+    std::unordered_map<int64_t, TGroupStats> reference;
+    for (size_t i = 0; i < keys.size(); ++i) {
+        auto& group = reference[keys[i]];
+        if (!group.Seen) {
+            group.Min = vals[i];
+            group.Max = vals[i];
+            group.Seen = true;
+        } else {
+            group.Min = std::min(group.Min, vals[i]);
+            group.Max = std::max(group.Max, vals[i]);
+        }
+        group.Count += 1;
+        group.Sum += vals[i];
+    }
+
+    for (size_t i = 0; i < outputKeys.size(); ++i) {
+        auto it = reference.find(outputKeys[i]);
+        ASSERT_NE(it, reference.end()) << "unexpected key " << outputKeys[i];
+        EXPECT_EQ(outputCounts[i], it->second.Count) << "key " << outputKeys[i];
+        EXPECT_EQ(outputSums[i], it->second.Sum) << "key " << outputKeys[i];
+        EXPECT_EQ(outputMins[i], it->second.Min) << "key " << outputKeys[i];
+        EXPECT_EQ(outputMaxs[i], it->second.Max) << "key " << outputKeys[i];
+    }
+
+    EXPECT_TRUE(kernels.Dispatch(ht, nullptr, 0, /*op=destroy*/6));
 }
 
 int main(int argc, char** argv) {
