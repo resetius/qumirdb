@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <ostream>
 #include <string>
 #include <vector>
 
@@ -45,6 +46,10 @@ struct TAggregateKernels {
 // Compiles qumir core-lang kernel sources to LLVM JIT function pointers.
 class TKernelCompiler {
 public:
+    explicit TKernelCompiler(std::ostream* diagnostics = nullptr)
+        : Diagnostics_(diagnostics)
+    {}
+
     // Filter dispatch: called per batch to fill the selection buffer.
     using TFilterDispatch = std::function<void(TRowSet& rowSet)>;
 
@@ -73,6 +78,9 @@ public:
         const NQumir::NAst::TStructType& inputType,
         const std::vector<std::string>& groupKeys,
         const std::vector<TAggregateSpec>& aggs);
+
+private:
+    std::ostream* Diagnostics_ = nullptr;
 };
 
 } // namespace NQqb

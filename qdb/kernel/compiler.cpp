@@ -14,6 +14,30 @@
 
 namespace NQqb {
 
+namespace {
+
+void PrintKernelAst(
+    std::ostream* out,
+    const std::string& nodeName,
+    const NQumir::NAst::TExprPtr& ast)
+{
+    if (!out) {
+        return;
+    }
+    *out << "\n========== RUNTIME NODE: " << nodeName << " ==========\n"
+         << "----- AST -----\n";
+    NQumir::NAst::NCore::PrintAst(*out, ast);
+    *out << "\n----- IR / LLVM -----\n";
+}
+
+void FinishKernelDiagnostics(std::ostream* out) {
+    if (out) {
+        *out << "========== END RUNTIME NODE ==========\n";
+    }
+}
+
+} // namespace
+
 TKernelCompiler::TFilterDispatch TKernelCompiler::CompileFilter(
     const NQumir::NAst::TStructType& inputType,
     const NQumir::NAst::TExprPtr& predicate)
@@ -44,15 +68,15 @@ TKernelCompiler::TFilterDispatch TKernelCompiler::CompileFilter(
     opts.ResolveCoreInput = true;
     opts.OptLevel = 3;
     opts.NativeCode = true;
-    opts.PrintAsm = true;
-    opts.PrintIr = true;
+    opts.PrintIr = Diagnostics_ != nullptr;
     auto runner = std::make_unique<NQumir::TLLVMRunner>(opts);
     runner->RegisterModule(dbModule, true);
 
-    NQumir::NAst::NCore::PrintAst(std::cerr, kernelAst);
+    PrintKernelAst(Diagnostics_, "filter", kernelAst);
 
     std::string err;
     void* fnPtr = runner->CompileKernelAst(std::move(kernelAst), &err);
+    FinishKernelDiagnostics(Diagnostics_);
     if (!fnPtr) {
         throw std::runtime_error("filter kernel compilation failed: " + err);
     }
@@ -142,6 +166,7 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
     options.CoreInput = true;
     options.NativeCode = true;
     options.AllowOverloads = true;
+    options.PrintIr = Diagnostics_ != nullptr;
 
     auto dispatchRunner = std::make_shared<NQumir::TLLVMRunner>(options);
     dispatchRunner->RegisterModule(dbModule, true);
@@ -153,9 +178,11 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
         throw NQumir::TError(
             "CompileAggregate: dispatch program: " + dispatchProgram.error().ToString());
     }
+    PrintKernelAst(Diagnostics_, "aggregate.update", *dispatchProgram);
     std::string error;
     void* dispatchFn = dispatchRunner->CompileKernelAst(
         std::move(*dispatchProgram), "agg_dispatch", &error);
+    FinishKernelDiagnostics(Diagnostics_);
     if (!dispatchFn) {
         throw std::runtime_error("CompileAggregate: agg_dispatch compilation failed: " + error);
     }
@@ -169,8 +196,10 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
         throw NQumir::TError(
             "CompileAggregate: finalize program: " + finalizeProgram.error().ToString());
     }
+    PrintKernelAst(Diagnostics_, "aggregate.finalize", *finalizeProgram);
     void* finalizeFn = finalizeRunner->CompileKernelAst(
         std::move(*finalizeProgram), "agg_finalize", &error);
+    FinishKernelDiagnostics(Diagnostics_);
     if (!finalizeFn) {
         throw std::runtime_error("CompileAggregate: agg_finalize compilation failed: " + error);
     }
