@@ -1786,6 +1786,87 @@ TEST(AggregationKernel, GeneratedF64KeyOperationsCanonicalizeZeroAndNaN) {
     EXPECT_NE(hash(1.0), hash(2.0));
 }
 
+TEST(AggregationKernel, GenericOzLibrariesSpecializeForKeyTypeMatrix) {
+    using namespace NQumir;
+    using namespace NQumir::NAst;
+
+    struct TCase {
+        std::string Name;
+        std::vector<std::pair<std::string, TTypePtr>> Fields;
+        std::vector<std::string> GroupKeys;
+        size_t ExpectedKeySize;
+    };
+
+    auto i32 = std::make_shared<TIntegerType>(TIntegerType::I32);
+    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
+    auto f64 = std::make_shared<TFloatType>();
+    const std::vector<TCase> cases = {
+        {"i32", {{"k", i32}, {"v", i64}}, {"k"}, 4},
+        {"i64", {{"k", i64}, {"v", i64}}, {"k"}, 8},
+        {"f64", {{"k", f64}, {"v", i64}}, {"k"}, 8},
+        {"i64_i64", {{"k1", i64}, {"k2", i64}, {"v", i64}},
+            {"k1", "k2"}, 16},
+        {"i64_f64", {{"k1", i64}, {"k2", f64}, {"v", i64}},
+            {"k1", "k2"}, 16},
+    };
+
+    auto dbModule = std::make_shared<NQumir::NRegistry::QumirDbModule>();
+    TTypePtr columnType;
+    TTypePtr rowSetType;
+    TTypePtr hashTableType;
+    for (const auto& external : dbModule->ExternalTypes()) {
+        if (external.Name == "TColumn") columnType = external.Type;
+        else if (external.Name == "TRowSet") rowSetType = external.Type;
+        else if (external.Name == "HashTable") hashTableType = external.Type;
+    }
+    ASSERT_NE(columnType, nullptr);
+    ASSERT_NE(rowSetType, nullptr);
+    ASSERT_NE(hashTableType, nullptr);
+
+    TLLVMRunnerOptions options;
+    options.CoreInput = true;
+    options.NativeCode = true;
+    options.AllowOverloads = true;
+    using TDispatchFn = int64_t(*)(THashTable*, NQqb::TRowSet*, int64_t, int64_t);
+
+    for (const auto& testCase : cases) {
+        SCOPED_TRACE(testCase.Name);
+        TStructType inputType(testCase.Fields);
+        auto key = NQqb::NKernel::BuildAggregateKeyDescriptor(
+            inputType, testCase.GroupKeys);
+        ASSERT_EQ(key.Size, testCase.ExpectedKeySize);
+
+        auto updateProgram = NQqb::NKernel::BuildGenericAggregateProgramAst(
+            inputType, key, std::string("v"), {"sum", "count"},
+            columnType, rowSetType, hashTableType);
+        ASSERT_TRUE(updateProgram.has_value())
+            << updateProgram.error().ToString();
+        auto finalizeProgram = NQqb::NKernel::BuildGenericAggregateFinalizeProgramAst(
+            key, hashTableType);
+        ASSERT_TRUE(finalizeProgram.has_value())
+            << finalizeProgram.error().ToString();
+
+        TLLVMRunner updateRunner(options);
+        updateRunner.RegisterModule(dbModule, true);
+        TLLVMRunner finalizeRunner(options);
+        finalizeRunner.RegisterModule(dbModule, true);
+        std::string error;
+        void* updateEntry = updateRunner.CompileKernelAst(
+            *updateProgram, "agg_dispatch", &error);
+        ASSERT_NE(updateEntry, nullptr) << error;
+        error.clear();
+        void* finalizeEntry = finalizeRunner.CompileKernelAst(
+            *finalizeProgram, "agg_finalize", &error);
+        ASSERT_NE(finalizeEntry, nullptr) << error;
+
+        auto dispatch = reinterpret_cast<TDispatchFn>(updateEntry);
+        THashTable table;
+        ASSERT_NE(dispatch(&table, nullptr, 4, 0), 0);
+        EXPECT_EQ(table.KeySize, static_cast<int64_t>(testCase.ExpectedKeySize));
+        EXPECT_EQ(dispatch(&table, nullptr, 0, 2), 1);
+    }
+}
+
 TEST(AggregationKernel, GenericProgramBuilderMaterializesCompositeKeysAndGrows) {
     using namespace NQumir;
     using namespace NQumir::NAst;
