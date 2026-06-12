@@ -515,16 +515,10 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
     using namespace NQumir::NAst;
     NQumir::TLocation loc{};
 
-    if (!key.IsScalar()) {
-        throw std::invalid_argument(
-            "GenGenericAggregateDispatchAst: composite keys are not implemented yet");
-    }
-
     auto i64Type = std::make_shared<TIntegerType>();
     auto u8Type = std::make_shared<TIntegerType>(TIntegerType::U8);
     auto boolType = std::make_shared<TBoolType>();
     auto ptrU8Type = std::make_shared<TPointerType>(u8Type);
-    auto ptrKeyType = std::make_shared<TPointerType>(key.KeyType);
     auto ptrI64Type = std::make_shared<TPointerType>(i64Type);
     TTypePtr valueType = i64Type;
 
@@ -594,8 +588,21 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
     update.push_back(assign("selection", field("batch", "Selection")));
     update.push_back(var("cols", ptrColumnType));
     update.push_back(assign("cols", field("batch", "Columns")));
-    update.push_back(var("keys", ptrKeyType));
-    update.push_back(assign("keys", columnData(key.Fields.front().ColumnIndex, ptrKeyType)));
+    if (key.IsScalar()) {
+        auto ptrKeyType = std::make_shared<TPointerType>(key.KeyType);
+        update.push_back(var("keys", ptrKeyType));
+        update.push_back(assign(
+            "keys", columnData(key.Fields.front().ColumnIndex, ptrKeyType)));
+    } else {
+        for (size_t fieldIndex = 0; fieldIndex < key.Fields.size(); ++fieldIndex) {
+            const auto& keyField = key.Fields[fieldIndex];
+            auto ptrFieldType = std::make_shared<TPointerType>(keyField.Type);
+            const std::string name = "key_column_" + std::to_string(fieldIndex);
+            update.push_back(var(name, ptrFieldType));
+            update.push_back(assign(
+                name, columnData(keyField.ColumnIndex, ptrFieldType)));
+        }
+    }
     if (argField) {
         auto arg = std::find_if(inputType.Fields.begin(), inputType.Fields.end(),
             [&](const auto& item) { return item.first == *argField; });
@@ -627,9 +634,25 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
     TExprPtr value = argField
         ? cast(std::make_shared<TIndexExpr>(loc, ident("values"), ident("i")), i64Type)
         : numI64(0);
+    TExprPtr keyValue;
+    if (key.IsScalar()) {
+        keyValue = std::make_shared<TIndexExpr>(
+            loc, ident("keys"), ident("i"));
+    } else {
+        std::vector<TExprPtr> fields;
+        fields.reserve(key.Fields.size());
+        for (size_t fieldIndex = 0; fieldIndex < key.Fields.size(); ++fieldIndex) {
+            fields.push_back(std::make_shared<TIndexExpr>(
+                loc,
+                ident("key_column_" + std::to_string(fieldIndex)),
+                ident("i")));
+        }
+        keyValue = std::make_shared<TStructConstructExpr>(
+            loc, key.KeyType, std::move(fields));
+    }
     auto updateCall = call("aht_update", {
         ident("ht"),
-        std::make_shared<TIndexExpr>(loc, ident("keys"), ident("i")),
+        std::move(keyValue),
         std::move(value),
     });
     auto process = block({assign("dense_slot", std::move(updateCall))});
@@ -664,13 +687,12 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
 {
     using namespace NQumir::NAst;
     NQumir::TLocation loc{};
-    if (!key.IsScalar()) {
-        throw std::invalid_argument(
-            "GenGenericAggregateFinalizeAst: composite keys are not implemented yet");
-    }
 
     auto i64Type = std::make_shared<TIntegerType>();
+    auto u8Type = std::make_shared<TIntegerType>(TIntegerType::U8);
     auto ptrKeyType = std::make_shared<TPointerType>(key.KeyType);
+    auto ptrU8Type = std::make_shared<TPointerType>(u8Type);
+    auto ptrPtrU8Type = std::make_shared<TPointerType>(ptrU8Type);
     auto ptrI64Type = std::make_shared<TPointerType>(i64Type);
     auto ptrPtrI64Type = std::make_shared<TPointerType>(ptrI64Type);
     auto hashTableRefType = std::make_shared<TReferenceType>(
@@ -681,17 +703,70 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
 
     std::vector<TParam> params = {
         std::make_shared<TVarStmt>(loc, "ht", hashTableRefType),
-        std::make_shared<TVarStmt>(loc, "output_keys", ptrKeyType),
+        std::make_shared<TVarStmt>(loc, "output_key_buffers", ptrPtrU8Type),
         std::make_shared<TVarStmt>(loc, "output_buffers", ptrPtrI64Type),
         std::make_shared<TVarStmt>(loc, "output_capacity", i64Type),
     };
-    auto call = std::make_shared<TCallExpr>(loc, ident("aht_finalize"),
+    auto stateCall = std::make_shared<TCallExpr>(loc, ident("aht_finalize_states"),
         std::vector<TExprPtr>{
-            ident("ht"), ident("output_keys"), ident("output_buffers"),
-            ident("output_capacity"),
+            ident("ht"), ident("output_buffers"), ident("output_capacity"),
         });
-    auto body = std::make_shared<TBlockExpr>(loc,
-        std::vector<TExprPtr>{std::make_shared<TReturnExpr>(loc, call)});
+
+    std::vector<TExprPtr> bodyStmts;
+    bodyStmts.push_back(std::make_shared<TVarStmt>(loc, "result", i64Type));
+    bodyStmts.push_back(std::make_shared<TAssignExpr>(loc, "result", stateCall));
+
+    std::vector<TExprPtr> project;
+    project.push_back(std::make_shared<TVarStmt>(loc, "group_keys", ptrKeyType));
+    project.push_back(std::make_shared<TAssignExpr>(loc, "group_keys",
+        std::make_shared<TCastExpr>(loc,
+            std::make_shared<TFieldAccessExpr>(loc, ident("ht"), "GroupKeys"),
+            ptrKeyType)));
+    for (size_t fieldIndex = 0; fieldIndex < key.Fields.size(); ++fieldIndex) {
+        const std::string name = "output_key_" + std::to_string(fieldIndex);
+        auto ptrFieldType = std::make_shared<TPointerType>(key.Fields[fieldIndex].Type);
+        project.push_back(std::make_shared<TVarStmt>(loc, name, ptrFieldType));
+        auto raw = std::make_shared<TIndexExpr>(
+            loc, ident("output_key_buffers"),
+            std::make_shared<TNumberExpr>(loc, static_cast<int64_t>(fieldIndex)));
+        project.push_back(std::make_shared<TAssignExpr>(loc, name,
+            std::make_shared<TCastExpr>(loc,
+                std::make_shared<TCastExpr>(loc, std::move(raw), i64Type),
+                ptrFieldType)));
+    }
+    project.push_back(std::make_shared<TVarStmt>(loc, "slot", i64Type));
+    project.push_back(std::make_shared<TAssignExpr>(
+        loc, "slot", std::make_shared<TNumberExpr>(loc, int64_t{0})));
+
+    std::vector<TExprPtr> loopStmts;
+    for (size_t fieldIndex = 0; fieldIndex < key.Fields.size(); ++fieldIndex) {
+        auto keyValue = std::make_shared<TIndexExpr>(
+            loc, ident("group_keys"), ident("slot"));
+        TExprPtr value;
+        if (key.IsScalar()) {
+            value = keyValue;
+        } else {
+            value = std::make_shared<TFieldAccessExpr>(
+                loc, keyValue, "key_" + std::to_string(fieldIndex));
+        }
+        loopStmts.push_back(std::make_shared<TArrayAssignExpr>(
+            loc, "output_key_" + std::to_string(fieldIndex),
+            std::vector<TExprPtr>{ident("slot")}, std::move(value)));
+    }
+    loopStmts.push_back(std::make_shared<TAssignExpr>(loc, "slot",
+        std::make_shared<TBinaryExpr>(loc, TOperator("+"), ident("slot"),
+            std::make_shared<TNumberExpr>(loc, int64_t{1}))));
+    project.push_back(std::make_shared<TWhileStmtExpr>(loc,
+        std::make_shared<TBinaryExpr>(loc, TOperator("<"),
+            ident("slot"), ident("result")),
+        std::make_shared<TBlockExpr>(loc, std::move(loopStmts))));
+
+    bodyStmts.push_back(std::make_shared<TIfExpr>(loc,
+        std::make_shared<TBinaryExpr>(loc, TOperator(">="), ident("result"),
+            std::make_shared<TNumberExpr>(loc, int64_t{0})),
+        std::make_shared<TBlockExpr>(loc, std::move(project)), nullptr));
+    bodyStmts.push_back(std::make_shared<TReturnExpr>(loc, ident("result")));
+    auto body = std::make_shared<TBlockExpr>(loc, std::move(bodyStmts));
     auto function = std::make_shared<TFunDecl>(
         loc, "agg_finalize", std::move(params), std::move(body), i64Type);
     return std::make_shared<TBlockExpr>(loc, std::vector<TExprPtr>{function});

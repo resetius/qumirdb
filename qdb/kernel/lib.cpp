@@ -120,10 +120,10 @@ BuildGenericAggregateFinalizeProgramAst(
     NQumir::NAst::TTypePtr hashTableType)
 {
     auto parsed = ParseFunctionLibrary(
-        ReadAggregationKernel("aggregation_finalize_generic.oz"));
+        ReadAggregationKernel("aggregation_finalize_states.oz"));
     if (!parsed) {
         return std::unexpected(NQumir::TError(
-            "aggregation_finalize_generic.oz: " + parsed.error().ToString()));
+            "aggregation_finalize_states.oz: " + parsed.error().ToString()));
     }
     auto entry = GenGenericAggregateFinalizeAst(key, std::move(hashTableType));
     auto block = NQumir::NAst::TMaybeNode<NQumir::NAst::TBlockExpr>(entry);
