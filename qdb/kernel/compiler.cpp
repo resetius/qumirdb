@@ -100,8 +100,6 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
             "CompileAggregate: generic key storage is not connected yet; "
             "the compatibility path requires one i64 group key");
     }
-    const std::string& keyField = keyDescriptor.Fields.front().ColumnName;
-
     std::vector<std::string> funcs;
     funcs.reserve(aggs.size());
     std::optional<std::string> argField;
@@ -129,11 +127,6 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
         throw NQumir::TError("CompileAggregate: aggregate argument column '" + *argField + "' must be i64 (Stage 1)");
     }
 
-    std::unordered_map<std::string, int32_t> fieldIndices;
-    for (int32_t i = 0; i < static_cast<int32_t>(inputType.Fields.size()); ++i) {
-        fieldIndices[inputType.Fields[i].first] = i;
-    }
-
     auto dbModule = std::make_shared<NQumir::NRegistry::QumirDbModule>();
     TTypePtr columnType, rowSetType, hashTableType;
     for (const auto& et : dbModule->ExternalTypes()) {
@@ -147,51 +140,34 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
     options.NativeCode = true;
     options.AllowOverloads = true;
 
-    // ---- Dispatch: agg_dispatch (L2c), merged with reduce_0..reduce_{N-1}/
-    // agg_apply_reducers (L2a/L2b-1, generated for `funcs`) and count.oz's
-    // NumAggs-generic agg_init/agg_rehash/agg_update/agg_destroy (L2b-2),
-    // with reducers/agg_apply_reducers preceding agg_update (ordering
-    // constraint: type annotation is a single in-order pass).
-    auto entryAst = NKernel::GenAggregateKernelAst(
-        fieldIndices, keyField, argField, funcs.size(), columnType, rowSetType, hashTableType);
-    auto dispatchEntry = TMaybeNode<TBlockExpr>(entryAst).Cast()->Stmts.front();
-
-    auto countLib = NKernel::ParseFunctionLibrary(
-        NKernel::ReadAggregationKernel("count.oz"), NKernel::kCountOzFixedFuncs);
-    if (!countLib) {
-        throw NQumir::TError("count.oz: " + countLib.error().ToString());
-    }
-
-    std::vector<TExprPtr> dispatchLib = NKernel::GenReducerFunDecls(funcs);
-    dispatchLib.push_back(NKernel::GenApplyReducersFunDecl(funcs.size()));
-    dispatchLib.insert(dispatchLib.end(), countLib->begin(), countLib->end());
-
     auto dispatchRunner = std::make_shared<NQumir::TLLVMRunner>(options);
     dispatchRunner->RegisterModule(dbModule, true);
 
-    auto dispatchMerged = NKernel::MergeKernelLibrary(std::move(dispatchLib), std::move(dispatchEntry));
+    auto dispatchProgram = NKernel::BuildGenericAggregateProgramAst(
+        inputType, keyDescriptor, argField, funcs,
+        columnType, rowSetType, hashTableType);
+    if (!dispatchProgram) {
+        throw NQumir::TError(
+            "CompileAggregate: dispatch program: " + dispatchProgram.error().ToString());
+    }
     std::string error;
-    void* dispatchFn = dispatchRunner->CompileKernelAst(std::move(dispatchMerged), &error);
+    void* dispatchFn = dispatchRunner->CompileKernelAst(
+        std::move(*dispatchProgram), "agg_dispatch", &error);
     if (!dispatchFn) {
         throw std::runtime_error("CompileAggregate: agg_dispatch compilation failed: " + error);
     }
 
-    // ---- Finalize: agg_finalize (L2b-2), self-contained (no reducers needed).
-    auto finalizeLib = NKernel::ParseFunctionLibrary(
-        NKernel::ReadAggregationKernel("finalize.oz"), {"aggregation_finalize"});
-    if (!finalizeLib) {
-        throw NQumir::TError("finalize.oz: " + finalizeLib.error().ToString());
-    }
-
-    auto finalizeFuncs = std::move(*finalizeLib);
-    auto finalizeEntry = std::move(finalizeFuncs.back());
-    finalizeFuncs.pop_back();
-
     auto finalizeRunner = std::make_shared<NQumir::TLLVMRunner>(options);
     finalizeRunner->RegisterModule(dbModule, true);
 
-    auto finalizeMerged = NKernel::MergeKernelLibrary(std::move(finalizeFuncs), std::move(finalizeEntry));
-    void* finalizeFn = finalizeRunner->CompileKernelAst(std::move(finalizeMerged), &error);
+    auto finalizeProgram = NKernel::BuildGenericAggregateFinalizeProgramAst(
+        keyDescriptor, hashTableType);
+    if (!finalizeProgram) {
+        throw NQumir::TError(
+            "CompileAggregate: finalize program: " + finalizeProgram.error().ToString());
+    }
+    void* finalizeFn = finalizeRunner->CompileKernelAst(
+        std::move(*finalizeProgram), "agg_finalize", &error);
     if (!finalizeFn) {
         throw std::runtime_error("CompileAggregate: agg_finalize compilation failed: " + error);
     }

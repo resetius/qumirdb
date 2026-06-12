@@ -50,5 +50,10 @@ BuildGenericAggregateProgramAst(
     NQumir::NAst::TTypePtr rowSetType,
     NQumir::NAst::TTypePtr hashTableType);
 
+std::expected<NQumir::NAst::TExprPtr, NQumir::TError>
+BuildGenericAggregateFinalizeProgramAst(
+    const TAggregateKeyDescriptor& key,
+    NQumir::NAst::TTypePtr hashTableType);
+
 } // namespace NKernel
 } // namespace NQqb
