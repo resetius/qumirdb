@@ -64,6 +64,8 @@ std::vector<NQumir::NAst::TExprPtr> GenKeyOperationFunDecls(
     };
     auto hash = std::make_shared<TFunDecl>(loc, "rh_hash", std::move(hashParams),
         std::make_shared<TBlockExpr>(loc, std::move(hashBody)), i64Type);
+    hash->Type = std::make_shared<TFunctionType>(
+        std::vector<TTypePtr>{key.KeyType}, i64Type);
 
     std::vector<TParam> equalParams = {
         std::make_shared<TVarStmt>(loc, "left", key.KeyType),
@@ -75,6 +77,8 @@ std::vector<NQumir::NAst::TExprPtr> GenKeyOperationFunDecls(
     };
     auto equal = std::make_shared<TFunDecl>(loc, "rh_key_equal", std::move(equalParams),
         std::make_shared<TBlockExpr>(loc, std::move(equalBody)), boolType);
+    equal->Type = std::make_shared<TFunctionType>(
+        std::vector<TTypePtr>{key.KeyType, key.KeyType}, boolType);
 
     return {std::move(hash), std::move(equal)};
 }
