@@ -87,46 +87,46 @@ QumirDbModule::QumirDbModule() {
     auto ptrI64Type = std::make_shared<TPointerType>(i64Type);
     auto ptrPtrI64Type = std::make_shared<TPointerType>(ptrI64Type);
 
-    // HashTable C layout (Stage 1: integer keys; aggregate accumulators are
-    // all stored as int64_t regardless of the output column type). Every
-    // array field is int64_t-based (including Dist/SlotId) so the embedded
-    // Robin Hood kernel (kernel/rh_source.h) never has to mix integer
-    // widths.
+    // HashTable C layout. Key-owned storage is byte-addressed so generated
+    // kernels can reinterpret it as the query's concrete Key type. Probe
+    // metadata and aggregate accumulators remain int64_t-based.
     //
     // Open-addressing arrays (Robin Hood, swap-on-insert; size == Capacity):
-    // offset  0: Keys       int64_t*   <ptr i64>      probe table, Capacity*NumKeys, row-major
+    // offset  0: Keys       uint8_t*   <ptr u8>       probe table, Capacity*KeySize bytes
     // offset  8: Dist       int64_t*   <ptr i64>      probe distance; -1 = empty slot
     // offset 16: SlotId     int64_t*   <ptr i64>      dense-storage slot id for the occupied entry
     //
     // Dense storage, indexed by stable SlotId (never moves; size == Capacity):
-    // offset 24: GroupKeys  int64_t*   <ptr i64>      Capacity*NumKeys, row-major
+    // offset 24: GroupKeys  uint8_t*   <ptr u8>       dense keys, Capacity*KeySize bytes
     // offset 32: AggBuffers int64_t**  <ptr <ptr i64>> NumAggs pointers, each -> int64_t[Capacity]
     //
     // Scratch buffers (NumKeys elements each):
-    // offset 40: Scratch    int64_t*   <ptr i64>      ping-pong buffer used by rh_insert_slot's swaps
-    // offset 48: Scratch2   int64_t*   <ptr i64>      ping-pong buffer used by rh_insert_slot's swaps
-    // offset 56: QueryKey   int64_t*   <ptr i64>      staging buffer for the row currently being looked up
+    // offset 40: Scratch    uint8_t*   <ptr u8>       one Key-sized swap buffer
+    // offset 48: Scratch2   uint8_t*   <ptr u8>       one Key-sized swap buffer
+    // offset 56: QueryKey   uint8_t*   <ptr u8>       staging buffer for the current row key
     //
     // Scalars:
     // offset 64: Capacity   int64_t    i64   (power of two; 0 before first grow)
     // offset 72: Size       int64_t    i64   (number of groups in dense storage)
     // offset 80: NumAggs    int64_t    i64
     // offset 88: NumKeys    int64_t    i64
-    // sizeof = 96
+    // offset 96: KeySize    int64_t    i64   (sizeof the query-local Key)
+    // sizeof = 104
     auto hashTableType = std::make_shared<TStructType>(
         std::vector<std::pair<std::string, TTypePtr>>{
-            {"Keys", ptrI64Type},
+            {"Keys", ptrU8Type},
             {"Dist", ptrI64Type},
             {"SlotId", ptrI64Type},
-            {"GroupKeys", ptrI64Type},
+            {"GroupKeys", ptrU8Type},
             {"AggBuffers", ptrPtrI64Type},
-            {"Scratch", ptrI64Type},
-            {"Scratch2", ptrI64Type},
-            {"QueryKey", ptrI64Type},
+            {"Scratch", ptrU8Type},
+            {"Scratch2", ptrU8Type},
+            {"QueryKey", ptrU8Type},
             {"Capacity", i64Type},
             {"Size", i64Type},
             {"NumAggs", i64Type},
             {"NumKeys", i64Type},
+            {"KeySize", i64Type},
         });
 
     ExternalTypes_ = {

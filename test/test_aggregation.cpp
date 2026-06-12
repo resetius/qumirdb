@@ -612,18 +612,19 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileAggTableSmoke(
 }
 
 struct THashTable {
-    int64_t* Keys = nullptr;
+    uint8_t* Keys = nullptr;
     int64_t* Dist = nullptr;
     int64_t* SlotId = nullptr;
-    int64_t* GroupKeys = nullptr;
+    uint8_t* GroupKeys = nullptr;
     int64_t** AggBuffers = nullptr;
-    int64_t* Scratch = nullptr;
-    int64_t* Scratch2 = nullptr;
-    int64_t* QueryKey = nullptr;
+    uint8_t* Scratch = nullptr;
+    uint8_t* Scratch2 = nullptr;
+    uint8_t* QueryKey = nullptr;
     int64_t Capacity = 0;
     int64_t Size = 0;
     int64_t NumAggs = 0;
     int64_t NumKeys = 0;
+    int64_t KeySize = 0;
 };
 
 struct TPairI64Key {
@@ -633,7 +634,28 @@ struct TPairI64Key {
     bool operator==(const TPairI64Key&) const = default;
 };
 
-static_assert(sizeof(THashTable) == 96);
+static_assert(sizeof(THashTable) == 104);
+static_assert(offsetof(THashTable, Keys) == 0);
+static_assert(offsetof(THashTable, GroupKeys) == 24);
+static_assert(offsetof(THashTable, QueryKey) == 56);
+static_assert(offsetof(THashTable, Capacity) == 64);
+static_assert(offsetof(THashTable, KeySize) == 96);
+
+int64_t* I64Keys(THashTable& table) {
+    return reinterpret_cast<int64_t*>(table.Keys);
+}
+
+const int64_t* I64Keys(const THashTable& table) {
+    return reinterpret_cast<const int64_t*>(table.Keys);
+}
+
+int64_t* I64GroupKeys(THashTable& table) {
+    return reinterpret_cast<int64_t*>(table.GroupKeys);
+}
+
+const int64_t* I64GroupKeys(const THashTable& table) {
+    return reinterpret_cast<const int64_t*>(table.GroupKeys);
+}
 
 uint64_t HashI64(int64_t key) {
     uint64_t h = static_cast<uint64_t>(key);
@@ -1372,6 +1394,184 @@ TEST(AggregationKernel, GenericFullUpdateGrowsProbeAndDenseStorageTogether) {
         &keys, &dist, &slotIds, &capacity, &size), 1);
 }
 
+// Drives the production-shaped generic <ref HashTable> table library
+// (aggregation_hashtable_generic.oz) for Key=i64 via a single op-dispatched
+// concrete entry, selected by name through the explicit-entry CompileKernelAst
+// overload (so appended generic specializations cannot steal the entry point).
+TEST(AggregationKernel, GenericRefHashTableUpsertsGrowsAndAggregatesI64) {
+    using namespace NQumir;
+
+    NAst::TStructType input({{"key", std::make_shared<NAst::TIntegerType>()}});
+    auto key = NQqb::NKernel::BuildAggregateKeyDescriptor(input, {"key"});
+    auto stmts = NQqb::NKernel::GenKeyOperationFunDecls(key);
+    auto reducers = NQqb::NKernel::GenReducerFunDecls({"sum", "count"});
+    stmts.insert(stmts.end(), reducers.begin(), reducers.end());
+    stmts.push_back(NQqb::NKernel::GenApplyReducersFunDecl(2));
+
+    for (const char* name : {"robin_hood_rehash_generic.oz",
+                             "aggregation_hashtable_generic.oz"}) {
+        auto parsed = NQqb::NKernel::ParseFunctionLibrary(ReadKernel(name));
+        ASSERT_TRUE(parsed.has_value())
+            << name << ": " << parsed.error().ToString();
+        stmts.insert(stmts.end(), parsed->begin(), parsed->end());
+    }
+
+    constexpr const char* entrySource = R"(
+(block
+  (fun aht_drive ((var ht <ref HashTable>)
+                      (var a i64)
+                      (var b i64)
+                      (var op i64)) -> i64
+    (block
+      (return
+        (if (== op (: 0 i64))
+          (if (call aht_init ht a b (: 8 i64)) (: 1 i64) (: 0 i64))
+          (if (== op (: 1 i64))
+            (call aht_update ht a b)
+            (block (call aht_destroy ht) (: 1 i64))))))))
+)";
+    auto parsedEntry = NQqb::NKernel::ParseFunctionLibrary(entrySource);
+    ASSERT_TRUE(parsedEntry.has_value());
+    ASSERT_EQ(parsedEntry->size(), 1u);
+    stmts.push_back(parsedEntry->front());
+
+    TLLVMRunnerOptions options;
+    options.CoreInput = true;
+    options.NativeCode = true;
+    options.AllowOverloads = true;
+    auto runner = std::make_unique<TLLVMRunner>(options);
+    runner->RegisterModule(std::make_shared<NQumir::NRegistry::QumirDbModule>(), true);
+    auto program = std::make_shared<NAst::TBlockExpr>(
+        NQumir::TLocation{}, std::move(stmts));
+    std::string error;
+    void* entry = runner->CompileKernelAst(program, "aht_drive", &error);
+    ASSERT_NE(entry, nullptr) << error;
+
+    using TDriveFn = int64_t(*)(THashTable*, int64_t, int64_t, int64_t);
+    auto drive = reinterpret_cast<TDriveFn>(entry);
+
+    THashTable table;
+    ASSERT_NE(drive(&table, 4, 2, 0), 0);  // init capacity=4, num_aggs=2 (success != 0)
+    EXPECT_EQ(table.KeySize, static_cast<int64_t>(sizeof(int64_t)));
+    EXPECT_EQ(table.Capacity, 4);
+    EXPECT_EQ(table.NumAggs, 2);
+
+    constexpr std::array<int64_t, 10> inputKeys =
+        {7, 9, 7, -3, 11, 9, 13, 15, -3, 17};
+    constexpr std::array<int64_t, 10> inputValues =
+        {5, 2, 8, 4, 1, 6, 3, 7, 10, 9};
+    std::unordered_map<int64_t, std::pair<int64_t, int64_t>> expected;  // sum, count
+    std::unordered_map<int64_t, int64_t> denseSlots;
+    for (size_t i = 0; i < inputKeys.size(); ++i) {
+        const int64_t dense = drive(&table, inputKeys[i], inputValues[i], 1);
+        ASSERT_GE(dense, 0);
+        auto [it, inserted] = denseSlots.emplace(inputKeys[i], dense);
+        EXPECT_EQ(dense, it->second);
+        expected[inputKeys[i]].first += inputValues[i];
+        expected[inputKeys[i]].second += 1;
+    }
+    EXPECT_EQ(table.Size, static_cast<int64_t>(expected.size()));
+    EXPECT_EQ(table.Capacity, 16);
+
+    for (const auto& [k, dense] : denseSlots) {
+        EXPECT_EQ(I64GroupKeys(table)[dense], k);
+        EXPECT_EQ(table.AggBuffers[0][dense], expected[k].first);   // sum
+        EXPECT_EQ(table.AggBuffers[1][dense], expected[k].second);  // count
+    }
+
+    EXPECT_EQ(drive(&table, 0, 0, 2), 1);  // destroy
+    EXPECT_EQ(table.Capacity, 0);
+    EXPECT_EQ(table.Size, 0);
+}
+
+TEST(AggregationKernel, GenericProgramBuilderDispatchesSelectedRowSets) {
+    using namespace NQumir;
+    using namespace NQumir::NAst;
+
+    auto i64Type = std::make_shared<TIntegerType>();
+    TStructType inputType({{"k", i64Type}, {"v", i64Type}});
+    auto key = NQqb::NKernel::BuildAggregateKeyDescriptor(inputType, {"k"});
+
+    auto dbModule = std::make_shared<NQumir::NRegistry::QumirDbModule>();
+    TTypePtr columnType;
+    TTypePtr rowSetType;
+    TTypePtr hashTableType;
+    for (const auto& external : dbModule->ExternalTypes()) {
+        if (external.Name == "TColumn") columnType = external.Type;
+        else if (external.Name == "TRowSet") rowSetType = external.Type;
+        else if (external.Name == "HashTable") hashTableType = external.Type;
+    }
+    ASSERT_NE(columnType, nullptr);
+    ASSERT_NE(rowSetType, nullptr);
+    ASSERT_NE(hashTableType, nullptr);
+
+    auto program = NQqb::NKernel::BuildGenericAggregateProgramAst(
+        inputType, key, std::string("v"), {"sum", "count"},
+        columnType, rowSetType, hashTableType);
+    ASSERT_TRUE(program.has_value()) << program.error().ToString();
+
+    TLLVMRunnerOptions options;
+    options.CoreInput = true;
+    options.NativeCode = true;
+    options.AllowOverloads = true;
+    TLLVMRunner runner(options);
+    runner.RegisterModule(dbModule, true);
+    std::string error;
+    void* entry = runner.CompileKernelAst(*program, "agg_dispatch", &error);
+    ASSERT_NE(entry, nullptr) << error;
+
+    using TDispatchFn = int64_t(*)(THashTable*, NQqb::TRowSet*, int64_t, int64_t);
+    auto dispatch = reinterpret_cast<TDispatchFn>(entry);
+    THashTable table;
+    ASSERT_NE(dispatch(&table, nullptr, 4, 0), 0);
+    EXPECT_EQ(table.KeySize, 8);
+    EXPECT_EQ(table.NumAggs, 2);
+
+    std::unordered_map<int64_t, std::pair<int64_t, int64_t>> expected;
+    auto runBatch = [&](std::vector<int64_t>& keys,
+                        std::vector<int64_t>& values,
+                        std::vector<uint8_t>* selection) {
+        NQqb::TColumn columns[2] = {};
+        columns[0].Data = reinterpret_cast<char*>(keys.data());
+        columns[1].Data = reinterpret_cast<char*>(values.data());
+        NQqb::TRowSet batch{};
+        batch.Columns = columns;
+        batch.ColumnCount = 2;
+        batch.RowCount = static_cast<int64_t>(keys.size());
+        batch.Selection = selection ? selection->data() : nullptr;
+        EXPECT_EQ(dispatch(&table, &batch, 0, 1), 0);
+        for (size_t i = 0; i < keys.size(); ++i) {
+            if (selection && !(*selection)[i]) continue;
+            expected[keys[i]].first += values[i];
+            expected[keys[i]].second += 1;
+        }
+    };
+
+    std::vector<int64_t> keys1 = {1, 2, 1, 3, 4, 5};
+    std::vector<int64_t> values1 = {10, 20, 5, 7, 11, 13};
+    std::vector<uint8_t> selection1 = {1, 0, 1, 1, 0, 1};
+    runBatch(keys1, values1, &selection1);
+
+    std::vector<int64_t> keys2 = {2, 6, 3, 7, 8, 1};
+    std::vector<int64_t> values2 = {4, 8, -2, 9, 12, 6};
+    runBatch(keys2, values2, nullptr);
+
+    ASSERT_EQ(table.Size, static_cast<int64_t>(expected.size()));
+    ASSERT_GE(table.Capacity, 16);
+    for (int64_t dense = 0; dense < table.Size; ++dense) {
+        const int64_t k = I64GroupKeys(table)[dense];
+        auto it = expected.find(k);
+        ASSERT_NE(it, expected.end()) << "unexpected key " << k;
+        EXPECT_EQ(table.AggBuffers[0][dense], it->second.first) << "key " << k;
+        EXPECT_EQ(table.AggBuffers[1][dense], it->second.second) << "key " << k;
+    }
+
+    EXPECT_EQ(dispatch(&table, nullptr, 0, 2), 1);
+    EXPECT_EQ(table.Keys, nullptr);
+    EXPECT_EQ(table.GroupKeys, nullptr);
+    EXPECT_EQ(table.Capacity, 0);
+}
+
 TEST(AggregationKernel, GenericKeyEqualityDispatchesToI64Overload) {
     void* entry = nullptr;
     std::string error;
@@ -1904,7 +2104,7 @@ TEST(AggregationKernel, OzTableGrowsAndPreservesStableSlotIds) {
             ASSERT_LT(capacityIndex, expectedCapacities.size());
             EXPECT_EQ(table.Capacity, expectedCapacities[capacityIndex]);
         }
-        EXPECT_TRUE(check(table.Keys, table.Dist, table.Capacity));
+        EXPECT_TRUE(check(I64Keys(table), table.Dist, table.Capacity));
         for (size_t keyIndex = 0; keyIndex <= i; ++keyIndex) {
             EXPECT_EQ(insertOrLookup(&table, input[keyIndex], 1),
                       static_cast<int64_t>(keyIndex));
@@ -1948,9 +2148,9 @@ TEST(AggregationKernel, OzTableRehashRejectsAllocationSizeOverflow) {
     auto grow = reinterpret_cast<TGrowFn>(growEntry);
     THashTable table;
     ASSERT_TRUE(lifecycle(&table, 4, 0));
-    int64_t* const oldKeys = table.Keys;
+    int64_t* const oldKeys = I64Keys(table);
     EXPECT_FALSE(grow(&table, INT64_C(1152921504606846976), 2));
-    EXPECT_EQ(table.Keys, oldKeys);
+    EXPECT_EQ(I64Keys(table), oldKeys);
     EXPECT_EQ(table.Capacity, 4);
     EXPECT_EQ(table.Size, 0);
     EXPECT_TRUE(lifecycle(&table, 0, 1));
@@ -2202,7 +2402,7 @@ TEST(AggregationKernel, OzStressAggregationHandlesLargeDeterministicInput) {
 
     ASSERT_EQ(table.Size, static_cast<int64_t>(reference.size())) << dumpTable();
     ASSERT_GE(table.Capacity, 256) << dumpTable();
-    ASSERT_TRUE(check(table.Keys, table.Dist, table.Capacity)) << dumpTable();
+    ASSERT_TRUE(check(I64Keys(table), table.Dist, table.Capacity)) << dumpTable();
 
     std::vector<bool> seenSlotId(table.Size, false);
     for (int64_t slot = 0; slot < table.Capacity; ++slot) {

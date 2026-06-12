@@ -49,7 +49,7 @@ public:
     // sizeof(HashTable) per modules/qumirdb.cpp's layout — callers of
     // CompileAggregate must allocate a zero-initialized buffer this large
     // for `ht`.
-    static constexpr size_t kHashTableSize = 96;
+    static constexpr size_t kHashTableSize = 104;
 
     // Compiles a filter kernel for the given input struct type and predicate.
     // Returns a dispatch lambda that calls the compiled kernel.

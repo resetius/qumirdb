@@ -9,20 +9,21 @@ namespace NQqb {
 
 namespace {
 
-// Mirrors the HashTable C layout from qdb/modules/qumirdb.cpp (96 bytes).
+// Mirrors the HashTable C layout from qdb/modules/qumirdb.cpp (104 bytes).
 struct THashTable {
-    int64_t* Keys = nullptr;
+    uint8_t* Keys = nullptr;
     int64_t* Dist = nullptr;
     int64_t* SlotId = nullptr;
-    int64_t* GroupKeys = nullptr;
+    uint8_t* GroupKeys = nullptr;
     int64_t** AggBuffers = nullptr;
-    int64_t* Scratch = nullptr;
-    int64_t* Scratch2 = nullptr;
-    int64_t* QueryKey = nullptr;
+    uint8_t* Scratch = nullptr;
+    uint8_t* Scratch2 = nullptr;
+    uint8_t* QueryKey = nullptr;
     int64_t Capacity = 0;
     int64_t Size = 0;
     int64_t NumAggs = 0;
     int64_t NumKeys = 0;
+    int64_t KeySize = 0;
 };
 static_assert(sizeof(THashTable) == TKernelCompiler::kHashTableSize);
 
