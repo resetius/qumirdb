@@ -352,5 +352,50 @@ std::vector<NQumir::NAst::TExprPtr> GenReducerFunDecls(
     return result;
 }
 
+NQumir::NAst::TExprPtr GenApplyReducersFunDecl(size_t numReducers)
+{
+    using namespace NQumir::NAst;
+    NQumir::TLocation loc{};
+
+    auto i64Type = std::make_shared<TIntegerType>();
+    auto boolType = std::make_shared<TBoolType>();
+    auto ptrI64Type = std::make_shared<TPointerType>(i64Type);
+    auto ptrPtrI64Type = std::make_shared<TPointerType>(ptrI64Type);
+
+    auto ident = [&](const std::string& name) {
+        return std::make_shared<TIdentExpr>(loc, name);
+    };
+    auto numI64 = [&](int64_t value) -> TExprPtr {
+        auto expr = std::make_shared<TNumberExpr>(loc, value);
+        expr->Type = i64Type;
+        return expr;
+    };
+
+    std::vector<TParam> params = {
+        std::make_shared<TVarStmt>(loc, "agg_buffers", ptrPtrI64Type),
+        std::make_shared<TVarStmt>(loc, "dense_slot", i64Type),
+        std::make_shared<TVarStmt>(loc, "value", i64Type),
+        std::make_shared<TVarStmt>(loc, "is_new", boolType),
+    };
+
+    std::vector<TExprPtr> stmts;
+    for (size_t i = 0; i < numReducers; ++i) {
+        std::string bufName = "buf_" + std::to_string(i);
+        stmts.push_back(std::make_shared<TVarStmt>(loc, bufName, ptrI64Type));
+        stmts.push_back(std::make_shared<TAssignExpr>(loc, bufName,
+            std::make_shared<TIndexExpr>(loc, ident("agg_buffers"), numI64(static_cast<int64_t>(i)))));
+
+        auto prev = std::make_shared<TIndexExpr>(loc, ident(bufName), ident("dense_slot"));
+        auto call = std::make_shared<TCallExpr>(loc, ident("reduce_" + std::to_string(i)),
+            std::vector<TExprPtr>{prev, ident("value"), ident("is_new")});
+        stmts.push_back(std::make_shared<TArrayAssignExpr>(loc, bufName,
+            std::vector<TExprPtr>{ident("dense_slot")}, call));
+    }
+
+    auto body = std::make_shared<TBlockExpr>(loc, std::move(stmts));
+    return std::make_shared<TFunDecl>(loc, "agg_apply_reducers",
+        std::move(params), std::move(body), std::make_shared<TVoidType>());
+}
+
 } // namespace NKernel
 } // namespace NQqb

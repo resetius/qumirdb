@@ -3,6 +3,7 @@
 #include <qumir/parser/ast.h>
 #include <qumir/parser/type.h>
 
+#include <cstddef>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -56,6 +57,21 @@ NQumir::NAst::TExprPtr GenAggregateKernelAst(
 // directly by name (no function pointers, no runtime dispatch on Func).
 std::vector<NQumir::NAst::TExprPtr> GenReducerFunDecls(
     const std::vector<std::string>& funcs);
+
+// Generates a single FunDecl:
+//   agg_apply_reducers(<ptr <ptr i64>> agg_buffers, i64 dense_slot,
+//                       i64 value, bool is_new)
+// which for i in [0, numReducers) does
+//   agg_buffers[i][dense_slot] = reduce_i(agg_buffers[i][dense_slot], value, is_new)
+// — numReducers static, direct, by-name calls to the reduce_0..reduce_{N-1}
+// functions from GenReducerFunDecls.
+//
+// This is the one piece of per-query generated code that the NumAggs-generic
+// table library (agg_init/agg_rehash/agg_update/agg_destroy/agg_finalize,
+// L2b) calls by static name to update all N aggregate buffers for one dense
+// slot. Everything else in that library is agg-count-agnostic and driven by
+// ht.NumAggs/ht.AggBuffers at runtime.
+NQumir::NAst::TExprPtr GenApplyReducersFunDecl(size_t numReducers);
 
 } // namespace NKernel
 } // namespace NQqb

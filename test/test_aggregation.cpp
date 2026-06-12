@@ -167,6 +167,76 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileReducerSmoke(
     return runner;
 }
 
+// Generates apply_smoke(<ptr <ptr i64>> agg_buffers, i64 dense_slot,
+// i64 value, i64 is_new_flag), which calls
+//   agg_apply_reducers(agg_buffers, dense_slot, value, is_new_flag != 0)
+// — the single per-query generated function (GenApplyReducersFunDecl) that
+// the future NumAggs-generic agg_update (L2b) will call to update all N
+// aggregate buffers for one dense slot.
+NQumir::NAst::TExprPtr GenApplyReducersSmokeEntry() {
+    using namespace NQumir::NAst;
+    NQumir::TLocation loc{};
+
+    auto i64Type = std::make_shared<TIntegerType>();
+    auto boolType = std::make_shared<TBoolType>();
+    auto ptrI64Type = std::make_shared<TPointerType>(i64Type);
+    auto ptrPtrI64Type = std::make_shared<TPointerType>(ptrI64Type);
+
+    auto ident = [&](const std::string& name) {
+        return std::make_shared<TIdentExpr>(loc, name);
+    };
+    auto numI64 = [&](int64_t value) -> TExprPtr {
+        auto expr = std::make_shared<TNumberExpr>(loc, value);
+        expr->Type = i64Type;
+        return expr;
+    };
+
+    std::vector<TParam> params = {
+        std::make_shared<TVarStmt>(loc, "agg_buffers", ptrPtrI64Type),
+        std::make_shared<TVarStmt>(loc, "dense_slot", i64Type),
+        std::make_shared<TVarStmt>(loc, "value", i64Type),
+        std::make_shared<TVarStmt>(loc, "is_new_flag", i64Type),
+    };
+
+    std::vector<TExprPtr> stmts;
+    stmts.push_back(std::make_shared<TVarStmt>(loc, "is_new", boolType));
+    stmts.push_back(std::make_shared<TAssignExpr>(loc, "is_new",
+        std::make_shared<TBinaryExpr>(loc, TOperator("!="), ident("is_new_flag"), numI64(0))));
+    stmts.push_back(std::make_shared<TCallExpr>(loc, ident("agg_apply_reducers"),
+        std::vector<TExprPtr>{ident("agg_buffers"), ident("dense_slot"), ident("value"), ident("is_new")}));
+
+    auto body = std::make_shared<TBlockExpr>(loc, std::move(stmts));
+    return std::make_shared<TFunDecl>(loc, "apply_smoke", std::move(params), body,
+        std::make_shared<TVoidType>());
+}
+
+// Generates reduce_0..reduce_{N-1} (GenReducerFunDecls) plus
+// agg_apply_reducers (GenApplyReducersFunDecl) for `funcs`, merges them with
+// an apply_smoke entry (GenApplyReducersSmokeEntry) via L1, and compiles the
+// result. No HashTable/TRowSet/count.oz involved — exercises the single
+// per-query generated function that updates all N aggregate buffers for one
+// dense slot, by static name, with no function pointers.
+std::unique_ptr<NQumir::TLLVMRunner> CompileApplyReducersSmoke(
+    const std::vector<std::string>& funcs,
+    void*& entry,
+    std::string& error)
+{
+    auto library = NQqb::NKernel::GenReducerFunDecls(funcs);
+    library.push_back(NQqb::NKernel::GenApplyReducersFunDecl(funcs.size()));
+    auto smokeEntry = GenApplyReducersSmokeEntry();
+
+    NQumir::TLLVMRunnerOptions options;
+    options.CoreInput = true;
+    options.NativeCode = true;
+    options.AllowOverloads = true;
+
+    auto runner = std::make_unique<NQumir::TLLVMRunner>(options);
+
+    auto merged = NQqb::NKernel::MergeKernelLibrary(std::move(library), std::move(smokeEntry));
+    entry = runner->CompileKernelAst(merged, &error);
+    return runner;
+}
+
 struct THashTable {
     int64_t* Keys = nullptr;
     int64_t* Dist = nullptr;
@@ -1357,6 +1427,83 @@ TEST(AggregationKernel, OzGeneratedReducersAreCalledByStaticName) {
         std::array<int64_t, 1> out{};
         smoke(/*prev=*/100, /*value=*/23, /*is_new=*/0, out.data());
         EXPECT_EQ(out[0], 123); // sum: prev + value
+    }
+}
+
+TEST(AggregationKernel, OzApplyReducersUpdatesAllBuffersByStaticName) {
+    using TApplyFn = void(*)(int64_t**, int64_t, int64_t, int64_t);
+
+    // N=4, same order as count.oz's agg_count_step/agg_sum_i64_step/
+    // agg_min_i64_step/agg_max_i64_step.
+    {
+        void* entry = nullptr;
+        std::string error;
+        auto runner = CompileApplyReducersSmoke({"count", "sum", "min", "max"}, entry, error);
+        ASSERT_NE(entry, nullptr) << error;
+        auto apply = reinterpret_cast<TApplyFn>(entry);
+
+        std::array<int64_t, 1> counts{0};
+        std::array<int64_t, 1> sums{0};
+        std::array<int64_t, 1> mins{0};
+        std::array<int64_t, 1> maxs{0};
+        std::array<int64_t*, 4> buffers{counts.data(), sums.data(), mins.data(), maxs.data()};
+
+        apply(buffers.data(), /*dense_slot=*/0, /*value=*/10, /*is_new=*/1);
+        EXPECT_EQ(counts[0], 1);
+        EXPECT_EQ(sums[0], 10);
+        EXPECT_EQ(mins[0], 10);
+        EXPECT_EQ(maxs[0], 10);
+
+        apply(buffers.data(), /*dense_slot=*/0, /*value=*/3, /*is_new=*/0);
+        EXPECT_EQ(counts[0], 2);
+        EXPECT_EQ(sums[0], 13);
+        EXPECT_EQ(mins[0], 3);
+        EXPECT_EQ(maxs[0], 10);
+
+        apply(buffers.data(), /*dense_slot=*/0, /*value=*/20, /*is_new=*/0);
+        EXPECT_EQ(counts[0], 3);
+        EXPECT_EQ(sums[0], 33);
+        EXPECT_EQ(mins[0], 3);
+        EXPECT_EQ(maxs[0], 20);
+    }
+
+    // N=2, non-default order/composition (max then count), at a non-zero
+    // dense_slot to confirm indexing into agg_buffers[i][dense_slot].
+    {
+        void* entry = nullptr;
+        std::string error;
+        auto runner = CompileApplyReducersSmoke({"max", "count"}, entry, error);
+        ASSERT_NE(entry, nullptr) << error;
+        auto apply = reinterpret_cast<TApplyFn>(entry);
+
+        std::array<int64_t, 2> maxs{0, 0};
+        std::array<int64_t, 2> counts{0, 0};
+        std::array<int64_t*, 2> buffers{maxs.data(), counts.data()};
+
+        apply(buffers.data(), /*dense_slot=*/1, /*value=*/-7, /*is_new=*/1);
+        EXPECT_EQ(maxs[1], -7);  // reduce_0 == max, is_new -> value
+        EXPECT_EQ(counts[1], 1); // reduce_1 == count
+        EXPECT_EQ(maxs[0], 0);   // slot 0 untouched
+        EXPECT_EQ(counts[0], 0); // slot 0 untouched
+
+        apply(buffers.data(), /*dense_slot=*/1, /*value=*/-3, /*is_new=*/0);
+        EXPECT_EQ(maxs[1], -3);  // max(-7, -3) == -3
+        EXPECT_EQ(counts[1], 2); // count: prev + 1
+    }
+
+    // N=1.
+    {
+        void* entry = nullptr;
+        std::string error;
+        auto runner = CompileApplyReducersSmoke({"sum"}, entry, error);
+        ASSERT_NE(entry, nullptr) << error;
+        auto apply = reinterpret_cast<TApplyFn>(entry);
+
+        std::array<int64_t, 1> sums{100};
+        std::array<int64_t*, 1> buffers{sums.data()};
+
+        apply(buffers.data(), /*dense_slot=*/0, /*value=*/23, /*is_new=*/0);
+        EXPECT_EQ(sums[0], 123); // sum: prev + value
     }
 }
 
