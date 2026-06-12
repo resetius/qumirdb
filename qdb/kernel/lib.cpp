@@ -108,5 +108,27 @@ BuildGenericAggregateProgramAst(
         NQumir::TLocation{}, std::move(stmts));
 }
 
+std::expected<NQumir::NAst::TExprPtr, NQumir::TError>
+BuildGenericAggregateFinalizeProgramAst(
+    const TAggregateKeyDescriptor& key,
+    NQumir::NAst::TTypePtr hashTableType)
+{
+    auto parsed = ParseFunctionLibrary(
+        ReadAggregationKernel("aggregation_finalize_generic.oz"));
+    if (!parsed) {
+        return std::unexpected(NQumir::TError(
+            "aggregation_finalize_generic.oz: " + parsed.error().ToString()));
+    }
+    auto entry = GenGenericAggregateFinalizeAst(key, std::move(hashTableType));
+    auto block = NQumir::NAst::TMaybeNode<NQumir::NAst::TBlockExpr>(entry);
+    if (!block || block.Cast()->Stmts.size() != 1) {
+        return std::unexpected(NQumir::TError(
+            "generic aggregate finalize generator returned an invalid entry block"));
+    }
+    parsed->push_back(block.Cast()->Stmts.front());
+    return std::make_shared<NQumir::NAst::TBlockExpr>(
+        NQumir::TLocation{}, std::move(*parsed));
+}
+
 } // namespace NKernel
 } // namespace NQqb

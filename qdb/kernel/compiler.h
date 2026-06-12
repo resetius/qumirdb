@@ -57,12 +57,12 @@ public:
         const NQumir::NAst::TStructType& inputType,
         const NQumir::NAst::TExprPtr& predicate);
 
-    // Compiles the per-query update (agg_dispatch, L2c) and finalize
-    // (agg_finalize, L2b) kernels for `aggs` grouped by `groupKeys`, over
-    // rows of `inputType`.
+    // Compiles the per-query generic update and finalize programs for `aggs`
+    // grouped by `groupKeys`, over rows of `inputType`.
     //
     // Stage 1 constraints (NQumir::TError thrown if violated):
-    // - exactly one group key, of type i64;
+    // - exactly one group key, of type i64 (until generated key operations and
+    //   output projection are implemented for the remaining descriptor types);
     // - agg.Func in {count, sum, min, max};
     // - every agg with Arg references the same single i64 column (Stage 1:
     //   one shared value column for all aggregates); count(*) aggs

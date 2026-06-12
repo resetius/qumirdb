@@ -526,6 +526,45 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
     return std::make_shared<TBlockExpr>(loc, std::vector<TExprPtr>{function});
 }
 
+NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
+    const TAggregateKeyDescriptor& key,
+    NQumir::NAst::TTypePtr hashTableType)
+{
+    using namespace NQumir::NAst;
+    NQumir::TLocation loc{};
+    if (!key.IsScalar()) {
+        throw std::invalid_argument(
+            "GenGenericAggregateFinalizeAst: composite keys are not implemented yet");
+    }
+
+    auto i64Type = std::make_shared<TIntegerType>();
+    auto ptrKeyType = std::make_shared<TPointerType>(key.KeyType);
+    auto ptrI64Type = std::make_shared<TPointerType>(i64Type);
+    auto ptrPtrI64Type = std::make_shared<TPointerType>(ptrI64Type);
+    auto hashTableRefType = std::make_shared<TReferenceType>(
+        std::make_shared<TNamedType>("HashTable", std::move(hashTableType)));
+    auto ident = [&](const std::string& name) -> TExprPtr {
+        return std::make_shared<TIdentExpr>(loc, name);
+    };
+
+    std::vector<TParam> params = {
+        std::make_shared<TVarStmt>(loc, "ht", hashTableRefType),
+        std::make_shared<TVarStmt>(loc, "output_keys", ptrKeyType),
+        std::make_shared<TVarStmt>(loc, "output_buffers", ptrPtrI64Type),
+        std::make_shared<TVarStmt>(loc, "output_capacity", i64Type),
+    };
+    auto call = std::make_shared<TCallExpr>(loc, ident("aht_finalize"),
+        std::vector<TExprPtr>{
+            ident("ht"), ident("output_keys"), ident("output_buffers"),
+            ident("output_capacity"),
+        });
+    auto body = std::make_shared<TBlockExpr>(loc,
+        std::vector<TExprPtr>{std::make_shared<TReturnExpr>(loc, call)});
+    auto function = std::make_shared<TFunDecl>(
+        loc, "agg_finalize", std::move(params), std::move(body), i64Type);
+    return std::make_shared<TBlockExpr>(loc, std::vector<TExprPtr>{function});
+}
+
 std::vector<NQumir::NAst::TExprPtr> GenReducerFunDecls(
     const std::vector<std::string>& funcs)
 {
