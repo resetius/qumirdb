@@ -115,6 +115,7 @@ QumirDbModule::QumirDbModule() {
 
     auto ptrI64Type = std::make_shared<TPointerType>(i64Type);
     auto ptrPtrI64Type = std::make_shared<TPointerType>(ptrI64Type);
+    auto ptrPtrU8Type = std::make_shared<TPointerType>(ptrU8Type);
 
     // HashTable C layout. Key-owned storage is byte-addressed so generated
     // kernels can reinterpret it as the query's concrete Key type. Probe
@@ -129,10 +130,10 @@ QumirDbModule::QumirDbModule() {
     // offset 24: GroupKeys  uint8_t*   <ptr u8>       dense keys, Capacity*KeySize bytes
     // offset 32: AggBuffers int64_t**  <ptr <ptr i64>> NumAggs pointers, each -> int64_t[Capacity]
     //
-    // Scratch buffers (NumKeys elements each):
-    // offset 40: Scratch    uint8_t*   <ptr u8>       one Key-sized swap buffer
-    // offset 48: Scratch2   uint8_t*   <ptr u8>       one Key-sized swap buffer
-    // offset 56: QueryKey   uint8_t*   <ptr u8>       staging buffer for the current row key
+    // Owned byte registry:
+    // offset 40: OwnedBlocks        uint8_t**  <ptr <ptr u8>>
+    // offset 48: OwnedBlockCount    int64_t    i64
+    // offset 56: OwnedBlockCapacity int64_t    i64
     //
     // Scalars:
     // offset 64: Capacity   int64_t    i64   (power of two; 0 before first grow)
@@ -148,9 +149,9 @@ QumirDbModule::QumirDbModule() {
             {"SlotId", ptrI64Type},
             {"GroupKeys", ptrU8Type},
             {"AggBuffers", ptrPtrI64Type},
-            {"Scratch", ptrU8Type},
-            {"Scratch2", ptrU8Type},
-            {"QueryKey", ptrU8Type},
+            {"OwnedBlocks", ptrPtrU8Type},
+            {"OwnedBlockCount", i64Type},
+            {"OwnedBlockCapacity", i64Type},
             {"Capacity", i64Type},
             {"Size", i64Type},
             {"NumAggs", i64Type},
