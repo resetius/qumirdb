@@ -36,11 +36,10 @@ NQumir::NAst::TExprPtr GenFilterKernelAst(
     NQumir::NAst::TTypePtr columnType,
     NQumir::NAst::TTypePtr rowSetType);
 
-// Builds the generic aggregation dispatch entry over aht_init/aht_update/
-// aht_destroy from aggregation_hashtable_generic.oz. Key extraction is driven
-// by the descriptor instead of a hardcoded i64 field. The first connected
-// Supports scalar and composite fixed-width integer/f64 keys. Aggregate values
-// still use one shared integer input column and i64 reducer states.
+// Builds the generic aggregation dispatch entry over aht_init/aht_upsert_dual/
+// aht_destroy. Key extraction uses the common TColumn materializer and the
+// descriptor's borrowed LookupType/stored StoredType representations. Aggregate
+// values still use one shared integer input column and i64 reducer states.
 NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
     const NQumir::NAst::TStructType& inputType,
     const TAggregateKeyDescriptor& key,

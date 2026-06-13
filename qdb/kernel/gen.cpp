@@ -1,10 +1,13 @@
 #include <qdb/kernel/gen.h>
 
+#include <qdb/kernel/column_value.h>
+
 #include <qumir/parser/ast.h>
 #include <qumir/parser/operator.h>
 #include <qumir/location.h>
 
 #include <algorithm>
+#include <iterator>
 #include <stdexcept>
 #include <string_view>
 
@@ -262,6 +265,58 @@ bool IsStringHandleType(const NQumir::NAst::TTypePtr& type) {
     auto named = NQumir::NAst::TMaybeType<NQumir::NAst::TNamedType>(type);
     return named && (named.Cast()->Name == "StringView" ||
                      named.Cast()->Name == "OwnedString");
+}
+
+NQumir::NAst::TTypePtr FindStringViewType(
+    const NQumir::NAst::TTypePtr& originalType)
+{
+    using namespace NQumir::NAst;
+    if (auto named = TMaybeType<TNamedType>(originalType)) {
+        if (named.Cast()->Name == "StringView") {
+            return named.Cast()->UnderlyingType;
+        }
+    }
+    auto type = UnwrapNamedType(originalType);
+    if (auto structure = TMaybeType<TStructType>(type)) {
+        for (const auto& [_, fieldType] : structure.Cast()->Fields) {
+            if (auto result = FindStringViewType(fieldType)) {
+                return result;
+            }
+        }
+    }
+    return nullptr;
+}
+
+NQumir::NAst::TExprPtr ZeroValueExpr(
+    const NQumir::NAst::TTypePtr& originalType)
+{
+    using namespace NQumir::NAst;
+    NQumir::TLocation loc{};
+    auto i64Type = std::make_shared<TIntegerType>(TIntegerType::I64);
+    auto zero = std::make_shared<TNumberExpr>(loc, int64_t{0});
+    zero->Type = i64Type;
+    auto type = UnwrapNamedType(originalType);
+    if (TMaybeType<TIntegerType>(type)) {
+        auto value = std::make_shared<TNumberExpr>(loc, int64_t{0});
+        value->Type = originalType;
+        return value;
+    }
+    if (TMaybeType<TFloatType>(type) || TMaybeType<TBoolType>(type) ||
+        TMaybeType<TPointerType>(type)) {
+        return std::make_shared<TCastExpr>(loc, std::move(zero), originalType);
+    }
+    if (auto structure = TMaybeType<TStructType>(type)) {
+        std::vector<TExprPtr> fields;
+        fields.reserve(structure.Cast()->Fields.size());
+        for (const auto& [_, fieldType] : structure.Cast()->Fields) {
+            fields.push_back(ZeroValueExpr(fieldType));
+        }
+        return std::make_shared<TStructConstructExpr>(
+            loc, originalType, std::move(fields));
+    }
+    throw std::invalid_argument(
+        "ZeroValueExpr: unsupported type " +
+        (originalType ? originalType->ToString() : std::string("<null>")));
 }
 
 NQumir::NAst::TExprPtr KeyOwnedBytesExpr(
@@ -695,9 +750,17 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
         }
         return std::make_shared<TPointerType>(columnType);
     }();
+    auto columnValueType = [&]() -> TTypePtr {
+        if (auto pointer = TMaybeType<TPointerType>(ptrColumnType)) {
+            return pointer.Cast()->PointeeType;
+        }
+        return columnType;
+    }();
+    auto columnAt = [&](int32_t index) -> TExprPtr {
+        return std::make_shared<TIndexExpr>(loc, ident("cols"), numI64(index));
+    };
     auto columnData = [&](int32_t index, TTypePtr pointerType) -> TExprPtr {
-        auto column = std::make_shared<TIndexExpr>(
-            loc, ident("cols"), numI64(index));
+        auto column = columnAt(index);
         auto data = std::make_shared<TFieldAccessExpr>(loc, column, "Data");
         return cast(cast(data, i64Type), std::move(pointerType));
     };
@@ -709,20 +772,11 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
     update.push_back(assign("selection", field("batch", "Selection")));
     update.push_back(var("cols", ptrColumnType));
     update.push_back(assign("cols", field("batch", "Columns")));
-    if (key.IsScalar()) {
-        auto ptrKeyType = std::make_shared<TPointerType>(key.KeyType);
-        update.push_back(var("keys", ptrKeyType));
-        update.push_back(assign(
-            "keys", columnData(key.Fields.front().ColumnIndex, ptrKeyType)));
-    } else {
-        for (size_t fieldIndex = 0; fieldIndex < key.Fields.size(); ++fieldIndex) {
-            const auto& keyField = key.Fields[fieldIndex];
-            auto ptrFieldType = std::make_shared<TPointerType>(keyField.Type);
-            const std::string name = "key_column_" + std::to_string(fieldIndex);
-            update.push_back(var(name, ptrFieldType));
-            update.push_back(assign(
-                name, columnData(keyField.ColumnIndex, ptrFieldType)));
-        }
+    for (size_t fieldIndex = 0; fieldIndex < key.Fields.size(); ++fieldIndex) {
+        const auto& keyField = key.Fields[fieldIndex];
+        const std::string name = "key_column_" + std::to_string(fieldIndex);
+        update.push_back(var(name, columnValueType));
+        update.push_back(assign(name, columnAt(keyField.ColumnIndex)));
     }
     if (argField) {
         auto arg = std::find_if(inputType.Fields.begin(), inputType.Fields.end(),
@@ -746,6 +800,11 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
     update.push_back(assign("selection_is_null",
         binary("==", cast(ident("selection"), i64Type), numI64(0))));
     update.push_back(var("dense_slot", i64Type));
+    update.push_back(assign("dense_slot", numI64(-1)));
+    update.push_back(var("is_new", i64Type));
+    update.push_back(assign("is_new", numI64(0)));
+    update.push_back(var("stored_witness", key.StoredType));
+    update.push_back(assign("stored_witness", ZeroValueExpr(key.StoredType)));
     update.push_back(var("i", i64Type));
     update.push_back(assign("i", numI64(0)));
 
@@ -755,16 +814,25 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
     TExprPtr value = argField
         ? cast(std::make_shared<TIndexExpr>(loc, ident("values"), ident("i")), i64Type)
         : numI64(0);
+    std::vector<TColumnValueAst> keyFields;
+    keyFields.reserve(key.Fields.size());
+    auto stringViewType = FindStringViewType(key.LookupType);
+    for (size_t fieldIndex = 0; fieldIndex < key.Fields.size(); ++fieldIndex) {
+        keyFields.push_back(BuildColumnValueAst(
+            "key_column_" + std::to_string(fieldIndex), "i",
+            "key_value_" + std::to_string(fieldIndex),
+            key.Fields[fieldIndex].Type, stringViewType));
+    }
+
     TExprPtr keyValue;
     if (key.IsScalar()) {
-        keyValue = std::make_shared<TIndexExpr>(
-            loc, ident("keys"), ident("i"));
+        keyValue = keyFields.front().Value;
     } else {
         std::vector<TExprPtr> fields;
-        auto namedKey = TMaybeType<TNamedType>(key.KeyType);
+        auto namedKey = TMaybeType<TNamedType>(key.LookupType);
         auto keyStruct = namedKey
             ? TMaybeType<TStructType>(namedKey.Cast()->UnderlyingType)
-            : TMaybeType<TStructType>(key.KeyType);
+            : TMaybeType<TStructType>(key.LookupType);
         if (!keyStruct) {
             throw std::invalid_argument(
                 "GenGenericAggregateDispatchAst: composite key must be a struct");
@@ -787,18 +855,43 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
                     "GenGenericAggregateDispatchAst: invalid key field '" +
                     fieldName + "'");
             }
-            fields.push_back(std::make_shared<TIndexExpr>(
-                loc, ident("key_column_" + std::to_string(fieldIndex)), ident("i")));
+            fields.push_back(keyFields[fieldIndex].Value);
         }
         keyValue = std::make_shared<TStructConstructExpr>(
-            loc, key.KeyType, std::move(fields));
+            loc, key.LookupType, std::move(fields));
     }
-    auto updateCall = call("aht_update", {
+    TExprPtr keyIsValid;
+    for (auto& keyField : keyFields) {
+        keyIsValid = keyIsValid
+            ? binary("&&", std::move(keyIsValid), keyField.IsValid)
+            : keyField.IsValid;
+    }
+    auto upsertCall = call("aht_upsert_dual", {
         ident("ht"),
         std::move(keyValue),
-        std::move(value),
+        ident("stored_witness"),
+        ident("is_new"),
     });
-    auto process = block({assign("dense_slot", std::move(updateCall))});
+    std::vector<TExprPtr> materialize;
+    for (auto& keyField : keyFields) {
+        materialize.insert(materialize.end(),
+            std::make_move_iterator(keyField.Setup.begin()),
+            std::make_move_iterator(keyField.Setup.end()));
+    }
+    auto reduceCall = call("agg_apply_reducers", {
+        field("ht", "AggBuffers"), ident("dense_slot"), std::move(value),
+        binary("!=", ident("is_new"), numI64(0)),
+    });
+    auto validProcess = block({
+        assign("dense_slot", std::move(upsertCall)),
+        std::make_shared<TIfExpr>(loc,
+            binary("<", ident("dense_slot"), numI64(0)),
+            block({std::make_shared<TReturnExpr>(loc, numI64(-1))}), nullptr),
+        std::move(reduceCall),
+    });
+    materialize.push_back(std::make_shared<TIfExpr>(
+        loc, std::move(keyIsValid), std::move(validProcess), nullptr));
+    auto process = block(std::move(materialize));
     auto loop = block({
         std::make_shared<TIfExpr>(loc, std::move(selected), std::move(process), nullptr),
         assign("i", binary("+", ident("i"), numI64(1))),
