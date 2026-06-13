@@ -25,6 +25,11 @@ namespace NQqb {
 // modules/qumirdb.cpp).
 using TAggregateDispatch = std::function<int64_t(void* ht, TRowSet* batch, int64_t arg, int64_t op)>;
 
+// Reports required Data bytes for each output key column. Returns ht.Size or
+// -1 if outputCapacity is smaller than the number of groups.
+using TAggregateMeasure = std::function<int64_t(
+    void* ht, int64_t* outputKeyBytes, int64_t outputCapacity)>;
+
 // agg_finalize(ref HashTable ht, <ptr <ptr u8>> outputKeyBuffers, <ptr <ptr i64>>
 // outputBuffers, i64 outputCapacity) -> i64. outputBuffers must have NumAggs
 // entries, each pointing to an int64_t[outputCapacity] buffer, in the same
@@ -49,6 +54,7 @@ struct TAggregateOutputKey {
 // Finalize copies the dense group keys/aggregate buffers to output arrays.
 struct TAggregateKernels {
     TAggregateDispatch Dispatch;
+    TAggregateMeasure Measure;
     TAggregateFinalize Finalize;
     size_t NumAggs = 0;
     std::vector<TAggregateOutputKey> OutputKeys;
