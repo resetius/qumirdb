@@ -209,7 +209,14 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
     kernels.NumAggs = funcs.size();
     kernels.OutputKeys.reserve(keyDescriptor.Fields.size());
     for (const auto& field : keyDescriptor.Fields) {
-        kernels.OutputKeys.push_back({field.Size, field.Alignment});
+        const auto logicalType = UnwrapNamedType(field.Type);
+        kernels.OutputKeys.push_back({
+            .Kind = TMaybeType<TStringType>(logicalType)
+                ? EAggregateOutputKeyKind::String
+                : EAggregateOutputKeyKind::Fixed,
+            .Size = field.Size,
+            .Alignment = field.Alignment,
+        });
     }
     kernels.Dispatch = [dispatchFn, dispatchRunner](void* ht, TRowSet* batch, int64_t arg, int64_t op) {
         return reinterpret_cast<TDispatchFn>(dispatchFn)(ht, batch, arg, op);

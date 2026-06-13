@@ -33,7 +33,13 @@ using TAggregateDispatch = std::function<int64_t(void* ht, TRowSet* batch, int64
 // byte destination per group key; generated code casts each to <ptr Ti>.
 using TAggregateFinalize = std::function<int64_t(void* ht, void** outputKeyBuffers, int64_t** outputBuffers, int64_t outputCapacity)>;
 
+enum class EAggregateOutputKeyKind {
+    Fixed,
+    String,
+};
+
 struct TAggregateOutputKey {
+    EAggregateOutputKeyKind Kind = EAggregateOutputKeyKind::Fixed;
     size_t Size = 0;
     size_t Alignment = 0;
 };
