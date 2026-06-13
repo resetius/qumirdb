@@ -488,6 +488,63 @@ TEST(AggregateE2E, MixedStringI32KeysFinalizeToSeparateColumns) {
     Release(&result);
 }
 
+TEST(AggregateE2E, MixedI32StringKeysPreserveReducersAcrossGrow) {
+    constexpr int32_t rowCount = 40;
+    std::vector<int32_t> ids(rowCount);
+    std::string names;
+    std::vector<int32_t> offsets(rowCount + 1);
+    std::vector<int64_t> values(rowCount);
+    std::map<std::pair<int32_t, std::string>,
+        std::pair<int64_t, int64_t>> expected;
+    for (int32_t row = 0; row < rowCount; ++row) {
+        ids[row] = row % 23;
+        const std::string name = "status_" + std::to_string(row % 3);
+        names += name;
+        offsets[row + 1] = static_cast<int32_t>(names.size());
+        values[row] = row + 1;
+        auto& state = expected[{ids[row], name}];
+        ++state.first;
+        state.second += values[row];
+    }
+
+    std::vector<TColumn> columns = {
+        TColumn{.Data = reinterpret_cast<char*>(ids.data())},
+        TColumn{.Data = names.data(), .Mask = nullptr,
+            .Offsets = offsets.data(), .OffsetWidth = 4},
+        TColumn{.Data = reinterpret_cast<char*>(values.data())},
+    };
+    std::vector<TRowSet> batches = {TRowSet{
+        .Columns = columns.data(), .ColumnCount = 3, .RowCount = rowCount,
+        .Selection = nullptr, .RefCount = 1}};
+    TVectorSource source(
+        {"id", "name", "v"}, std::move(batches),
+        {std::make_shared<TIntegerType>(TIntegerType::I32),
+         std::make_shared<TStringType>(),
+         std::make_shared<TIntegerType>(TIntegerType::I64)});
+    auto root = ParsePlan(
+        "(rel aggregate (rel source \"data.parquet\") (keys id name) "
+        "(agg c count) (agg s sum v))",
+        source);
+    TPhysicalPlanner planner;
+    auto runtime = planner.Build(root);
+
+    TRowSet result{};
+    ASSERT_TRUE(runtime->Next(result));
+    ASSERT_EQ(result.ColumnCount, 4);
+    ASSERT_EQ(result.RowCount, static_cast<int64_t>(expected.size()));
+    auto* outIds = reinterpret_cast<int32_t*>(result.Columns[0].Data);
+    auto* outOffsets = static_cast<int64_t*>(result.Columns[1].Offsets);
+    auto* outCounts = reinterpret_cast<int64_t*>(result.Columns[2].Data);
+    auto* outSums = reinterpret_cast<int64_t*>(result.Columns[3].Data);
+    for (int64_t row = 0; row < result.RowCount; ++row) {
+        std::string name(result.Columns[1].Data + outOffsets[row],
+            result.Columns[1].Data + outOffsets[row + 1]);
+        EXPECT_EQ((std::pair<int64_t, int64_t>{outCounts[row], outSums[row]}),
+            expected.at({outIds[row], name}));
+    }
+    Release(&result);
+}
+
 TEST(AggregateE2E, TwoStringKeysFinalizeIndependentColumns) {
     std::string leftData = "ababa";
     std::string rightData = "xyxzy";
