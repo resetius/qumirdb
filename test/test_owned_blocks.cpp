@@ -87,6 +87,29 @@ TEST(OwnedBlocks, GrowsAndDestroysRegisteredBlocks) {
     EXPECT_EQ(capacity, 0);
 }
 
+TEST(OwnedBlocks, HashTableUsesFormerScratchSlots) {
+    NQumir::NRegistry::QumirDbModule module;
+    std::shared_ptr<NQumir::NAst::TStructType> hashTable;
+    for (const auto& type : module.ExternalTypes()) {
+        if (type.Name == "HashTable") {
+            hashTable = NQumir::NAst::TMaybeType<NQumir::NAst::TStructType>(
+                type.Type).Cast();
+            break;
+        }
+    }
+    ASSERT_NE(hashTable, nullptr);
+    ASSERT_EQ(hashTable->Fields.size(), 13u);
+    EXPECT_EQ(hashTable->Fields[5].first, "OwnedBlocks");
+    EXPECT_EQ(hashTable->Fields[6].first, "OwnedBlockCount");
+    EXPECT_EQ(hashTable->Fields[7].first, "OwnedBlockCapacity");
+    EXPECT_TRUE(NQumir::NAst::TMaybeType<NQumir::NAst::TPointerType>(
+        hashTable->Fields[5].second));
+    EXPECT_TRUE(NQumir::NAst::TMaybeType<NQumir::NAst::TIntegerType>(
+        hashTable->Fields[6].second));
+    EXPECT_TRUE(NQumir::NAst::TMaybeType<NQumir::NAst::TIntegerType>(
+        hashTable->Fields[7].second));
+}
+
 } // namespace
 
 int main(int argc, char** argv) {

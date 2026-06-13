@@ -166,6 +166,10 @@ each `OwnedString.Data` into that block.
 The table owns a registry of these blocks and frees them in `aht_destroy`.
 Rehash copies `OwnedString` handles and never clones or frees their bytes.
 
+The registry reuses the three previously unused 8-byte scratch slots in
+`HashTable`: `OwnedBlocks`, `OwnedBlockCount`, and `OwnedBlockCapacity` at
+offsets 40, 48, and 56. The table ABI therefore remains 104 bytes.
+
 This is intentionally simpler than designing the final query allocator now.
 It costs one allocation per unique string-bearing group. Later, the registry
 can be replaced by a chunked query arena while keeping `OwnedString` and the
