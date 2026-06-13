@@ -78,4 +78,43 @@
         (block (call qdb_free (cast blocks <ptr i8>))))
       (= blocks_ref [(: 0 i64)] (cast (: 0 i64) <ptr <ptr u8>>))
       (= count_ref [(: 0 i64)] (: 0 i64))
-      (= capacity_ref [(: 0 i64)] (: 0 i64)))))
+      (= capacity_ref [(: 0 i64)] (: 0 i64))))
+
+  (fun aht_owned_blocks_reserve
+       ((var ht <ref HashTable>) (var additional i64)) -> bool
+    (block
+      (if (< additional (: 0 i64)) (block (return #f)))
+      (var count = (field ht OwnedBlockCount))
+      (var capacity = (field ht OwnedBlockCapacity))
+      (var required = (+ count additional))
+      (if (< required count) (block (return #f)))
+      (if (> required capacity)
+        (block
+          (var new_capacity = capacity)
+          (if (< new_capacity (: 4 i64))
+            (block (= new_capacity (: 4 i64))))
+          (while (< new_capacity required)
+            (block
+              (if (> new_capacity (: 1152921504606846975 i64))
+                (block (return #f)))
+              (= new_capacity (* new_capacity (: 2 i64)))))
+          (var grown = (cast
+            (call qdb_realloc
+              (cast (field ht OwnedBlocks) <ptr i8>)
+              (* new_capacity (: 8 i64)))
+            <ptr <ptr u8>>))
+          (if (== (cast grown i64) (: 0 i64))
+            (block (return #f)))
+          (field_assign ht OwnedBlocks grown)
+          (field_assign ht OwnedBlockCapacity new_capacity)))
+      (return #t)))
+
+  (fun aht_owned_blocks_commit
+       ((var ht <ref HashTable>) (var block <ptr u8>))
+    (block
+      (if (!= (cast block i64) (: 0 i64))
+        (block
+          (var count = (field ht OwnedBlockCount))
+          (var blocks = (field ht OwnedBlocks))
+          (= blocks [count] block)
+          (field_assign ht OwnedBlockCount (+ count (: 1 i64))))))))

@@ -1,0 +1,206 @@
+#include <gtest/gtest.h>
+
+#include <qdb/kernel/aggregate_key.h>
+#include <qdb/kernel/gen.h>
+#include <qdb/kernel/lib.h>
+#include <qdb/modules/qumirdb.h>
+#include <qdb/modules/qumirdb_runtime.h>
+#include <qdb/modules/qumirdb_types.h>
+
+#include <qumir/codegen/llvm/llvm_initializer.h>
+#include <qumir/runner/runner_llvm.h>
+
+#include <array>
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <vector>
+
+namespace {
+
+struct THashTable {
+    uint8_t* Keys = nullptr;
+    int64_t* Dist = nullptr;
+    int64_t* SlotId = nullptr;
+    uint8_t* GroupKeys = nullptr;
+    int64_t** AggBuffers = nullptr;
+    uint8_t** OwnedBlocks = nullptr;
+    int64_t OwnedBlockCount = 0;
+    int64_t OwnedBlockCapacity = 0;
+    int64_t Capacity = 0;
+    int64_t Size = 0;
+    int64_t NumAggs = 0;
+    int64_t NumKeys = 0;
+    int64_t KeySize = 0;
+};
+
+static_assert(sizeof(THashTable) == 104);
+
+std::unique_ptr<NQumir::TLLVMRunner> CompileDualUpsert(
+    const NQqb::NKernel::TAggregateKeyDescriptor& key,
+    const std::string& entrySource,
+    const std::string& entryName,
+    void*& entry)
+{
+    using namespace NQumir;
+    using namespace NQumir::NAst;
+
+    std::vector<TExprPtr> stmts;
+    for (const char* file : {
+             "string_ops.oz", "owned_blocks.oz", "robin_hood_dual_key.oz"}) {
+        auto library = NQqb::NKernel::ParseFunctionLibrary(
+            NQqb::NKernel::ReadAggregationKernel(file));
+        if (!library) {
+            ADD_FAILURE() << library.error().ToString();
+            return {};
+        }
+        stmts.insert(stmts.end(), library->begin(), library->end());
+    }
+    auto operations = NQqb::NKernel::GenKeyOperationFunDecls(key);
+    stmts.insert(stmts.end(), operations.begin(), operations.end());
+    auto ownership = NQqb::NKernel::GenKeyOwnershipFunDecls(key);
+    stmts.insert(stmts.end(), ownership.begin(), ownership.end());
+    auto wrapper = NQqb::NKernel::ParseFunctionLibrary(entrySource);
+    if (!wrapper) {
+        ADD_FAILURE() << wrapper.error().ToString();
+        return {};
+    }
+    stmts.insert(stmts.end(), wrapper->begin(), wrapper->end());
+
+    TLLVMRunnerOptions options;
+    options.CoreInput = true;
+    options.NativeCode = true;
+    options.AllowOverloads = true;
+    auto runner = std::make_unique<TLLVMRunner>(options);
+    runner->RegisterModule(
+        std::make_shared<NQumir::NRegistry::QumirDbModule>(), true);
+    auto program = std::make_shared<TBlockExpr>(TLocation{}, std::move(stmts));
+    std::string error;
+    entry = runner->CompileKernelAst(program, entryName, &error);
+    EXPECT_NE(entry, nullptr) << error;
+    return runner;
+}
+
+void DestroyOwnedBlocks(THashTable& table) {
+    for (int64_t i = 0; i < table.OwnedBlockCount; ++i) {
+        qdb_free(table.OwnedBlocks[i]);
+    }
+    qdb_free(table.OwnedBlocks);
+    table.OwnedBlocks = nullptr;
+    table.OwnedBlockCount = 0;
+    table.OwnedBlockCapacity = 0;
+}
+
+TEST(DualKeyUpsert, FixedWidthUsesIdentityClone) {
+    using namespace NQumir::NAst;
+    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
+    TStructType input({{"key", i64}});
+    auto key = NQqb::NKernel::BuildAggregateKeyDescriptor(input, {"key"});
+    const std::string source = R"oz(
+(block
+  (fun upsert_i64 ((var ht <ref HashTable>)
+                   (var key i64)
+                   (var out_is_new <ptr i64>)) -> i64
+    (block (return (call aht_upsert_dual ht key key out_is_new)))))
+)oz";
+    void* entry = nullptr;
+    auto runner = CompileDualUpsert(key, source, "upsert_i64", entry);
+    ASSERT_NE(entry, nullptr);
+    auto upsert = reinterpret_cast<int64_t(*)(
+        THashTable*, int64_t, int64_t*)>(entry);
+
+    std::array<int64_t, 4> keys{};
+    std::array<int64_t, 4> groupKeys{};
+    std::array<int64_t, 4> dist = {-1, -1, -1, -1};
+    std::array<int64_t, 4> slotIds = {-1, -1, -1, -1};
+    THashTable table{
+        .Keys = reinterpret_cast<uint8_t*>(keys.data()),
+        .Dist = dist.data(),
+        .SlotId = slotIds.data(),
+        .GroupKeys = reinterpret_cast<uint8_t*>(groupKeys.data()),
+        .Capacity = 4,
+        .KeySize = 8,
+    };
+    int64_t isNew = 0;
+    EXPECT_EQ(upsert(&table, 42, &isNew), 0);
+    EXPECT_EQ(isNew, 1);
+    EXPECT_EQ(table.OwnedBlockCount, 0);
+    EXPECT_EQ(groupKeys[0], 42);
+    EXPECT_EQ(upsert(&table, 42, &isNew), 0);
+    EXPECT_EQ(isNew, 0);
+    EXPECT_EQ(table.Size, 1);
+}
+
+TEST(DualKeyUpsert, StringClonesOnlyAfterMiss) {
+    using namespace NQumir::NAst;
+    TStructType input({{"key", std::make_shared<TStringType>()}});
+    auto key = NQqb::NKernel::BuildAggregateKeyDescriptor(input, {"key"});
+    const std::string source = R"oz(
+(block
+  (fun upsert_string ((var ht <ref HashTable>)
+                      (var key StringView)
+                      (var stored_witness OwnedString)
+                      (var out_is_new <ptr i64>)) -> i64
+    (block (return (call aht_upsert_dual
+      ht key stored_witness out_is_new)))))
+)oz";
+    void* entry = nullptr;
+    auto runner = CompileDualUpsert(key, source, "upsert_string", entry);
+    ASSERT_NE(entry, nullptr);
+    auto upsert = reinterpret_cast<int64_t(*)(
+        THashTable*, NQqb::TStringView, NQqb::TOwnedString, int64_t*)>(entry);
+
+    std::array<NQqb::TOwnedString, 4> keys{};
+    std::array<NQqb::TOwnedString, 4> groupKeys{};
+    std::array<int64_t, 4> dist = {-1, -1, -1, -1};
+    std::array<int64_t, 4> slotIds = {-1, -1, -1, -1};
+    THashTable table{
+        .Keys = reinterpret_cast<uint8_t*>(keys.data()),
+        .Dist = dist.data(),
+        .SlotId = slotIds.data(),
+        .GroupKeys = reinterpret_cast<uint8_t*>(groupKeys.data()),
+        .Capacity = 4,
+        .KeySize = 16,
+    };
+    std::string first = "alpha";
+    NQqb::TStringView firstView{
+        .Data = reinterpret_cast<uint8_t*>(first.data()),
+        .Size = static_cast<int64_t>(first.size()),
+    };
+    int64_t isNew = 0;
+    EXPECT_EQ(upsert(&table, firstView, {}, &isNew), 0);
+    ASSERT_EQ(isNew, 1);
+    ASSERT_EQ(table.OwnedBlockCount, 1);
+    ASSERT_NE(groupKeys[0].Data, firstView.Data);
+    EXPECT_EQ(std::string(
+        reinterpret_cast<char*>(groupKeys[0].Data), groupKeys[0].Size), first);
+
+    std::string duplicate = "alpha";
+    NQqb::TStringView duplicateView{
+        .Data = reinterpret_cast<uint8_t*>(duplicate.data()),
+        .Size = static_cast<int64_t>(duplicate.size()),
+    };
+    EXPECT_EQ(upsert(&table, duplicateView, {}, &isNew), 0);
+    EXPECT_EQ(isNew, 0);
+    EXPECT_EQ(table.OwnedBlockCount, 1);
+    EXPECT_EQ(table.Size, 1);
+
+    std::string second = "beta";
+    NQqb::TStringView secondView{
+        .Data = reinterpret_cast<uint8_t*>(second.data()),
+        .Size = static_cast<int64_t>(second.size()),
+    };
+    EXPECT_EQ(upsert(&table, secondView, {}, &isNew), 1);
+    EXPECT_EQ(isNew, 1);
+    EXPECT_EQ(table.OwnedBlockCount, 2);
+    EXPECT_EQ(table.Size, 2);
+    DestroyOwnedBlocks(table);
+}
+
+} // namespace
+
+int main(int argc, char** argv) {
+    testing::InitGoogleTest(&argc, argv);
+    NQumir::NCodeGen::TLLVMInitializer initializer;
+    return RUN_ALL_TESTS();
+}
