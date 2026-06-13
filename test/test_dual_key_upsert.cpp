@@ -197,6 +197,98 @@ TEST(DualKeyUpsert, StringClonesOnlyAfterMiss) {
     DestroyOwnedBlocks(table);
 }
 
+TEST(DualKeyUpsert, StoredRehashPreservesOwnedPointers) {
+    using namespace NQumir::NAst;
+    TStructType input({{"key", std::make_shared<TStringType>()}});
+    auto key = NQqb::NKernel::BuildAggregateKeyDescriptor(input, {"key"});
+    const std::string upsertSource = R"oz(
+(block
+  (fun upsert_string ((var ht <ref HashTable>)
+                      (var key StringView)
+                      (var stored_witness OwnedString)
+                      (var out_is_new <ptr i64>)) -> i64
+    (block (return (call aht_upsert_dual
+      ht key stored_witness out_is_new)))))
+)oz";
+    const std::string rehashSource = R"oz(
+(block
+  (fun rehash_string ((var old_keys <ptr OwnedString>)
+                      (var old_dist <ptr i64>)
+                      (var old_slot_ids <ptr i64>)
+                      (var old_capacity i64)
+                      (var new_keys <ptr OwnedString>)
+                      (var new_dist <ptr i64>)
+                      (var new_slot_ids <ptr i64>)
+                      (var new_capacity i64)
+                      (var stored_witness OwnedString)) -> bool
+    (block (return (call rh_rehash_stored
+      old_keys old_dist old_slot_ids old_capacity
+      new_keys new_dist new_slot_ids new_capacity stored_witness)))))
+)oz";
+    void* upsertEntry = nullptr;
+    auto upsertRunner = CompileDualUpsert(
+        key, upsertSource, "upsert_string", upsertEntry);
+    ASSERT_NE(upsertEntry, nullptr);
+    void* rehashEntry = nullptr;
+    auto rehashRunner = CompileDualUpsert(
+        key, rehashSource, "rehash_string", rehashEntry);
+    ASSERT_NE(rehashEntry, nullptr);
+    auto upsert = reinterpret_cast<int64_t(*)(
+        THashTable*, NQqb::TStringView, NQqb::TOwnedString, int64_t*)>(
+        upsertEntry);
+    auto rehash = reinterpret_cast<bool(*)(
+        NQqb::TOwnedString*, int64_t*, int64_t*, int64_t,
+        NQqb::TOwnedString*, int64_t*, int64_t*, int64_t,
+        NQqb::TOwnedString)>(rehashEntry);
+
+    std::array<NQqb::TOwnedString, 4> oldKeys{};
+    std::array<NQqb::TOwnedString, 4> groupKeys{};
+    std::array<int64_t, 4> oldDist = {-1, -1, -1, -1};
+    std::array<int64_t, 4> oldSlotIds = {-1, -1, -1, -1};
+    THashTable table{
+        .Keys = reinterpret_cast<uint8_t*>(oldKeys.data()),
+        .Dist = oldDist.data(),
+        .SlotId = oldSlotIds.data(),
+        .GroupKeys = reinterpret_cast<uint8_t*>(groupKeys.data()),
+        .Capacity = 4,
+        .KeySize = 16,
+    };
+    std::array<std::string, 3> values = {"alpha", "beta", "gamma"};
+    int64_t isNew = 0;
+    for (auto& value : values) {
+        NQqb::TStringView view{
+            .Data = reinterpret_cast<uint8_t*>(value.data()),
+            .Size = static_cast<int64_t>(value.size()),
+        };
+        ASSERT_GE(upsert(&table, view, {}, &isNew), 0);
+        ASSERT_EQ(isNew, 1);
+    }
+    ASSERT_EQ(table.OwnedBlockCount, 3);
+    std::array<uint8_t*, 3> ownedPointers = {
+        groupKeys[0].Data, groupKeys[1].Data, groupKeys[2].Data};
+
+    std::array<NQqb::TOwnedString, 8> newKeys{};
+    std::array<int64_t, 8> newDist{};
+    std::array<int64_t, 8> newSlotIds{};
+    ASSERT_TRUE(rehash(
+        oldKeys.data(), oldDist.data(), oldSlotIds.data(), 4,
+        newKeys.data(), newDist.data(), newSlotIds.data(), 8, {}));
+    std::array<bool, 3> found{};
+    for (size_t slot = 0; slot < newKeys.size(); ++slot) {
+        if (newDist[slot] < 0) {
+            continue;
+        }
+        for (size_t i = 0; i < ownedPointers.size(); ++i) {
+            if (newKeys[slot].Data == ownedPointers[i]) {
+                found[i] = true;
+            }
+        }
+    }
+    EXPECT_EQ(found, (std::array<bool, 3>{true, true, true}));
+    EXPECT_EQ(table.OwnedBlockCount, 3);
+    DestroyOwnedBlocks(table);
+}
+
 } // namespace
 
 int main(int argc, char** argv) {

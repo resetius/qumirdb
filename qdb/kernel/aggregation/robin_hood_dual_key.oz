@@ -99,4 +99,34 @@
       (call aht_owned_blocks_commit ht owned_block)
       (field_assign ht Size (+ dense_slot (: 1 i64)))
       (= out_is_new [(: 0 i64)] (: 1 i64))
-      (return dense_slot))))
+      (return dense_slot)))
+
+  (fun rh_rehash_stored
+       ((var old_keys <ptr <named StoredKey (template readable mutable)>>)
+        (var old_dist <ptr i64>)
+        (var old_slot_ids <ptr i64>)
+        (var old_capacity i64)
+        (var new_keys <ptr <named StoredKey (template readable mutable)>>)
+        (var new_dist <ptr i64>)
+        (var new_slot_ids <ptr i64>)
+        (var new_capacity i64)
+        (var stored_witness <named StoredKey (template readable mutable)>)) -> bool
+    (block
+      (var index i64)
+      (= index (: 0 i64))
+      (while (< index new_capacity)
+        (block
+          (= new_dist [index] (: -1 i64))
+          (= new_slot_ids [index] (: -1 i64))
+          (= index (+ index (: 1 i64)))))
+      (= index (: 0 i64))
+      (while (< index old_capacity)
+        (block
+          (if (>= (index old_dist index) (: 0 i64))
+            (block
+              (if (! (call rh_insert_stored
+                new_keys new_dist new_slot_ids new_capacity
+                (index old_keys index) (index old_slot_ids index)))
+                (block (return #f)))))
+          (= index (+ index (: 1 i64)))))
+      (return #t))))
