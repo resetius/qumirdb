@@ -258,6 +258,145 @@ NQumir::NAst::TExprPtr EqualKeyValue(
         (leftType ? leftType->ToString() : std::string("<null>")));
 }
 
+bool IsStringHandleType(const NQumir::NAst::TTypePtr& type) {
+    auto named = NQumir::NAst::TMaybeType<NQumir::NAst::TNamedType>(type);
+    return named && (named.Cast()->Name == "StringView" ||
+                     named.Cast()->Name == "OwnedString");
+}
+
+NQumir::NAst::TExprPtr KeyOwnedBytesExpr(
+    const NQumir::NAst::TTypePtr& originalType,
+    const std::string& root,
+    std::vector<std::string>& path)
+{
+    using namespace NQumir::NAst;
+    NQumir::TLocation loc{};
+    auto i64Type = std::make_shared<TIntegerType>(TIntegerType::I64);
+    auto zero = [&]() -> TExprPtr {
+        auto value = std::make_shared<TNumberExpr>(loc, int64_t{0});
+        value->Type = i64Type;
+        return value;
+    };
+    if (IsStringHandleType(originalType)) {
+        return std::make_shared<TFieldAccessExpr>(
+            loc, KeyValueExpr(root, path), "Size");
+    }
+    auto type = UnwrapNamedType(originalType);
+    if (TMaybeType<TIntegerType>(type) || TMaybeType<TFloatType>(type) ||
+        TMaybeType<TBoolType>(type)) {
+        return zero();
+    }
+    if (auto structure = TMaybeType<TStructType>(type)) {
+        TExprPtr result = zero();
+        for (const auto& [fieldName, fieldType] : structure.Cast()->Fields) {
+            if (fieldName.starts_with("__qdb_padding_")) {
+                continue;
+            }
+            path.push_back(fieldName);
+            auto fieldBytes = KeyOwnedBytesExpr(fieldType, root, path);
+            path.pop_back();
+            result = std::make_shared<TBinaryExpr>(loc, TOperator("+"),
+                std::move(result), std::move(fieldBytes));
+        }
+        return result;
+    }
+    throw std::invalid_argument(
+        "GenKeyOwnershipFunDecls: unsupported key leaf type " +
+        (originalType ? originalType->ToString() : std::string("<null>")));
+}
+
+NQumir::NAst::TExprPtr CloneKeyValue(
+    const NQumir::NAst::TTypePtr& lookupType,
+    const NQumir::NAst::TTypePtr& storedType,
+    const std::string& root,
+    std::vector<std::string>& path,
+    std::vector<NQumir::NAst::TExprPtr>& body,
+    size_t& nextTemporary)
+{
+    using namespace NQumir::NAst;
+    NQumir::TLocation loc{};
+    auto i64Type = std::make_shared<TIntegerType>(TIntegerType::I64);
+    auto u8Type = std::make_shared<TIntegerType>(TIntegerType::U8);
+    auto ptrU8Type = std::make_shared<TPointerType>(u8Type);
+    auto ident = [&](const std::string& name) -> TExprPtr {
+        return std::make_shared<TIdentExpr>(loc, name);
+    };
+    auto field = [&](const std::string& name) -> TExprPtr {
+        return std::make_shared<TFieldAccessExpr>(
+            loc, KeyValueExpr(root, path), name);
+    };
+
+    if (IsStringHandleType(lookupType) && IsStringHandleType(storedType)) {
+        const std::string dataName =
+            "owned_data_" + std::to_string(nextTemporary++);
+        const std::string valueName =
+            "owned_value_" + std::to_string(nextTemporary++);
+        const std::string copyName =
+            "owned_copy_" + std::to_string(nextTemporary++);
+        body.push_back(std::make_shared<TVarStmt>(loc, dataName, ptrU8Type));
+        auto address = std::make_shared<TBinaryExpr>(loc, TOperator("+"),
+            std::make_shared<TCastExpr>(loc, ident("owned_buffer"), i64Type),
+            ident("owned_offset"));
+        body.push_back(std::make_shared<TAssignExpr>(loc, dataName,
+            std::make_shared<TCastExpr>(loc, std::move(address), ptrU8Type)));
+        body.push_back(std::make_shared<TVarStmt>(loc, copyName, i64Type));
+        body.push_back(std::make_shared<TAssignExpr>(loc, copyName,
+            std::make_shared<TCallExpr>(loc,
+                ident("qdb_string_copy_bytes"),
+                std::vector<TExprPtr>{
+                    ident(dataName), field("Data"), field("Size")})));
+        body.push_back(std::make_shared<TVarStmt>(loc, valueName, storedType));
+        body.push_back(std::make_shared<TAssignExpr>(loc, valueName,
+            std::make_shared<TStructConstructExpr>(loc, storedType,
+                std::vector<TExprPtr>{ident(dataName), field("Size")})));
+        body.push_back(std::make_shared<TAssignExpr>(loc, "owned_offset",
+            std::make_shared<TBinaryExpr>(loc, TOperator("+"),
+                ident("owned_offset"), field("Size"))));
+        return ident(valueName);
+    }
+
+    auto lookup = UnwrapNamedType(lookupType);
+    auto stored = UnwrapNamedType(storedType);
+    if ((TMaybeType<TIntegerType>(lookup) && TMaybeType<TIntegerType>(stored)) ||
+        (TMaybeType<TFloatType>(lookup) && TMaybeType<TFloatType>(stored)) ||
+        (TMaybeType<TBoolType>(lookup) && TMaybeType<TBoolType>(stored))) {
+        return KeyValueExpr(root, path);
+    }
+    if (auto storedStruct = TMaybeType<TStructType>(stored)) {
+        auto lookupStruct = TMaybeType<TStructType>(lookup);
+        if (!lookupStruct) {
+            throw std::invalid_argument(
+                "GenKeyOwnershipFunDecls: mismatched struct key types");
+        }
+        std::vector<TExprPtr> fields;
+        fields.reserve(storedStruct.Cast()->Fields.size());
+        for (const auto& [fieldName, fieldType] : storedStruct.Cast()->Fields) {
+            if (fieldName.starts_with("__qdb_padding_")) {
+                auto padding = std::make_shared<TNumberExpr>(loc, int64_t{0});
+                padding->Type = fieldType;
+                fields.push_back(std::move(padding));
+                continue;
+            }
+            auto lookupField = std::find_if(
+                lookupStruct.Cast()->Fields.begin(), lookupStruct.Cast()->Fields.end(),
+                [&](const auto& item) { return item.first == fieldName; });
+            if (lookupField == lookupStruct.Cast()->Fields.end()) {
+                throw std::invalid_argument(
+                    "GenKeyOwnershipFunDecls: mismatched struct key fields");
+            }
+            path.push_back(fieldName);
+            fields.push_back(CloneKeyValue(lookupField->second, fieldType,
+                root, path, body, nextTemporary));
+            path.pop_back();
+        }
+        return std::make_shared<TStructConstructExpr>(
+            loc, storedType, std::move(fields));
+    }
+    throw std::invalid_argument(
+        "GenKeyOwnershipFunDecls: unsupported clone type " +
+        (lookupType ? lookupType->ToString() : std::string("<null>")));
+}
+
 } // namespace
 
 std::vector<NQumir::NAst::TExprPtr> GenKeyOperationFunDecls(
@@ -312,6 +451,56 @@ std::vector<NQumir::NAst::TExprPtr> GenKeyOperationFunDecls(
     }
     result.push_back(makeEqual(key.StoredType, key.StoredType));
     return result;
+}
+
+std::vector<NQumir::NAst::TExprPtr> GenKeyOwnershipFunDecls(
+    const TAggregateKeyDescriptor& key)
+{
+    using namespace NQumir::NAst;
+    NQumir::TLocation loc{};
+    auto i64Type = std::make_shared<TIntegerType>(TIntegerType::I64);
+    auto u8Type = std::make_shared<TIntegerType>(TIntegerType::U8);
+    auto ptrU8Type = std::make_shared<TPointerType>(u8Type);
+
+    std::vector<std::string> path;
+    auto bytesExpr = KeyOwnedBytesExpr(key.LookupType, "key", path);
+    std::vector<TParam> bytesParams = {
+        std::make_shared<TVarStmt>(loc, "key", key.LookupType),
+    };
+    auto bytes = std::make_shared<TFunDecl>(loc, "key_owned_bytes",
+        std::move(bytesParams), std::make_shared<TBlockExpr>(loc,
+            std::vector<TExprPtr>{
+                std::make_shared<TReturnExpr>(loc, std::move(bytesExpr))}),
+        i64Type);
+    bytes->Type = std::make_shared<TFunctionType>(
+        std::vector<TTypePtr>{key.LookupType}, i64Type);
+
+    std::vector<TExprPtr> cloneBody;
+    TExprPtr cloneValue;
+    if (key.HasDistinctLookupType()) {
+        auto offset = std::make_shared<TVarStmt>(loc, "owned_offset", i64Type);
+        offset->Init = std::make_shared<TNumberExpr>(loc, int64_t{0});
+        cloneBody.push_back(std::move(offset));
+        size_t nextTemporary = 0;
+        path.clear();
+        cloneValue = CloneKeyValue(key.LookupType, key.StoredType,
+            "key", path, cloneBody, nextTemporary);
+    } else {
+        cloneValue = std::make_shared<TIdentExpr>(loc, "key");
+    }
+    cloneBody.push_back(
+        std::make_shared<TReturnExpr>(loc, std::move(cloneValue)));
+    std::vector<TParam> cloneParams = {
+        std::make_shared<TVarStmt>(loc, "key", key.LookupType),
+        std::make_shared<TVarStmt>(loc, "owned_buffer", ptrU8Type),
+    };
+    auto clone = std::make_shared<TFunDecl>(loc, "key_clone_owned",
+        std::move(cloneParams),
+        std::make_shared<TBlockExpr>(loc, std::move(cloneBody)), key.StoredType);
+    clone->Type = std::make_shared<TFunctionType>(
+        std::vector<TTypePtr>{key.LookupType, ptrU8Type}, key.StoredType);
+
+    return {std::move(bytes), std::move(clone)};
 }
 
 void SubstFieldsInPlace(

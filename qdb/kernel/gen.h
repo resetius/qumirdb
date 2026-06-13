@@ -18,6 +18,10 @@ namespace NKernel {
 std::vector<NQumir::NAst::TExprPtr> GenKeyOperationFunDecls(
     const TAggregateKeyDescriptor& key);
 
+// Generates key_owned_bytes(LookupKey) and key_clone_owned(LookupKey, u8*).
+std::vector<NQumir::NAst::TExprPtr> GenKeyOwnershipFunDecls(
+    const TAggregateKeyDescriptor& key);
+
 void SubstFieldsInPlace(
     NQumir::NAst::TExprPtr& expr,
     const std::unordered_set<std::string>& fieldNames,
