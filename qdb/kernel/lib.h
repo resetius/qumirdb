@@ -55,5 +55,10 @@ BuildGenericAggregateFinalizeProgramAst(
     const TAggregateKeyDescriptor& key,
     NQumir::NAst::TTypePtr hashTableType);
 
+std::expected<NQumir::NAst::TExprPtr, NQumir::TError>
+BuildGenericAggregateMeasureProgramAst(
+    const TAggregateKeyDescriptor& key,
+    NQumir::NAst::TTypePtr hashTableType);
+
 } // namespace NKernel
 } // namespace NQqb

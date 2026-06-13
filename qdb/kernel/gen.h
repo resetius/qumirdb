@@ -56,6 +56,13 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
     const TAggregateKeyDescriptor& key,
     NQumir::NAst::TTypePtr hashTableType);
 
+// Measures the output Data bytes required for each logical key column.
+// Fixed-width columns report row_count * field.Size; string columns report
+// the sum of stored byte lengths. Returns ht.Size or -1 on capacity failure.
+NQumir::NAst::TExprPtr GenGenericAggregateMeasureAst(
+    const TAggregateKeyDescriptor& key,
+    NQumir::NAst::TTypePtr hashTableType);
+
 // Generates N = funcs.size() FunDecls named reduce_0..reduce_{N-1}, each with
 // the predefined reducer contract from PLAN_AGGREGATION.md section 4:
 //   reduce_i(i64 prev, i64 value, bool is_new) -> i64
