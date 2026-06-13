@@ -11,6 +11,7 @@
 #include <qumir/runner/runner_llvm.h>
 
 #include <array>
+#include <cstring>
 #include <memory>
 #include <string>
 
@@ -60,6 +61,8 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileKeyOperation(
     stmts.insert(stmts.end(), stringOps->begin(), stringOps->end());
     auto keyOps = NQqb::NKernel::GenKeyOperationFunDecls(key);
     stmts.insert(stmts.end(), keyOps.begin(), keyOps.end());
+    auto ownership = NQqb::NKernel::GenKeyOwnershipFunDecls(key);
+    stmts.insert(stmts.end(), ownership.begin(), ownership.end());
 
     std::vector<TParam> params;
     std::vector<TExprPtr> args;
@@ -99,6 +102,86 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileKeyOperation(
     auto program = std::make_shared<TBlockExpr>(TLocation{}, std::move(stmts));
     std::string error;
     entry = runner->CompileKernelAst(program, entryName, &error);
+    EXPECT_NE(entry, nullptr) << error;
+    return runner;
+}
+
+std::unique_ptr<NQumir::TLLVMRunner> CompileCloneEntry(
+    const NQqb::NKernel::TAggregateKeyDescriptor& key,
+    void*& entry)
+{
+    using namespace NQumir;
+    using namespace NQumir::NAst;
+
+    std::vector<TExprPtr> stmts;
+    if (!key.LookupTypeName.empty()) {
+        stmts.push_back(std::make_shared<TTypeDeclStmt>(
+            TLocation{}, key.LookupType));
+    }
+    if (!key.StoredTypeName.empty()) {
+        stmts.push_back(std::make_shared<TTypeDeclStmt>(
+            TLocation{}, key.StoredType));
+    }
+    auto stringOps = NQqb::NKernel::ParseFunctionLibrary(
+        NQqb::NKernel::ReadAggregationKernel("string_ops.oz"));
+    if (!stringOps) {
+        ADD_FAILURE() << stringOps.error().ToString();
+        return {};
+    }
+    stmts.insert(stmts.end(), stringOps->begin(), stringOps->end());
+    auto ownership = NQqb::NKernel::GenKeyOwnershipFunDecls(key);
+    stmts.insert(stmts.end(), ownership.begin(), ownership.end());
+
+    auto u8 = std::make_shared<TIntegerType>(TIntegerType::U8);
+    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
+    auto ptrU8 = std::make_shared<TPointerType>(u8);
+    auto ptrLookup = std::make_shared<TPointerType>(key.LookupType);
+    auto ptrStored = std::make_shared<TPointerType>(key.StoredType);
+    auto ident = [&](const std::string& name) -> TExprPtr {
+        return std::make_shared<TIdentExpr>(TLocation{}, name);
+    };
+    auto indexZero = [&](const std::string& name) -> TExprPtr {
+        auto zero = std::make_shared<TNumberExpr>(TLocation{}, int64_t{0});
+        zero->Type = i64;
+        return std::make_shared<TIndexExpr>(TLocation{}, ident(name), zero);
+    };
+    auto cloneCall = std::make_shared<TCallExpr>(TLocation{},
+        ident("key_clone_owned"),
+        std::vector<TExprPtr>{indexZero("lookup"), ident("buffer")});
+    auto assignOutput = std::make_shared<TArrayAssignExpr>(TLocation{}, "stored",
+        std::vector<TExprPtr>{[&]() -> TExprPtr {
+            auto zero = std::make_shared<TNumberExpr>(TLocation{}, int64_t{0});
+            zero->Type = i64;
+            return zero;
+        }()}, std::move(cloneCall));
+    auto bytesCall = std::make_shared<TCallExpr>(TLocation{},
+        ident("key_owned_bytes"),
+        std::vector<TExprPtr>{indexZero("lookup")});
+    std::vector<TParam> params = {
+        std::make_shared<TVarStmt>(TLocation{}, "lookup", ptrLookup),
+        std::make_shared<TVarStmt>(TLocation{}, "buffer", ptrU8),
+        std::make_shared<TVarStmt>(TLocation{}, "stored", ptrStored),
+    };
+    auto function = std::make_shared<TFunDecl>(TLocation{}, "clone_key",
+        std::move(params), std::make_shared<TBlockExpr>(TLocation{},
+            std::vector<TExprPtr>{
+                std::move(assignOutput),
+                std::make_shared<TReturnExpr>(TLocation{}, std::move(bytesCall)),
+            }), i64);
+    function->Type = std::make_shared<TFunctionType>(
+        std::vector<TTypePtr>{ptrLookup, ptrU8, ptrStored}, i64);
+    stmts.push_back(std::move(function));
+
+    TLLVMRunnerOptions options;
+    options.CoreInput = true;
+    options.NativeCode = true;
+    options.AllowOverloads = true;
+    auto runner = std::make_unique<TLLVMRunner>(options);
+    runner->RegisterModule(
+        std::make_shared<NQumir::NRegistry::QumirDbModule>(), true);
+    auto program = std::make_shared<TBlockExpr>(TLocation{}, std::move(stmts));
+    std::string error;
+    entry = runner->CompileKernelAst(program, "clone_key", &error);
     EXPECT_NE(entry, nullptr) << error;
     return runner;
 }
@@ -372,6 +455,93 @@ TEST(StringKeyDescriptor, DualRobinHoodLooksUpBorrowedAndStoresOwned) {
         .Size = static_cast<int64_t>(missingBytes.size()),
     };
     EXPECT_EQ(lookup(keys.data(), dist.data(), slotIds.data(), 4, missing), -1);
+}
+
+TEST(StringKeyDescriptor, FixedWidthOwnershipCloneIsIdentity) {
+    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
+    TStructType input({{"id", i64}});
+    auto key = NQqb::NKernel::BuildAggregateKeyDescriptor(input, {"id"});
+    void* entry = nullptr;
+    auto runner = CompileCloneEntry(key, entry);
+    ASSERT_NE(entry, nullptr);
+    auto clone = reinterpret_cast<int64_t(*)(int64_t*, uint8_t*, int64_t*)>(entry);
+
+    int64_t lookup = 42;
+    int64_t stored = 0;
+    EXPECT_EQ(clone(&lookup, nullptr, &stored), 0);
+    EXPECT_EQ(stored, lookup);
+}
+
+TEST(StringKeyDescriptor, StringOwnershipCloneCopiesBytes) {
+    TStructType input({{"name", std::make_shared<TStringType>()}});
+    auto key = NQqb::NKernel::BuildAggregateKeyDescriptor(input, {"name"});
+    void* entry = nullptr;
+    auto runner = CompileCloneEntry(key, entry);
+    ASSERT_NE(entry, nullptr);
+    auto clone = reinterpret_cast<int64_t(*)(
+        NQqb::TStringView*, uint8_t*, NQqb::TOwnedString*)>(entry);
+
+    std::string source("copy\0me", 7);
+    NQqb::TStringView lookup{
+        .Data = reinterpret_cast<uint8_t*>(source.data()),
+        .Size = static_cast<int64_t>(source.size()),
+    };
+    std::array<uint8_t, 7> buffer{};
+    NQqb::TOwnedString stored{};
+    EXPECT_EQ(clone(&lookup, buffer.data(), &stored), 7);
+    EXPECT_EQ(stored.Data, buffer.data());
+    EXPECT_EQ(stored.Size, 7);
+    EXPECT_EQ(std::memcmp(stored.Data, source.data(), source.size()), 0);
+}
+
+struct TLookupStrings {
+    int64_t Id;
+    NQqb::TStringView First;
+    NQqb::TStringView Second;
+};
+
+struct TStoredStrings {
+    int64_t Id;
+    NQqb::TOwnedString First;
+    NQqb::TOwnedString Second;
+};
+
+static_assert(sizeof(TLookupStrings) == 40);
+static_assert(sizeof(TStoredStrings) == 40);
+
+TEST(StringKeyDescriptor, CompositeOwnershipCloneUsesOneBlock) {
+    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
+    auto string = std::make_shared<TStringType>();
+    TStructType input({{"id", i64}, {"first", string}, {"second", string}});
+    auto key = NQqb::NKernel::BuildAggregateKeyDescriptor(
+        input, {"id", "first", "second"});
+    void* entry = nullptr;
+    auto runner = CompileCloneEntry(key, entry);
+    ASSERT_NE(entry, nullptr);
+    auto clone = reinterpret_cast<int64_t(*)(
+        TLookupStrings*, uint8_t*, TStoredStrings*)>(entry);
+
+    std::string first = "left";
+    std::string second("r\0ght", 5);
+    TLookupStrings lookup{
+        .Id = 9,
+        .First = {
+            .Data = reinterpret_cast<uint8_t*>(first.data()),
+            .Size = static_cast<int64_t>(first.size()),
+        },
+        .Second = {
+            .Data = reinterpret_cast<uint8_t*>(second.data()),
+            .Size = static_cast<int64_t>(second.size()),
+        },
+    };
+    std::array<uint8_t, 9> buffer{};
+    TStoredStrings stored{};
+    EXPECT_EQ(clone(&lookup, buffer.data(), &stored), 9);
+    EXPECT_EQ(stored.Id, lookup.Id);
+    EXPECT_EQ(stored.First.Data, buffer.data());
+    EXPECT_EQ(stored.Second.Data, buffer.data() + first.size());
+    EXPECT_EQ(std::memcmp(stored.First.Data, first.data(), first.size()), 0);
+    EXPECT_EQ(std::memcmp(stored.Second.Data, second.data(), second.size()), 0);
 }
 
 } // namespace
