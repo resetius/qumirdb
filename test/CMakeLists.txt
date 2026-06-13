@@ -16,3 +16,4 @@ ut(test_aggregation test_aggregation.cpp ${CMAKE_SOURCE_DIR}/qdb/kernel/aggregat
 ut(test_aggregate test_aggregate.cpp)
 ut(test_string_types test_string_types.cpp)
 ut(test_string_ops test_string_ops.cpp)
+ut(test_string_key_descriptor test_string_key_descriptor.cpp)
