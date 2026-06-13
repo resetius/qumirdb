@@ -114,7 +114,23 @@ void DestroyHeapTable(THashTable& table) {
     qdb_free(table.Dist);
     qdb_free(table.SlotId);
     qdb_free(table.GroupKeys);
+    for (int64_t i = 0; i < table.NumAggs; ++i) {
+        qdb_free(table.AggBuffers[i]);
+    }
+    qdb_free(table.AggBuffers);
     DestroyOwnedBlocks(table);
+}
+
+void AddAggregateBuffers(THashTable& table, int64_t count) {
+    table.AggBuffers = static_cast<int64_t**>(
+        qdb_alloc(count * sizeof(int64_t*)));
+    ASSERT_NE(table.AggBuffers, nullptr);
+    table.NumAggs = count;
+    for (int64_t agg = 0; agg < count; ++agg) {
+        table.AggBuffers[agg] = static_cast<int64_t*>(
+            qdb_alloc(table.Capacity * sizeof(int64_t)));
+        ASSERT_NE(table.AggBuffers[agg], nullptr);
+    }
 }
 
 TEST(DualKeyUpsert, FixedWidthUsesIdentityClone) {
@@ -373,6 +389,7 @@ TEST(DualKeyUpsert, StringGrowPreservesOwnedPointers) {
 
     THashTable table;
     InitHeapTable<NQqb::TOwnedString>(table, 2);
+    AddAggregateBuffers(table, 2);
     std::vector<std::string> values;
     std::vector<uint8_t*> ownedPointers;
     int64_t isNew = 0;
@@ -385,6 +402,8 @@ TEST(DualKeyUpsert, StringGrowPreservesOwnedPointers) {
         };
         ASSERT_EQ(upsert(&table, view, {}, &isNew), i);
         ASSERT_EQ(isNew, 1);
+        table.AggBuffers[0][i] = i * 10;
+        table.AggBuffers[1][i] = i * 100;
         auto* groupKeys = reinterpret_cast<NQqb::TOwnedString*>(table.GroupKeys);
         ownedPointers.push_back(groupKeys[i].Data);
     }
@@ -397,6 +416,8 @@ TEST(DualKeyUpsert, StringGrowPreservesOwnedPointers) {
         EXPECT_EQ(std::string(
             reinterpret_cast<char*>(groupKeys[i].Data), groupKeys[i].Size),
             values[i]);
+        EXPECT_EQ(table.AggBuffers[0][i], i * 10);
+        EXPECT_EQ(table.AggBuffers[1][i], i * 100);
         NQqb::TStringView duplicate{
             .Data = reinterpret_cast<uint8_t*>(values[i].data()),
             .Size = static_cast<int64_t>(values[i].size()),
