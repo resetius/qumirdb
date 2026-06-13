@@ -196,7 +196,8 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileDualKeyEntry(
     using namespace NQumir::NAst;
 
     std::vector<TExprPtr> stmts;
-    for (const char* file : {"string_ops.oz", "robin_hood_dual_key.oz"}) {
+    for (const char* file : {
+             "string_ops.oz", "owned_blocks.oz", "robin_hood_dual_key.oz"}) {
         auto library = NQqb::NKernel::ParseFunctionLibrary(
             NQqb::NKernel::ReadAggregationKernel(file));
         if (!library) {
@@ -207,6 +208,8 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileDualKeyEntry(
     }
     auto keyOps = NQqb::NKernel::GenKeyOperationFunDecls(key);
     stmts.insert(stmts.end(), keyOps.begin(), keyOps.end());
+    auto ownership = NQqb::NKernel::GenKeyOwnershipFunDecls(key);
+    stmts.insert(stmts.end(), ownership.begin(), ownership.end());
     auto entryLibrary = NQqb::NKernel::ParseFunctionLibrary(entrySource);
     if (!entryLibrary) {
         ADD_FAILURE() << entryLibrary.error().ToString();

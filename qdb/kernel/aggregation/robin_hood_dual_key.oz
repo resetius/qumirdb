@@ -59,4 +59,44 @@
           (= slot (& (+ slot (: 1 i64)) (- capacity (: 1 i64))))
           (= carried_dist (+ carried_dist (: 1 i64)))
           (= probes (+ probes (: 1 i64)))))
-      (return #f))))
+      (return #f)))
+
+  (fun aht_upsert_dual
+       ((var ht <ref HashTable>)
+        (var key <named LookupKey (template readable mutable)>)
+        (var stored_witness <named StoredKey (template readable mutable)>)
+        (var out_is_new <ptr i64>)) -> i64
+    (block
+      (= out_is_new [(: 0 i64)] (: 0 i64))
+      (var capacity = (field ht Capacity))
+      (var keys = (cast (field ht Keys)
+        <ptr <named StoredKey (template readable mutable)>>))
+      (var dense_slot = (call rh_lookup_dual
+        keys (field ht Dist) (field ht SlotId) capacity key))
+      (if (>= dense_slot (: 0 i64)) (block (return dense_slot)))
+      (= dense_slot (field ht Size))
+      (if (>= dense_slot capacity) (block (return (: -1 i64))))
+      (var owned_bytes = (call key_owned_bytes key))
+      (var owned_block = (cast (: 0 i64) <ptr u8>))
+      (if (> owned_bytes (: 0 i64))
+        (block
+          (if (! (call aht_owned_blocks_reserve ht (: 1 i64)))
+            (block (return (: -1 i64))))
+          (= owned_block (cast (call qdb_alloc owned_bytes) <ptr u8>))
+          (if (== (cast owned_block i64) (: 0 i64))
+            (block (return (: -1 i64))))))
+      (var stored_key = (call key_clone_owned key owned_block))
+      (if (! (call rh_insert_stored
+        keys (field ht Dist) (field ht SlotId) capacity
+        stored_key dense_slot))
+        (block
+          (if (!= (cast owned_block i64) (: 0 i64))
+            (block (call qdb_free (cast owned_block <ptr i8>))))
+          (return (: -1 i64))))
+      (var group_keys = (cast (field ht GroupKeys)
+        <ptr <named StoredKey (template readable mutable)>>))
+      (= group_keys [dense_slot] stored_key)
+      (call aht_owned_blocks_commit ht owned_block)
+      (field_assign ht Size (+ dense_slot (: 1 i64)))
+      (= out_is_new [(: 0 i64)] (: 1 i64))
+      (return dense_slot))))
