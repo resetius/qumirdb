@@ -87,6 +87,48 @@ TEST(OwnedBlocks, GrowsAndDestroysRegisteredBlocks) {
     EXPECT_EQ(capacity, 0);
 }
 
+TEST(OwnedBlocks, ReserveThenCommitCannotReallocate) {
+    void* reserveEntry = nullptr;
+    auto reserveRunner = CompileOwnedBlocks("owned_blocks_reserve", reserveEntry);
+    ASSERT_NE(reserveEntry, nullptr);
+    void* commitEntry = nullptr;
+    auto commitRunner = CompileOwnedBlocks("owned_blocks_commit", commitEntry);
+    ASSERT_NE(commitEntry, nullptr);
+    void* destroyEntry = nullptr;
+    auto destroyRunner = CompileOwnedBlocks(
+        "owned_blocks_destroy", destroyEntry);
+    ASSERT_NE(destroyEntry, nullptr);
+    auto reserve = reinterpret_cast<bool(*)(
+        uint8_t***, int64_t*, int64_t*, int64_t)>(reserveEntry);
+    auto commit = reinterpret_cast<bool(*)(
+        uint8_t***, int64_t*, int64_t*, uint8_t*)>(commitEntry);
+    auto destroy = reinterpret_cast<void(*)(
+        uint8_t***, int64_t*, int64_t*)>(destroyEntry);
+
+    uint8_t** blocks = nullptr;
+    int64_t count = 0;
+    int64_t capacity = 0;
+    ASSERT_TRUE(reserve(&blocks, &count, &capacity, 3));
+    ASSERT_EQ(capacity, 4);
+    auto** reservedStorage = blocks;
+    for (int64_t i = 0; i < 3; ++i) {
+        auto* block = static_cast<uint8_t*>(qdb_alloc(1));
+        ASSERT_NE(block, nullptr);
+        ASSERT_TRUE(commit(&blocks, &count, &capacity, block));
+        EXPECT_EQ(blocks, reservedStorage);
+    }
+    EXPECT_EQ(count, 3);
+    auto* uncommitted = static_cast<uint8_t*>(qdb_alloc(1));
+    ASSERT_NE(uncommitted, nullptr);
+    ASSERT_TRUE(commit(&blocks, &count, &capacity, uncommitted));
+    auto* rejected = static_cast<uint8_t*>(qdb_alloc(1));
+    ASSERT_NE(rejected, nullptr);
+    EXPECT_FALSE(commit(&blocks, &count, &capacity, rejected));
+    qdb_free(rejected);
+
+    destroy(&blocks, &count, &capacity);
+}
+
 TEST(OwnedBlocks, HashTableUsesFormerScratchSlots) {
     NQumir::NRegistry::QumirDbModule module;
     std::shared_ptr<NQumir::NAst::TStructType> hashTable;

@@ -1,20 +1,25 @@
 (block
-  (fun owned_blocks_register
+  (fun owned_blocks_reserve
        ((var blocks_ref <ptr <ptr <ptr u8>>>)
         (var count_ref <ptr i64>)
         (var capacity_ref <ptr i64>)
-        (var block <ptr u8>)) -> bool
+        (var additional i64)) -> bool
     (block
-      (if (== (cast block i64) (: 0 i64))
-        (block (return #t)))
+      (if (< additional (: 0 i64)) (block (return #f)))
       (var count = (index count_ref (: 0 i64)))
       (var capacity = (index capacity_ref (: 0 i64)))
-      (if (== count capacity)
+      (var required = (+ count additional))
+      (if (< required count) (block (return #f)))
+      (if (> required capacity)
         (block
-          (var new_capacity i64)
-          (= new_capacity (* capacity (: 2 i64)))
+          (var new_capacity = capacity)
           (if (< new_capacity (: 4 i64))
             (block (= new_capacity (: 4 i64))))
+          (while (< new_capacity required)
+            (block
+              (if (> new_capacity (: 1152921504606846975 i64))
+                (block (return #f)))
+              (= new_capacity (* new_capacity (: 2 i64)))))
           (var blocks = (index blocks_ref (: 0 i64)))
           (var grown = (cast
             (call qdb_realloc
@@ -24,10 +29,37 @@
             (block (return #f)))
           (= blocks_ref [(: 0 i64)] grown)
           (= capacity_ref [(: 0 i64)] new_capacity)))
+      (return #t)))
+
+  (fun owned_blocks_commit
+       ((var blocks_ref <ptr <ptr <ptr u8>>>)
+        (var count_ref <ptr i64>)
+        (var capacity_ref <ptr i64>)
+        (var block <ptr u8>)) -> bool
+    (block
+      (if (== (cast block i64) (: 0 i64))
+        (block (return #t)))
+      (var count = (index count_ref (: 0 i64)))
+      (var capacity = (index capacity_ref (: 0 i64)))
+      (if (>= count capacity) (block (return #f)))
       (var blocks = (index blocks_ref (: 0 i64)))
       (= blocks [count] block)
       (= count_ref [(: 0 i64)] (+ count (: 1 i64)))
       (return #t)))
+
+  (fun owned_blocks_register
+       ((var blocks_ref <ptr <ptr <ptr u8>>>)
+        (var count_ref <ptr i64>)
+        (var capacity_ref <ptr i64>)
+        (var block <ptr u8>)) -> bool
+    (block
+      (if (== (cast block i64) (: 0 i64))
+        (block (return #t)))
+      (if (! (call owned_blocks_reserve
+        blocks_ref count_ref capacity_ref (: 1 i64)))
+        (block (return #f)))
+      (return (call owned_blocks_commit
+        blocks_ref count_ref capacity_ref block))))
 
   (fun owned_blocks_destroy
        ((var blocks_ref <ptr <ptr <ptr u8>>>)
