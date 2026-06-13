@@ -422,13 +422,13 @@ TEST(AggregateE2E, ScalarStringKeyOwnsFinalizedOutput) {
     Release(&result);
 }
 
-TEST(AggregateE2E, MixedIntegerStringKeysFinalizeToSeparateColumns) {
-    std::array<int64_t, 4> ids1 = {1, 1, 2, 3};
+TEST(AggregateE2E, MixedStringI32KeysFinalizeToSeparateColumns) {
+    std::array<int32_t, 4> ids1 = {1, 1, 2, 3};
     std::string data1 = "alphaalphabetagamma";
     std::array<int32_t, 5> offsets1 = {0, 5, 10, 14, 19};
     std::array<int64_t, 4> values1 = {10, 5, 20, 100};
     std::array<uint8_t, 4> selection1 = {1, 1, 1, 0};
-    std::array<int64_t, 3> ids2 = {2, 4, 1};
+    std::array<int32_t, 3> ids2 = {2, 4, 1};
     std::string data2 = "betadeltaalpha";
     std::array<int32_t, 4> offsets2 = {0, 4, 9, 14};
     std::array<int64_t, 3> values2 = {-3, 11, 7};
@@ -454,11 +454,11 @@ TEST(AggregateE2E, MixedIntegerStringKeysFinalizeToSeparateColumns) {
     };
     TVectorSource source(
         {"id", "name", "v"}, std::move(batches),
-        {std::make_shared<TIntegerType>(TIntegerType::I64),
+        {std::make_shared<TIntegerType>(TIntegerType::I32),
          std::make_shared<TStringType>(),
          std::make_shared<TIntegerType>(TIntegerType::I64)});
     auto root = ParsePlan(
-        "(rel aggregate (rel source \"data.parquet\") (keys id name) "
+        "(rel aggregate (rel source \"data.parquet\") (keys name id) "
         "(agg c count) (agg s sum v))",
         source);
     TPhysicalPlanner planner;
@@ -468,15 +468,15 @@ TEST(AggregateE2E, MixedIntegerStringKeysFinalizeToSeparateColumns) {
     ASSERT_TRUE(runtime->Next(result));
     ASSERT_EQ(result.ColumnCount, 4);
     ASSERT_EQ(result.RowCount, 3);
-    auto* outIds = reinterpret_cast<int64_t*>(result.Columns[0].Data);
-    auto* outOffsets = static_cast<int64_t*>(result.Columns[1].Offsets);
+    auto* outOffsets = static_cast<int64_t*>(result.Columns[0].Offsets);
+    auto* outIds = reinterpret_cast<int32_t*>(result.Columns[1].Data);
     auto* outCounts = reinterpret_cast<int64_t*>(result.Columns[2].Data);
     auto* outSums = reinterpret_cast<int64_t*>(result.Columns[3].Data);
     std::map<std::pair<int64_t, std::string>,
         std::pair<int64_t, int64_t>> actual;
     for (int64_t row = 0; row < result.RowCount; ++row) {
-        std::string name(result.Columns[1].Data + outOffsets[row],
-            result.Columns[1].Data + outOffsets[row + 1]);
+        std::string name(result.Columns[0].Data + outOffsets[row],
+            result.Columns[0].Data + outOffsets[row + 1]);
         actual[{outIds[row], name}] = {outCounts[row], outSums[row]};
     }
     EXPECT_EQ(actual.at({1, "alpha"}),
