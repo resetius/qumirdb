@@ -569,6 +569,88 @@ TEST(DualKeyUpsert, ProductionDispatchMaterializesStringKeys) {
     EXPECT_EQ(dispatch(&table, &batch2, 0, 2), 1);
 }
 
+TEST(DualKeyUpsert, ProductionDispatchMaterializesMixedStringKeys) {
+    using namespace NQumir::NAst;
+    auto stringType = std::make_shared<TStringType>();
+    auto i64Type = std::make_shared<TIntegerType>(TIntegerType::I64);
+    TStructType input({
+        {"id", i64Type}, {"name", stringType}, {"value", i64Type}});
+    auto key = NQqb::NKernel::BuildAggregateKeyDescriptor(
+        input, {"id", "name"});
+
+    void* entry = nullptr;
+    auto runner = CompileAggregateDispatch(input, key, entry);
+    ASSERT_NE(entry, nullptr);
+    using TDispatch = int64_t(*)(THashTable*, NQqb::TRowSet*, int64_t, int64_t);
+    auto dispatch = reinterpret_cast<TDispatch>(entry);
+
+    std::array<int64_t, 4> ids1 = {1, 1, 2, 3};
+    std::string data1 = "alphaalphabetagamma";
+    std::array<int32_t, 5> offsets1 = {0, 5, 10, 14, 19};
+    std::array<int64_t, 4> values1 = {10, 5, 20, 100};
+    std::array<uint8_t, 4> selection1 = {1, 1, 1, 0};
+    std::array<NQqb::TColumn, 3> columns1 = {
+        NQqb::TColumn{
+            .Data = reinterpret_cast<char*>(ids1.data()), .Mask = nullptr},
+        NQqb::TColumn{
+            .Data = data1.data(), .Mask = nullptr,
+            .Offsets = offsets1.data(), .OffsetWidth = 4},
+        NQqb::TColumn{
+            .Data = reinterpret_cast<char*>(values1.data()), .Mask = nullptr},
+    };
+    NQqb::TRowSet batch1{
+        .Columns = columns1.data(), .ColumnCount = 3, .RowCount = 4,
+        .Selection = selection1.data(), .RefCount = 1};
+
+    std::array<int64_t, 3> ids2 = {2, 4, 1};
+    std::string data2 = "betadeltaalpha";
+    std::array<int32_t, 4> offsets2 = {0, 4, 9, 14};
+    std::array<int64_t, 3> values2 = {-3, 11, 7};
+    std::array<NQqb::TColumn, 3> columns2 = {
+        NQqb::TColumn{
+            .Data = reinterpret_cast<char*>(ids2.data()), .Mask = nullptr},
+        NQqb::TColumn{
+            .Data = data2.data(), .Mask = nullptr,
+            .Offsets = offsets2.data(), .OffsetWidth = 4},
+        NQqb::TColumn{
+            .Data = reinterpret_cast<char*>(values2.data()), .Mask = nullptr},
+    };
+    NQqb::TRowSet batch2{
+        .Columns = columns2.data(), .ColumnCount = 3, .RowCount = 3,
+        .Selection = nullptr, .RefCount = 1};
+
+    THashTable table;
+    ASSERT_NE(dispatch(&table, &batch1, 2, 0), 0);
+    ASSERT_EQ(dispatch(&table, &batch1, 0, 1), 0);
+    ASSERT_EQ(dispatch(&table, &batch2, 0, 1), 0);
+    ASSERT_EQ(table.Size, 3);
+    ASSERT_EQ(table.Capacity, 4);
+    ASSERT_EQ(table.OwnedBlockCount, 3);
+
+    struct TStoredKey {
+        int64_t Id;
+        NQqb::TOwnedString Name;
+    };
+    static_assert(sizeof(TStoredKey) == 24);
+    const std::map<std::pair<int64_t, std::string>,
+        std::pair<int64_t, int64_t>> expected = {
+        {{1, "alpha"}, {3, 22}},
+        {{2, "beta"}, {2, 17}},
+        {{4, "delta"}, {1, 11}},
+    };
+    auto* groupKeys = reinterpret_cast<TStoredKey*>(table.GroupKeys);
+    for (int64_t slot = 0; slot < table.Size; ++slot) {
+        std::string name(reinterpret_cast<char*>(groupKeys[slot].Name.Data),
+            groupKeys[slot].Name.Size);
+        auto it = expected.find({groupKeys[slot].Id, name});
+        ASSERT_NE(it, expected.end());
+        EXPECT_EQ(table.AggBuffers[0][slot], it->second.first);
+        EXPECT_EQ(table.AggBuffers[1][slot], it->second.second);
+    }
+
+    EXPECT_EQ(dispatch(&table, &batch2, 0, 2), 1);
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
