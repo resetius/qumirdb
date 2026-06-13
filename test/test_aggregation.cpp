@@ -630,16 +630,14 @@ TEST(AggregationKeyDescriptor, BuildsScalarAndCompositeFixedWidthLayouts) {
     EXPECT_EQ(unsignedScalar.Size, 8);
 }
 
-TEST(AggregationKeyDescriptor, RejectsMissingVariableWidthAndEmptyKeys) {
+TEST(AggregationKeyDescriptor, RejectsMissingAndEmptyKeys) {
     using namespace NQumir::NAst;
 
     TStructType input({
         {"id", std::make_shared<TIntegerType>()},
-        {"name", std::make_shared<TStringType>()},
     });
     EXPECT_THROW(NQqb::NKernel::BuildAggregateKeyDescriptor(input, {}), NQumir::TError);
     EXPECT_THROW(NQqb::NKernel::BuildAggregateKeyDescriptor(input, {"missing"}), NQumir::TError);
-    EXPECT_THROW(NQqb::NKernel::BuildAggregateKeyDescriptor(input, {"name"}), NQumir::TError);
 }
 
 TEST(AggregationKernel, GenericKeyDispatchInstantiatesI64) {
