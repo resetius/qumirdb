@@ -10,6 +10,7 @@
 #include <qumir/parser/type.h>
 #include <qumir/runner/runner_llvm.h>
 
+#include <array>
 #include <memory>
 #include <string>
 
@@ -87,6 +88,48 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileKeyOperation(
     function->Type = std::make_shared<TFunctionType>(
         wrapperParamTypes, resultType);
     stmts.push_back(std::move(function));
+
+    TLLVMRunnerOptions options;
+    options.CoreInput = true;
+    options.NativeCode = true;
+    options.AllowOverloads = true;
+    auto runner = std::make_unique<TLLVMRunner>(options);
+    runner->RegisterModule(
+        std::make_shared<NQumir::NRegistry::QumirDbModule>(), true);
+    auto program = std::make_shared<TBlockExpr>(TLocation{}, std::move(stmts));
+    std::string error;
+    entry = runner->CompileKernelAst(program, entryName, &error);
+    EXPECT_NE(entry, nullptr) << error;
+    return runner;
+}
+
+std::unique_ptr<NQumir::TLLVMRunner> CompileDualKeyEntry(
+    const NQqb::NKernel::TAggregateKeyDescriptor& key,
+    const std::string& entrySource,
+    const std::string& entryName,
+    void*& entry)
+{
+    using namespace NQumir;
+    using namespace NQumir::NAst;
+
+    std::vector<TExprPtr> stmts;
+    for (const char* file : {"string_ops.oz", "robin_hood_dual_key.oz"}) {
+        auto library = NQqb::NKernel::ParseFunctionLibrary(
+            NQqb::NKernel::ReadAggregationKernel(file));
+        if (!library) {
+            ADD_FAILURE() << library.error().ToString();
+            return {};
+        }
+        stmts.insert(stmts.end(), library->begin(), library->end());
+    }
+    auto keyOps = NQqb::NKernel::GenKeyOperationFunDecls(key);
+    stmts.insert(stmts.end(), keyOps.begin(), keyOps.end());
+    auto entryLibrary = NQqb::NKernel::ParseFunctionLibrary(entrySource);
+    if (!entryLibrary) {
+        ADD_FAILURE() << entryLibrary.error().ToString();
+        return {};
+    }
+    stmts.insert(stmts.end(), entryLibrary->begin(), entryLibrary->end());
 
     TLLVMRunnerOptions options;
     options.CoreInput = true;
@@ -266,6 +309,69 @@ TEST(StringKeyDescriptor, CompilesCompositeCrossRepresentationOperations) {
     EXPECT_TRUE(equal(&stored, &lookup));
     lookup.Id = 8;
     EXPECT_FALSE(equal(&stored, &lookup));
+}
+
+TEST(StringKeyDescriptor, DualRobinHoodLooksUpBorrowedAndStoresOwned) {
+    TStructType input({{"name", std::make_shared<TStringType>()}});
+    auto key = NQqb::NKernel::BuildAggregateKeyDescriptor(input, {"name"});
+    const std::string insertSource = R"oz(
+(block
+  (fun insert_owned ((var keys <ptr OwnedString>)
+                     (var dist <ptr i64>)
+                     (var slot_ids <ptr i64>)
+                     (var capacity i64)
+                     (var key OwnedString)
+                     (var dense_slot i64)) -> bool
+    (block
+      (return (call rh_insert_stored
+        keys dist slot_ids capacity key dense_slot)))))
+)oz";
+    const std::string lookupSource = R"oz(
+(block
+  (fun lookup_borrowed ((var keys <ptr OwnedString>)
+                        (var dist <ptr i64>)
+                        (var slot_ids <ptr i64>)
+                        (var capacity i64)
+                        (var key StringView)) -> i64
+    (block
+      (return (call rh_lookup_dual keys dist slot_ids capacity key)))))
+)oz";
+
+    void* insertEntry = nullptr;
+    auto insertRunner = CompileDualKeyEntry(
+        key, insertSource, "insert_owned", insertEntry);
+    ASSERT_NE(insertEntry, nullptr);
+    void* lookupEntry = nullptr;
+    auto lookupRunner = CompileDualKeyEntry(
+        key, lookupSource, "lookup_borrowed", lookupEntry);
+    ASSERT_NE(lookupEntry, nullptr);
+
+    using TInsert = bool(*)(NQqb::TOwnedString*, int64_t*, int64_t*,
+        int64_t, NQqb::TOwnedString, int64_t);
+    using TLookup = int64_t(*)(NQqb::TOwnedString*, int64_t*, int64_t*,
+        int64_t, NQqb::TStringView);
+    auto insert = reinterpret_cast<TInsert>(insertEntry);
+    auto lookup = reinterpret_cast<TLookup>(lookupEntry);
+
+    std::array<NQqb::TOwnedString, 4> keys{};
+    std::array<int64_t, 4> dist = {-1, -1, -1, -1};
+    std::array<int64_t, 4> slotIds = {-1, -1, -1, -1};
+    std::string bytes = "owned";
+    NQqb::TOwnedString stored{
+        .Data = reinterpret_cast<uint8_t*>(bytes.data()),
+        .Size = static_cast<int64_t>(bytes.size()),
+    };
+    ASSERT_TRUE(insert(keys.data(), dist.data(), slotIds.data(), 4, stored, 17));
+    NQqb::TStringView lookupKey{.Data = stored.Data, .Size = stored.Size};
+    EXPECT_EQ(lookup(
+        keys.data(), dist.data(), slotIds.data(), 4, lookupKey), 17);
+
+    std::string missingBytes = "missing";
+    NQqb::TStringView missing{
+        .Data = reinterpret_cast<uint8_t*>(missingBytes.data()),
+        .Size = static_cast<int64_t>(missingBytes.size()),
+    };
+    EXPECT_EQ(lookup(keys.data(), dist.data(), slotIds.data(), 4, missing), -1);
 }
 
 } // namespace
