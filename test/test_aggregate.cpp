@@ -488,6 +488,62 @@ TEST(AggregateE2E, MixedStringI32KeysFinalizeToSeparateColumns) {
     Release(&result);
 }
 
+TEST(AggregateE2E, TwoStringKeysFinalizeIndependentColumns) {
+    std::string leftData = "ababa";
+    std::string rightData = "xyxzy";
+    std::array<int32_t, 6> offsets = {0, 1, 2, 3, 4, 5};
+    std::array<int64_t, 5> values = {10, 20, 5, 7, 11};
+    std::vector<TColumn> columns = {
+        TColumn{.Data = leftData.data(), .Mask = nullptr,
+            .Offsets = offsets.data(), .OffsetWidth = 4},
+        TColumn{.Data = rightData.data(), .Mask = nullptr,
+            .Offsets = offsets.data(), .OffsetWidth = 4},
+        TColumn{.Data = reinterpret_cast<char*>(values.data())},
+    };
+    std::vector<TRowSet> batches = {TRowSet{
+        .Columns = columns.data(), .ColumnCount = 3, .RowCount = 5,
+        .Selection = nullptr, .RefCount = 1}};
+    TVectorSource source(
+        {"left", "right", "v"}, std::move(batches),
+        {std::make_shared<TStringType>(), std::make_shared<TStringType>(),
+         std::make_shared<TIntegerType>(TIntegerType::I64)});
+    auto root = ParsePlan(
+        "(rel aggregate (rel source \"data.parquet\") (keys left right) "
+        "(agg c count) (agg s sum v))",
+        source);
+    TPhysicalPlanner planner;
+    auto runtime = planner.Build(root);
+
+    TRowSet result{};
+    ASSERT_TRUE(runtime->Next(result));
+    ASSERT_EQ(result.ColumnCount, 4);
+    ASSERT_EQ(result.RowCount, 4);
+    ASSERT_EQ(result.Columns[0].OffsetWidth, 8);
+    ASSERT_EQ(result.Columns[1].OffsetWidth, 8);
+    auto* leftOffsets = static_cast<int64_t*>(result.Columns[0].Offsets);
+    auto* rightOffsets = static_cast<int64_t*>(result.Columns[1].Offsets);
+    auto* counts = reinterpret_cast<int64_t*>(result.Columns[2].Data);
+    auto* sums = reinterpret_cast<int64_t*>(result.Columns[3].Data);
+    std::map<std::pair<std::string, std::string>,
+        std::pair<int64_t, int64_t>> actual;
+    for (int64_t row = 0; row < result.RowCount; ++row) {
+        std::string left(result.Columns[0].Data + leftOffsets[row],
+            result.Columns[0].Data + leftOffsets[row + 1]);
+        std::string right(result.Columns[1].Data + rightOffsets[row],
+            result.Columns[1].Data + rightOffsets[row + 1]);
+        actual[{left, right}] = {counts[row], sums[row]};
+    }
+    EXPECT_EQ(actual.at({"a", "x"}),
+        (std::pair<int64_t, int64_t>{2, 15}));
+    EXPECT_EQ(actual.at({"b", "y"}),
+        (std::pair<int64_t, int64_t>{1, 20}));
+    EXPECT_EQ(actual.at({"b", "z"}),
+        (std::pair<int64_t, int64_t>{1, 7}));
+    EXPECT_EQ(actual.at({"a", "y"}),
+        (std::pair<int64_t, int64_t>{1, 11}));
+    Release(&result);
+}
+
 TEST(AggregateE2E, ScalarF64KeyCanonicalizesSignedZero) {
     const double nan1 = std::numeric_limits<double>::quiet_NaN();
     const double nan2 = std::bit_cast<double>(UINT64_C(0x7ff0000000000001));
