@@ -48,6 +48,16 @@ QumirDbModule::QumirDbModule() {
     auto ptrU8Type = std::make_shared<TPointerType>(u8Type);
     auto ptrI8Type = std::make_shared<TPointerType>(i8Type);
 
+    auto makeStringHandleType = [&]() {
+        return std::make_shared<TStructType>(
+            std::vector<std::pair<std::string, TTypePtr>>{
+                {"Data", ptrU8Type},
+                {"Size", i64Type},
+            });
+    };
+    auto stringViewType = makeStringHandleType();
+    auto ownedStringType = makeStringHandleType();
+
     // TColumn C layout (all fields at 8-byte boundaries due to pointer padding):
     // offset  0: Data          char*      <ptr i8>
     // offset  8: DataBitOffset int32_t    i32  (+4 pad)
@@ -137,6 +147,8 @@ QumirDbModule::QumirDbModule() {
         { .Name = "TColumn", .Type = columnType },
         { .Name = "TRowSet", .Type = rowSetType },
         { .Name = "HashTable", .Type = hashTableType },
+        { .Name = "StringView", .Type = stringViewType },
+        { .Name = "OwnedString", .Type = ownedStringType },
     };
 
     ExternalFunctions_ = {
