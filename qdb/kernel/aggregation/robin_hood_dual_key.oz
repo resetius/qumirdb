@@ -65,9 +65,9 @@
        ((var ht <ref HashTable>)
         (var key <named LookupKey (template readable mutable)>)
         (var stored_witness <named StoredKey (template readable mutable)>)
-        (var out_is_new <ptr i64>)) -> i64
+        (var out_is_new <ref i64>)) -> i64
     (block
-      (= out_is_new [(: 0 i64)] (: 0 i64))
+      (= out_is_new (: 0 i64))
       (var capacity = (field ht Capacity))
       (var keys = (cast (field ht Keys)
         <ptr <named StoredKey (template readable mutable)>>))
@@ -75,7 +75,8 @@
         keys (field ht Dist) (field ht SlotId) capacity key))
       (if (>= dense_slot (: 0 i64)) (block (return dense_slot)))
       (= dense_slot (field ht Size))
-      (if (>= dense_slot capacity)
+      (if (> (+ dense_slot (: 1 i64))
+             (- capacity (/ capacity (: 4 i64))))
         (block
           (if (> capacity (: 576460752303423487 i64))
             (block (return (: -1 i64))))
@@ -107,7 +108,7 @@
       (= group_keys [dense_slot] stored_key)
       (call aht_owned_blocks_commit ht owned_block)
       (field_assign ht Size (+ dense_slot (: 1 i64)))
-      (= out_is_new [(: 0 i64)] (: 1 i64))
+      (= out_is_new (: 1 i64))
       (return dense_slot)))
 
   (fun rh_rehash_stored

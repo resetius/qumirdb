@@ -79,20 +79,48 @@ BuildGenericAggregateProgramAst(
     NQumir::NAst::TTypePtr hashTableType)
 {
     std::vector<NQumir::NAst::TExprPtr> stmts;
-    if (NQumir::NAst::TMaybeType<NQumir::NAst::TNamedType>(key.KeyType)) {
+    if (!key.LookupTypeName.empty()) {
+        stmts.push_back(std::make_shared<NQumir::NAst::TTypeDeclStmt>(
+            NQumir::TLocation{}, key.LookupType));
+    }
+    if (!key.StoredTypeName.empty()) {
+        stmts.push_back(std::make_shared<NQumir::NAst::TTypeDeclStmt>(
+            NQumir::TLocation{}, key.StoredType));
+    } else if (!key.IsScalar() &&
+               NQumir::NAst::TMaybeType<NQumir::NAst::TNamedType>(key.KeyType)) {
         stmts.push_back(std::make_shared<NQumir::NAst::TTypeDeclStmt>(
             NQumir::TLocation{}, key.KeyType));
     }
+
+    if (key.HasDistinctLookupType()) {
+        auto stringOperations = ParseFunctionLibrary(
+            ReadAggregationKernel("string_ops.oz"));
+        if (!stringOperations) {
+            return std::unexpected(NQumir::TError(
+                "string_ops.oz: " + stringOperations.error().ToString()));
+        }
+        stmts.insert(
+            stmts.end(), stringOperations->begin(), stringOperations->end());
+    }
     auto keyOperations = GenKeyOperationFunDecls(key);
     stmts.insert(stmts.end(), keyOperations.begin(), keyOperations.end());
+    auto ownership = GenKeyOwnershipFunDecls(key);
+    stmts.insert(stmts.end(), ownership.begin(), ownership.end());
     auto reducerDecls = GenReducerFunDecls(reducers);
     stmts.insert(stmts.end(), reducerDecls.begin(), reducerDecls.end());
     stmts.push_back(GenApplyReducersFunDecl(reducers.size()));
 
-    for (const char* name : {
-             "robin_hood_rehash_generic.oz",
-             "aggregation_hashtable_generic.oz",
-         }) {
+    auto lifecycle = ParseFunctionLibrary(
+        ReadAggregationKernel("aggregation_hashtable_generic.oz"),
+        {"rh_lookup_slot", "rh_insert_displace", "aht_rehash", "aht_update"});
+    if (!lifecycle) {
+        return std::unexpected(NQumir::TError(
+            "aggregation_hashtable_generic.oz: " +
+            lifecycle.error().ToString()));
+    }
+    stmts.insert(stmts.end(), lifecycle->begin(), lifecycle->end());
+
+    for (const char* name : {"owned_blocks.oz", "robin_hood_dual_key.oz"}) {
         auto parsed = ParseFunctionLibrary(ReadAggregationKernel(name));
         if (!parsed) {
             return std::unexpected(NQumir::TError(

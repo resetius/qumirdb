@@ -3,6 +3,7 @@
 #include <qdb/kernel/aggregate_key.h>
 #include <qdb/kernel/gen.h>
 #include <qdb/kernel/lib.h>
+#include <qdb/io/io.h>
 #include <qdb/modules/qumirdb.h>
 #include <qdb/modules/qumirdb_runtime.h>
 #include <qdb/modules/qumirdb_types.h>
@@ -13,6 +14,7 @@
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -81,6 +83,47 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileDualUpsert(
     return runner;
 }
 
+std::unique_ptr<NQumir::TLLVMRunner> CompileAggregateDispatch(
+    const NQumir::NAst::TStructType& input,
+    const NQqb::NKernel::TAggregateKeyDescriptor& key,
+    void*& entry)
+{
+    using namespace NQumir;
+    using namespace NQumir::NAst;
+
+    auto module = std::make_shared<NRegistry::QumirDbModule>();
+    TTypePtr columnType;
+    TTypePtr rowSetType;
+    TTypePtr hashTableType;
+    for (const auto& type : module->ExternalTypes()) {
+        if (type.Name == "TColumn") {
+            columnType = type.Type;
+        } else if (type.Name == "TRowSet") {
+            rowSetType = type.Type;
+        } else if (type.Name == "HashTable") {
+            hashTableType = type.Type;
+        }
+    }
+    auto program = NQqb::NKernel::BuildGenericAggregateProgramAst(
+        input, key, std::string("value"), {"count", "sum"},
+        columnType, rowSetType, hashTableType);
+    if (!program) {
+        ADD_FAILURE() << program.error().ToString();
+        return {};
+    }
+
+    TLLVMRunnerOptions options;
+    options.CoreInput = true;
+    options.NativeCode = true;
+    options.AllowOverloads = true;
+    auto runner = std::make_unique<TLLVMRunner>(options);
+    runner->RegisterModule(module, true);
+    std::string error;
+    entry = runner->CompileKernelAst(*program, "agg_dispatch", &error);
+    EXPECT_NE(entry, nullptr) << error;
+    return runner;
+}
+
 void DestroyOwnedBlocks(THashTable& table) {
     for (int64_t i = 0; i < table.OwnedBlockCount; ++i) {
         qdb_free(table.OwnedBlocks[i]);
@@ -143,7 +186,8 @@ TEST(DualKeyUpsert, FixedWidthUsesIdentityClone) {
   (fun upsert_i64 ((var ht <ref HashTable>)
                    (var key i64)
                    (var out_is_new <ptr i64>)) -> i64
-    (block (return (call aht_upsert_dual ht key key out_is_new)))))
+    (block (return (call aht_upsert_dual
+      ht key key (index out_is_new (: 0 i64)))))))
 )oz";
     void* entry = nullptr;
     auto runner = CompileDualUpsert(key, source, "upsert_i64", entry);
@@ -184,7 +228,7 @@ TEST(DualKeyUpsert, StringClonesOnlyAfterMiss) {
                       (var stored_witness OwnedString)
                       (var out_is_new <ptr i64>)) -> i64
     (block (return (call aht_upsert_dual
-      ht key stored_witness out_is_new)))))
+      ht key stored_witness (index out_is_new (: 0 i64)))))))
 )oz";
     void* entry = nullptr;
     auto runner = CompileDualUpsert(key, source, "upsert_string", entry);
@@ -250,7 +294,7 @@ TEST(DualKeyUpsert, StoredRehashPreservesOwnedPointers) {
                       (var stored_witness OwnedString)
                       (var out_is_new <ptr i64>)) -> i64
     (block (return (call aht_upsert_dual
-      ht key stored_witness out_is_new)))))
+      ht key stored_witness (index out_is_new (: 0 i64)))))))
 )oz";
     const std::string rehashSource = R"oz(
 (block
@@ -341,7 +385,8 @@ TEST(DualKeyUpsert, FixedWidthGrowsThroughGenericPath) {
   (fun upsert_i64 ((var ht <ref HashTable>)
                    (var key i64)
                    (var out_is_new <ptr i64>)) -> i64
-    (block (return (call aht_upsert_dual ht key key out_is_new)))))
+    (block (return (call aht_upsert_dual
+      ht key key (index out_is_new (: 0 i64)))))))
 )oz";
     void* entry = nullptr;
     auto runner = CompileDualUpsert(key, source, "upsert_i64", entry);
@@ -379,7 +424,7 @@ TEST(DualKeyUpsert, StringGrowPreservesOwnedPointers) {
                       (var stored_witness OwnedString)
                       (var out_is_new <ptr i64>)) -> i64
     (block (return (call aht_upsert_dual
-      ht key stored_witness out_is_new)))))
+      ht key stored_witness (index out_is_new (: 0 i64)))))))
 )oz";
     void* entry = nullptr;
     auto runner = CompileDualUpsert(key, source, "upsert_string", entry);
@@ -427,6 +472,101 @@ TEST(DualKeyUpsert, StringGrowPreservesOwnedPointers) {
     }
     EXPECT_EQ(table.OwnedBlockCount, 17);
     DestroyHeapTable(table);
+}
+
+TEST(DualKeyUpsert, ProductionDispatchMaterializesStringKeys) {
+    using namespace NQumir::NAst;
+    auto stringType = std::make_shared<TStringType>();
+    auto i64Type = std::make_shared<TIntegerType>(TIntegerType::I64);
+    TStructType input({{"key", stringType}, {"value", i64Type}});
+    auto key = NQqb::NKernel::BuildAggregateKeyDescriptor(input, {"key"});
+
+    void* entry = nullptr;
+    auto runner = CompileAggregateDispatch(input, key, entry);
+    ASSERT_NE(entry, nullptr);
+    using TDispatch = int64_t(*)(THashTable*, NQqb::TRowSet*, int64_t, int64_t);
+    auto dispatch = reinterpret_cast<TDispatch>(entry);
+
+    std::string data1 = "alphabetaalphagamma";
+    std::array<int32_t, 5> offsets1 = {0, 5, 9, 14, 19};
+    std::array<int64_t, 4> values1 = {10, 20, 5, 100};
+    std::array<uint8_t, 4> selection1 = {1, 1, 1, 0};
+    std::array<NQqb::TColumn, 2> columns1 = {
+        NQqb::TColumn{
+            .Data = data1.data(),
+            .Mask = nullptr,
+            .Offsets = offsets1.data(),
+            .OffsetWidth = 4,
+        },
+        NQqb::TColumn{
+            .Data = reinterpret_cast<char*>(values1.data()),
+            .Mask = nullptr,
+            .Offsets = nullptr,
+            .OffsetWidth = 0,
+        },
+    };
+    NQqb::TRowSet batch1{
+        .Columns = columns1.data(),
+        .ColumnCount = 2,
+        .RowCount = 4,
+        .Selection = selection1.data(),
+        .RefCount = 1,
+    };
+
+    std::string data2 = "gammadeltabeta";
+    std::array<int32_t, 4> offsets2 = {0, 5, 10, 14};
+    std::array<int64_t, 3> values2 = {7, 11, -3};
+    std::array<NQqb::TColumn, 2> columns2 = {
+        NQqb::TColumn{
+            .Data = data2.data(),
+            .Mask = nullptr,
+            .Offsets = offsets2.data(),
+            .OffsetWidth = 4,
+        },
+        NQqb::TColumn{
+            .Data = reinterpret_cast<char*>(values2.data()),
+            .Mask = nullptr,
+            .Offsets = nullptr,
+            .OffsetWidth = 0,
+        },
+    };
+    NQqb::TRowSet batch2{
+        .Columns = columns2.data(),
+        .ColumnCount = 2,
+        .RowCount = 3,
+        .Selection = nullptr,
+        .RefCount = 1,
+    };
+
+    THashTable table;
+    ASSERT_NE(dispatch(&table, &batch1, 2, 0), 0);
+    ASSERT_EQ(dispatch(&table, &batch1, 0, 1), 0);
+    ASSERT_EQ(dispatch(&table, &batch2, 0, 1), 0);
+    ASSERT_EQ(table.Size, 4);
+    ASSERT_EQ(table.Capacity, 8);
+    ASSERT_EQ(table.OwnedBlockCount, 4);
+
+    const std::map<std::string, std::pair<int64_t, int64_t>> expected = {
+        {"alpha", {2, 15}},
+        {"beta", {2, 17}},
+        {"gamma", {1, 7}},
+        {"delta", {1, 11}},
+    };
+    auto* groupKeys = reinterpret_cast<NQqb::TOwnedString*>(table.GroupKeys);
+    for (int64_t slot = 0; slot < table.Size; ++slot) {
+        std::string value(
+            reinterpret_cast<char*>(groupKeys[slot].Data), groupKeys[slot].Size);
+        auto it = expected.find(value);
+        ASSERT_NE(it, expected.end());
+        EXPECT_EQ(table.AggBuffers[0][slot], it->second.first);
+        EXPECT_EQ(table.AggBuffers[1][slot], it->second.second);
+        EXPECT_NE(groupKeys[slot].Data,
+            reinterpret_cast<uint8_t*>(data1.data()));
+        EXPECT_NE(groupKeys[slot].Data,
+            reinterpret_cast<uint8_t*>(data2.data()));
+    }
+
+    EXPECT_EQ(dispatch(&table, &batch2, 0, 2), 1);
 }
 
 } // namespace
