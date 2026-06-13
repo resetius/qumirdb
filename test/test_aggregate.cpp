@@ -359,6 +359,69 @@ TEST(AggregateE2E, ScalarI32KeyPreservesTypedOutput) {
     Release(&result);
 }
 
+TEST(AggregateE2E, ScalarStringKeyOwnsFinalizedOutput) {
+    std::string data1 = "alphabetaalpha";
+    std::array<int32_t, 4> offsets1 = {0, 5, 9, 14};
+    std::array<int64_t, 3> values1 = {10, 20, 5};
+    std::array<uint8_t, 3> selection1 = {1, 0, 1};
+    std::string data2 = "betaмир";
+    std::array<int64_t, 4> offsets2 = {
+        0, 4, 4, static_cast<int64_t>(data2.size())};
+    std::array<int64_t, 3> values2 = {-3, 11, 7};
+
+    std::vector<std::vector<TColumn>> batchColumns(2);
+    batchColumns[0] = {
+        TColumn{
+            .Data = data1.data(), .Mask = nullptr,
+            .Offsets = offsets1.data(), .OffsetWidth = 4},
+        TColumn{.Data = reinterpret_cast<char*>(values1.data())},
+    };
+    batchColumns[1] = {
+        TColumn{
+            .Data = data2.data(), .Mask = nullptr,
+            .Offsets = offsets2.data(), .OffsetWidth = 8},
+        TColumn{.Data = reinterpret_cast<char*>(values2.data())},
+    };
+    std::vector<TRowSet> batches = {
+        TRowSet{
+            .Columns = batchColumns[0].data(), .ColumnCount = 2, .RowCount = 3,
+            .Selection = selection1.data(), .RefCount = 1},
+        TRowSet{
+            .Columns = batchColumns[1].data(), .ColumnCount = 2, .RowCount = 3,
+            .Selection = nullptr, .RefCount = 1},
+    };
+    TVectorSource source(
+        {"k", "v"}, std::move(batches),
+        {std::make_shared<TStringType>(),
+         std::make_shared<TIntegerType>(TIntegerType::I64)});
+    auto root = ParsePlan(
+        "(rel aggregate (rel source \"data.parquet\") (keys k) "
+        "(agg c count) (agg s sum v))",
+        source);
+    TPhysicalPlanner planner;
+    auto runtime = planner.Build(root);
+
+    TRowSet result{};
+    ASSERT_TRUE(runtime->Next(result));
+    ASSERT_EQ(result.ColumnCount, 3);
+    ASSERT_EQ(result.RowCount, 4);
+    ASSERT_EQ(result.Columns[0].OffsetWidth, 8);
+    auto* offsets = static_cast<int64_t*>(result.Columns[0].Offsets);
+    auto* counts = reinterpret_cast<int64_t*>(result.Columns[1].Data);
+    auto* sums = reinterpret_cast<int64_t*>(result.Columns[2].Data);
+    std::map<std::string, std::pair<int64_t, int64_t>> actual;
+    for (int64_t row = 0; row < result.RowCount; ++row) {
+        std::string key(result.Columns[0].Data + offsets[row],
+            result.Columns[0].Data + offsets[row + 1]);
+        actual[key] = {counts[row], sums[row]};
+    }
+    EXPECT_EQ(actual.at("alpha"), (std::pair<int64_t, int64_t>{2, 15}));
+    EXPECT_EQ(actual.at("beta"), (std::pair<int64_t, int64_t>{1, -3}));
+    EXPECT_EQ(actual.at(""), (std::pair<int64_t, int64_t>{1, 11}));
+    EXPECT_EQ(actual.at("мир"), (std::pair<int64_t, int64_t>{1, 7}));
+    Release(&result);
+}
+
 TEST(AggregateE2E, ScalarF64KeyCanonicalizesSignedZero) {
     const double nan1 = std::numeric_limits<double>::quiet_NaN();
     const double nan2 = std::bit_cast<double>(UINT64_C(0x7ff0000000000001));

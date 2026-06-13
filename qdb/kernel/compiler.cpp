@@ -116,10 +116,11 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
     const auto keyDescriptor = NKernel::BuildAggregateKeyDescriptor(inputType, groupKeys);
     for (const auto& field : keyDescriptor.Fields) {
         const auto type = UnwrapNamedType(field.Type);
-        if (!TMaybeType<TIntegerType>(type) && !TMaybeType<TFloatType>(type)) {
+        if (!TMaybeType<TIntegerType>(type) && !TMaybeType<TFloatType>(type) &&
+            !TMaybeType<TStringType>(type)) {
             throw NQumir::TError(
                 "CompileAggregate: group key column '" + field.ColumnName +
-                "' must be fixed-width integer or f64");
+                "' must be integer, f64, or string");
         }
     }
     std::vector<std::string> funcs;
@@ -206,7 +207,7 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
     finalizeRunner->RegisterModule(dbModule, true);
 
     auto finalizeProgram = NKernel::BuildGenericAggregateFinalizeProgramAst(
-        keyDescriptor, hashTableType);
+        keyDescriptor, hashTableType, columnType);
     if (!finalizeProgram) {
         throw NQumir::TError(
             "CompileAggregate: finalize program: " + finalizeProgram.error().ToString());

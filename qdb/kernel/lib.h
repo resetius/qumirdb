@@ -53,7 +53,8 @@ BuildGenericAggregateProgramAst(
 std::expected<NQumir::NAst::TExprPtr, NQumir::TError>
 BuildGenericAggregateFinalizeProgramAst(
     const TAggregateKeyDescriptor& key,
-    NQumir::NAst::TTypePtr hashTableType);
+    NQumir::NAst::TTypePtr hashTableType,
+    NQumir::NAst::TTypePtr columnType = nullptr);
 
 std::expected<NQumir::NAst::TExprPtr, NQumir::TError>
 BuildGenericAggregateMeasureProgramAst(

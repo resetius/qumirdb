@@ -54,7 +54,8 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
 // concrete pointer type and projects dense AoS Key values into SoA columns.
 NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
     const TAggregateKeyDescriptor& key,
-    NQumir::NAst::TTypePtr hashTableType);
+    NQumir::NAst::TTypePtr hashTableType,
+    NQumir::NAst::TTypePtr columnType = nullptr);
 
 // Measures the output Data bytes required for each logical key column.
 // Fixed-width columns report row_count * field.Size; string columns report
