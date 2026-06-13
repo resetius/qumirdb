@@ -96,6 +96,15 @@ NQumir::NAst::TExprPtr HashKeyValue(
 {
     using namespace NQumir::NAst;
     NQumir::TLocation loc{};
+    auto named = TMaybeType<TNamedType>(originalType);
+    if (named && (named.Cast()->Name == "StringView" ||
+                  named.Cast()->Name == "OwnedString")) {
+        return std::make_shared<TCastExpr>(loc,
+            std::make_shared<TCallExpr>(loc,
+                std::make_shared<TIdentExpr>(loc, "qdb_string_hash"),
+                std::vector<TExprPtr>{KeyValueExpr(root, path)}),
+            std::make_shared<TIntegerType>(TIntegerType::U64));
+    }
     const auto type = UnwrapNamedType(originalType);
     auto u64Type = std::make_shared<TIntegerType>(TIntegerType::U64);
     auto ident = [&](const std::string& name) -> TExprPtr {
@@ -176,31 +185,63 @@ NQumir::NAst::TExprPtr HashKeyValue(
 }
 
 NQumir::NAst::TExprPtr EqualKeyValue(
-    const NQumir::NAst::TTypePtr& originalType,
+    const NQumir::NAst::TTypePtr& leftType,
+    const NQumir::NAst::TTypePtr& rightType,
     std::vector<std::string>& path)
 {
     using namespace NQumir::NAst;
     NQumir::TLocation loc{};
-    const auto type = UnwrapNamedType(originalType);
+    auto leftNamed = TMaybeType<TNamedType>(leftType);
+    auto rightNamed = TMaybeType<TNamedType>(rightType);
+    const bool leftString = leftNamed &&
+        (leftNamed.Cast()->Name == "StringView" ||
+         leftNamed.Cast()->Name == "OwnedString");
+    const bool rightString = rightNamed &&
+        (rightNamed.Cast()->Name == "StringView" ||
+         rightNamed.Cast()->Name == "OwnedString");
+    if (leftString || rightString) {
+        if (!leftString || !rightString) {
+            throw std::invalid_argument(
+                "GenKeyOperationFunDecls: mismatched string key leaves");
+        }
+        return std::make_shared<TCallExpr>(loc,
+            std::make_shared<TIdentExpr>(loc, "qdb_string_equal"),
+            std::vector<TExprPtr>{
+                KeyValueExpr("left", path), KeyValueExpr("right", path)});
+    }
+    const auto left = UnwrapNamedType(leftType);
+    const auto right = UnwrapNamedType(rightType);
     auto binary = [&](const char* op, TExprPtr left, TExprPtr right) -> TExprPtr {
         return std::make_shared<TBinaryExpr>(
             loc, TOperator(op), std::move(left), std::move(right));
     };
-    if (TMaybeType<TIntegerType>(type)) {
+    if (TMaybeType<TIntegerType>(left) && TMaybeType<TIntegerType>(right)) {
         return binary("==", KeyValueExpr("left", path), KeyValueExpr("right", path));
     }
-    if (TMaybeType<TFloatType>(type)) {
+    if (TMaybeType<TFloatType>(left) && TMaybeType<TFloatType>(right)) {
         return binary("==",
             CanonicalFloatBits("left", path), CanonicalFloatBits("right", path));
     }
-    if (auto structure = TMaybeType<TStructType>(type)) {
+    if (auto leftStruct = TMaybeType<TStructType>(left)) {
+        auto rightStruct = TMaybeType<TStructType>(right);
+        if (!rightStruct) {
+            throw std::invalid_argument(
+                "GenKeyOperationFunDecls: mismatched struct key leaves");
+        }
         TExprPtr result;
-        for (const auto& [fieldName, fieldType] : structure.Cast()->Fields) {
+        for (const auto& [fieldName, fieldType] : leftStruct.Cast()->Fields) {
             if (fieldName.starts_with("__qdb_padding_")) {
                 continue;
             }
+            auto rightField = std::find_if(
+                rightStruct.Cast()->Fields.begin(), rightStruct.Cast()->Fields.end(),
+                [&](const auto& field) { return field.first == fieldName; });
+            if (rightField == rightStruct.Cast()->Fields.end()) {
+                throw std::invalid_argument(
+                    "GenKeyOperationFunDecls: mismatched struct key fields");
+            }
             path.push_back(fieldName);
-            auto fieldEqual = EqualKeyValue(fieldType, path);
+            auto fieldEqual = EqualKeyValue(fieldType, rightField->second, path);
             path.pop_back();
             result = result
                 ? binary("&&", std::move(result), std::move(fieldEqual))
@@ -214,7 +255,7 @@ NQumir::NAst::TExprPtr EqualKeyValue(
     }
     throw std::invalid_argument(
         "GenKeyOperationFunDecls: unsupported equality leaf type " +
-        (originalType ? originalType->ToString() : std::string("<null>")));
+        (leftType ? leftType->ToString() : std::string("<null>")));
 }
 
 } // namespace
@@ -226,51 +267,51 @@ std::vector<NQumir::NAst::TExprPtr> GenKeyOperationFunDecls(
     NQumir::TLocation loc{};
 
     auto i64Type = std::make_shared<TIntegerType>(TIntegerType::I64);
-    auto u64Type = std::make_shared<TIntegerType>(TIntegerType::U64);
     auto boolType = std::make_shared<TBoolType>();
-    auto ident = [&](const std::string& name) -> TExprPtr {
-        return std::make_shared<TIdentExpr>(loc, name);
+
+    auto makeHash = [&](const TTypePtr& type) -> TExprPtr {
+        std::vector<TExprPtr> body;
+        size_t nextTemporary = 0;
+        std::vector<std::string> path;
+        auto value = HashKeyValue(type, "key", path, body, nextTemporary);
+        body.push_back(std::make_shared<TReturnExpr>(loc,
+            std::make_shared<TCastExpr>(loc, std::move(value), i64Type)));
+        std::vector<TParam> params = {
+            std::make_shared<TVarStmt>(loc, "key", type),
+        };
+        auto function = std::make_shared<TFunDecl>(loc, "rh_hash", std::move(params),
+            std::make_shared<TBlockExpr>(loc, std::move(body)), i64Type);
+        function->Type = std::make_shared<TFunctionType>(
+            std::vector<TTypePtr>{type}, i64Type);
+        return function;
     };
-    auto number = [&](int64_t value, const TTypePtr& type) -> TExprPtr {
-        auto result = std::make_shared<TNumberExpr>(loc, value);
-        result->Type = type;
-        return result;
-    };
-    auto binary = [&](const char* op, TExprPtr left, TExprPtr right) -> TExprPtr {
-        return std::make_shared<TBinaryExpr>(
-            loc, TOperator(op), std::move(left), std::move(right));
+    auto makeEqual = [&](const TTypePtr& leftType,
+                         const TTypePtr& rightType) -> TExprPtr {
+        std::vector<TParam> params = {
+            std::make_shared<TVarStmt>(loc, "left", leftType),
+            std::make_shared<TVarStmt>(loc, "right", rightType),
+        };
+        std::vector<std::string> path;
+        std::vector<TExprPtr> body = {
+            std::make_shared<TReturnExpr>(
+                loc, EqualKeyValue(leftType, rightType, path)),
+        };
+        auto function = std::make_shared<TFunDecl>(loc, "rh_key_equal",
+            std::move(params), std::make_shared<TBlockExpr>(loc, std::move(body)),
+            boolType);
+        function->Type = std::make_shared<TFunctionType>(
+            std::vector<TTypePtr>{leftType, rightType}, boolType);
+        return function;
     };
 
-    std::vector<TExprPtr> hashBody;
-    size_t nextTemporary = 0;
-    std::vector<std::string> path;
-    auto hashValue = HashKeyValue(
-        key.KeyType, "key", path, hashBody, nextTemporary);
-    hashBody.push_back(std::make_shared<TReturnExpr>(loc,
-        std::make_shared<TCastExpr>(loc, std::move(hashValue), i64Type)));
-
-    std::vector<TParam> hashParams = {
-        std::make_shared<TVarStmt>(loc, "key", key.KeyType),
-    };
-    auto hash = std::make_shared<TFunDecl>(loc, "rh_hash", std::move(hashParams),
-        std::make_shared<TBlockExpr>(loc, std::move(hashBody)), i64Type);
-    hash->Type = std::make_shared<TFunctionType>(
-        std::vector<TTypePtr>{key.KeyType}, i64Type);
-
-    std::vector<TParam> equalParams = {
-        std::make_shared<TVarStmt>(loc, "left", key.KeyType),
-        std::make_shared<TVarStmt>(loc, "right", key.KeyType),
-    };
-    path.clear();
-    std::vector<TExprPtr> equalBody = {
-        std::make_shared<TReturnExpr>(loc, EqualKeyValue(key.KeyType, path)),
-    };
-    auto equal = std::make_shared<TFunDecl>(loc, "rh_key_equal", std::move(equalParams),
-        std::make_shared<TBlockExpr>(loc, std::move(equalBody)), boolType);
-    equal->Type = std::make_shared<TFunctionType>(
-        std::vector<TTypePtr>{key.KeyType, key.KeyType}, boolType);
-
-    return {std::move(hash), std::move(equal)};
+    std::vector<TExprPtr> result;
+    result.push_back(makeHash(key.LookupType));
+    if (key.HasDistinctLookupType()) {
+        result.push_back(makeHash(key.StoredType));
+        result.push_back(makeEqual(key.StoredType, key.LookupType));
+    }
+    result.push_back(makeEqual(key.StoredType, key.StoredType));
+    return result;
 }
 
 void SubstFieldsInPlace(
