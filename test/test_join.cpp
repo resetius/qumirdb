@@ -45,7 +45,7 @@ std::vector<TTableRow> GenerateTable(int* seed, int numKeys, int numRows, std::s
 TTable InnerJoin(const TTable& left, const TTable& right) {
     int batchSize = 10;
     // key -> rows
-    using THashMap = std::unordered_map<int, std::pair<std::vector<TTableValues>, std::vector<TTableValues>>>;
+    using THashMap = std::unordered_map<int, std::vector<TTableValues>>;
     THashMap leftHash;
     THashMap rightHash;
     int leftIt = 0;
@@ -65,29 +65,16 @@ TTable InnerJoin(const TTable& left, const TTable& right) {
             // 1. try join with right rows for this key
             auto rightIt = rightHash.find(key);
             if (rightIt != rightHash.end()) {
-                for (const auto& rightRow : rightIt->second.first) {
+                for (const auto& rightRow : rightIt->second) {
                     TTableRow joinedRow;
                     joinedRow.Key = key;
                     joinedRow.Values.insert(row.begin(), row.end());
                     joinedRow.Values.insert(rightRow.begin(), rightRow.end());
                     result.push_back(joinedRow);
                 }
-                rightIt->second.second.push_back(row);
-            } else {
-                // 2. store left row for future join
-                auto& entry = leftHash[key];
-                entry.first.push_back(row);
-                if (!entry.second.empty()) {
-                    // must join with all right rows for this key
-                    for (const auto& rightRow : entry.second) {
-                        TTableRow joinedRow;
-                        joinedRow.Key = key;
-                        joinedRow.Values.insert(row.begin(), row.end());
-                        joinedRow.Values.insert(rightRow.begin(), rightRow.end());
-                        result.push_back(joinedRow);
-                    }
-                }
             }
+            // 2. store left row for future join
+            leftHash[key].push_back(row);
         }
         return true;
     };
@@ -97,6 +84,34 @@ TTable InnerJoin(const TTable& left, const TTable& right) {
     }
 
     return result;
+}
+
+TTable NestedLoopInnerJoin(const TTable& left, const TTable& right) {
+    TTable result;
+    for (const auto& leftRow : left) {
+        for (const auto& rightRow : right) {
+            if (leftRow.Key == rightRow.Key) {
+                TTableRow joinedRow;
+                joinedRow.Key = leftRow.Key;
+                joinedRow.Values.insert(leftRow.Values.begin(), leftRow.Values.end());
+                joinedRow.Values.insert(rightRow.Values.begin(), rightRow.Values.end());
+                result.push_back(joinedRow);
+            }
+        }
+    }
+    return result;
+}
+
+void CheckJoinMatchesNestedLoop(const TTable& left, const TTable& right) {
+    auto joinedTable = InnerJoin(left, right);
+    auto nestedLoopJoinedTable = NestedLoopInnerJoin(left, right);
+    EXPECT_EQ(joinedTable.size(), nestedLoopJoinedTable.size());
+    for (const auto& row : joinedTable) {
+        auto it = std::find_if(nestedLoopJoinedTable.begin(), nestedLoopJoinedTable.end(), [&](const TTableRow& r) {
+            return r.Key == row.Key && r.Values == row.Values;
+        });
+        EXPECT_NE(it, nestedLoopJoinedTable.end());
+    }
 }
 
 void PrintTable(const TTable& table, std::ostream& os) {
@@ -129,6 +144,85 @@ TEST(JoinTest, BasicInnerJoin) {
     PrintTable(rightTable, std::cout);
     std::cout << "Joined Table:" << std::endl;
     PrintTable(joinedTable, std::cout);
+
+    auto nestedLoopJoinedTable = NestedLoopInnerJoin(leftTable, rightTable);
+    EXPECT_EQ(joinedTable.size(), nestedLoopJoinedTable.size());
+    for (const auto& row : joinedTable) {
+        auto it = std::find_if(nestedLoopJoinedTable.begin(), nestedLoopJoinedTable.end(), [&](const TTableRow& r) {
+            return r.Key == row.Key && r.Values == row.Values;
+        });
+        EXPECT_NE(it, nestedLoopJoinedTable.end());
+    }
+}
+
+TEST(JoinTest, LargeTablesManyKeys) {
+    int seed = 123;
+    const int numLeftKeys = 20;
+    const int numRightKeys = 20;
+    const int numLeftRows = 37;
+    const int numRightRows = 42;
+    std::set<std::string> leftColumns = {"col1", "col2"};
+    std::set<std::string> rightColumns = {"col3", "col4"};
+    auto leftTable = GenerateTable(&seed, numLeftKeys, numLeftRows, leftColumns);
+    auto rightTable = GenerateTable(&seed, numRightKeys, numRightRows, rightColumns);
+
+    CheckJoinMatchesNestedLoop(leftTable, rightTable);
+}
+
+TEST(JoinTest, FewKeysHighCardinality) {
+    int seed = 7;
+    const int numLeftKeys = 2;
+    const int numRightKeys = 2;
+    const int numLeftRows = 15;
+    const int numRightRows = 18;
+    std::set<std::string> leftColumns = {"col1"};
+    std::set<std::string> rightColumns = {"col2"};
+    auto leftTable = GenerateTable(&seed, numLeftKeys, numLeftRows, leftColumns);
+    auto rightTable = GenerateTable(&seed, numRightKeys, numRightRows, rightColumns);
+
+    CheckJoinMatchesNestedLoop(leftTable, rightTable);
+}
+
+TEST(JoinTest, SingleKeyFullCrossProduct) {
+    int seed = 99;
+    const int numLeftKeys = 1;
+    const int numRightKeys = 1;
+    const int numLeftRows = 8;
+    const int numRightRows = 11;
+    std::set<std::string> leftColumns = {"col1"};
+    std::set<std::string> rightColumns = {"col2"};
+    auto leftTable = GenerateTable(&seed, numLeftKeys, numLeftRows, leftColumns);
+    auto rightTable = GenerateTable(&seed, numRightKeys, numRightRows, rightColumns);
+
+    CheckJoinMatchesNestedLoop(leftTable, rightTable);
+}
+
+TEST(JoinTest, AsymmetricSidesAndKeyRanges) {
+    int seed = 555;
+    const int numLeftKeys = 3;
+    const int numRightKeys = 15;
+    const int numLeftRows = 5;
+    const int numRightRows = 50;
+    std::set<std::string> leftColumns = {"col1"};
+    std::set<std::string> rightColumns = {"col2", "col3"};
+    auto leftTable = GenerateTable(&seed, numLeftKeys, numLeftRows, leftColumns);
+    auto rightTable = GenerateTable(&seed, numRightKeys, numRightRows, rightColumns);
+
+    CheckJoinMatchesNestedLoop(leftTable, rightTable);
+}
+
+TEST(JoinTest, EmptySides) {
+    int seed = 1;
+    std::set<std::string> leftColumns = {"col1"};
+    std::set<std::string> rightColumns = {"col2"};
+
+    auto leftTable = GenerateTable(&seed, 5, 10, leftColumns);
+    auto emptyRight = GenerateTable(&seed, 5, 0, rightColumns);
+    CheckJoinMatchesNestedLoop(leftTable, emptyRight);
+
+    auto emptyLeft = GenerateTable(&seed, 5, 0, leftColumns);
+    auto rightTable = GenerateTable(&seed, 5, 10, rightColumns);
+    CheckJoinMatchesNestedLoop(emptyLeft, rightTable);
 }
 
 int main(int argc, char** argv) {
