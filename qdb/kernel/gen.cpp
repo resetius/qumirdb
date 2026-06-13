@@ -934,7 +934,8 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
 
 NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
     const TAggregateKeyDescriptor& key,
-    NQumir::NAst::TTypePtr hashTableType)
+    NQumir::NAst::TTypePtr hashTableType,
+    NQumir::NAst::TTypePtr columnType)
 {
     using namespace NQumir::NAst;
     NQumir::TLocation loc{};
@@ -946,6 +947,10 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
     auto ptrPtrU8Type = std::make_shared<TPointerType>(ptrU8Type);
     auto ptrI64Type = std::make_shared<TPointerType>(i64Type);
     auto ptrPtrI64Type = std::make_shared<TPointerType>(ptrI64Type);
+    auto ptrColumnType = columnType
+        ? std::make_shared<TPointerType>(
+            std::make_shared<TNamedType>("TColumn", columnType))
+        : nullptr;
     auto hashTableRefType = std::make_shared<TReferenceType>(
         std::make_shared<TNamedType>("HashTable", std::move(hashTableType)));
     auto ident = [&](const std::string& name) -> TExprPtr {
@@ -974,6 +979,62 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
             std::make_shared<TFieldAccessExpr>(loc, ident("ht"), "GroupKeys"),
             ptrKeyType)));
     for (size_t fieldIndex = 0; fieldIndex < key.Fields.size(); ++fieldIndex) {
+        const bool isString = TMaybeType<TStringType>(
+            UnwrapNamedType(key.Fields[fieldIndex].Type));
+        if (isString) {
+            if (!ptrColumnType) {
+                throw std::invalid_argument(
+                    "GenGenericAggregateFinalizeAst: missing TColumn type");
+            }
+            const std::string columnName =
+                "output_column_" + std::to_string(fieldIndex);
+            const std::string dataName =
+                "output_data_" + std::to_string(fieldIndex);
+            const std::string offsetsName =
+                "output_offsets_" + std::to_string(fieldIndex);
+            const std::string copyResultName =
+                "output_copy_result_" + std::to_string(fieldIndex);
+            project.push_back(std::make_shared<TVarStmt>(
+                loc, columnName, ptrColumnType));
+            auto raw = std::make_shared<TIndexExpr>(loc,
+                ident("output_key_buffers"),
+                std::make_shared<TNumberExpr>(
+                    loc, static_cast<int64_t>(fieldIndex)));
+            project.push_back(std::make_shared<TAssignExpr>(loc, columnName,
+                std::make_shared<TCastExpr>(loc,
+                    std::make_shared<TCastExpr>(loc, std::move(raw), i64Type),
+                    ptrColumnType)));
+            auto column = std::make_shared<TIndexExpr>(
+                loc, ident(columnName), std::make_shared<TNumberExpr>(loc, int64_t{0}));
+            project.push_back(std::make_shared<TVarStmt>(loc, dataName, ptrU8Type));
+            project.push_back(std::make_shared<TAssignExpr>(loc, dataName,
+                std::make_shared<TCastExpr>(loc,
+                    std::make_shared<TCastExpr>(loc,
+                        std::make_shared<TFieldAccessExpr>(
+                            loc, column, "Data"), i64Type),
+                    ptrU8Type)));
+            column = std::make_shared<TIndexExpr>(
+                loc, ident(columnName), std::make_shared<TNumberExpr>(loc, int64_t{0}));
+            project.push_back(std::make_shared<TVarStmt>(
+                loc, offsetsName, ptrI64Type));
+            project.push_back(std::make_shared<TAssignExpr>(loc, offsetsName,
+                std::make_shared<TCastExpr>(loc,
+                    std::make_shared<TCastExpr>(loc,
+                        std::make_shared<TFieldAccessExpr>(
+                            loc, column, "Offsets"), i64Type),
+                    ptrI64Type)));
+            project.push_back(std::make_shared<TArrayAssignExpr>(loc,
+                offsetsName,
+                std::vector<TExprPtr>{
+                    std::make_shared<TNumberExpr>(loc, int64_t{0})},
+                std::make_shared<TNumberExpr>(loc, int64_t{0})));
+            project.push_back(std::make_shared<TVarStmt>(
+                loc, copyResultName, i64Type));
+            project.push_back(std::make_shared<TAssignExpr>(
+                loc, copyResultName,
+                std::make_shared<TNumberExpr>(loc, int64_t{0})));
+            continue;
+        }
         const std::string name = "output_key_" + std::to_string(fieldIndex);
         auto ptrFieldType = std::make_shared<TPointerType>(key.Fields[fieldIndex].Type);
         project.push_back(std::make_shared<TVarStmt>(loc, name, ptrFieldType));
@@ -1000,9 +1061,44 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
             value = std::make_shared<TFieldAccessExpr>(
                 loc, keyValue, "key_" + std::to_string(fieldIndex));
         }
-        loopStmts.push_back(std::make_shared<TArrayAssignExpr>(
-            loc, "output_key_" + std::to_string(fieldIndex),
-            std::vector<TExprPtr>{ident("slot")}, std::move(value)));
+        const bool isString = TMaybeType<TStringType>(
+            UnwrapNamedType(key.Fields[fieldIndex].Type));
+        if (!isString) {
+            loopStmts.push_back(std::make_shared<TArrayAssignExpr>(
+                loc, "output_key_" + std::to_string(fieldIndex),
+                std::vector<TExprPtr>{ident("slot")}, std::move(value)));
+            continue;
+        }
+        const std::string dataName =
+            "output_data_" + std::to_string(fieldIndex);
+        const std::string offsetsName =
+            "output_offsets_" + std::to_string(fieldIndex);
+        const std::string copyResultName =
+            "output_copy_result_" + std::to_string(fieldIndex);
+        auto offset = std::make_shared<TIndexExpr>(
+            loc, ident(offsetsName), ident("slot"));
+        auto destination = std::make_shared<TCastExpr>(loc,
+            std::make_shared<TBinaryExpr>(loc, TOperator("+"),
+                std::make_shared<TCastExpr>(loc, ident(dataName), i64Type),
+                offset), ptrU8Type);
+        auto source = std::make_shared<TFieldAccessExpr>(
+            loc, value, "Data");
+        auto byteSize = std::make_shared<TFieldAccessExpr>(
+            loc, value, "Size");
+        loopStmts.push_back(std::make_shared<TAssignExpr>(loc, copyResultName,
+            std::make_shared<TCallExpr>(loc,
+                ident("qdb_string_copy_bytes"),
+                std::vector<TExprPtr>{
+                    std::move(destination), std::move(source), byteSize})));
+        loopStmts.push_back(std::make_shared<TArrayAssignExpr>(loc,
+            offsetsName,
+            std::vector<TExprPtr>{std::make_shared<TBinaryExpr>(loc,
+                TOperator("+"), ident("slot"),
+                std::make_shared<TNumberExpr>(loc, int64_t{1}))},
+            std::make_shared<TBinaryExpr>(loc, TOperator("+"),
+                std::make_shared<TIndexExpr>(
+                    loc, ident(offsetsName), ident("slot")),
+                std::make_shared<TFieldAccessExpr>(loc, value, "Size"))));
     }
     loopStmts.push_back(std::make_shared<TAssignExpr>(loc, "slot",
         std::make_shared<TBinaryExpr>(loc, TOperator("+"), ident("slot"),

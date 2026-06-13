@@ -145,7 +145,8 @@ BuildGenericAggregateProgramAst(
 std::expected<NQumir::NAst::TExprPtr, NQumir::TError>
 BuildGenericAggregateFinalizeProgramAst(
     const TAggregateKeyDescriptor& key,
-    NQumir::NAst::TTypePtr hashTableType)
+    NQumir::NAst::TTypePtr hashTableType,
+    NQumir::NAst::TTypePtr columnType)
 {
     auto parsed = ParseFunctionLibrary(
         ReadAggregationKernel("aggregation_finalize_states.oz"));
@@ -153,13 +154,26 @@ BuildGenericAggregateFinalizeProgramAst(
         return std::unexpected(NQumir::TError(
             "aggregation_finalize_states.oz: " + parsed.error().ToString()));
     }
-    auto entry = GenGenericAggregateFinalizeAst(key, std::move(hashTableType));
+    if (key.HasDistinctLookupType()) {
+        auto stringOperations = ParseFunctionLibrary(
+            ReadAggregationKernel("string_ops.oz"));
+        if (!stringOperations) {
+            return std::unexpected(NQumir::TError(
+                "string_ops.oz: " + stringOperations.error().ToString()));
+        }
+        parsed->insert(parsed->end(),
+            stringOperations->begin(), stringOperations->end());
+    }
+    auto entry = GenGenericAggregateFinalizeAst(
+        key, std::move(hashTableType), std::move(columnType));
     auto block = NQumir::NAst::TMaybeNode<NQumir::NAst::TBlockExpr>(entry);
     if (!block || block.Cast()->Stmts.size() != 1) {
         return std::unexpected(NQumir::TError(
             "generic aggregate finalize generator returned an invalid entry block"));
     }
-    if (NQumir::NAst::TMaybeType<NQumir::NAst::TNamedType>(key.KeyType)) {
+    if (!key.StoredTypeName.empty() ||
+        (!key.IsScalar() &&
+         NQumir::NAst::TMaybeType<NQumir::NAst::TNamedType>(key.KeyType))) {
         parsed->insert(parsed->begin(),
             std::make_shared<NQumir::NAst::TTypeDeclStmt>(
                 NQumir::TLocation{}, key.KeyType));

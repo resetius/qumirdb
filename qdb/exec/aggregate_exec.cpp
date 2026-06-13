@@ -46,7 +46,14 @@ struct TAggregateRowSetData {
         std::vector<uint64_t> Words;
     };
 
-    std::vector<TAlignedByteBuffer> Keys;
+    struct TKeyBuffer {
+        TAlignedByteBuffer Fixed;
+        std::vector<char> Data;
+        std::vector<int64_t> Offsets;
+        TColumn Column{};
+    };
+
+    std::vector<TKeyBuffer> Keys;
     std::vector<std::vector<int64_t>> AggBuffers;
     std::vector<TColumn> Columns;
 };
@@ -95,8 +102,23 @@ bool TRuntimeAggregate::Next(TRowSet& rowSet) {
     }
     std::vector<void*> outputKeyBuffers(Kernels_.OutputKeys.size());
     for (size_t i = 0; i < Kernels_.OutputKeys.size(); ++i) {
-        data->Keys[i].Resize(outputKeyBytes[i]);
-        outputKeyBuffers[i] = data->Keys[i].Data();
+        auto& keyBuffer = data->Keys[i];
+        if (Kernels_.OutputKeys[i].Kind == EAggregateOutputKeyKind::String) {
+            keyBuffer.Data.resize(outputKeyBytes[i]);
+            keyBuffer.Offsets.resize(size + 1);
+            keyBuffer.Column = TColumn{
+                .Data = keyBuffer.Data.data(),
+                .Mask = nullptr,
+                .Offsets = keyBuffer.Offsets.data(),
+                .OffsetWidth = 8,
+            };
+            outputKeyBuffers[i] = &keyBuffer.Column;
+        } else {
+            keyBuffer.Fixed.Resize(outputKeyBytes[i]);
+            keyBuffer.Column = TColumn{
+                .Data = reinterpret_cast<char*>(keyBuffer.Fixed.Data())};
+            outputKeyBuffers[i] = keyBuffer.Fixed.Data();
+        }
     }
     data->AggBuffers.resize(Kernels_.NumAggs);
     std::vector<int64_t*> outputBuffers(Kernels_.NumAggs);
@@ -115,7 +137,7 @@ bool TRuntimeAggregate::Next(TRowSet& rowSet) {
 
     data->Columns.reserve(Kernels_.OutputKeys.size() + Kernels_.NumAggs);
     for (auto& buffer : data->Keys) {
-        data->Columns.push_back(TColumn{.Data = reinterpret_cast<char*>(buffer.Data())});
+        data->Columns.push_back(buffer.Column);
     }
     for (auto& buffer : data->AggBuffers) {
         data->Columns.push_back(TColumn{.Data = reinterpret_cast<char*>(buffer.data())});
