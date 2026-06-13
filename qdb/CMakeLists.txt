@@ -18,6 +18,7 @@ add_library(qumirdb
     pipeline/unbound_vars.cpp
     pipeline/typing.cpp
     pipeline/column_pruning.cpp
+    kernel/column_value.cpp
     kernel/gen.cpp
     kernel/aggregate_key.cpp
     kernel/lib.cpp

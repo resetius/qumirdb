@@ -70,10 +70,25 @@ QumirDbModule::QumirDbModule() {
         std::vector<std::pair<std::string, TTypePtr>>{
             {"Data", ptrI8Type},
             {"DataBitOffset", i32Type},
+            {"__qdb_padding_column_0", u8Type},
+            {"__qdb_padding_column_1", u8Type},
+            {"__qdb_padding_column_2", u8Type},
+            {"__qdb_padding_column_3", u8Type},
             {"Mask", ptrU8Type},
             {"MaskBitOffset", i32Type},
+            {"__qdb_padding_column_4", u8Type},
+            {"__qdb_padding_column_5", u8Type},
+            {"__qdb_padding_column_6", u8Type},
+            {"__qdb_padding_column_7", u8Type},
             {"Offsets", voidPtrType},
             {"OffsetWidth", u8Type},
+            {"__qdb_padding_column_8", u8Type},
+            {"__qdb_padding_column_9", u8Type},
+            {"__qdb_padding_column_10", u8Type},
+            {"__qdb_padding_column_11", u8Type},
+            {"__qdb_padding_column_12", u8Type},
+            {"__qdb_padding_column_13", u8Type},
+            {"__qdb_padding_column_14", u8Type},
         });
     auto columnNamedType = std::make_shared<TNamedType>("TColumn", columnType);
     auto ptrColumnType = std::make_shared<TPointerType>(columnNamedType);
