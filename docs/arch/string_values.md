@@ -98,6 +98,23 @@ rehash(StoredKey[] -> StoredKey[])
 The input remains borrowed during lookup. Only an absent key is cloned into
 owned storage.
 
+The distinction is operational, not only nominal:
+
+| Property | `LookupKey` | `StoredKey` |
+| --- | --- | --- |
+| String leaf | `StringView` | `OwnedString` |
+| Byte owner | Input `TRowSet` | Hash table |
+| Lifetime | One update call/batch | Until table destruction |
+| Construction | Materialize without allocation | Clone only after lookup miss |
+| Probe argument | Yes | Existing resident key |
+| Robin Hood storage | No | Yes |
+| Rehash | Never retained | Handle copied without copying bytes |
+
+For fixed-width leaves both representations use the same concrete type. For
+example, a logical `{i64,string}` key becomes `{i64,StringView}` for lookup and
+`{i64,OwnedString}` for storage. Both representations must hash identically
+and support direct `StoredKey` versus `LookupKey` equality.
+
 ## Generated type helpers
 
 The AST generator must recursively produce helpers for the concrete pair of
