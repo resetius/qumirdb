@@ -185,6 +185,23 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
         throw std::runtime_error("CompileAggregate: agg_dispatch compilation failed: " + error);
     }
 
+    auto measureRunner = std::make_shared<NQumir::TLLVMRunner>(options);
+    measureRunner->RegisterModule(dbModule, true);
+    auto measureProgram = NKernel::BuildGenericAggregateMeasureProgramAst(
+        keyDescriptor, hashTableType);
+    if (!measureProgram) {
+        throw NQumir::TError(
+            "CompileAggregate: measure program: " + measureProgram.error().ToString());
+    }
+    PrintKernelAst(Diagnostics_, "aggregate.measure", *measureProgram);
+    void* measureFn = measureRunner->CompileKernelAst(
+        std::move(*measureProgram), "agg_measure_keys", &error);
+    FinishKernelDiagnostics(Diagnostics_);
+    if (!measureFn) {
+        throw std::runtime_error(
+            "CompileAggregate: agg_measure_keys compilation failed: " + error);
+    }
+
     auto finalizeRunner = std::make_shared<NQumir::TLLVMRunner>(options);
     finalizeRunner->RegisterModule(dbModule, true);
 
@@ -203,6 +220,7 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
     }
 
     using TDispatchFn = int64_t(*)(void*, TRowSet*, int64_t, int64_t);
+    using TMeasureFn = int64_t(*)(void*, int64_t*, int64_t);
     using TFinalizeFn = int64_t(*)(void*, void**, int64_t**, int64_t);
 
     TAggregateKernels kernels;
@@ -220,6 +238,9 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
     }
     kernels.Dispatch = [dispatchFn, dispatchRunner](void* ht, TRowSet* batch, int64_t arg, int64_t op) {
         return reinterpret_cast<TDispatchFn>(dispatchFn)(ht, batch, arg, op);
+    };
+    kernels.Measure = [measureFn, measureRunner](void* ht, int64_t* outputKeyBytes, int64_t outputCapacity) {
+        return reinterpret_cast<TMeasureFn>(measureFn)(ht, outputKeyBytes, outputCapacity);
     };
     kernels.Finalize = [finalizeFn, finalizeRunner](void* ht, void** outputKeyBuffers, int64_t** outputBuffers, int64_t outputCapacity) {
         return reinterpret_cast<TFinalizeFn>(finalizeFn)(ht, outputKeyBuffers, outputBuffers, outputCapacity);

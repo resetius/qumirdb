@@ -85,9 +85,17 @@ bool TRuntimeAggregate::Next(TRowSet& rowSet) {
 
     auto* data = new TAggregateRowSetData;
     data->Keys.resize(Kernels_.OutputKeys.size());
+    std::vector<int64_t> outputKeyBytes(Kernels_.OutputKeys.size());
+    const int64_t measured = Kernels_.Measure(
+        ht.data(), outputKeyBytes.data(), size);
+    if (measured != size) {
+        Kernels_.Dispatch(ht.data(), nullptr, 0, kOpDestroy);
+        delete data;
+        throw std::runtime_error("aggregate measure returned an unexpected row count");
+    }
     std::vector<void*> outputKeyBuffers(Kernels_.OutputKeys.size());
     for (size_t i = 0; i < Kernels_.OutputKeys.size(); ++i) {
-        data->Keys[i].Resize(size * Kernels_.OutputKeys[i].Size);
+        data->Keys[i].Resize(outputKeyBytes[i]);
         outputKeyBuffers[i] = data->Keys[i].Data();
     }
     data->AggBuffers.resize(Kernels_.NumAggs);
