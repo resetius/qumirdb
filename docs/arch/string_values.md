@@ -115,6 +115,20 @@ example, a logical `{i64,string}` key becomes `{i64,StringView}` for lookup and
 `{i64,OwnedString}` for storage. Both representations must hash identically
 and support direct `StoredKey` versus `LookupKey` equality.
 
+The dual-key contract applies to every key type. It does not introduce a
+string-only branch in the hash table:
+
+```text
+fixed-width: LookupKey == StoredKey
+string-bearing: LookupKey != StoredKey
+```
+
+Every descriptor generates the same ownership helpers. For a key without
+owned leaves, `key_owned_bytes` returns zero and `key_clone_owned` is an
+identity operation that ignores its byte buffer. Generic update code can
+therefore always execute `lookup -> allocate owned bytes -> clone -> insert`;
+the allocator step is skipped when the requested size is zero.
+
 ## Generated type helpers
 
 The AST generator must recursively produce helpers for the concrete pair of
@@ -132,6 +146,11 @@ key_clone_owned(LookupKey, <ptr u8>) -> StoredKey
 Both hash overloads must use the same byte hash and struct combiner. Equality
 must compare lengths first and then bytes. Composite helpers recurse through
 nested fields and ignore generated padding.
+
+`key_clone_owned` is recursive and type-directed. Fixed-width leaves are
+copied directly. String leaves copy bytes into successive slices of one
+caller-provided block and construct `OwnedString` handles pointing into those
+slices.
 
 The first implementation should use a small, stable Oz byte hash with fixed
 test vectors. A faster hash can replace it later only with deliberate
