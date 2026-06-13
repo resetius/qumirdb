@@ -287,6 +287,21 @@ NQumir::NAst::TTypePtr FindStringViewType(
     return nullptr;
 }
 
+bool ContainsLogicalString(const NQumir::NAst::TTypePtr& originalType) {
+    using namespace NQumir::NAst;
+    auto type = UnwrapNamedType(originalType);
+    if (TMaybeType<TStringType>(type)) {
+        return true;
+    }
+    if (auto structure = TMaybeType<TStructType>(type)) {
+        return std::any_of(structure.Cast()->Fields.begin(),
+            structure.Cast()->Fields.end(), [](const auto& field) {
+                return ContainsLogicalString(field.second);
+            });
+    }
+    return false;
+}
+
 NQumir::NAst::TExprPtr ZeroValueExpr(
     const NQumir::NAst::TTypePtr& originalType)
 {
@@ -1006,6 +1021,108 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
     auto function = std::make_shared<TFunDecl>(
         loc, "agg_finalize", std::move(params), std::move(body), i64Type);
     return std::make_shared<TBlockExpr>(loc, std::vector<TExprPtr>{function});
+}
+
+NQumir::NAst::TExprPtr GenGenericAggregateMeasureAst(
+    const TAggregateKeyDescriptor& key,
+    NQumir::NAst::TTypePtr hashTableType)
+{
+    using namespace NQumir::NAst;
+    NQumir::TLocation loc{};
+    auto i64Type = std::make_shared<TIntegerType>(TIntegerType::I64);
+    auto ptrI64Type = std::make_shared<TPointerType>(i64Type);
+    auto ptrKeyType = std::make_shared<TPointerType>(key.StoredType);
+    auto hashTableRefType = std::make_shared<TReferenceType>(
+        std::make_shared<TNamedType>("HashTable", std::move(hashTableType)));
+    auto ident = [&](const std::string& name) -> TExprPtr {
+        return std::make_shared<TIdentExpr>(loc, name);
+    };
+    auto number = [&](int64_t value) -> TExprPtr {
+        auto result = std::make_shared<TNumberExpr>(loc, value);
+        result->Type = i64Type;
+        return result;
+    };
+    auto binary = [&](const char* op, TExprPtr left, TExprPtr right) -> TExprPtr {
+        return std::make_shared<TBinaryExpr>(
+            loc, TOperator(op), std::move(left), std::move(right));
+    };
+    auto outputAt = [&](size_t fieldIndex) -> TExprPtr {
+        return std::make_shared<TIndexExpr>(loc, ident("output_key_bytes"),
+            number(static_cast<int64_t>(fieldIndex)));
+    };
+
+    std::vector<TParam> params = {
+        std::make_shared<TVarStmt>(loc, "ht", hashTableRefType),
+        std::make_shared<TVarStmt>(loc, "output_key_bytes", ptrI64Type),
+        std::make_shared<TVarStmt>(loc, "output_capacity", i64Type),
+    };
+    std::vector<TExprPtr> body;
+    body.push_back(std::make_shared<TVarStmt>(loc, "size", i64Type));
+    body.push_back(std::make_shared<TAssignExpr>(loc, "size",
+        std::make_shared<TFieldAccessExpr>(loc, ident("ht"), "Size")));
+    body.push_back(std::make_shared<TIfExpr>(loc,
+        binary("<", ident("output_capacity"), ident("size")),
+        std::make_shared<TBlockExpr>(loc, std::vector<TExprPtr>{
+            std::make_shared<TReturnExpr>(loc, number(-1))}), nullptr));
+    body.push_back(std::make_shared<TVarStmt>(loc, "group_keys", ptrKeyType));
+    body.push_back(std::make_shared<TAssignExpr>(loc, "group_keys",
+        std::make_shared<TCastExpr>(loc,
+            std::make_shared<TFieldAccessExpr>(loc, ident("ht"), "GroupKeys"),
+            ptrKeyType)));
+
+    for (size_t fieldIndex = 0; fieldIndex < key.Fields.size(); ++fieldIndex) {
+        const auto logical = UnwrapNamedType(key.Fields[fieldIndex].Type);
+        if (ContainsLogicalString(key.Fields[fieldIndex].Type) &&
+            !TMaybeType<TStringType>(logical)) {
+            throw std::invalid_argument(
+                "GenGenericAggregateMeasureAst: nested variable-width output "
+                "is not supported");
+        }
+        if (TMaybeType<TStringType>(logical)) {
+            body.push_back(std::make_shared<TArrayAssignExpr>(loc,
+                "output_key_bytes", std::vector<TExprPtr>{
+                    number(static_cast<int64_t>(fieldIndex))}, number(0)));
+        } else {
+            body.push_back(std::make_shared<TArrayAssignExpr>(loc,
+                "output_key_bytes",
+                std::vector<TExprPtr>{number(static_cast<int64_t>(fieldIndex))},
+                binary("*", ident("size"),
+                    number(static_cast<int64_t>(key.Fields[fieldIndex].Size)))));
+        }
+    }
+
+    body.push_back(std::make_shared<TVarStmt>(loc, "slot", i64Type));
+    body.push_back(std::make_shared<TAssignExpr>(loc, "slot", number(0)));
+    std::vector<TExprPtr> loop;
+    for (size_t fieldIndex = 0; fieldIndex < key.Fields.size(); ++fieldIndex) {
+        if (!TMaybeType<TStringType>(UnwrapNamedType(key.Fields[fieldIndex].Type))) {
+            continue;
+        }
+        TExprPtr stored = std::make_shared<TIndexExpr>(
+            loc, ident("group_keys"), ident("slot"));
+        if (!key.IsScalar()) {
+            stored = std::make_shared<TFieldAccessExpr>(
+                loc, std::move(stored), "key_" + std::to_string(fieldIndex));
+        }
+        auto size = std::make_shared<TFieldAccessExpr>(
+            loc, std::move(stored), "Size");
+        loop.push_back(std::make_shared<TArrayAssignExpr>(loc,
+            "output_key_bytes",
+            std::vector<TExprPtr>{number(static_cast<int64_t>(fieldIndex))},
+            binary("+", outputAt(fieldIndex), std::move(size))));
+    }
+    loop.push_back(std::make_shared<TAssignExpr>(loc, "slot",
+        binary("+", ident("slot"), number(1))));
+    body.push_back(std::make_shared<TWhileStmtExpr>(loc,
+        binary("<", ident("slot"), ident("size")),
+        std::make_shared<TBlockExpr>(loc, std::move(loop))));
+    body.push_back(std::make_shared<TReturnExpr>(loc, ident("size")));
+
+    auto function = std::make_shared<TFunDecl>(loc, "agg_measure_keys",
+        std::move(params), std::make_shared<TBlockExpr>(loc, std::move(body)),
+        i64Type);
+    return std::make_shared<TBlockExpr>(
+        loc, std::vector<TExprPtr>{std::move(function)});
 }
 
 std::vector<NQumir::NAst::TExprPtr> GenReducerFunDecls(

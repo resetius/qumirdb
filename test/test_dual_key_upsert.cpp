@@ -651,6 +651,65 @@ TEST(DualKeyUpsert, ProductionDispatchMaterializesMixedStringKeys) {
     EXPECT_EQ(dispatch(&table, &batch2, 0, 2), 1);
 }
 
+TEST(DualKeyUpsert, MeasuresFixedAndStringOutputBytes) {
+    using namespace NQumir;
+    using namespace NQumir::NAst;
+    auto i64Type = std::make_shared<TIntegerType>(TIntegerType::I64);
+    TStructType input({
+        {"id", i64Type}, {"name", std::make_shared<TStringType>()}});
+    auto key = NQqb::NKernel::BuildAggregateKeyDescriptor(
+        input, {"id", "name"});
+
+    auto module = std::make_shared<NRegistry::QumirDbModule>();
+    TTypePtr hashTableType;
+    for (const auto& type : module->ExternalTypes()) {
+        if (type.Name == "HashTable") {
+            hashTableType = type.Type;
+        }
+    }
+    auto program = NQqb::NKernel::BuildGenericAggregateMeasureProgramAst(
+        key, hashTableType);
+    ASSERT_TRUE(program) << program.error().ToString();
+    TLLVMRunnerOptions options;
+    options.CoreInput = true;
+    options.NativeCode = true;
+    options.AllowOverloads = true;
+    TLLVMRunner runner(options);
+    runner.RegisterModule(module, true);
+    std::string error;
+    void* entry = runner.CompileKernelAst(
+        *program, "agg_measure_keys", &error);
+    ASSERT_NE(entry, nullptr) << error;
+
+    struct TStoredKey {
+        int64_t Id;
+        NQqb::TOwnedString Name;
+    };
+    std::string first = "alpha";
+    std::string second = "";
+    std::string third = "мир";
+    std::array<TStoredKey, 3> keys = {{
+        {1, {reinterpret_cast<uint8_t*>(first.data()),
+             static_cast<int64_t>(first.size())}},
+        {2, {reinterpret_cast<uint8_t*>(second.data()),
+             static_cast<int64_t>(second.size())}},
+        {3, {reinterpret_cast<uint8_t*>(third.data()),
+             static_cast<int64_t>(third.size())}},
+    }};
+    THashTable table{
+        .GroupKeys = reinterpret_cast<uint8_t*>(keys.data()),
+        .Size = static_cast<int64_t>(keys.size()),
+    };
+    std::array<int64_t, 2> bytes = {-1, -1};
+    auto measure = reinterpret_cast<int64_t(*)(
+        THashTable*, int64_t*, int64_t)>(entry);
+    EXPECT_EQ(measure(&table, bytes.data(), 2), -1);
+    ASSERT_EQ(measure(&table, bytes.data(), keys.size()), 3);
+    EXPECT_EQ(bytes[0], 3 * static_cast<int64_t>(sizeof(int64_t)));
+    EXPECT_EQ(bytes[1], static_cast<int64_t>(
+        first.size() + second.size() + third.size()));
+}
+
 } // namespace
 
 int main(int argc, char** argv) {

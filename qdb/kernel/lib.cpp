@@ -169,5 +169,28 @@ BuildGenericAggregateFinalizeProgramAst(
         NQumir::TLocation{}, std::move(*parsed));
 }
 
+std::expected<NQumir::NAst::TExprPtr, NQumir::TError>
+BuildGenericAggregateMeasureProgramAst(
+    const TAggregateKeyDescriptor& key,
+    NQumir::NAst::TTypePtr hashTableType)
+{
+    std::vector<NQumir::NAst::TExprPtr> stmts;
+    if (!key.StoredTypeName.empty() ||
+        (!key.IsScalar() &&
+         NQumir::NAst::TMaybeType<NQumir::NAst::TNamedType>(key.StoredType))) {
+        stmts.push_back(std::make_shared<NQumir::NAst::TTypeDeclStmt>(
+            NQumir::TLocation{}, key.StoredType));
+    }
+    auto entry = GenGenericAggregateMeasureAst(key, std::move(hashTableType));
+    auto block = NQumir::NAst::TMaybeNode<NQumir::NAst::TBlockExpr>(entry);
+    if (!block || block.Cast()->Stmts.size() != 1) {
+        return std::unexpected(NQumir::TError(
+            "generic aggregate measure generator returned an invalid entry block"));
+    }
+    stmts.push_back(block.Cast()->Stmts.front());
+    return std::make_shared<NQumir::NAst::TBlockExpr>(
+        NQumir::TLocation{}, std::move(stmts));
+}
+
 } // namespace NKernel
 } // namespace NQqb
