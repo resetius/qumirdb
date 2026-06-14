@@ -22,6 +22,7 @@ TColumnValueAst BuildColumnValueAst(
     auto i32Type = std::make_shared<TIntegerType>(TIntegerType::I32);
     auto i64Type = std::make_shared<TIntegerType>();
     auto u8Type = std::make_shared<TIntegerType>(TIntegerType::U8);
+    auto boolType = std::make_shared<TBoolType>();
     auto ptrU8Type = std::make_shared<TPointerType>(u8Type);
     auto ident = [&](const std::string& name) -> TExprPtr {
         return std::make_shared<TIdentExpr>(loc, name);
@@ -46,24 +47,38 @@ TColumnValueAst BuildColumnValueAst(
             loc, std::move(collection), std::move(offset));
     };
 
+    const std::string validName = temporaryPrefix + "_valid";
+    const std::string valueName = temporaryPrefix + "_value";
     auto maskIsNull = binary("==", cast(field("Mask"), i64Type), number(0));
     auto maskBit = std::make_shared<TCallExpr>(loc, ident("bitoff"),
         std::vector<TExprPtr>{field("Mask"), ident(rowName), field("MaskBitOffset")});
     auto isValid = binary("||", std::move(maskIsNull), std::move(maskBit));
+    std::vector<TExprPtr> commonSetup = {
+        std::make_shared<TVarStmt>(loc, validName, boolType),
+        std::make_shared<TAssignExpr>(loc, validName, std::move(isValid)),
+    };
 
     auto type = UnwrapNamedType(logicalType);
     if (TMaybeType<TIntegerType>(type) || TMaybeType<TFloatType>(type)) {
         auto pointerType = std::make_shared<TPointerType>(logicalType);
         const std::string dataName = temporaryPrefix + "_data";
-        std::vector<TExprPtr> setup = {
+        commonSetup.insert(commonSetup.end(), {
             std::make_shared<TVarStmt>(loc, dataName, pointerType),
-            std::make_shared<TAssignExpr>(loc, dataName,
-                cast(cast(field("Data"), i64Type), pointerType)),
-        };
+            std::make_shared<TVarStmt>(loc, valueName, logicalType),
+            std::make_shared<TAssignExpr>(loc, valueName,
+                cast(number(0), logicalType)),
+            std::make_shared<TIfExpr>(loc, ident(validName),
+                std::make_shared<TBlockExpr>(loc, std::vector<TExprPtr>{
+                    std::make_shared<TAssignExpr>(loc, dataName,
+                        cast(cast(field("Data"), i64Type), pointerType)),
+                    std::make_shared<TAssignExpr>(loc, valueName,
+                        index(ident(dataName), ident(rowName))),
+                }), nullptr),
+        });
         return {
-            .Setup = std::move(setup),
-            .Value = index(ident(dataName), ident(rowName)),
-            .IsValid = std::move(isValid),
+            .Setup = std::move(commonSetup),
+            .Value = ident(valueName),
+            .IsValid = ident(validName),
             .ValueType = logicalType,
         };
     }
@@ -72,10 +87,20 @@ TColumnValueAst BuildColumnValueAst(
         auto value = std::make_shared<TCallExpr>(loc, ident("bitoff"),
             std::vector<TExprPtr>{
                 std::move(data), ident(rowName), field("DataBitOffset")});
+        commonSetup.insert(commonSetup.end(), {
+            std::make_shared<TVarStmt>(loc, valueName, logicalType),
+            std::make_shared<TAssignExpr>(loc, valueName,
+                std::make_shared<TNumberExpr>(loc, false)),
+            std::make_shared<TIfExpr>(loc, ident(validName),
+                std::make_shared<TBlockExpr>(loc, std::vector<TExprPtr>{
+                    std::make_shared<TAssignExpr>(loc, valueName,
+                        std::move(value)),
+                }), nullptr),
+        });
         return {
-            .Setup = {},
-            .Value = std::move(value),
-            .IsValid = std::move(isValid),
+            .Setup = std::move(commonSetup),
+            .Value = ident(valueName),
+            .IsValid = ident(validName),
             .ValueType = logicalType,
         };
     }
@@ -91,16 +116,17 @@ TColumnValueAst BuildColumnValueAst(
         const std::string endName = temporaryPrefix + "_end";
         auto ptrI32Type = std::make_shared<TPointerType>(i32Type);
         auto ptrI64Type = std::make_shared<TPointerType>(i64Type);
-        std::vector<TExprPtr> setup = {
+        commonSetup.insert(commonSetup.end(), {
             std::make_shared<TVarStmt>(loc, offsets32Name, ptrI32Type),
-            std::make_shared<TAssignExpr>(loc, offsets32Name,
-                cast(cast(field("Offsets"), i64Type), ptrI32Type)),
             std::make_shared<TVarStmt>(loc, offsets64Name, ptrI64Type),
-            std::make_shared<TAssignExpr>(loc, offsets64Name,
-                cast(cast(field("Offsets"), i64Type), ptrI64Type)),
             std::make_shared<TVarStmt>(loc, startName, i64Type),
             std::make_shared<TVarStmt>(loc, endName, i64Type),
-        };
+            std::make_shared<TVarStmt>(loc, valueName, namedStringView),
+            std::make_shared<TAssignExpr>(loc, valueName,
+                std::make_shared<TStructConstructExpr>(loc, namedStringView,
+                    std::vector<TExprPtr>{
+                        cast(number(0), ptrU8Type), number(0)})),
+        });
         auto buildOffsetsBranch = [&](const std::string& offsetsName) -> TExprPtr {
             auto start = binary("-",
                 cast(index(ident(offsetsName), ident(rowName)), i64Type),
@@ -114,19 +140,30 @@ TColumnValueAst BuildColumnValueAst(
                 std::make_shared<TAssignExpr>(loc, endName, std::move(end)),
             });
         };
-        setup.push_back(std::make_shared<TIfExpr>(loc,
-            binary("==", field("OffsetWidth"), number(4, u8Type)),
-            buildOffsetsBranch(offsets32Name), buildOffsetsBranch(offsets64Name)));
+        std::vector<TExprPtr> loadValue = {
+            std::make_shared<TAssignExpr>(loc, offsets32Name,
+                cast(cast(field("Offsets"), i64Type), ptrI32Type)),
+            std::make_shared<TAssignExpr>(loc, offsets64Name,
+                cast(cast(field("Offsets"), i64Type), ptrI64Type)),
+            std::make_shared<TIfExpr>(loc,
+                binary("==", field("OffsetWidth"), number(4, u8Type)),
+                buildOffsetsBranch(offsets32Name),
+                buildOffsetsBranch(offsets64Name)),
+        };
         auto dataAddress = binary("+", cast(field("Data"), i64Type),
             ident(startName));
         auto data = cast(std::move(dataAddress), ptrU8Type);
         auto size = binary("-", ident(endName), ident(startName));
         auto value = std::make_shared<TStructConstructExpr>(loc, namedStringView,
             std::vector<TExprPtr>{std::move(data), std::move(size)});
+        loadValue.push_back(std::make_shared<TAssignExpr>(
+            loc, valueName, std::move(value)));
+        commonSetup.push_back(std::make_shared<TIfExpr>(loc, ident(validName),
+            std::make_shared<TBlockExpr>(loc, std::move(loadValue)), nullptr));
         return {
-            .Setup = std::move(setup),
-            .Value = std::move(value),
-            .IsValid = std::move(isValid),
+            .Setup = std::move(commonSetup),
+            .Value = ident(valueName),
+            .IsValid = ident(validName),
             .ValueType = std::move(namedStringView),
         };
     }
