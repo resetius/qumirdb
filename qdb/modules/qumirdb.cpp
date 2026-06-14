@@ -258,6 +258,20 @@ QumirDbModule::QumirDbModule() {
             .ArgTypes = {ptrU8Type, i64Type, ptrU8Type, i64Type},
             .ReturnType = i64Type,
         },
+        {
+            .Name = "qdb_bitmap_set_valid",
+            .MangledName = "qdb_bitmap_set_valid",
+            .Ptr = reinterpret_cast<void*>(static_cast<void(*)(
+                uint8_t*, int64_t, bool)>(qdb_bitmap_set_valid)),
+            .Packed = +[](const uint64_t* args, size_t) -> uint64_t {
+                qdb_bitmap_set_valid(
+                    reinterpret_cast<uint8_t*>(args[0]),
+                    static_cast<int64_t>(args[1]), args[2] != 0);
+                return 0;
+            },
+            .ArgTypes = {ptrU8Type, i64Type, boolType},
+            .ReturnType = std::make_shared<TVoidType>(),
+        },
     };
 }
 

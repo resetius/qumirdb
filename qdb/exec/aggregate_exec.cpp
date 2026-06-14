@@ -50,6 +50,7 @@ struct TAggregateRowSetData {
         TAlignedByteBuffer Fixed;
         std::vector<char> Data;
         std::vector<int64_t> Offsets;
+        std::vector<uint8_t> Mask;
         TColumn Column{};
     };
 
@@ -103,12 +104,13 @@ bool TRuntimeAggregate::Next(TRowSet& rowSet) {
     std::vector<void*> outputKeyBuffers(Kernels_.OutputKeys.size());
     for (size_t i = 0; i < Kernels_.OutputKeys.size(); ++i) {
         auto& keyBuffer = data->Keys[i];
+        keyBuffer.Mask.resize((size + 7) / 8);
         if (Kernels_.OutputKeys[i].Kind == EAggregateOutputKeyKind::String) {
             keyBuffer.Data.resize(outputKeyBytes[i]);
             keyBuffer.Offsets.resize(size + 1);
             keyBuffer.Column = TColumn{
                 .Data = keyBuffer.Data.data(),
-                .Mask = nullptr,
+                .Mask = keyBuffer.Mask.data(),
                 .Offsets = keyBuffer.Offsets.data(),
                 .OffsetWidth = 8,
             };
@@ -116,9 +118,10 @@ bool TRuntimeAggregate::Next(TRowSet& rowSet) {
         } else {
             keyBuffer.Fixed.Resize(outputKeyBytes[i]);
             keyBuffer.Column = TColumn{
-                .Data = reinterpret_cast<char*>(keyBuffer.Fixed.Data())};
-            outputKeyBuffers[i] = keyBuffer.Fixed.Data();
+                .Data = reinterpret_cast<char*>(keyBuffer.Fixed.Data()),
+                .Mask = keyBuffer.Mask.data()};
         }
+        outputKeyBuffers[i] = &keyBuffer.Column;
     }
     data->AggBuffers.resize(Kernels_.NumAggs);
     std::vector<int64_t*> outputBuffers(Kernels_.NumAggs);

@@ -128,6 +128,14 @@ constexpr const char* kPlanSexp =
     "(rel aggregate (rel source \"data.parquet\") (keys k) "
     "(agg c count) (agg s sum v) (agg mn min v) (agg mx max v))";
 
+bool IsValid(const TColumn& column, int64_t row) {
+    if (!column.Mask) {
+        return true;
+    }
+    const int64_t bit = column.MaskBitOffset + row;
+    return ((column.Mask[bit / 8] >> (bit % 8)) & 1) != 0;
+}
+
 } // namespace
 
 // L6 (multiple groups): full pipeline sexp -> AnnotateTypes -> ApplyColumnPruning
@@ -406,13 +414,13 @@ TEST(AggregateE2E, ScalarStringKeyOwnsFinalizedOutput) {
     ASSERT_EQ(result.ColumnCount, 3);
     ASSERT_EQ(result.RowCount, 4);
     ASSERT_EQ(result.Columns[0].OffsetWidth, 8);
-    auto* offsets = static_cast<int64_t*>(result.Columns[0].Offsets);
+    auto* outputOffsets = static_cast<int64_t*>(result.Columns[0].Offsets);
     auto* counts = reinterpret_cast<int64_t*>(result.Columns[1].Data);
     auto* sums = reinterpret_cast<int64_t*>(result.Columns[2].Data);
     std::map<std::string, std::pair<int64_t, int64_t>> actual;
     for (int64_t row = 0; row < result.RowCount; ++row) {
-        std::string key(result.Columns[0].Data + offsets[row],
-            result.Columns[0].Data + offsets[row + 1]);
+        std::string key(result.Columns[0].Data + outputOffsets[row],
+            result.Columns[0].Data + outputOffsets[row + 1]);
         actual[key] = {counts[row], sums[row]};
     }
     EXPECT_EQ(actual.at("alpha"), (std::pair<int64_t, int64_t>{2, 15}));
@@ -451,9 +459,14 @@ TEST(AggregateE2E, NullStringKeysGroupTogetherAndDifferFromEmpty) {
     ASSERT_EQ(result.RowCount, 2);
     auto* counts = reinterpret_cast<int64_t*>(result.Columns[1].Data);
     auto* sums = reinterpret_cast<int64_t*>(result.Columns[2].Data);
+    auto* outputOffsets = static_cast<int64_t*>(result.Columns[0].Offsets);
     std::map<int64_t, int64_t> countBySum;
     for (int64_t row = 0; row < result.RowCount; ++row) {
         countBySum[sums[row]] = counts[row];
+        const std::string key(result.Columns[0].Data + outputOffsets[row],
+            result.Columns[0].Data + outputOffsets[row + 1]);
+        EXPECT_TRUE(key.empty());
+        EXPECT_EQ(IsValid(result.Columns[0], row), sums[row] == 7);
     }
     EXPECT_EQ(countBySum.at(30), 2);
     EXPECT_EQ(countBySum.at(7), 2);
@@ -487,9 +500,12 @@ TEST(AggregateE2E, NullIntegerKeysIgnorePayloadAndDifferFromZero) {
     ASSERT_EQ(result.RowCount, 2);
     auto* counts = reinterpret_cast<int64_t*>(result.Columns[1].Data);
     auto* sums = reinterpret_cast<int64_t*>(result.Columns[2].Data);
+    auto* outputKeys = reinterpret_cast<int64_t*>(result.Columns[0].Data);
     std::map<int64_t, int64_t> countBySum;
     for (int64_t row = 0; row < result.RowCount; ++row) {
         countBySum[sums[row]] = counts[row];
+        EXPECT_EQ(outputKeys[row], 0);
+        EXPECT_EQ(IsValid(result.Columns[0], row), sums[row] == 7);
     }
     EXPECT_EQ(countBySum.at(30), 2);
     EXPECT_EQ(countBySum.at(7), 2);
@@ -530,6 +546,18 @@ TEST(AggregateE2E, CompositeNullKeysTrackValidityPerPosition) {
     std::map<int64_t, int64_t> countBySum;
     for (int64_t row = 0; row < result.RowCount; ++row) {
         countBySum[sums[row]] = counts[row];
+        const bool firstValid = IsValid(result.Columns[0], row);
+        const bool secondValid = IsValid(result.Columns[1], row);
+        if (sums[row] == 3) {
+            EXPECT_TRUE(firstValid);
+            EXPECT_TRUE(secondValid);
+        } else if (sums[row] == 11) {
+            EXPECT_FALSE(firstValid);
+            EXPECT_FALSE(secondValid);
+        } else {
+            EXPECT_FALSE(firstValid);
+            EXPECT_TRUE(secondValid);
+        }
     }
     EXPECT_EQ(countBySum.at(30), 2);
     EXPECT_EQ(countBySum.at(3), 1);

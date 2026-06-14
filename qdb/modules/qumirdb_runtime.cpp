@@ -49,4 +49,14 @@ int64_t qdb_filter_string_compare(
     return (leftSize > rightSize) - (leftSize < rightSize);
 }
 
+void qdb_bitmap_set_valid(uint8_t* bitmap, int64_t index, bool valid) {
+    const auto byteIndex = static_cast<size_t>(index >> 3);
+    const auto bit = static_cast<uint8_t>(1u << (index & 7));
+    if (valid) {
+        bitmap[byteIndex] |= bit;
+    } else {
+        bitmap[byteIndex] &= static_cast<uint8_t>(~bit);
+    }
+}
+
 } // extern "C"
