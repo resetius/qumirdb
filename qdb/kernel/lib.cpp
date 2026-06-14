@@ -76,12 +76,13 @@ BuildFilterProgramAst(
     const std::unordered_map<std::string, int32_t>& fieldIndices,
     NQumir::NAst::TTypePtr columnType,
     NQumir::NAst::TTypePtr rowSetType,
-    NQumir::NAst::TTypePtr stringViewType)
+    NQumir::NAst::TTypePtr stringViewType,
+    std::vector<std::shared_ptr<std::string>>& literalStorage)
 {
     using namespace NQumir::NAst;
     auto entry = GenFilterKernelAst(
         std::move(predicate), inputType, fieldIndices, columnType, rowSetType,
-        stringViewType);
+        stringViewType, literalStorage);
     auto block = TMaybeNode<TBlockExpr>(entry);
     if (!block) {
         return std::unexpected(NQumir::TError(

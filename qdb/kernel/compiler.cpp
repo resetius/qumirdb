@@ -6,12 +6,9 @@
 
 #include <qumir/codegen/llvm/llvm_initializer.h>
 #include <qumir/error.h>
-#include <qumir/parser/core/lexer.h>
-#include <qumir/parser/core/parser.h>
 #include <qumir/parser/core/printer.h>
 
 #include <optional>
-#include <sstream>
 #include <stdexcept>
 #include <unordered_map>
 
@@ -42,16 +39,45 @@ void FinishKernelDiagnostics(std::ostream* out) {
 NQumir::NAst::TExprPtr ClonePredicate(
     const NQumir::NAst::TExprPtr& predicate)
 {
-    using namespace NQumir::NAst::NCore;
-    std::istringstream input(PrintAst(predicate));
-    TTokenStream tokens(input);
-    TParser parser;
-    auto parsed = parser.Parse(tokens);
-    if (!parsed) {
+    using namespace NQumir::NAst;
+    TExprPtr result;
+    if (auto ident = TMaybeNode<TIdentExpr>(predicate)) {
+        result = std::make_shared<TIdentExpr>(
+            predicate->Location, ident.Cast()->Name);
+    } else if (auto literal = TMaybeNode<TStringLiteralExpr>(predicate)) {
+        result = std::make_shared<TStringLiteralExpr>(
+            predicate->Location, literal.Cast()->Value);
+    } else if (auto number = TMaybeNode<TNumberExpr>(predicate)) {
+        result = number.Cast()->IsFloat
+            ? std::static_pointer_cast<TExpr>(std::make_shared<TNumberExpr>(
+                predicate->Location, number.Cast()->FloatValue))
+            : std::static_pointer_cast<TExpr>(std::make_shared<TNumberExpr>(
+                predicate->Location, number.Cast()->IntValue));
+    } else if (auto unary = TMaybeNode<TUnaryExpr>(predicate)) {
+        result = std::make_shared<TUnaryExpr>(predicate->Location,
+            unary.Cast()->Operator, ClonePredicate(unary.Cast()->Operand));
+    } else if (auto binary = TMaybeNode<TBinaryExpr>(predicate)) {
+        result = std::make_shared<TBinaryExpr>(predicate->Location,
+            binary.Cast()->Operator, ClonePredicate(binary.Cast()->Left),
+            ClonePredicate(binary.Cast()->Right));
+    } else if (auto call = TMaybeNode<TCallExpr>(predicate)) {
+        std::vector<TExprPtr> args;
+        args.reserve(call.Cast()->Args.size());
+        for (const auto& arg : call.Cast()->Args) {
+            args.push_back(ClonePredicate(arg));
+        }
+        result = std::make_shared<TCallExpr>(predicate->Location,
+            ClonePredicate(call.Cast()->Callee), std::move(args));
+    } else if (auto cast = TMaybeNode<TCastExpr>(predicate)) {
+        result = std::make_shared<TCastExpr>(predicate->Location,
+            ClonePredicate(cast.Cast()->Operand), predicate->Type);
+    } else {
         throw NQumir::TError(
-            "filter predicate clone failed: " + parsed.error().ToString());
+            "filter predicate clone does not support " +
+            std::string(predicate->NodeName()));
     }
-    return std::move(*parsed);
+    result->Type = predicate->Type;
+    return result;
 }
 
 } // namespace
@@ -81,9 +107,11 @@ TKernelCompiler::TFilterDispatch TKernelCompiler::CompileFilter(
         }
     }
 
+    auto literalStorage =
+        std::make_shared<std::vector<std::shared_ptr<std::string>>>();
     auto kernelAst = NKernel::BuildFilterProgramAst(
         ClonePredicate(predicate), inputType, fieldIndices, columnType,
-        rowSetType, stringViewType);
+        rowSetType, stringViewType, *literalStorage);
     if (!kernelAst) {
         throw NQumir::TError(
             "CompileFilter: " + kernelAst.error().ToString());
@@ -111,9 +139,10 @@ TKernelCompiler::TFilterDispatch TKernelCompiler::CompileFilter(
     using TFilterFn = void(*)(void*);
     auto sharedRunner = std::shared_ptr<NQumir::TLLVMRunner>(std::move(runner));
 
-    TFilterDispatch dispatch = [fnPtr, sharedRunner](TRowSet& rowSet) {
-        reinterpret_cast<TFilterFn>(fnPtr)(&rowSet);
-    };
+    TFilterDispatch dispatch =
+        [fnPtr, sharedRunner, literalStorage](TRowSet& rowSet) {
+            reinterpret_cast<TFilterFn>(fnPtr)(&rowSet);
+        };
 
     return dispatch;
 }

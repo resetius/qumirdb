@@ -6,6 +6,7 @@
 #include <qumir/parser/type.h>
 
 #include <cstddef>
+#include <memory>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -35,7 +36,8 @@ NQumir::NAst::TExprPtr GenFilterKernelAst(
     const std::unordered_map<std::string, int32_t>& fieldIndices,
     NQumir::NAst::TTypePtr columnType,
     NQumir::NAst::TTypePtr rowSetType,
-    NQumir::NAst::TTypePtr stringViewType);
+    NQumir::NAst::TTypePtr stringViewType,
+    std::vector<std::shared_ptr<std::string>>& literalStorage);
 
 // Builds the generic aggregation dispatch entry over aht_init/aht_upsert_dual/
 // aht_destroy. Key extraction uses the common TColumn materializer and the
