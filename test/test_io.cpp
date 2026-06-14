@@ -2,6 +2,8 @@
 
 #include <qdb/io/parquet/source.h>
 #include <qdb/io/text/sink.h>
+#include <qdb/ops/source.h>
+#include <qdb/types/nullable.h>
 
 #include <sstream>
 #include <vector>
@@ -41,7 +43,7 @@ TEST(IOTest, ParquetRoundtrip) {
     (void)flags.AppendValues(std::vector<bool>{true, false, true});
 
     auto schema = arrow::schema({
-        arrow::field("id", arrow::int64()),
+        arrow::field("id", arrow::int64(), false),
         arrow::field("name", arrow::utf8()),
         arrow::field("value", arrow::float64()),
         arrow::field("flag", arrow::boolean()),
@@ -62,6 +64,17 @@ TEST(IOTest, ParquetRoundtrip) {
     EXPECT_EQ(s.Columns[1].Name, "name");
     EXPECT_EQ(s.Columns[2].Name, "value");
     EXPECT_EQ(s.Columns[3].Name, "flag");
+    EXPECT_FALSE(IsNullableType(s.Columns[0].Type));
+    EXPECT_TRUE(IsNullableType(s.Columns[1].Type));
+    EXPECT_TRUE(IsNullableType(s.Columns[2].Type));
+    EXPECT_TRUE(IsNullableType(s.Columns[3].Type));
+    EXPECT_EQ(UnwrapNullableType(s.Columns[1].Type)->TypeName(),
+        NQumir::NAst::TStringType::TypeId);
+
+    auto structType = NQumir::NAst::TMaybeType<NQumir::NAst::TStructType>(
+        StructTypeFromSchema(s));
+    ASSERT_TRUE(structType);
+    EXPECT_EQ(structType.Cast()->Fields[1].second, s.Columns[1].Type);
 
     TRowSet rowSet = {};
     ASSERT_TRUE(source.Next(rowSet));
