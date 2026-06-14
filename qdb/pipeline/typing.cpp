@@ -2,6 +2,7 @@
 
 #include <qdb/ops/aggregate.h>
 #include <qdb/ops/filter.h>
+#include <qdb/ops/join.h>
 #include <qdb/ops/project.h>
 #include <qdb/ops/source.h>
 
@@ -61,6 +62,17 @@ void AnnotateTypes(const TOperatorPtr& root) {
         root->Type = std::make_shared<TFunctionType>(
             std::vector<TTypePtr>{inputSchema},
             ComputeAggregateOutputType(inputSchema, agg->GroupKeys(), agg->Aggs()));
+        return;
+    }
+
+    if (auto maybe = TMaybeOp<TJoinOperator>(root)) {
+        auto join = maybe.Cast();
+        auto leftSchema = join->Left()->OutputColumns();
+        auto rightSchema = join->Right()->OutputColumns();
+        auto output = ComputeJoinOutputType(leftSchema, rightSchema, join->JoinType());
+        root->Type = std::make_shared<TFunctionType>(
+            std::vector<TTypePtr>{leftSchema, rightSchema},
+            output ? *output : nullptr);
         return;
     }
 }

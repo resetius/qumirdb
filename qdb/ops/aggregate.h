@@ -25,6 +25,11 @@ public:
 
     std::string_view RelName() const override { return OpId; }
     std::unordered_set<std::string> ComputeReferencedColumns() const override;
+    // Aggregate defines a new schema: child only needs group keys + agg args.
+    std::unordered_set<std::string> RequiredColumnsForChild(
+        size_t, const std::unordered_set<std::string>&) const override {
+        return ComputeReferencedColumns();
+    }
     std::vector<NQumir::NAst::TExprPtr> Children() const override { return {Input_}; }
     const std::string ToString() const override;
 

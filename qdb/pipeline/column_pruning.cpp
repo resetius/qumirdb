@@ -23,57 +23,47 @@ void ApplyColumnPruning(const TOperatorPtr& root) {
         }
     }
 
+    auto narrowStruct = [](const TTypePtr& type,
+        const std::unordered_set<std::string>& keep) -> TTypePtr {
+        auto* st = static_cast<TStructType*>(type.get());
+        if (!st) {
+            return type;
+        }
+        std::vector<std::pair<std::string, TTypePtr>> fields;
+        for (auto& [name, fieldType] : st->Fields) {
+            if (keep.contains(name)) {
+                fields.emplace_back(name, fieldType);
+            }
+        }
+        return std::make_shared<TStructType>(std::move(fields));
+    };
+
     std::function<void(const TOperatorPtr&, std::unordered_set<std::string>)>
         walk = [&](const TOperatorPtr& op, std::unordered_set<std::string> needed) {
 
-        auto own = op->ComputeReferencedColumns();
-
-        std::unordered_set<std::string> required;
-        if (TMaybeOp<TProjectOperator>(op) || TMaybeOp<TAggregateOperator>(op)) {
-            // Project/aggregate define a new schema: required input = only what
-            // their own expressions (projections / group keys / agg args) reference.
-            required = std::move(own);
-        } else {
-            // Filter/source pass rows through: must satisfy own refs + parent needs.
-            required = std::move(needed);
-            required.insert(own.begin(), own.end());
-        }
-
-        // Narrow ParamTypes[0] to the required subset of the input schema.
         auto* fun = static_cast<TFunctionType*>(op->Type.get());
-        if (fun && !fun->ParamTypes.empty()) {
-            if (auto* param = static_cast<TStructType*>(fun->ParamTypes[0].get())) {
-                std::vector<std::pair<std::string, TTypePtr>> fields;
-                for (auto& [name, type] : param->Fields) {
-                    if (required.contains(name)) {
-                        fields.emplace_back(name, type);
-                    }
-                }
-                fun->ParamTypes[0] = std::make_shared<TStructType>(std::move(fields));
-            }
-        }
 
         if (TMaybeOp<TSourceOperator>(op)) {
-            // Source has no upstream: store required columns in ParamTypes[0]
-            // and narrow ReturnType so downstream sees only what's actually read.
-            auto* fun = static_cast<TFunctionType*>(op->Type.get());
-            if (auto* full = static_cast<TStructType*>(fun->ReturnType.get())) {
-                std::vector<std::pair<std::string, TTypePtr>> fields;
-                for (auto& [name, type] : full->Fields) {
-                    if (required.contains(name)) {
-                        fields.emplace_back(name, type);
-                    }
-                }
-                auto narrowed = std::make_shared<TStructType>(std::move(fields));
+            // Source has no upstream: required = needed ∪ own refs. Narrow both
+            // ReturnType and ParamTypes[0] so downstream sees only what's read.
+            auto required = op->RequiredColumnsForChild(0, needed);
+            if (fun) {
+                auto narrowed = narrowStruct(fun->ReturnType, required);
                 fun->ParamTypes = {narrowed};
                 fun->ReturnType = narrowed;
             }
             return;
         }
 
-        for (const auto& child : op->Children()) {
-            if (auto maybeOp = TMaybeNode<IOperator>(child)) {
-                walk(maybeOp.Cast(), required);
+        // Each child gets its own required set; narrow the matching ParamTypes[i].
+        auto children = op->Children();
+        for (size_t i = 0; i < children.size(); ++i) {
+            auto required = op->RequiredColumnsForChild(i, needed);
+            if (fun && i < fun->ParamTypes.size()) {
+                fun->ParamTypes[i] = narrowStruct(fun->ParamTypes[i], required);
+            }
+            if (auto maybeOp = TMaybeNode<IOperator>(children[i])) {
+                walk(maybeOp.Cast(), std::move(required));
             }
         }
     };
