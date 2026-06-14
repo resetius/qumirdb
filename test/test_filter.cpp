@@ -36,7 +36,8 @@ std::array<uint8_t, 4> RunStringLiteralFilter(
     const std::array<int32_t, 5>& offsets,
     const std::string& op,
     const std::string& literal,
-    bool literalFirst)
+    bool literalFirst,
+    bool castLiteral = false)
 {
     std::array<TColumn, 1> columns = {
         TColumn{.Data = const_cast<char*>(data.data()), .Mask = nullptr,
@@ -52,6 +53,11 @@ std::array<uint8_t, 4> RunStringLiteralFilter(
     auto literalExpr = TMaybeNode<TStringLiteralExpr>(
         literalFirst ? binary->Left : binary->Right).Cast();
     literalExpr->Value = literal;
+    if (castLiteral) {
+        auto cast = std::make_shared<TCastExpr>(literalExpr->Location,
+            literalExpr, std::make_shared<TStringType>());
+        (literalFirst ? binary->Left : binary->Right) = std::move(cast);
+    }
 
     auto dispatch = TKernelCompiler().CompileFilter(inputType, predicate);
     std::array<uint8_t, 4> selection{};
@@ -144,6 +150,9 @@ TEST(FilterKernel, PreservesEmptyUtf8AndEmbeddedNullLiterals) {
     EXPECT_EQ(RunStringLiteralFilter(
         data, offsets, "==", std::string("a\0b", 3), false),
         (std::array<uint8_t, 4>{0, 0, 0xff, 0}));
+    EXPECT_EQ(RunStringLiteralFilter(
+        data, offsets, "==", "\xD0\xAF", false, true),
+        (std::array<uint8_t, 4>{0, 0xff, 0, 0}));
 }
 
 } // namespace
