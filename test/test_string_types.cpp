@@ -146,6 +146,54 @@ std::unique_ptr<TLLVMRunner> CompileI32ColumnReader(void*& entry) {
     return runner;
 }
 
+std::unique_ptr<TLLVMRunner> CompileScalarColumnReader(
+    void*& entry,
+    TTypePtr valueType,
+    const std::string& entryName)
+{
+    NQumir::NRegistry::QumirDbModule module;
+    auto types = GetModuleTypes(module);
+    auto materialized = NQqb::NKernel::BuildColumnValueAst(
+        "column", "row", "value", valueType, types.StringView);
+
+    TLocation loc{};
+    auto i64Type = std::make_shared<TIntegerType>();
+    auto boolType = std::make_shared<TBoolType>();
+    auto columnType = std::make_shared<TNamedType>("TColumn", types.Column);
+    auto ident = [&](const std::string& name) -> TExprPtr {
+        return std::make_shared<TIdentExpr>(loc, name);
+    };
+    std::vector<TParam> params = {
+        std::make_shared<TVarStmt>(loc, "column",
+            std::make_shared<TReferenceType>(columnType)),
+        std::make_shared<TVarStmt>(loc, "row", i64Type),
+        std::make_shared<TVarStmt>(loc, "valid",
+            std::make_shared<TPointerType>(boolType)),
+    };
+    std::vector<TExprPtr> body = std::move(materialized.Setup);
+    body.insert(body.end(), {
+        std::make_shared<TArrayAssignExpr>(loc, "valid",
+            std::vector<TExprPtr>{ident("row")}, materialized.IsValid),
+        std::make_shared<TReturnExpr>(loc, materialized.Value),
+    });
+    auto function = std::make_shared<TFunDecl>(loc, entryName,
+        std::move(params), std::make_shared<TBlockExpr>(loc, std::move(body)),
+        valueType);
+    auto program = std::make_shared<TBlockExpr>(loc,
+        std::vector<TExprPtr>{std::move(function)});
+
+    TLLVMRunnerOptions options;
+    options.CoreInput = true;
+    options.NativeCode = true;
+    auto runner = std::make_unique<TLLVMRunner>(options);
+    runner->RegisterModule(
+        std::make_shared<NQumir::NRegistry::QumirDbModule>(), true);
+    std::string error;
+    entry = runner->CompileKernelAst(std::move(program), entryName, &error);
+    EXPECT_NE(entry, nullptr) << error;
+    return runner;
+}
+
 template <typename T>
 void CheckStringHandleJit(const std::string& typeName) {
     TLLVMRunnerOptions options;
@@ -225,7 +273,7 @@ TEST(QumirDbStringTypes, MaterializesI32AndValidity) {
     auto read = reinterpret_cast<int64_t(*)(NQqb::TColumn*, int64_t, bool*)>(entry);
 
     EXPECT_EQ(read(&column, 0, valid.data()), 17);
-    EXPECT_EQ(read(&column, 1, valid.data()), -4);
+    EXPECT_EQ(read(&column, 1, valid.data()), 0);
     EXPECT_EQ(read(&column, 2, valid.data()), 29);
     EXPECT_TRUE(valid[0]);
     EXPECT_FALSE(valid[1]);
@@ -253,12 +301,12 @@ TEST(QumirDbStringTypes, MaterializesStringAndLargeStringSlices) {
         .OffsetWidth = 4,
     };
     EXPECT_EQ(read(&stringColumn, 0, output.data(), valid.data()), 0);
-    EXPECT_EQ(read(&stringColumn, 1, output.data(), valid.data()), 3);
+    EXPECT_EQ(read(&stringColumn, 1, output.data(), valid.data()), 0);
     EXPECT_EQ(read(&stringColumn, 2, output.data(), valid.data()), 4);
     EXPECT_TRUE(valid[0]);
     EXPECT_FALSE(valid[1]);
     EXPECT_TRUE(valid[2]);
-    EXPECT_EQ(output[1].Data, bytes32.data());
+    EXPECT_EQ(output[1].Data, nullptr);
     EXPECT_EQ(output[2].Data, bytes32.data() + 3);
     EXPECT_EQ(output[2].Data[1], 0);
 
@@ -275,6 +323,58 @@ TEST(QumirDbStringTypes, MaterializesStringAndLargeStringSlices) {
     EXPECT_TRUE(valid[1]);
     EXPECT_EQ(output[0].Data, bytes64.data());
     EXPECT_EQ(output[1].Data, bytes64.data() + 2);
+}
+
+TEST(QumirDbStringTypes, DoesNotReadNullPayload) {
+    std::array<uint8_t, 1> mask = {0};
+
+    void* i32Entry = nullptr;
+    auto i32Runner = CompileI32ColumnReader(i32Entry);
+    ASSERT_NE(i32Entry, nullptr);
+    NQqb::TColumn i32Column{.Data = nullptr, .Mask = mask.data()};
+    bool i32Valid = true;
+    auto readI32 = reinterpret_cast<int64_t(*)(
+        NQqb::TColumn*, int64_t, bool*)>(i32Entry);
+    EXPECT_EQ(readI32(&i32Column, 0, &i32Valid), 0);
+    EXPECT_FALSE(i32Valid);
+
+    void* stringEntry = nullptr;
+    auto stringRunner = CompileStringColumnReader(stringEntry);
+    ASSERT_NE(stringEntry, nullptr);
+    NQqb::TColumn stringColumn{
+        .Data = nullptr, .Mask = mask.data(), .Offsets = nullptr,
+        .OffsetWidth = 4,
+    };
+    NQqb::TStringView output{.Data = reinterpret_cast<uint8_t*>(1), .Size = -1};
+    bool stringValid = true;
+    auto readString = reinterpret_cast<int64_t(*)(
+        NQqb::TColumn*, int64_t, NQqb::TStringView*, bool*)>(stringEntry);
+    EXPECT_EQ(readString(&stringColumn, 0, &output, &stringValid), 0);
+    EXPECT_FALSE(stringValid);
+    EXPECT_EQ(output.Data, nullptr);
+    EXPECT_EQ(output.Size, 0);
+
+    void* f64Entry = nullptr;
+    auto f64Runner = CompileScalarColumnReader(
+        f64Entry, std::make_shared<TFloatType>(), "read_f64_column");
+    ASSERT_NE(f64Entry, nullptr);
+    NQqb::TColumn f64Column{.Data = nullptr, .Mask = mask.data()};
+    bool f64Valid = true;
+    auto readF64 = reinterpret_cast<double(*)(
+        NQqb::TColumn*, int64_t, bool*)>(f64Entry);
+    EXPECT_EQ(readF64(&f64Column, 0, &f64Valid), 0.0);
+    EXPECT_FALSE(f64Valid);
+
+    void* boolEntry = nullptr;
+    auto boolRunner = CompileScalarColumnReader(
+        boolEntry, std::make_shared<TBoolType>(), "read_bool_column");
+    ASSERT_NE(boolEntry, nullptr);
+    NQqb::TColumn boolColumn{.Data = nullptr, .Mask = mask.data()};
+    bool boolValid = true;
+    auto readBool = reinterpret_cast<bool(*)(
+        NQqb::TColumn*, int64_t, bool*)>(boolEntry);
+    EXPECT_FALSE(readBool(&boolColumn, 0, &boolValid));
+    EXPECT_FALSE(boolValid);
 }
 
 } // namespace
