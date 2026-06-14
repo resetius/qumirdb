@@ -25,6 +25,17 @@ std::string ReadAggregationKernel(const std::string& name) {
     return source.str();
 }
 
+std::string ReadJoinKernel(const std::string& name) {
+    auto path = std::filesystem::path(__FILE__).parent_path() / "join" / name;
+    std::ifstream input(path);
+    if (!input) {
+        throw std::runtime_error("cannot open join kernel: " + path.string());
+    }
+    std::ostringstream source;
+    source << input.rdbuf();
+    return source.str();
+}
+
 std::expected<std::vector<NQumir::NAst::TExprPtr>, NQumir::TError>
 ParseFunctionLibrary(
     const std::string& source,

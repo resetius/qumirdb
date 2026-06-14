@@ -84,6 +84,12 @@ public:
     // for `ht`.
     static constexpr size_t kHashTableSize = 104;
 
+    // sizeof(JoinTable) / sizeof(PairBuffer) per modules/qumirdb.cpp's layout —
+    // callers of CompileJoin allocate zero-initialized buffers this large for
+    // each side's table and for the pair buffer.
+    static constexpr size_t kJoinTableSize = 80;
+    static constexpr size_t kPairBufferSize = 24;
+
     // Compiles a filter kernel for the given input struct type and predicate.
     // Returns a dispatch lambda that calls the compiled kernel.
     TFilterDispatch CompileFilter(
