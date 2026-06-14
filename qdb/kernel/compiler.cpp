@@ -1,4 +1,5 @@
 #include <qdb/kernel/compiler.h>
+#include <qdb/types/nullable.h>
 #include <qdb/kernel/aggregate_key.h>
 #include <qdb/kernel/gen.h>
 #include <qdb/kernel/lib.h>
@@ -171,7 +172,7 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
     };
     const auto keyDescriptor = NKernel::BuildAggregateKeyDescriptor(inputType, groupKeys);
     for (const auto& field : keyDescriptor.Fields) {
-        const auto type = UnwrapNamedType(field.Type);
+        const auto type = UnwrapNamedType(UnwrapNullableType(field.Type));
         if (!TMaybeType<TIntegerType>(type) && !TMaybeType<TFloatType>(type) &&
             !TMaybeType<TStringType>(type)) {
             throw NQumir::TError(
@@ -203,7 +204,8 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
         }
     }
     if (argField &&
-        !TMaybeType<TIntegerType>(UnwrapNamedType(requireField(*argField)))) {
+        !TMaybeType<TIntegerType>(
+            UnwrapNamedType(UnwrapNullableType(requireField(*argField))))) {
         throw NQumir::TError(
             "CompileAggregate: aggregate argument column '" + *argField +
             "' must be integer while reducer states are i64");
@@ -289,6 +291,7 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
             .Kind = TMaybeType<TStringType>(logicalType)
                 ? EAggregateOutputKeyKind::String
                 : EAggregateOutputKeyKind::Fixed,
+            .IsNullable = field.IsNullable,
             .Size = field.Size,
             .Alignment = field.Alignment,
         });

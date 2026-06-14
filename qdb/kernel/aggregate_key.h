@@ -15,6 +15,7 @@ struct TAggregateKeyField {
     NQumir::NAst::TTypePtr Type;
     NQumir::NAst::TTypePtr LookupType;
     NQumir::NAst::TTypePtr StoredType;
+    bool IsNullable = false;
     size_t Offset = 0;
     size_t Size = 0;
     size_t Alignment = 0;

@@ -45,6 +45,7 @@ enum class EAggregateOutputKeyKind {
 
 struct TAggregateOutputKey {
     EAggregateOutputKeyKind Kind = EAggregateOutputKeyKind::Fixed;
+    bool IsNullable = false;
     size_t Size = 0;
     size_t Alignment = 0;
 };

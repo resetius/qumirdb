@@ -4,12 +4,14 @@
 #include <qdb/modules/qumirdb_types.h>
 #include <qdb/io/io.h>
 #include <qdb/kernel/column_value.h>
+#include <qdb/types/nullable.h>
 
 #include <qumir/codegen/llvm/llvm_initializer.h>
 #include <qumir/parser/type.h>
 #include <qumir/runner/runner_llvm.h>
 
 #include <cstdint>
+#include <algorithm>
 #include <array>
 #include <memory>
 #include <string>
@@ -43,11 +45,36 @@ TModuleTypes GetModuleTypes(const NQumir::NRegistry::QumirDbModule& module) {
     };
 }
 
+bool ContainsField(const TExprPtr& expr, std::string_view name) {
+    if (!expr) {
+        return false;
+    }
+    if (auto field = TMaybeNode<TFieldAccessExpr>(expr)) {
+        if (field.Cast()->FieldName == name) {
+            return true;
+        }
+    }
+    return std::ranges::any_of(expr->Children(), [&](const auto& child) {
+        return ContainsField(child, name);
+    });
+}
+
+bool ContainsField(
+    const NQqb::NKernel::TColumnValueAst& value,
+    std::string_view name)
+{
+    return ContainsField(value.Value, name) || ContainsField(value.IsValid, name) ||
+        std::ranges::any_of(value.Setup, [&](const auto& expr) {
+            return ContainsField(expr, name);
+        });
+}
+
 std::unique_ptr<TLLVMRunner> CompileStringColumnReader(void*& entry) {
     NQumir::NRegistry::QumirDbModule module;
     auto types = GetModuleTypes(module);
     auto materialized = NQqb::NKernel::BuildColumnValueAst(
-        "column", "row", "value", std::make_shared<TStringType>(),
+        "column", "row", "value",
+        std::make_shared<NQqb::TNullable>(std::make_shared<TStringType>()),
         types.StringView);
 
     TLocation loc{};
@@ -104,7 +131,8 @@ std::unique_ptr<TLLVMRunner> CompileI32ColumnReader(void*& entry) {
     auto types = GetModuleTypes(module);
     auto i32Type = std::make_shared<TIntegerType>(TIntegerType::I32);
     auto materialized = NQqb::NKernel::BuildColumnValueAst(
-        "column", "row", "value", i32Type, types.StringView);
+        "column", "row", "value", std::make_shared<NQqb::TNullable>(i32Type),
+        types.StringView);
 
     TLocation loc{};
     auto i64Type = std::make_shared<TIntegerType>();
@@ -154,7 +182,8 @@ std::unique_ptr<TLLVMRunner> CompileScalarColumnReader(
     NQumir::NRegistry::QumirDbModule module;
     auto types = GetModuleTypes(module);
     auto materialized = NQqb::NKernel::BuildColumnValueAst(
-        "column", "row", "value", valueType, types.StringView);
+        "column", "row", "value",
+        std::make_shared<NQqb::TNullable>(valueType), types.StringView);
 
     TLocation loc{};
     auto i64Type = std::make_shared<TIntegerType>();
@@ -256,6 +285,35 @@ TEST(QumirDbStringTypes, StringViewUsesPlainStructCopies) {
 
 TEST(QumirDbStringTypes, OwnedStringUsesPlainStructCopies) {
     CheckStringHandleJit<NQqb::TOwnedString>("OwnedString");
+}
+
+TEST(QumirDbStringTypes, NonNullableMaterializersSkipValidityBitmap) {
+    NQumir::NRegistry::QumirDbModule module;
+    auto types = GetModuleTypes(module);
+    const std::array<TTypePtr, 4> logicalTypes = {
+        std::make_shared<TIntegerType>(TIntegerType::I32),
+        std::make_shared<TFloatType>(),
+        std::make_shared<TBoolType>(),
+        std::make_shared<TStringType>(),
+    };
+    for (const auto& type : logicalTypes) {
+        auto value = NQqb::NKernel::BuildColumnValueAst(
+            "column", "row", "value", type, types.StringView);
+        EXPECT_FALSE(ContainsField(value, "Mask")) << type->ToString();
+        EXPECT_FALSE(ContainsField(value, "MaskBitOffset")) << type->ToString();
+        EXPECT_FALSE(NQqb::IsNullableType(value.ValueType));
+        auto valid = TMaybeNode<TNumberExpr>(value.IsValid);
+        ASSERT_TRUE(valid) << type->ToString();
+        EXPECT_NE(valid.Cast()->IntValue, 0) << type->ToString();
+
+        auto nullableValue = NQqb::NKernel::BuildColumnValueAst(
+            "column", "row", "value",
+            std::make_shared<NQqb::TNullable>(type), types.StringView);
+        EXPECT_TRUE(ContainsField(nullableValue, "Mask")) << type->ToString();
+        EXPECT_TRUE(ContainsField(nullableValue, "MaskBitOffset"))
+            << type->ToString();
+        EXPECT_FALSE(NQqb::IsNullableType(nullableValue.ValueType));
+    }
 }
 
 TEST(QumirDbStringTypes, MaterializesI32AndValidity) {

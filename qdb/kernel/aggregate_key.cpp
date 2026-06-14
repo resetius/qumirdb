@@ -1,4 +1,5 @@
 #include <qdb/kernel/aggregate_key.h>
+#include <qdb/types/nullable.h>
 
 #include <qumir/error.h>
 
@@ -19,6 +20,8 @@ struct TRepresentedType {
     NQumir::NAst::TTypePtr Stored;
     TLayout Layout;
     bool HasString = false;
+    bool Nullable = false;
+    NQumir::NAst::TTypePtr Inner;
 };
 
 size_t AlignUp(size_t value, size_t alignment) {
@@ -71,21 +74,27 @@ NQumir::NAst::TTypePtr StringHandleType(const std::string& name) {
 TRepresentedType RepresentKeyType(const NQumir::NAst::TTypePtr& original) {
     using namespace NQumir::NAst;
 
-    auto type = UnwrapNamedType(original);
+    const bool nullable = IsNullableType(original);
+    auto inner = nullable ? UnwrapNullableType(original) : original;
+    auto type = UnwrapNamedType(inner);
     if (TMaybeType<TStringType>(type)) {
         return {
             .Lookup = StringHandleType("StringView"),
             .Stored = StringHandleType("OwnedString"),
             .Layout = {16, 8},
             .HasString = true,
+            .Nullable = nullable,
+            .Inner = inner,
         };
     }
     if (TMaybeType<TIntegerType>(type) || TMaybeType<TFloatType>(type) ||
         TMaybeType<TBoolType>(type)) {
         return {
-            .Lookup = original,
-            .Stored = original,
-            .Layout = TypeLayout(original),
+            .Lookup = inner,
+            .Stored = inner,
+            .Layout = TypeLayout(inner),
+            .Nullable = nullable,
+            .Inner = inner,
         };
     }
     if (auto structure = TMaybeType<TStructType>(type)) {
@@ -121,9 +130,11 @@ TRepresentedType RepresentKeyType(const NQumir::NAst::TTypePtr& original) {
         addPadding(size);
         if (!hasString) {
             return {
-                .Lookup = original,
-                .Stored = original,
+                .Lookup = inner,
+                .Stored = inner,
                 .Layout = {size, alignment},
+                .Nullable = nullable,
+                .Inner = inner,
             };
         }
         return {
@@ -131,6 +142,8 @@ TRepresentedType RepresentKeyType(const NQumir::NAst::TTypePtr& original) {
             .Stored = std::make_shared<TStructType>(std::move(storedFields)),
             .Layout = {size, alignment},
             .HasString = hasString,
+            .Nullable = nullable,
+            .Inner = inner,
         };
     }
     throw NQumir::TError(
@@ -197,20 +210,23 @@ TAggregateKeyDescriptor BuildAggregateKeyDescriptor(
 
         const auto represented = RepresentKeyType(type);
         const auto layout = represented.Layout;
-        lookupFields.emplace_back(
-            "valid_" + std::to_string(result.Fields.size()),
-            std::make_shared<TBoolType>());
-        storedFields.emplace_back(
-            "valid_" + std::to_string(result.Fields.size()),
-            std::make_shared<TBoolType>());
-        ++offset;
+        if (represented.Nullable) {
+            lookupFields.emplace_back(
+                "valid_" + std::to_string(result.Fields.size()),
+                std::make_shared<TBoolType>());
+            storedFields.emplace_back(
+                "valid_" + std::to_string(result.Fields.size()),
+                std::make_shared<TBoolType>());
+            ++offset;
+        }
         addPadding(AlignUp(offset, layout.Alignment));
         result.Fields.push_back({
             .ColumnName = key,
             .ColumnIndex = columnIndex,
-            .Type = type,
+            .Type = represented.Inner,
             .LookupType = represented.Lookup,
             .StoredType = represented.Stored,
+            .IsNullable = represented.Nullable,
             .Offset = offset,
             .Size = layout.Size,
             .Alignment = layout.Alignment,

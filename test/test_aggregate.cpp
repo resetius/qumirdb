@@ -8,11 +8,14 @@
 #include <qdb/exec/executor.h>
 #include <qdb/exec/planner.h>
 #include <qdb/io/io.h>
+#include <qdb/kernel/compiler.h>
+#include <qdb/ops/aggregate.h>
 #include <qdb/ops/operator.h>
 #include <qdb/ops/source.h>
 #include <qdb/pipeline/column_pruning.h>
 #include <qdb/pipeline/typing.h>
 #include <qdb/sexp/parser.h>
+#include <qdb/types/nullable.h>
 
 #include <algorithm>
 #include <memory>
@@ -79,13 +82,13 @@ TOperatorPtr ParsePlan(const std::string& sexp, ISource& source) {
         return std::make_shared<TSourceOperator>(source, std::string(path));
     };
 
-    TParser parser;
+    NQumir::NAst::NCore::TParser parser;
     for (auto& [name, fn] : MakeRelParsers(std::move(opts))) {
         parser.NodeParsers[name] = std::move(fn);
     }
 
     std::istringstream in(sexp);
-    TTokenStream ts(in);
+    NQumir::NAst::NCore::TTokenStream ts(in);
     auto result = parser.Parse(ts);
     if (!result.has_value()) {
         throw std::runtime_error(result.error().ToString());
@@ -177,6 +180,7 @@ TEST(AggregateE2E, MultipleGroups) {
     ASSERT_TRUE(runtime->Next(result));
     ASSERT_EQ(result.ColumnCount, 5); // k, c, s, mn, mx
     ASSERT_EQ(result.RowCount, static_cast<int64_t>(reference.size()));
+    EXPECT_EQ(result.Columns[0].Mask, nullptr);
 
     auto* outKeys = reinterpret_cast<int64_t*>(result.Columns[0].Data);
     auto* outCounts = reinterpret_cast<int64_t*>(result.Columns[1].Data);
@@ -445,7 +449,7 @@ TEST(AggregateE2E, NullStringKeysGroupTogetherAndDifferFromEmpty) {
         .Selection = nullptr, .RefCount = 1}};
     TVectorSource source(
         {"k", "v"}, std::move(batches),
-        {std::make_shared<TStringType>(),
+        {std::make_shared<TNullable>(std::make_shared<TStringType>()),
          std::make_shared<TIntegerType>(TIntegerType::I64)});
     auto root = ParsePlan(
         "(rel aggregate (rel source \"data.parquet\") (keys k) "
@@ -486,7 +490,8 @@ TEST(AggregateE2E, NullIntegerKeysIgnorePayloadAndDifferFromZero) {
         .Selection = nullptr, .RefCount = 1}};
     TVectorSource source(
         {"k", "v"}, std::move(batches),
-        {std::make_shared<TIntegerType>(TIntegerType::I64),
+        {std::make_shared<TNullable>(
+             std::make_shared<TIntegerType>(TIntegerType::I64)),
          std::make_shared<TIntegerType>(TIntegerType::I64)});
     auto root = ParsePlan(
         "(rel aggregate (rel source \"data.parquet\") (keys k) "
@@ -530,7 +535,11 @@ TEST(AggregateE2E, CompositeNullKeysTrackValidityPerPosition) {
     std::vector<TRowSet> batches = {TRowSet{
         .Columns = columns.data(), .ColumnCount = 3, .RowCount = 6,
         .Selection = nullptr, .RefCount = 1}};
-    TVectorSource source({"k1", "k2", "v"}, std::move(batches));
+    TVectorSource source(
+        {"k1", "k2", "v"}, std::move(batches),
+        {std::make_shared<TNullable>(std::make_shared<TIntegerType>()),
+         std::make_shared<TNullable>(std::make_shared<TIntegerType>()),
+         std::make_shared<TIntegerType>()});
     auto root = ParsePlan(
         "(rel aggregate (rel source \"data.parquet\") (keys k1 k2) "
         "(agg c count) (agg s sum v))",
@@ -971,6 +980,21 @@ TEST(AggregateE2E, PlannerUsesPhysicalPrunedSchemaForKeyDescriptor) {
         EXPECT_EQ(outSums[i], it->second);
     }
     Release(&result);
+}
+
+TEST(AggregateE2E, CompilesNullableReducerArgumentWithUnwrappedAstType) {
+    TStructType inputType({
+        {"k", std::make_shared<TIntegerType>()},
+        {"v", std::make_shared<TNullable>(std::make_shared<TIntegerType>())},
+    });
+    NQumir::TLocation loc{};
+    std::vector<NQqb::TAggregateSpec> aggs = {{
+        .Name = "s",
+        .Func = "sum",
+        .Arg = std::make_shared<TIdentExpr>(loc, "v"),
+    }};
+    EXPECT_NO_THROW(
+        NQqb::TKernelCompiler().CompileAggregate(inputType, {"k"}, aggs));
 }
 
 int main(int argc, char** argv) {
