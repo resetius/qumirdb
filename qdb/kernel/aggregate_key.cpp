@@ -166,14 +166,17 @@ TAggregateKeyDescriptor BuildAggregateKeyDescriptor(
     TAggregateKeyDescriptor result;
     size_t offset = 0;
     size_t maxAlignment = 1;
-    std::vector<std::pair<std::string, TTypePtr>> structFields;
+    std::vector<std::pair<std::string, TTypePtr>> lookupFields;
+    std::vector<std::pair<std::string, TTypePtr>> storedFields;
     size_t paddingIndex = 0;
 
     auto addPadding = [&](size_t targetOffset) {
         while (offset < targetOffset) {
-            structFields.emplace_back(
-                "__qdb_padding_" + std::to_string(paddingIndex++),
-                std::make_shared<TIntegerType>(TIntegerType::U8));
+            const std::string name =
+                "__qdb_padding_" + std::to_string(paddingIndex++);
+            auto type = std::make_shared<TIntegerType>(TIntegerType::U8);
+            lookupFields.emplace_back(name, type);
+            storedFields.emplace_back(name, type);
             ++offset;
         }
     };
@@ -194,6 +197,13 @@ TAggregateKeyDescriptor BuildAggregateKeyDescriptor(
 
         const auto represented = RepresentKeyType(type);
         const auto layout = represented.Layout;
+        lookupFields.emplace_back(
+            "valid_" + std::to_string(result.Fields.size()),
+            std::make_shared<TBoolType>());
+        storedFields.emplace_back(
+            "valid_" + std::to_string(result.Fields.size()),
+            std::make_shared<TBoolType>());
+        ++offset;
         addPadding(AlignUp(offset, layout.Alignment));
         result.Fields.push_back({
             .ColumnName = key,
@@ -205,7 +215,9 @@ TAggregateKeyDescriptor BuildAggregateKeyDescriptor(
             .Size = layout.Size,
             .Alignment = layout.Alignment,
         });
-        structFields.emplace_back(
+        lookupFields.emplace_back(
+            "key_" + std::to_string(result.Fields.size() - 1), represented.Lookup);
+        storedFields.emplace_back(
             "key_" + std::to_string(result.Fields.size() - 1), represented.Stored);
         offset += layout.Size;
         maxAlignment = std::max(maxAlignment, layout.Alignment);
@@ -213,52 +225,23 @@ TAggregateKeyDescriptor BuildAggregateKeyDescriptor(
 
     result.Alignment = std::min<size_t>(maxAlignment, 8);
     result.Size = AlignUp(offset, result.Alignment);
-    if (!result.IsScalar()) {
-        addPadding(result.Size);
-    }
+    addPadding(result.Size);
     result.TypeName = KeyTypeName(result.Fields);
-    if (result.IsScalar()) {
-        result.LookupType = result.Fields.front().LookupType;
-        result.StoredType = result.Fields.front().StoredType;
-        if (result.LookupType != result.StoredType &&
-            TMaybeType<TStructType>(result.LookupType) &&
-            TMaybeType<TStructType>(result.StoredType)) {
-            result.LookupTypeName = result.TypeName + "_Lookup";
-            result.StoredTypeName = result.TypeName + "_Stored";
-            result.LookupType = std::make_shared<TNamedType>(
-                result.LookupTypeName, result.LookupType);
-            result.StoredType = std::make_shared<TNamedType>(
-                result.StoredTypeName, result.StoredType);
-            result.Fields.front().LookupType = result.LookupType;
-            result.Fields.front().StoredType = result.StoredType;
-        }
+    const bool hasDistinctType = std::any_of(
+        result.Fields.begin(), result.Fields.end(),
+        [](const auto& field) { return field.LookupType != field.StoredType; });
+    if (hasDistinctType) {
+        result.LookupTypeName = result.TypeName + "_Lookup";
+        result.StoredTypeName = result.TypeName + "_Stored";
+        result.LookupType = std::make_shared<TNamedType>(result.LookupTypeName,
+            std::make_shared<TStructType>(std::move(lookupFields)));
+        result.StoredType = std::make_shared<TNamedType>(result.StoredTypeName,
+            std::make_shared<TStructType>(std::move(storedFields)));
     } else {
-        std::vector<std::pair<std::string, TTypePtr>> lookupFields;
-        lookupFields.reserve(structFields.size());
-        size_t keyIndex = 0;
-        for (const auto& [name, storedType] : structFields) {
-            if (name.starts_with("__qdb_padding_")) {
-                lookupFields.emplace_back(name, storedType);
-            } else {
-                lookupFields.emplace_back(name, result.Fields[keyIndex++].LookupType);
-            }
-        }
-        const bool hasDistinctType = std::any_of(
-            result.Fields.begin(), result.Fields.end(),
-            [](const auto& field) { return field.LookupType != field.StoredType; });
-        if (hasDistinctType) {
-            result.LookupTypeName = result.TypeName + "_Lookup";
-            result.StoredTypeName = result.TypeName + "_Stored";
-            result.LookupType = std::make_shared<TNamedType>(result.LookupTypeName,
-                std::make_shared<TStructType>(std::move(lookupFields)));
-            result.StoredType = std::make_shared<TNamedType>(result.StoredTypeName,
-                std::make_shared<TStructType>(std::move(structFields)));
-        } else {
-            auto concrete = std::make_shared<TNamedType>(result.TypeName,
-                std::make_shared<TStructType>(std::move(structFields)));
-            result.LookupType = concrete;
-            result.StoredType = concrete;
-        }
+        auto concrete = std::make_shared<TNamedType>(result.TypeName,
+            std::make_shared<TStructType>(std::move(storedFields)));
+        result.LookupType = concrete;
+        result.StoredType = concrete;
     }
     result.KeyType = result.StoredType;
     return result;

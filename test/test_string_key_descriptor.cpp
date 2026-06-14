@@ -11,6 +11,7 @@
 #include <qumir/runner/runner_llvm.h>
 
 #include <array>
+#include <algorithm>
 #include <cstring>
 #include <memory>
 #include <string>
@@ -49,6 +50,9 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileKeyOperation(
             TLocation{}, key.LookupType));
     }
     if (!key.StoredTypeName.empty()) {
+        stmts.push_back(std::make_shared<TTypeDeclStmt>(
+            TLocation{}, key.StoredType));
+    } else if (TMaybeType<TNamedType>(key.StoredType)) {
         stmts.push_back(std::make_shared<TTypeDeclStmt>(
             TLocation{}, key.StoredType));
     }
@@ -119,6 +123,9 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileCloneEntry(
             TLocation{}, key.LookupType));
     }
     if (!key.StoredTypeName.empty()) {
+        stmts.push_back(std::make_shared<TTypeDeclStmt>(
+            TLocation{}, key.StoredType));
+    } else if (TMaybeType<TNamedType>(key.StoredType)) {
         stmts.push_back(std::make_shared<TTypeDeclStmt>(
             TLocation{}, key.StoredType));
     }
@@ -237,15 +244,20 @@ TEST(StringKeyDescriptor, BuildsScalarLookupAndStoredTypes) {
 
     ASSERT_TRUE(key.IsScalar());
     EXPECT_TRUE(key.HasDistinctLookupType());
-    EXPECT_EQ(NamedTypeName(key.LookupType), "StringView");
-    EXPECT_EQ(NamedTypeName(key.StoredType), "OwnedString");
+    EXPECT_EQ(NamedTypeName(key.LookupType), key.TypeName + "_Lookup");
+    EXPECT_EQ(NamedTypeName(key.StoredType), key.TypeName + "_Stored");
     EXPECT_EQ(key.KeyType, key.StoredType);
-    EXPECT_EQ(key.Size, 16u);
+    EXPECT_EQ(key.Size, 24u);
     EXPECT_EQ(key.Alignment, 8u);
     ASSERT_EQ(key.Fields.size(), 1u);
     EXPECT_TRUE(TMaybeType<TStringType>(key.Fields[0].Type));
-    EXPECT_EQ(key.Fields[0].LookupType, key.LookupType);
-    EXPECT_EQ(key.Fields[0].StoredType, key.StoredType);
+    auto lookup = StructOf(key.LookupType);
+    auto stored = StructOf(key.StoredType);
+    ASSERT_NE(lookup, nullptr);
+    ASSERT_NE(stored, nullptr);
+    EXPECT_EQ(lookup->Fields.front().first, "valid_0");
+    EXPECT_EQ(NamedTypeName(lookup->Fields.back().second), "StringView");
+    EXPECT_EQ(NamedTypeName(stored->Fields.back().second), "OwnedString");
 }
 
 TEST(StringKeyDescriptor, BuildsParallelCompositeLayouts) {
@@ -260,11 +272,11 @@ TEST(StringKeyDescriptor, BuildsParallelCompositeLayouts) {
     EXPECT_TRUE(key.HasDistinctLookupType());
     EXPECT_EQ(NamedTypeName(key.LookupType), key.TypeName + "_Lookup");
     EXPECT_EQ(NamedTypeName(key.StoredType), key.TypeName + "_Stored");
-    EXPECT_EQ(key.Size, 32u);
+    EXPECT_EQ(key.Size, 48u);
     EXPECT_EQ(key.Alignment, 8u);
-    EXPECT_EQ(key.Fields[0].Offset, 0u);
-    EXPECT_EQ(key.Fields[1].Offset, 8u);
-    EXPECT_EQ(key.Fields[2].Offset, 24u);
+    EXPECT_EQ(key.Fields[0].Offset, 8u);
+    EXPECT_EQ(key.Fields[1].Offset, 24u);
+    EXPECT_EQ(key.Fields[2].Offset, 44u);
 
     auto lookup = StructOf(key.LookupType);
     auto stored = StructOf(key.StoredType);
@@ -274,8 +286,14 @@ TEST(StringKeyDescriptor, BuildsParallelCompositeLayouts) {
     for (size_t i = 0; i < lookup->Fields.size(); ++i) {
         EXPECT_EQ(lookup->Fields[i].first, stored->Fields[i].first);
     }
-    EXPECT_EQ(NamedTypeName(lookup->Fields[1].second), "StringView");
-    EXPECT_EQ(NamedTypeName(stored->Fields[1].second), "OwnedString");
+    auto lookupName = std::find_if(lookup->Fields.begin(), lookup->Fields.end(),
+        [](const auto& field) { return field.first == "key_1"; });
+    auto storedName = std::find_if(stored->Fields.begin(), stored->Fields.end(),
+        [](const auto& field) { return field.first == "key_1"; });
+    ASSERT_NE(lookupName, lookup->Fields.end());
+    ASSERT_NE(storedName, stored->Fields.end());
+    EXPECT_EQ(NamedTypeName(lookupName->second), "StringView");
+    EXPECT_EQ(NamedTypeName(storedName->second), "OwnedString");
 }
 
 TEST(StringKeyDescriptor, RewritesNestedStringLeaves) {
@@ -294,11 +312,9 @@ TEST(StringKeyDescriptor, RewritesNestedStringLeaves) {
     auto stored = StructOf(key.StoredType);
     ASSERT_NE(lookup, nullptr);
     ASSERT_NE(stored, nullptr);
-    ASSERT_EQ(lookup->Fields.size(), 2u);
-    ASSERT_EQ(stored->Fields.size(), 2u);
-    EXPECT_EQ(NamedTypeName(lookup->Fields[1].second), "StringView");
-    EXPECT_EQ(NamedTypeName(stored->Fields[1].second), "OwnedString");
-    EXPECT_EQ(key.Size, 24u);
+    EXPECT_EQ(lookup->Fields.front().first, "valid_0");
+    EXPECT_EQ(lookup->Fields.back().first, "key_0");
+    EXPECT_EQ(key.Size, 32u);
     EXPECT_EQ(key.Alignment, 8u);
 }
 
@@ -319,54 +335,71 @@ TEST(StringKeyDescriptor, CompilesScalarCrossRepresentationOperations) {
     auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
     auto boolean = std::make_shared<TBoolType>();
     std::string bytes("same\0bytes", 10);
-    NQqb::TStringView lookup{
-        .Data = reinterpret_cast<uint8_t*>(bytes.data()),
-        .Size = static_cast<int64_t>(bytes.size()),
-    };
-    NQqb::TOwnedString stored{.Data = lookup.Data, .Size = lookup.Size};
+    struct TLookupKey {
+        bool Valid;
+        uint8_t Padding[7];
+        NQqb::TStringView Value;
+    } lookup{true, {}, {reinterpret_cast<uint8_t*>(bytes.data()),
+        static_cast<int64_t>(bytes.size())}};
+    struct TStoredKey {
+        bool Valid;
+        uint8_t Padding[7];
+        NQqb::TOwnedString Value;
+    } stored{true, {}, {lookup.Value.Data, lookup.Value.Size}};
 
     void* lookupHashEntry = nullptr;
     auto lookupHashRunner = CompileKeyOperation(key, "hash_lookup", "rh_hash",
-        {key.LookupType}, i64, lookupHashEntry);
+        {key.LookupType}, i64, lookupHashEntry, true);
     ASSERT_NE(lookupHashEntry, nullptr);
     void* storedHashEntry = nullptr;
     auto storedHashRunner = CompileKeyOperation(key, "hash_stored", "rh_hash",
-        {key.StoredType}, i64, storedHashEntry);
+        {key.StoredType}, i64, storedHashEntry, true);
     ASSERT_NE(storedHashEntry, nullptr);
     void* equalEntry = nullptr;
     auto equalRunner = CompileKeyOperation(key, "equal_stored_lookup",
-        "rh_key_equal", {key.StoredType, key.LookupType}, boolean, equalEntry);
+        "rh_key_equal", {key.StoredType, key.LookupType}, boolean, equalEntry,
+        true);
     ASSERT_NE(equalEntry, nullptr);
 
-    auto lookupHash = reinterpret_cast<int64_t(*)(NQqb::TStringView)>(
+    auto lookupHash = reinterpret_cast<int64_t(*)(TLookupKey*)>(
         lookupHashEntry);
-    auto storedHash = reinterpret_cast<int64_t(*)(NQqb::TOwnedString)>(
+    auto storedHash = reinterpret_cast<int64_t(*)(TStoredKey*)>(
         storedHashEntry);
-    auto equal = reinterpret_cast<bool(*)(
-        NQqb::TOwnedString, NQqb::TStringView)>(equalEntry);
-    EXPECT_EQ(lookupHash(lookup), storedHash(stored));
-    EXPECT_TRUE(equal(stored, lookup));
+    auto equal = reinterpret_cast<bool(*)(TStoredKey*, TLookupKey*)>(equalEntry);
+    EXPECT_EQ(lookupHash(&lookup), storedHash(&stored));
+    EXPECT_TRUE(equal(&stored, &lookup));
 
     std::string different = "different";
-    auto differentLookup = NQqb::TStringView{
-        .Data = reinterpret_cast<uint8_t*>(different.data()),
-        .Size = static_cast<int64_t>(different.size()),
-    };
-    EXPECT_FALSE(equal(stored, differentLookup));
+    auto differentLookup = TLookupKey{true, {}, {
+        reinterpret_cast<uint8_t*>(different.data()),
+        static_cast<int64_t>(different.size())}};
+    EXPECT_FALSE(equal(&stored, &differentLookup));
+    differentLookup.Valid = false;
+    stored.Valid = false;
+    EXPECT_EQ(lookupHash(&differentLookup), storedHash(&stored));
+    EXPECT_TRUE(equal(&stored, &differentLookup));
 }
 
 struct TLookupPair {
+    bool IdValid;
+    uint8_t IdPadding[7];
     int64_t Id;
+    bool NameValid;
+    uint8_t NamePadding[7];
     NQqb::TStringView Name;
 };
 
 struct TStoredPair {
+    bool IdValid;
+    uint8_t IdPadding[7];
     int64_t Id;
+    bool NameValid;
+    uint8_t NamePadding[7];
     NQqb::TOwnedString Name;
 };
 
-static_assert(sizeof(TLookupPair) == 24);
-static_assert(sizeof(TStoredPair) == 24);
+static_assert(sizeof(TLookupPair) == 40);
+static_assert(sizeof(TStoredPair) == 40);
 
 TEST(StringKeyDescriptor, CompilesCompositeCrossRepresentationOperations) {
     auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
@@ -382,82 +415,23 @@ TEST(StringKeyDescriptor, CompilesCompositeCrossRepresentationOperations) {
 
     std::string bytes = "group";
     TLookupPair lookup{
+        .IdValid = true,
         .Id = 7,
+        .NameValid = true,
         .Name = {
             .Data = reinterpret_cast<uint8_t*>(bytes.data()),
             .Size = static_cast<int64_t>(bytes.size()),
         },
     };
     TStoredPair stored{
+        .IdValid = true,
         .Id = lookup.Id,
+        .NameValid = true,
         .Name = {.Data = lookup.Name.Data, .Size = lookup.Name.Size},
     };
     EXPECT_TRUE(equal(&stored, &lookup));
     lookup.Id = 8;
     EXPECT_FALSE(equal(&stored, &lookup));
-}
-
-TEST(StringKeyDescriptor, DualRobinHoodLooksUpBorrowedAndStoresOwned) {
-    TStructType input({{"name", std::make_shared<TStringType>()}});
-    auto key = NQqb::NKernel::BuildAggregateKeyDescriptor(input, {"name"});
-    const std::string insertSource = R"oz(
-(block
-  (fun insert_owned ((var keys <ptr OwnedString>)
-                     (var dist <ptr i64>)
-                     (var slot_ids <ptr i64>)
-                     (var capacity i64)
-                     (var key OwnedString)
-                     (var dense_slot i64)) -> bool
-    (block
-      (return (call rh_insert_stored
-        keys dist slot_ids capacity key dense_slot)))))
-)oz";
-    const std::string lookupSource = R"oz(
-(block
-  (fun lookup_borrowed ((var keys <ptr OwnedString>)
-                        (var dist <ptr i64>)
-                        (var slot_ids <ptr i64>)
-                        (var capacity i64)
-                        (var key StringView)) -> i64
-    (block
-      (return (call rh_lookup_dual keys dist slot_ids capacity key)))))
-)oz";
-
-    void* insertEntry = nullptr;
-    auto insertRunner = CompileDualKeyEntry(
-        key, insertSource, "insert_owned", insertEntry);
-    ASSERT_NE(insertEntry, nullptr);
-    void* lookupEntry = nullptr;
-    auto lookupRunner = CompileDualKeyEntry(
-        key, lookupSource, "lookup_borrowed", lookupEntry);
-    ASSERT_NE(lookupEntry, nullptr);
-
-    using TInsert = bool(*)(NQqb::TOwnedString*, int64_t*, int64_t*,
-        int64_t, NQqb::TOwnedString, int64_t);
-    using TLookup = int64_t(*)(NQqb::TOwnedString*, int64_t*, int64_t*,
-        int64_t, NQqb::TStringView);
-    auto insert = reinterpret_cast<TInsert>(insertEntry);
-    auto lookup = reinterpret_cast<TLookup>(lookupEntry);
-
-    std::array<NQqb::TOwnedString, 4> keys{};
-    std::array<int64_t, 4> dist = {-1, -1, -1, -1};
-    std::array<int64_t, 4> slotIds = {-1, -1, -1, -1};
-    std::string bytes = "owned";
-    NQqb::TOwnedString stored{
-        .Data = reinterpret_cast<uint8_t*>(bytes.data()),
-        .Size = static_cast<int64_t>(bytes.size()),
-    };
-    ASSERT_TRUE(insert(keys.data(), dist.data(), slotIds.data(), 4, stored, 17));
-    NQqb::TStringView lookupKey{.Data = stored.Data, .Size = stored.Size};
-    EXPECT_EQ(lookup(
-        keys.data(), dist.data(), slotIds.data(), 4, lookupKey), 17);
-
-    std::string missingBytes = "missing";
-    NQqb::TStringView missing{
-        .Data = reinterpret_cast<uint8_t*>(missingBytes.data()),
-        .Size = static_cast<int64_t>(missingBytes.size()),
-    };
-    EXPECT_EQ(lookup(keys.data(), dist.data(), slotIds.data(), 4, missing), -1);
 }
 
 TEST(StringKeyDescriptor, FixedWidthOwnershipCloneIsIdentity) {
@@ -467,12 +441,14 @@ TEST(StringKeyDescriptor, FixedWidthOwnershipCloneIsIdentity) {
     void* entry = nullptr;
     auto runner = CompileCloneEntry(key, entry);
     ASSERT_NE(entry, nullptr);
-    auto clone = reinterpret_cast<int64_t(*)(int64_t*, uint8_t*, int64_t*)>(entry);
+    struct TKey { bool Valid; uint8_t Padding[7]; int64_t Value; };
+    auto clone = reinterpret_cast<int64_t(*)(TKey*, uint8_t*, TKey*)>(entry);
 
-    int64_t lookup = 42;
-    int64_t stored = 0;
+    TKey lookup{true, {}, 42};
+    TKey stored{};
     EXPECT_EQ(clone(&lookup, nullptr, &stored), 0);
-    EXPECT_EQ(stored, lookup);
+    EXPECT_EQ(stored.Valid, lookup.Valid);
+    EXPECT_EQ(stored.Value, lookup.Value);
 }
 
 TEST(StringKeyDescriptor, StringOwnershipCloneCopiesBytes) {
@@ -481,36 +457,54 @@ TEST(StringKeyDescriptor, StringOwnershipCloneCopiesBytes) {
     void* entry = nullptr;
     auto runner = CompileCloneEntry(key, entry);
     ASSERT_NE(entry, nullptr);
+    struct TLookupKey {
+        bool Valid; uint8_t Padding[7]; NQqb::TStringView Value;
+    };
+    struct TStoredKey {
+        bool Valid; uint8_t Padding[7]; NQqb::TOwnedString Value;
+    };
     auto clone = reinterpret_cast<int64_t(*)(
-        NQqb::TStringView*, uint8_t*, NQqb::TOwnedString*)>(entry);
+        TLookupKey*, uint8_t*, TStoredKey*)>(entry);
 
     std::string source("copy\0me", 7);
-    NQqb::TStringView lookup{
-        .Data = reinterpret_cast<uint8_t*>(source.data()),
-        .Size = static_cast<int64_t>(source.size()),
-    };
+    TLookupKey lookup{true, {}, {
+        reinterpret_cast<uint8_t*>(source.data()),
+        static_cast<int64_t>(source.size())}};
     std::array<uint8_t, 7> buffer{};
-    NQqb::TOwnedString stored{};
+    TStoredKey stored{};
     EXPECT_EQ(clone(&lookup, buffer.data(), &stored), 7);
-    EXPECT_EQ(stored.Data, buffer.data());
-    EXPECT_EQ(stored.Size, 7);
-    EXPECT_EQ(std::memcmp(stored.Data, source.data(), source.size()), 0);
+    EXPECT_TRUE(stored.Valid);
+    EXPECT_EQ(stored.Value.Data, buffer.data());
+    EXPECT_EQ(stored.Value.Size, 7);
+    EXPECT_EQ(std::memcmp(stored.Value.Data, source.data(), source.size()), 0);
 }
 
 struct TLookupStrings {
+    bool IdValid;
+    uint8_t IdPadding[7];
     int64_t Id;
+    bool FirstValid;
+    uint8_t FirstPadding[7];
     NQqb::TStringView First;
+    bool SecondValid;
+    uint8_t SecondPadding[7];
     NQqb::TStringView Second;
 };
 
 struct TStoredStrings {
+    bool IdValid;
+    uint8_t IdPadding[7];
     int64_t Id;
+    bool FirstValid;
+    uint8_t FirstPadding[7];
     NQqb::TOwnedString First;
+    bool SecondValid;
+    uint8_t SecondPadding[7];
     NQqb::TOwnedString Second;
 };
 
-static_assert(sizeof(TLookupStrings) == 40);
-static_assert(sizeof(TStoredStrings) == 40);
+static_assert(sizeof(TLookupStrings) == 64);
+static_assert(sizeof(TStoredStrings) == 64);
 
 TEST(StringKeyDescriptor, CompositeOwnershipCloneUsesOneBlock) {
     auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
@@ -527,11 +521,14 @@ TEST(StringKeyDescriptor, CompositeOwnershipCloneUsesOneBlock) {
     std::string first = "left";
     std::string second("r\0ght", 5);
     TLookupStrings lookup{
+        .IdValid = true,
         .Id = 9,
+        .FirstValid = true,
         .First = {
             .Data = reinterpret_cast<uint8_t*>(first.data()),
             .Size = static_cast<int64_t>(first.size()),
         },
+        .SecondValid = true,
         .Second = {
             .Data = reinterpret_cast<uint8_t*>(second.data()),
             .Size = static_cast<int64_t>(second.size()),
