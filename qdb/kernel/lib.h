@@ -7,6 +7,7 @@
 
 #include <expected>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -29,12 +30,20 @@ ParseFunctionLibrary(
     const std::string& source,
     const std::unordered_set<std::string>& exclude = {});
 
-// Builds (block <library...> <entry>), with `entry` last so that
-// TLLVMRunner::CompileKernelAst (which returns Module.Functions.back())
-// picks it as the compiled kernel's entry point.
+// Builds (block <library...> <entry>). Callers select the compiled entry point
+// explicitly by its source function name.
 NQumir::NAst::TExprPtr MergeKernelLibrary(
     std::vector<NQumir::NAst::TExprPtr> library,
     NQumir::NAst::TExprPtr entry);
+
+std::expected<NQumir::NAst::TExprPtr, NQumir::TError>
+BuildFilterProgramAst(
+    NQumir::NAst::TExprPtr predicate,
+    const NQumir::NAst::TStructType& inputType,
+    const std::unordered_map<std::string, int32_t>& fieldIndices,
+    NQumir::NAst::TTypePtr columnType,
+    NQumir::NAst::TTypePtr rowSetType,
+    NQumir::NAst::TTypePtr stringViewType);
 
 // Composes one generic aggregation update program in dependency order:
 // key operations, reducers, generic rehash/table libraries, then the named

@@ -6,9 +6,12 @@
 
 #include <qumir/codegen/llvm/llvm_initializer.h>
 #include <qumir/error.h>
+#include <qumir/parser/core/lexer.h>
+#include <qumir/parser/core/parser.h>
 #include <qumir/parser/core/printer.h>
 
 #include <optional>
+#include <sstream>
 #include <stdexcept>
 #include <unordered_map>
 
@@ -36,6 +39,21 @@ void FinishKernelDiagnostics(std::ostream* out) {
     }
 }
 
+NQumir::NAst::TExprPtr ClonePredicate(
+    const NQumir::NAst::TExprPtr& predicate)
+{
+    using namespace NQumir::NAst::NCore;
+    std::istringstream input(PrintAst(predicate));
+    TTokenStream tokens(input);
+    TParser parser;
+    auto parsed = parser.Parse(tokens);
+    if (!parsed) {
+        throw NQumir::TError(
+            "filter predicate clone failed: " + parsed.error().ToString());
+    }
+    return std::move(*parsed);
+}
+
 } // namespace
 
 TKernelCompiler::TFilterDispatch TKernelCompiler::CompileFilter(
@@ -52,16 +70,24 @@ TKernelCompiler::TFilterDispatch TKernelCompiler::CompileFilter(
     // ExternalTypes_[0] = TColumn, [1] = TRowSet (order from qumirdb.cpp)
     NQumir::NAst::TTypePtr columnType;
     NQumir::NAst::TTypePtr rowSetType;
+    NQumir::NAst::TTypePtr stringViewType;
     for (const auto& et : extTypes) {
         if (et.Name == "TColumn") {
             columnType = et.Type;
         } else if (et.Name == "TRowSet") {
             rowSetType = et.Type;
+        } else if (et.Name == "StringView") {
+            stringViewType = et.Type;
         }
     }
 
-    auto kernelAst = NKernel::GenFilterKernelAst(
-        predicate, inputType, fieldIndices, columnType, rowSetType);
+    auto kernelAst = NKernel::BuildFilterProgramAst(
+        ClonePredicate(predicate), inputType, fieldIndices, columnType,
+        rowSetType, stringViewType);
+    if (!kernelAst) {
+        throw NQumir::TError(
+            "CompileFilter: " + kernelAst.error().ToString());
+    }
 
     NQumir::TLLVMRunnerOptions opts;
     opts.CoreInput = true;
@@ -72,10 +98,11 @@ TKernelCompiler::TFilterDispatch TKernelCompiler::CompileFilter(
     auto runner = std::make_unique<NQumir::TLLVMRunner>(opts);
     runner->RegisterModule(dbModule, true);
 
-    PrintKernelAst(Diagnostics_, "filter", kernelAst);
+    PrintKernelAst(Diagnostics_, "filter", *kernelAst);
 
     std::string err;
-    void* fnPtr = runner->CompileKernelAst(std::move(kernelAst), &err);
+    void* fnPtr = runner->CompileKernelAst(
+        std::move(*kernelAst), "<kernel>", &err);
     FinishKernelDiagnostics(Diagnostics_);
     if (!fnPtr) {
         throw std::runtime_error("filter kernel compilation failed: " + err);

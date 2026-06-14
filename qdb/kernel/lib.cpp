@@ -5,6 +5,7 @@
 #include <qumir/parser/core/lexer.h>
 #include <qumir/parser/core/parser.h>
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -66,6 +67,41 @@ NQumir::NAst::TExprPtr MergeKernelLibrary(
 
     library.push_back(std::move(entry));
     return std::make_shared<TBlockExpr>(TLocation{}, std::move(library));
+}
+
+std::expected<NQumir::NAst::TExprPtr, NQumir::TError>
+BuildFilterProgramAst(
+    NQumir::NAst::TExprPtr predicate,
+    const NQumir::NAst::TStructType& inputType,
+    const std::unordered_map<std::string, int32_t>& fieldIndices,
+    NQumir::NAst::TTypePtr columnType,
+    NQumir::NAst::TTypePtr rowSetType,
+    NQumir::NAst::TTypePtr stringViewType)
+{
+    using namespace NQumir::NAst;
+    auto entry = GenFilterKernelAst(
+        std::move(predicate), inputType, fieldIndices, columnType, rowSetType,
+        stringViewType);
+    auto block = TMaybeNode<TBlockExpr>(entry);
+    if (!block) {
+        return std::unexpected(NQumir::TError(
+            "filter kernel generator returned a non-block program"));
+    }
+
+    const bool hasString = std::any_of(
+        inputType.Fields.begin(), inputType.Fields.end(),
+        [](const auto& field) {
+            return TMaybeType<TStringType>(UnwrapNamedType(field.second));
+        });
+    if (!hasString) {
+        return entry;
+    }
+    if (!stringViewType) {
+        return std::unexpected(NQumir::TError(
+            "filter kernel requires the StringView external type"));
+    }
+
+    return entry;
 }
 
 std::expected<NQumir::NAst::TExprPtr, NQumir::TError>

@@ -16,6 +16,70 @@ namespace NKernel {
 
 namespace {
 
+enum class EFilterValueKind {
+    Other,
+    String,
+};
+
+EFilterValueKind SpecializeFilterPredicate(
+    NQumir::NAst::TExprPtr& expr,
+    const std::unordered_set<std::string>& stringFields,
+    const std::unordered_map<std::string, std::string>& stringValues)
+{
+    using namespace NQumir::NAst;
+    NQumir::TLocation loc{};
+    if (auto ident = TMaybeNode<TIdentExpr>(expr)) {
+        if (!stringFields.contains(ident.Cast()->Name)) {
+            return EFilterValueKind::Other;
+        }
+        expr = std::make_shared<TIdentExpr>(
+            expr->Location, stringValues.at(ident.Cast()->Name));
+        return EFilterValueKind::String;
+    }
+    if (auto binary = TMaybeNode<TBinaryExpr>(expr)) {
+        const auto leftKind = SpecializeFilterPredicate(
+            binary.Cast()->Left, stringFields, stringValues);
+        const auto rightKind = SpecializeFilterPredicate(
+            binary.Cast()->Right, stringFields, stringValues);
+        if (leftKind == EFilterValueKind::String ||
+            rightKind == EFilterValueKind::String) {
+            if (leftKind != EFilterValueKind::String ||
+                rightKind != EFilterValueKind::String) {
+                throw std::invalid_argument(
+                    "string filter comparison requires two StringView operands");
+            }
+            const auto op = binary.Cast()->Operator;
+            if (!(op == "==" || op == "!=" || op == "<" || op == "<=" ||
+                  op == ">" || op == ">=")) {
+                throw std::invalid_argument(
+                    "unsupported StringView filter operator '" + op.ToString() + "'");
+            }
+            auto compare = std::make_shared<TCallExpr>(loc,
+                std::make_shared<TIdentExpr>(loc, "qdb_filter_string_compare"),
+                std::vector<TExprPtr>{
+                    std::make_shared<TFieldAccessExpr>(
+                        loc, binary.Cast()->Left, "Data"),
+                    std::make_shared<TFieldAccessExpr>(
+                        loc, binary.Cast()->Left, "Size"),
+                    std::make_shared<TFieldAccessExpr>(
+                        loc, binary.Cast()->Right, "Data"),
+                    std::make_shared<TFieldAccessExpr>(
+                        loc, binary.Cast()->Right, "Size")});
+            expr = std::make_shared<TBinaryExpr>(loc, op, std::move(compare),
+                std::make_shared<TNumberExpr>(loc, int64_t{0}));
+        }
+        return EFilterValueKind::Other;
+    }
+    for (auto* child : expr->MutableChildren()) {
+        if (SpecializeFilterPredicate(*child, stringFields, stringValues) ==
+            EFilterValueKind::String) {
+            throw std::invalid_argument(
+                "StringView filter value must be an operand of a comparison");
+        }
+    }
+    return EFilterValueKind::Other;
+}
+
 NQumir::NAst::TIntegerType::EKind UnsignedIntegerKind(
     NQumir::NAst::TIntegerType::EKind kind)
 {
@@ -601,18 +665,27 @@ NQumir::NAst::TExprPtr GenFilterKernelAst(
     const NQumir::NAst::TStructType& inputType,
     const std::unordered_map<std::string, int32_t>& fieldIndices,
     NQumir::NAst::TTypePtr columnType,
-    NQumir::NAst::TTypePtr rowSetType)
+    NQumir::NAst::TTypePtr rowSetType,
+    NQumir::NAst::TTypePtr stringViewType)
 {
     using namespace NQumir::NAst;
     NQumir::TLocation loc{};
 
-    std::unordered_set<std::string> fieldNames;
-    for (const auto& [name, _] : inputType.Fields) {
-        fieldNames.insert(name);
+    std::unordered_set<std::string> fixedFields;
+    std::unordered_set<std::string> stringFields;
+    std::unordered_map<std::string, std::string> stringValues;
+    for (const auto& [name, type] : inputType.Fields) {
+        if (TMaybeType<TStringType>(UnwrapNamedType(type))) {
+            stringFields.insert(name);
+            stringValues.emplace(name, name + "_value");
+        } else {
+            fixedFields.insert(name);
+        }
     }
 
     auto identI = std::make_shared<TIdentExpr>(loc, "i");
-    SubstFieldsInPlace(predicate, fieldNames, identI);
+    SpecializeFilterPredicate(predicate, stringFields, stringValues);
+    SubstFieldsInPlace(predicate, fixedFields, identI);
 
     // Single param: (var rowSet <ref TRowSet>) — raw struct type, no TNamedType wrapper
     auto rowSetRefType = std::make_shared<TReferenceType>(rowSetType);
@@ -646,17 +719,38 @@ NQumir::NAst::TExprPtr GenFilterKernelAst(
         }
         return std::make_shared<TPointerType>(columnType);
     }();
+    auto columnValueType = [&]() -> TTypePtr {
+        if (auto pointer = TMaybeType<TPointerType>(ptrColumnType)) {
+            return pointer.Cast()->PointeeType;
+        }
+        return columnType;
+    }();
     bodyStmts.push_back(std::make_shared<TVarStmt>(loc, "cols", ptrColumnType));
     bodyStmts.push_back(std::make_shared<TAssignExpr>(loc, "cols", fieldOf("Columns")));
 
-    // For each referenced field: cols[colIdx].Data -> i64 -> <ptr T>
+    // Bind fixed-width columns as typed arrays and strings as TColumn values.
     auto i64Type = std::make_shared<TIntegerType>();
+    std::vector<TExprPtr> loopSetup;
     for (const auto& [name, type] : inputType.Fields) {
         int32_t idx = fieldIndices.at(name);
-        auto ptrFieldType = std::make_shared<TPointerType>(type);
         auto colElem = std::make_shared<TIndexExpr>(loc,
             std::make_shared<TIdentExpr>(loc, "cols"),
             std::make_shared<TNumberExpr>(loc, int64_t(idx)));
+        if (TMaybeType<TStringType>(UnwrapNamedType(type))) {
+            bodyStmts.push_back(std::make_shared<TVarStmt>(loc, name, columnValueType));
+            bodyStmts.push_back(std::make_shared<TAssignExpr>(loc, name, colElem));
+            auto materialized = BuildColumnValueAst(
+                name, "i", name + "_filter", type, stringViewType);
+            loopSetup.insert(loopSetup.end(),
+                std::make_move_iterator(materialized.Setup.begin()),
+                std::make_move_iterator(materialized.Setup.end()));
+            loopSetup.push_back(std::make_shared<TVarStmt>(
+                loc, stringValues.at(name), materialized.ValueType));
+            loopSetup.push_back(std::make_shared<TAssignExpr>(
+                loc, stringValues.at(name), std::move(materialized.Value)));
+            continue;
+        }
+        auto ptrFieldType = std::make_shared<TPointerType>(type);
         auto rawData = std::make_shared<TFieldAccessExpr>(loc, colElem, "Data");
         auto asInt = std::make_shared<TCastExpr>(loc, rawData, i64Type);
         auto asTypedPtr = std::make_shared<TCastExpr>(loc, asInt, ptrFieldType);
@@ -684,8 +778,10 @@ NQumir::NAst::TExprPtr GenFilterKernelAst(
 
     bodyStmts.push_back(varI);
     bodyStmts.push_back(initI);
+    loopSetup.push_back(std::move(writeSel));
+    loopSetup.push_back(std::move(incrI));
     bodyStmts.push_back(std::make_shared<TWhileStmtExpr>(loc, cond,
-        std::make_shared<TBlockExpr>(loc, std::vector<TExprPtr>{writeSel, incrI})));
+        std::make_shared<TBlockExpr>(loc, std::move(loopSetup))));
 
     auto funBody = std::make_shared<TBlockExpr>(loc, std::move(bodyStmts));
     auto funDecl = std::make_shared<TFunDecl>(loc, "<kernel>",
