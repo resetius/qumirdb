@@ -2,6 +2,7 @@
 
 #include <qdb/ops/aggregate.h>
 #include <qdb/ops/filter.h>
+#include <qdb/ops/join.h>
 #include <qdb/ops/project.h>
 #include <qdb/ops/source.h>
 #include <qdb/sexp/parser.h>
@@ -209,6 +210,78 @@ TEST(SexpParser, AggregatePrintRoundtrip) {
 
     auto printed = PrintAst(std::static_pointer_cast<TExpr>(expr), MakePrintOpts());
     EXPECT_EQ(printed, input);
+}
+
+TEST(SexpPrinter, Join) {
+    TStubSource leftSrc({"a", "b"});
+    TStubSource rightSrc({"c", "d"});
+    auto l = std::make_shared<TSourceOperator>(leftSrc);
+    auto r = std::make_shared<TSourceOperator>(rightSrc);
+    auto join = MakeJoin(l, r, {{"a", "c"}}, EJoinType::Inner);
+    ASSERT_TRUE(join.has_value()) << (join ? "" : join.error().ToString());
+    EXPECT_EQ(PrintAst(*join, MakePrintOpts()),
+              "(rel join (rel source) (rel source) (on a c) (type inner))");
+}
+
+TEST(SexpPrinter, JoinWithFilterAndMultipleKeys) {
+    TStubSource leftSrc({"a", "b"});
+    TStubSource rightSrc({"c", "d"});
+    auto l = std::make_shared<TSourceOperator>(leftSrc);
+    auto r = std::make_shared<TSourceOperator>(rightSrc);
+    auto join = MakeJoin(l, r, {{"a", "c"}, {"b", "d"}}, EJoinType::Left, "(< b d)");
+    ASSERT_TRUE(join.has_value()) << (join ? "" : join.error().ToString());
+    EXPECT_EQ(PrintAst(*join, MakePrintOpts()),
+              "(rel join (rel source) (rel source) (on a c) (on b d) (type left) (filter (< b d)))");
+}
+
+TEST(SexpParser, JoinPrintRoundtrip) {
+    TStubSource leftSrc({"a", "b"});
+    TStubSource rightSrc({"c", "d"});
+
+    const std::string input =
+        "(rel join (rel source \"left.parquet\") (rel source \"right.parquet\") "
+        "(on a c) (type left) (filter (< b d)))";
+
+    TRelParserOptions opts;
+    opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
+        if (path == "left.parquet") {
+            return std::make_shared<TSourceOperator>(leftSrc, std::string(path));
+        }
+        return std::make_shared<TSourceOperator>(rightSrc, std::string(path));
+    };
+    auto p = MakeParser(std::move(opts));
+
+    auto expr = Parse(p, input);
+    ASSERT_NE(expr, nullptr);
+
+    auto& join = static_cast<TJoinOperator&>(*expr);
+    ASSERT_EQ(join.Keys().size(), 1u);
+    EXPECT_EQ(join.Keys()[0].Left, "a");
+    EXPECT_EQ(join.Keys()[0].Right, "c");
+    EXPECT_EQ(join.JoinType(), EJoinType::Left);
+    EXPECT_NE(join.Filter(), nullptr);
+
+    auto printed = PrintAst(std::static_pointer_cast<TExpr>(expr), MakePrintOpts());
+    EXPECT_EQ(printed, input);
+}
+
+TEST(SexpParser, JoinRejectsMissingKeys) {
+    TStubSource leftSrc({"a", "b"});
+    TStubSource rightSrc({"c", "d"});
+
+    TRelParserOptions opts;
+    opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
+        if (path == "left.parquet") {
+            return std::make_shared<TSourceOperator>(leftSrc, std::string(path));
+        }
+        return std::make_shared<TSourceOperator>(rightSrc, std::string(path));
+    };
+    auto p = MakeParser(std::move(opts));
+
+    std::istringstream in(
+        "(rel join (rel source \"left.parquet\") (rel source \"right.parquet\") (type inner))");
+    TTokenStream ts(in);
+    EXPECT_FALSE(p.Parse(ts).has_value());
 }
 
 int main(int argc, char** argv) {

@@ -2,6 +2,7 @@
 
 #include <qdb/ops/aggregate.h>
 #include <qdb/ops/filter.h>
+#include <qdb/ops/join.h>
 #include <qdb/ops/project.h>
 #include <qdb/ops/source.h>
 
@@ -110,6 +111,68 @@ TNodeParserMap MakeRelParsers(TRelParserOptions options) {
             }
 
             co_return std::make_shared<TAggregateOperator>(std::move(input), std::move(groupKeys), std::move(aggs));
+        }
+
+        if (nameTok.Name == TJoinOperator::OpId) {
+            auto leftExpr = co_await h.Expr();
+            auto left = std::static_pointer_cast<IOperator>(leftExpr);
+            auto rightExpr = co_await h.Expr();
+            auto right = std::static_pointer_cast<IOperator>(rightExpr);
+
+            std::vector<TJoinKey> keys;
+            EJoinType type = EJoinType::Inner;
+            TExprPtr filter;
+
+            while (true) {
+                auto tok = h.Next();
+                if (IParseHandle::IsOp(tok, ')')) break;
+                if (!IParseHandle::IsOp(tok, '(')) {
+                    co_return IParseHandle::MakeError(tok, "expected '(' before join clause");
+                }
+                auto clause = h.Next();
+                if (clause.Type != TToken::Identifier) {
+                    co_return IParseHandle::MakeError(clause, "expected join clause name (on/type/filter)");
+                }
+                if (clause.Name == "on") {
+                    auto leftKey = h.Next();
+                    if (leftKey.Type != TToken::Identifier) {
+                        co_return IParseHandle::MakeError(leftKey, "expected left key column in (on ...)");
+                    }
+                    auto rightKey = h.Next();
+                    if (rightKey.Type != TToken::Identifier) {
+                        co_return IParseHandle::MakeError(rightKey, "expected right key column in (on ...)");
+                    }
+                    co_await h.Take(')');
+                    keys.push_back({leftKey.Name, rightKey.Name});
+                } else if (clause.Name == "type") {
+                    auto typeTok = h.Next();
+                    if (typeTok.Type != TToken::Identifier) {
+                        co_return IParseHandle::MakeError(typeTok, "expected join type name in (type ...)");
+                    }
+                    auto parsed = ParseJoinType(typeTok.Name);
+                    if (!parsed) {
+                        co_return IParseHandle::MakeError(typeTok, "unknown join type: " + typeTok.Name);
+                    }
+                    type = *parsed;
+                    co_await h.Take(')');
+                } else if (clause.Name == "filter") {
+                    filter = co_await h.Expr();
+                    co_await h.Take(')');
+                } else {
+                    co_return IParseHandle::MakeError(clause, "unknown join clause: " + clause.Name);
+                }
+            }
+
+            if (keys.empty()) {
+                co_return TError(loc, "(rel join) requires at least one (on left right) key");
+            }
+            auto output = ComputeJoinOutputType(
+                left->OutputColumns(), right->OutputColumns(), type);
+            if (!output) {
+                co_return output.error();
+            }
+            co_return std::make_shared<TJoinOperator>(
+                std::move(left), std::move(right), std::move(keys), type, std::move(filter));
         }
 
         co_return IParseHandle::MakeError(nameTok, "unknown rel operator: " + nameTok.Name);
