@@ -31,6 +31,41 @@ TExprPtr ParsePredicate(const std::string& source) {
     return std::move(*parsed);
 }
 
+std::array<uint8_t, 4> RunStringLiteralFilter(
+    const std::string& data,
+    const std::array<int32_t, 5>& offsets,
+    const std::string& op,
+    const std::string& literal,
+    bool literalFirst)
+{
+    std::array<TColumn, 1> columns = {
+        TColumn{.Data = const_cast<char*>(data.data()), .Mask = nullptr,
+            .Offsets = const_cast<int32_t*>(offsets.data()), .OffsetWidth = 4},
+    };
+    TStructType inputType({
+        {"value", std::make_shared<TStringType>()},
+    });
+    auto predicate = ParsePredicate(literalFirst
+        ? "(" + op + " \"placeholder\" value)"
+        : "(" + op + " value \"placeholder\")");
+    auto binary = TMaybeNode<TBinaryExpr>(predicate).Cast();
+    auto literalExpr = TMaybeNode<TStringLiteralExpr>(
+        literalFirst ? binary->Left : binary->Right).Cast();
+    literalExpr->Value = literal;
+
+    auto dispatch = TKernelCompiler().CompileFilter(inputType, predicate);
+    std::array<uint8_t, 4> selection{};
+    TRowSet rowSet{
+        .Columns = columns.data(),
+        .ColumnCount = static_cast<int64_t>(columns.size()),
+        .RowCount = static_cast<int64_t>(selection.size()),
+        .Selection = selection.data(),
+        .RefCount = 1,
+    };
+    dispatch(rowSet);
+    return selection;
+}
+
 TEST(FilterKernel, ComparesStringColumnsWithoutMutatingLogicalPredicate) {
     const std::string leftData = "absamez";
     const std::string rightData = "basamey";
@@ -71,6 +106,44 @@ TEST(FilterKernel, ComparesStringColumnsWithoutMutatingLogicalPredicate) {
         EXPECT_EQ(selection, expected) << op;
         EXPECT_EQ(NCore::PrintAst(predicate), logical) << op;
     }
+}
+
+TEST(FilterKernel, ComparesStringColumnAndLiteralInBothOrders) {
+    const std::string data = std::string("a") + "same" + "z" + "same";
+    const std::array<int32_t, 5> offsets = {0, 1, 5, 6, 10};
+    const std::array<std::pair<const char*, std::array<uint8_t, 4>>, 6> cases = {{
+        {"==", {0, 0xff, 0, 0xff}},
+        {"!=", {0xff, 0, 0xff, 0}},
+        {"<", {0xff, 0, 0, 0}},
+        {"<=", {0xff, 0xff, 0, 0xff}},
+        {">", {0, 0, 0xff, 0}},
+        {">=", {0, 0xff, 0xff, 0xff}},
+    }};
+
+    for (const auto& [op, expected] : cases) {
+        EXPECT_EQ(RunStringLiteralFilter(data, offsets, op, "same", false),
+            expected) << op;
+        const std::string reversedOp = op == std::string("<") ? ">"
+            : op == std::string("<=") ? ">="
+            : op == std::string(">") ? "<"
+            : op == std::string(">=") ? "<=" : op;
+        EXPECT_EQ(RunStringLiteralFilter(
+            data, offsets, reversedOp, "same", true), expected) << op;
+    }
+}
+
+TEST(FilterKernel, PreservesEmptyUtf8AndEmbeddedNullLiterals) {
+    const std::string data = std::string() + "" + "\xD0\xAF" +
+        std::string("a\0b", 3) + "other";
+    const std::array<int32_t, 5> offsets = {0, 0, 2, 5, 10};
+
+    EXPECT_EQ(RunStringLiteralFilter(data, offsets, "==", "", false),
+        (std::array<uint8_t, 4>{0xff, 0, 0, 0}));
+    EXPECT_EQ(RunStringLiteralFilter(data, offsets, "==", "\xD0\xAF", true),
+        (std::array<uint8_t, 4>{0, 0xff, 0, 0}));
+    EXPECT_EQ(RunStringLiteralFilter(
+        data, offsets, "==", std::string("a\0b", 3), false),
+        (std::array<uint8_t, 4>{0, 0, 0xff, 0}));
 }
 
 } // namespace
