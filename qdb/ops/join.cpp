@@ -144,6 +144,40 @@ std::unordered_set<std::string> TJoinOperator::ComputeReferencedColumns() const 
     return refs;
 }
 
+std::unordered_set<std::string> TJoinOperator::RequiredColumnsForChild(
+    size_t childIdx, const std::unordered_set<std::string>& needed) const
+{
+    const auto& side = (childIdx == 0) ? Left_ : Right_;
+    auto* sideStruct = static_cast<TStructType*>(side->OutputColumns().get());
+    std::unordered_set<std::string> sideCols;
+    if (sideStruct) {
+        for (const auto& [name, _] : sideStruct->Fields) {
+            sideCols.insert(name);
+        }
+    }
+
+    std::unordered_set<std::string> required;
+    // This side's key columns are always needed for matching.
+    for (const auto& key : Keys_) {
+        required.insert(childIdx == 0 ? key.Left : key.Right);
+    }
+    // Residual filter vars that belong to this side.
+    if (Filter_) {
+        for (const auto& var : FindUnboundVars(Filter_)) {
+            if (sideCols.contains(var)) {
+                required.insert(var);
+            }
+        }
+    }
+    // Parent-required columns that belong to this side.
+    for (const auto& var : needed) {
+        if (sideCols.contains(var)) {
+            required.insert(var);
+        }
+    }
+    return required;
+}
+
 const std::string TJoinOperator::ToString() const {
     using namespace NQumir::NAst::NCore;
     std::string s = "(rel join " + Left_->ToString() + " " + Right_->ToString() + " (";

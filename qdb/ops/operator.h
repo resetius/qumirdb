@@ -21,6 +21,19 @@ struct IOperator : NQumir::NAst::TExpr {
     // Excludes what input operators produce — only own references.
     virtual std::unordered_set<std::string> ComputeReferencedColumns() const = 0;
 
+    // Columns the child at `childIdx` must produce, given what this node's
+    // consumer needs (`needed`). Default = pass-through (needed ∪ own refs),
+    // correct for schema-preserving single-input operators (filter, source).
+    // Schema-defining operators (project, aggregate) override to return only
+    // their own refs; multi-input operators (join) override to split per side.
+    virtual std::unordered_set<std::string> RequiredColumnsForChild(
+        size_t /*childIdx*/, const std::unordered_set<std::string>& needed) const {
+        std::unordered_set<std::string> required = needed;
+        auto own = ComputeReferencedColumns();
+        required.insert(own.begin(), own.end());
+        return required;
+    }
+
     // Output schema: TFunctionType::ReturnType.
     NQumir::NAst::TTypePtr OutputColumns() const {
         return static_cast<NQumir::NAst::TFunctionType*>(Type.get())->ReturnType;
