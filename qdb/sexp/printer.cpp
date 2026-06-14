@@ -2,6 +2,7 @@
 
 #include <qdb/ops/aggregate.h>
 #include <qdb/ops/filter.h>
+#include <qdb/ops/join.h>
 #include <qdb/ops/operator.h>
 #include <qdb/ops/project.h>
 #include <qdb/ops/source.h>
@@ -79,6 +80,33 @@ static void PrintRel(NQumir::NAst::TExpr& expr, TPrinter& printer, TPrintFrame f
                 printer.Space();
                 printer.PrintExpr(spec.Arg, frame.AllowTypeWrap, frame.Level + 2);
             }
+            out << ')';
+        }
+        out << ')';
+        return;
+    }
+
+    if (rel == TJoinOperator::OpId) {
+        auto& join = static_cast<TJoinOperator&>(op);
+        out << "(rel join";
+        printer.Separator(frame.Level + 1);
+        printer.PrintExpr(join.Left(), frame.AllowTypeWrap, frame.Level + 1);
+        printer.Separator(frame.Level + 1);
+        printer.PrintExpr(join.Right(), frame.AllowTypeWrap, frame.Level + 1);
+        for (const auto& key : join.Keys()) {
+            printer.Separator(frame.Level + 1);
+            out << "(on ";
+            printer.PrintIdentifier(key.Left);
+            printer.Space();
+            printer.PrintIdentifier(key.Right);
+            out << ')';
+        }
+        printer.Separator(frame.Level + 1);
+        out << "(type " << JoinTypeName(join.JoinType()) << ')';
+        if (join.Filter()) {
+            printer.Separator(frame.Level + 1);
+            out << "(filter ";
+            printer.PrintExpr(join.Filter(), frame.AllowTypeWrap, frame.Level + 2);
             out << ')';
         }
         out << ')';
