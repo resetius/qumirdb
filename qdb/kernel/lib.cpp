@@ -110,7 +110,8 @@ BuildGenericAggregateProgramAst(
     const NQumir::NAst::TStructType& inputType,
     const TAggregateKeyDescriptor& key,
     const std::optional<std::string>& argField,
-    const std::vector<std::string>& reducers,
+    const TAggReducerLayout& layout,
+    bool argIsNullable,
     NQumir::NAst::TTypePtr columnType,
     NQumir::NAst::TTypePtr rowSetType,
     NQumir::NAst::TTypePtr hashTableType)
@@ -142,9 +143,9 @@ BuildGenericAggregateProgramAst(
     stmts.insert(stmts.end(), keyOperations.begin(), keyOperations.end());
     auto ownership = GenKeyOwnershipFunDecls(key);
     stmts.insert(stmts.end(), ownership.begin(), ownership.end());
-    auto reducerDecls = GenReducerFunDecls(reducers);
+    auto reducerDecls = GenReducerFunDecls(layout);
     stmts.insert(stmts.end(), reducerDecls.begin(), reducerDecls.end());
-    stmts.push_back(GenApplyReducersFunDecl(reducers.size()));
+    stmts.push_back(GenApplyReducersFunDecl(layout));
 
     auto lifecycle = ParseFunctionLibrary(
         ReadAggregationKernel("aggregation_hashtable_generic.oz"),
@@ -166,7 +167,7 @@ BuildGenericAggregateProgramAst(
     }
 
     auto entry = GenGenericAggregateDispatchAst(
-        inputType, key, argField, reducers.size(), std::move(columnType),
+        inputType, key, argField, layout, argIsNullable, std::move(columnType),
         std::move(rowSetType), std::move(hashTableType));
     auto block = NQumir::NAst::TMaybeNode<NQumir::NAst::TBlockExpr>(entry);
     if (!block || block.Cast()->Stmts.size() != 1) {
@@ -181,6 +182,7 @@ BuildGenericAggregateProgramAst(
 std::expected<NQumir::NAst::TExprPtr, NQumir::TError>
 BuildGenericAggregateFinalizeProgramAst(
     const TAggregateKeyDescriptor& key,
+    const TAggReducerLayout& layout,
     NQumir::NAst::TTypePtr hashTableType,
     NQumir::NAst::TTypePtr columnType)
 {
@@ -201,7 +203,7 @@ BuildGenericAggregateFinalizeProgramAst(
             stringOperations->begin(), stringOperations->end());
     }
     auto entry = GenGenericAggregateFinalizeAst(
-        key, std::move(hashTableType), std::move(columnType));
+        key, layout, std::move(hashTableType), std::move(columnType));
     auto block = NQumir::NAst::TMaybeNode<NQumir::NAst::TBlockExpr>(entry);
     if (!block || block.Cast()->Stmts.size() != 1) {
         return std::unexpected(NQumir::TError(
