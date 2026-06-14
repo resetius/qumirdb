@@ -242,6 +242,15 @@ NQumir::NAst::TExprPtr HashKeyValue(
         return ident(name);
     }
 
+    if (TMaybeType<TBoolType>(type)) {
+        const std::string name = "key_hash_" + std::to_string(nextTemporary++);
+        body.push_back(std::make_shared<TVarStmt>(loc, name, u64Type));
+        assign(name, std::make_shared<TCastExpr>(loc,
+            KeyValueExpr(root, path), u64Type));
+        assign(name, binary("*", ident(name), number(2685821657736338717LL)));
+        return ident(name);
+    }
+
     if (TMaybeType<TFloatType>(type)) {
         const std::string name = "key_hash_" + std::to_string(nextTemporary++);
         body.push_back(std::make_shared<TVarStmt>(loc, name, u64Type));
@@ -268,6 +277,13 @@ NQumir::NAst::TExprPtr HashKeyValue(
             auto fieldHash = HashKeyValue(
                 fieldType, root, path, body, nextTemporary);
             path.pop_back();
+            if (fieldName.starts_with("key_")) {
+                auto validPath = path;
+                validPath.push_back(
+                    "valid_" + fieldName.substr(std::string("key_").size()));
+                fieldHash = std::make_shared<TIfExpr>(loc,
+                    KeyValueExpr(root, validPath), std::move(fieldHash), number(0));
+            }
             // boost-style ordered combine over already mixed field hashes.
             auto combined = binary("+", std::move(fieldHash), number(-7046029254386353131LL));
             combined = binary("+", std::move(combined),
@@ -318,6 +334,9 @@ NQumir::NAst::TExprPtr EqualKeyValue(
     if (TMaybeType<TIntegerType>(left) && TMaybeType<TIntegerType>(right)) {
         return binary("==", KeyValueExpr("left", path), KeyValueExpr("right", path));
     }
+    if (TMaybeType<TBoolType>(left) && TMaybeType<TBoolType>(right)) {
+        return binary("==", KeyValueExpr("left", path), KeyValueExpr("right", path));
+    }
     if (TMaybeType<TFloatType>(left) && TMaybeType<TFloatType>(right)) {
         return binary("==",
             CanonicalFloatBits("left", path), CanonicalFloatBits("right", path));
@@ -343,6 +362,15 @@ NQumir::NAst::TExprPtr EqualKeyValue(
             path.push_back(fieldName);
             auto fieldEqual = EqualKeyValue(fieldType, rightField->second, path);
             path.pop_back();
+            if (fieldName.starts_with("key_")) {
+                auto validPath = path;
+                validPath.push_back(
+                    "valid_" + fieldName.substr(std::string("key_").size()));
+                fieldEqual = binary("||",
+                    std::make_shared<TUnaryExpr>(loc, TOperator("!"),
+                        KeyValueExpr("left", validPath)),
+                    std::move(fieldEqual));
+            }
             result = result
                 ? binary("&&", std::move(result), std::move(fieldEqual))
                 : std::move(fieldEqual);
@@ -462,6 +490,13 @@ NQumir::NAst::TExprPtr KeyOwnedBytesExpr(
             path.push_back(fieldName);
             auto fieldBytes = KeyOwnedBytesExpr(fieldType, root, path);
             path.pop_back();
+            if (fieldName.starts_with("key_")) {
+                auto validPath = path;
+                validPath.push_back(
+                    "valid_" + fieldName.substr(std::string("key_").size()));
+                fieldBytes = std::make_shared<TIfExpr>(loc,
+                    KeyValueExpr(root, validPath), std::move(fieldBytes), zero());
+            }
             result = std::make_shared<TBinaryExpr>(loc, TOperator("+"),
                 std::move(result), std::move(fieldBytes));
         }
@@ -970,48 +1005,40 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
             key.Fields[fieldIndex].Type, stringViewType));
     }
 
-    TExprPtr keyValue;
-    if (key.IsScalar()) {
-        keyValue = keyFields.front().Value;
-    } else {
-        std::vector<TExprPtr> fields;
-        auto namedKey = TMaybeType<TNamedType>(key.LookupType);
-        auto keyStruct = namedKey
-            ? TMaybeType<TStructType>(namedKey.Cast()->UnderlyingType)
-            : TMaybeType<TStructType>(key.LookupType);
-        if (!keyStruct) {
+    std::vector<TExprPtr> fields;
+    auto namedKey = TMaybeType<TNamedType>(key.LookupType);
+    auto keyStruct = namedKey
+        ? TMaybeType<TStructType>(namedKey.Cast()->UnderlyingType)
+        : TMaybeType<TStructType>(key.LookupType);
+    if (!keyStruct) {
+        throw std::invalid_argument(
+            "GenGenericAggregateDispatchAst: key must be a struct");
+    }
+    fields.reserve(keyStruct.Cast()->Fields.size());
+    for (const auto& [fieldName, fieldType] : keyStruct.Cast()->Fields) {
+        if (fieldName.starts_with("__qdb_padding_")) {
+            fields.push_back(number(0, fieldType));
+            continue;
+        }
+        const bool validity = fieldName.starts_with("valid_");
+        const std::string_view prefix = validity ? "valid_" : "key_";
+        if (!fieldName.starts_with(prefix)) {
             throw std::invalid_argument(
-                "GenGenericAggregateDispatchAst: composite key must be a struct");
+                "GenGenericAggregateDispatchAst: unexpected key field '" +
+                fieldName + "'");
         }
-        fields.reserve(keyStruct.Cast()->Fields.size());
-        for (const auto& [fieldName, fieldType] : keyStruct.Cast()->Fields) {
-            if (fieldName.starts_with("__qdb_padding_")) {
-                fields.push_back(number(0, fieldType));
-                continue;
-            }
-            constexpr std::string_view prefix = "key_";
-            if (!fieldName.starts_with(prefix)) {
-                throw std::invalid_argument(
-                    "GenGenericAggregateDispatchAst: unexpected key field '" +
-                    fieldName + "'");
-            }
-            const size_t fieldIndex = std::stoull(fieldName.substr(prefix.size()));
-            if (fieldIndex >= key.Fields.size()) {
-                throw std::invalid_argument(
-                    "GenGenericAggregateDispatchAst: invalid key field '" +
-                    fieldName + "'");
-            }
-            fields.push_back(keyFields[fieldIndex].Value);
+        const size_t fieldIndex = std::stoull(fieldName.substr(prefix.size()));
+        if (fieldIndex >= key.Fields.size()) {
+            throw std::invalid_argument(
+                "GenGenericAggregateDispatchAst: invalid key field '" +
+                fieldName + "'");
         }
-        keyValue = std::make_shared<TStructConstructExpr>(
-            loc, key.LookupType, std::move(fields));
+        fields.push_back(validity
+            ? keyFields[fieldIndex].IsValid
+            : keyFields[fieldIndex].Value);
     }
-    TExprPtr keyIsValid;
-    for (auto& keyField : keyFields) {
-        keyIsValid = keyIsValid
-            ? binary("&&", std::move(keyIsValid), keyField.IsValid)
-            : keyField.IsValid;
-    }
+    TExprPtr keyValue = std::make_shared<TStructConstructExpr>(
+        loc, key.LookupType, std::move(fields));
     auto upsertCall = call("aht_upsert_dual", {
         ident("ht"),
         std::move(keyValue),
@@ -1035,8 +1062,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
             block({std::make_shared<TReturnExpr>(loc, numI64(-1))}), nullptr),
         std::move(reduceCall),
     });
-    materialize.push_back(std::make_shared<TIfExpr>(
-        loc, std::move(keyIsValid), std::move(validProcess), nullptr));
+    materialize.push_back(std::move(validProcess));
     auto process = block(std::move(materialize));
     auto loop = block({
         std::make_shared<TIfExpr>(loc, std::move(selected), std::move(process), nullptr),
@@ -1186,12 +1212,8 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
         auto keyValue = std::make_shared<TIndexExpr>(
             loc, ident("group_keys"), ident("slot"));
         TExprPtr value;
-        if (key.IsScalar()) {
-            value = keyValue;
-        } else {
-            value = std::make_shared<TFieldAccessExpr>(
-                loc, keyValue, "key_" + std::to_string(fieldIndex));
-        }
+        value = std::make_shared<TFieldAccessExpr>(
+            loc, keyValue, "key_" + std::to_string(fieldIndex));
         const bool isString = TMaybeType<TStringType>(
             UnwrapNamedType(key.Fields[fieldIndex].Type));
         if (!isString) {
@@ -1327,10 +1349,8 @@ NQumir::NAst::TExprPtr GenGenericAggregateMeasureAst(
         }
         TExprPtr stored = std::make_shared<TIndexExpr>(
             loc, ident("group_keys"), ident("slot"));
-        if (!key.IsScalar()) {
-            stored = std::make_shared<TFieldAccessExpr>(
-                loc, std::move(stored), "key_" + std::to_string(fieldIndex));
-        }
+        stored = std::make_shared<TFieldAccessExpr>(
+            loc, std::move(stored), "key_" + std::to_string(fieldIndex));
         auto size = std::make_shared<TFieldAccessExpr>(
             loc, std::move(stored), "Size");
         loop.push_back(std::make_shared<TArrayAssignExpr>(loc,

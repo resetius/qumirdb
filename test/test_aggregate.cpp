@@ -422,6 +422,122 @@ TEST(AggregateE2E, ScalarStringKeyOwnsFinalizedOutput) {
     Release(&result);
 }
 
+TEST(AggregateE2E, NullStringKeysGroupTogetherAndDifferFromEmpty) {
+    std::string data = "hidden-onehidden-two";
+    std::array<int32_t, 5> offsets = {0, 10, 20, 20, 20};
+    std::array<uint8_t, 1> mask = {0b00001100};
+    std::array<int64_t, 4> values = {10, 20, 3, 4};
+    std::vector<TColumn> columns = {
+        TColumn{.Data = data.data(), .Mask = mask.data(),
+            .Offsets = offsets.data(), .OffsetWidth = 4},
+        TColumn{.Data = reinterpret_cast<char*>(values.data())},
+    };
+    std::vector<TRowSet> batches = {TRowSet{
+        .Columns = columns.data(), .ColumnCount = 2, .RowCount = 4,
+        .Selection = nullptr, .RefCount = 1}};
+    TVectorSource source(
+        {"k", "v"}, std::move(batches),
+        {std::make_shared<TStringType>(),
+         std::make_shared<TIntegerType>(TIntegerType::I64)});
+    auto root = ParsePlan(
+        "(rel aggregate (rel source \"data.parquet\") (keys k) "
+        "(agg c count) (agg s sum v))",
+        source);
+    TPhysicalPlanner planner;
+    auto runtime = planner.Build(root);
+
+    TRowSet result{};
+    ASSERT_TRUE(runtime->Next(result));
+    ASSERT_EQ(result.RowCount, 2);
+    auto* counts = reinterpret_cast<int64_t*>(result.Columns[1].Data);
+    auto* sums = reinterpret_cast<int64_t*>(result.Columns[2].Data);
+    std::map<int64_t, int64_t> countBySum;
+    for (int64_t row = 0; row < result.RowCount; ++row) {
+        countBySum[sums[row]] = counts[row];
+    }
+    EXPECT_EQ(countBySum.at(30), 2);
+    EXPECT_EQ(countBySum.at(7), 2);
+    Release(&result);
+}
+
+TEST(AggregateE2E, NullIntegerKeysIgnorePayloadAndDifferFromZero) {
+    std::array<int64_t, 4> keys = {41, 99, 0, 0};
+    std::array<uint8_t, 1> mask = {0b00001100};
+    std::array<int64_t, 4> values = {10, 20, 3, 4};
+    std::vector<TColumn> columns = {
+        TColumn{.Data = reinterpret_cast<char*>(keys.data()), .Mask = mask.data()},
+        TColumn{.Data = reinterpret_cast<char*>(values.data())},
+    };
+    std::vector<TRowSet> batches = {TRowSet{
+        .Columns = columns.data(), .ColumnCount = 2, .RowCount = 4,
+        .Selection = nullptr, .RefCount = 1}};
+    TVectorSource source(
+        {"k", "v"}, std::move(batches),
+        {std::make_shared<TIntegerType>(TIntegerType::I64),
+         std::make_shared<TIntegerType>(TIntegerType::I64)});
+    auto root = ParsePlan(
+        "(rel aggregate (rel source \"data.parquet\") (keys k) "
+        "(agg c count) (agg s sum v))",
+        source);
+    TPhysicalPlanner planner;
+    auto runtime = planner.Build(root);
+
+    TRowSet result{};
+    ASSERT_TRUE(runtime->Next(result));
+    ASSERT_EQ(result.RowCount, 2);
+    auto* counts = reinterpret_cast<int64_t*>(result.Columns[1].Data);
+    auto* sums = reinterpret_cast<int64_t*>(result.Columns[2].Data);
+    std::map<int64_t, int64_t> countBySum;
+    for (int64_t row = 0; row < result.RowCount; ++row) {
+        countBySum[sums[row]] = counts[row];
+    }
+    EXPECT_EQ(countBySum.at(30), 2);
+    EXPECT_EQ(countBySum.at(7), 2);
+    Release(&result);
+}
+
+TEST(AggregateE2E, CompositeNullKeysTrackValidityPerPosition) {
+    std::array<int64_t, 6> first = {41, 99, 0, 17, 23, 88};
+    std::array<int64_t, 6> second = {1, 1, 1, 2, 31, 77};
+    std::array<uint8_t, 1> firstMask = {0b00000100};
+    std::array<uint8_t, 1> secondMask = {0b00001111};
+    std::array<int64_t, 6> values = {10, 20, 3, 4, 5, 6};
+    std::vector<TColumn> columns = {
+        TColumn{
+            .Data = reinterpret_cast<char*>(first.data()),
+            .Mask = firstMask.data()},
+        TColumn{
+            .Data = reinterpret_cast<char*>(second.data()),
+            .Mask = secondMask.data()},
+        TColumn{.Data = reinterpret_cast<char*>(values.data())},
+    };
+    std::vector<TRowSet> batches = {TRowSet{
+        .Columns = columns.data(), .ColumnCount = 3, .RowCount = 6,
+        .Selection = nullptr, .RefCount = 1}};
+    TVectorSource source({"k1", "k2", "v"}, std::move(batches));
+    auto root = ParsePlan(
+        "(rel aggregate (rel source \"data.parquet\") (keys k1 k2) "
+        "(agg c count) (agg s sum v))",
+        source);
+    TPhysicalPlanner planner;
+    auto runtime = planner.Build(root);
+
+    TRowSet result{};
+    ASSERT_TRUE(runtime->Next(result));
+    ASSERT_EQ(result.RowCount, 4);
+    auto* counts = reinterpret_cast<int64_t*>(result.Columns[2].Data);
+    auto* sums = reinterpret_cast<int64_t*>(result.Columns[3].Data);
+    std::map<int64_t, int64_t> countBySum;
+    for (int64_t row = 0; row < result.RowCount; ++row) {
+        countBySum[sums[row]] = counts[row];
+    }
+    EXPECT_EQ(countBySum.at(30), 2);
+    EXPECT_EQ(countBySum.at(3), 1);
+    EXPECT_EQ(countBySum.at(4), 1);
+    EXPECT_EQ(countBySum.at(11), 2);
+    Release(&result);
+}
+
 TEST(AggregateE2E, MixedStringI32KeysFinalizeToSeparateColumns) {
     std::array<int32_t, 4> ids1 = {1, 1, 2, 3};
     std::string data1 = "alphaalphabetagamma";

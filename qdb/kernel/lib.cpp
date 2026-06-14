@@ -123,8 +123,7 @@ BuildGenericAggregateProgramAst(
     if (!key.StoredTypeName.empty()) {
         stmts.push_back(std::make_shared<NQumir::NAst::TTypeDeclStmt>(
             NQumir::TLocation{}, key.StoredType));
-    } else if (!key.IsScalar() &&
-               NQumir::NAst::TMaybeType<NQumir::NAst::TNamedType>(key.KeyType)) {
+    } else if (NQumir::NAst::TMaybeType<NQumir::NAst::TNamedType>(key.KeyType)) {
         stmts.push_back(std::make_shared<NQumir::NAst::TTypeDeclStmt>(
             NQumir::TLocation{}, key.KeyType));
     }
@@ -209,8 +208,7 @@ BuildGenericAggregateFinalizeProgramAst(
             "generic aggregate finalize generator returned an invalid entry block"));
     }
     if (!key.StoredTypeName.empty() ||
-        (!key.IsScalar() &&
-         NQumir::NAst::TMaybeType<NQumir::NAst::TNamedType>(key.KeyType))) {
+        NQumir::NAst::TMaybeType<NQumir::NAst::TNamedType>(key.KeyType)) {
         parsed->insert(parsed->begin(),
             std::make_shared<NQumir::NAst::TTypeDeclStmt>(
                 NQumir::TLocation{}, key.KeyType));
@@ -227,8 +225,7 @@ BuildGenericAggregateMeasureProgramAst(
 {
     std::vector<NQumir::NAst::TExprPtr> stmts;
     if (!key.StoredTypeName.empty() ||
-        (!key.IsScalar() &&
-         NQumir::NAst::TMaybeType<NQumir::NAst::TNamedType>(key.StoredType))) {
+        NQumir::NAst::TMaybeType<NQumir::NAst::TNamedType>(key.StoredType)) {
         stmts.push_back(std::make_shared<NQumir::NAst::TTypeDeclStmt>(
             NQumir::TLocation{}, key.StoredType));
     }
