@@ -4,6 +4,7 @@
 
 namespace {
 
+// TODO: values should be vector of pairs
 using TTableValues = std::map<std::string, std::string>;
 
 struct TTableRow {
@@ -12,6 +13,8 @@ struct TTableRow {
 };
 
 using TTable = std::vector<TTableRow>;
+
+using TJoinFilter = std::function<bool(const TTableRow& row)>;
 
 int RandomInt(int* seed) {
     *seed = (*seed * 1103515245 + 12345) & 0x7fffffff;
@@ -42,7 +45,7 @@ std::vector<TTableRow> GenerateTable(int* seed, int numKeys, int numRows, std::s
     return table;
 }
 
-TTable InnerJoin(const TTable& left, const TTable& right) {
+TTable InnerJoin(const TTable& left, const TTable& right, TJoinFilter filter = {}) {
     int batchSize = 10;
     // key -> rows
     using THashMap = std::unordered_map<int, std::vector<TTableValues>>;
@@ -53,7 +56,7 @@ TTable InnerJoin(const TTable& left, const TTable& right) {
 
     TTable result;
 
-    auto progress = [&](auto& leftIt, const TTable& left, const TTable& right, THashMap& leftHash, THashMap& rightHash) -> bool {
+    auto progress = [&](auto& leftIt, const TTable& left, const TTable& right, THashMap& leftHash, THashMap& rightHash, bool isLeft) -> bool {
         bool hasMore = leftIt < left.size();
         if (!hasMore) {
             return false;
@@ -68,8 +71,16 @@ TTable InnerJoin(const TTable& left, const TTable& right) {
                 for (const auto& rightRow : rightIt->second) {
                     TTableRow joinedRow;
                     joinedRow.Key = key;
-                    joinedRow.Values.insert(row.begin(), row.end());
-                    joinedRow.Values.insert(rightRow.begin(), rightRow.end());
+                    if (isLeft) {
+                        joinedRow.Values.insert(row.begin(), row.end());
+                        joinedRow.Values.insert(rightRow.begin(), rightRow.end());
+                    } else {
+                        joinedRow.Values.insert(rightRow.begin(), rightRow.end());
+                        joinedRow.Values.insert(row.begin(), row.end());
+                    }
+                    if (filter && !filter(joinedRow)) {
+                        continue;
+                    }
                     result.push_back(joinedRow);
                 }
             }
@@ -79,14 +90,14 @@ TTable InnerJoin(const TTable& left, const TTable& right) {
         return true;
     };
 
-    while (progress(leftIt, left, right, leftHash, rightHash) || progress(rightIt, right, left, rightHash, leftHash)) {
+    while (progress(leftIt, left, right, leftHash, rightHash, true) || progress(rightIt, right, left, rightHash, leftHash, false)) {
         // keep joining until both sides are exhausted
     }
 
     return result;
 }
 
-TTable NestedLoopInnerJoin(const TTable& left, const TTable& right) {
+TTable NestedLoopInnerJoin(const TTable& left, const TTable& right, TJoinFilter filter = {}) {
     TTable result;
     for (const auto& leftRow : left) {
         for (const auto& rightRow : right) {
@@ -95,6 +106,10 @@ TTable NestedLoopInnerJoin(const TTable& left, const TTable& right) {
                 joinedRow.Key = leftRow.Key;
                 joinedRow.Values.insert(leftRow.Values.begin(), leftRow.Values.end());
                 joinedRow.Values.insert(rightRow.Values.begin(), rightRow.Values.end());
+                // Residual filter is applied before emit, same as InnerJoin.
+                if (filter && !filter(joinedRow)) {
+                    continue;
+                }
                 result.push_back(joinedRow);
             }
         }
@@ -102,9 +117,9 @@ TTable NestedLoopInnerJoin(const TTable& left, const TTable& right) {
     return result;
 }
 
-void CheckJoinMatchesNestedLoop(const TTable& left, const TTable& right) {
-    auto joinedTable = InnerJoin(left, right);
-    auto nestedLoopJoinedTable = NestedLoopInnerJoin(left, right);
+void CheckJoinMatchesNestedLoop(const TTable& left, const TTable& right, TJoinFilter filter = {}) {
+    auto joinedTable = InnerJoin(left, right, filter);
+    auto nestedLoopJoinedTable = NestedLoopInnerJoin(left, right, filter);
     EXPECT_EQ(joinedTable.size(), nestedLoopJoinedTable.size());
     for (const auto& row : joinedTable) {
         auto it = std::find_if(nestedLoopJoinedTable.begin(), nestedLoopJoinedTable.end(), [&](const TTableRow& r) {
@@ -223,6 +238,40 @@ TEST(JoinTest, EmptySides) {
     auto emptyLeft = GenerateTable(&seed, 5, 0, leftColumns);
     auto rightTable = GenerateTable(&seed, 5, 10, rightColumns);
     CheckJoinMatchesNestedLoop(emptyLeft, rightTable);
+}
+
+TEST(JoinTest, ResidualFilterAppliedBeforeEmit) {
+    int seed = 2024;
+    const int numLeftKeys = 8;
+    const int numRightKeys = 8;
+    const int numLeftRows = 30;
+    const int numRightRows = 35;
+    std::set<std::string> leftColumns = {"l1", "l2"};
+    std::set<std::string> rightColumns = {"r1", "r2"};
+    auto leftTable = GenerateTable(&seed, numLeftKeys, numLeftRows, leftColumns);
+    auto rightTable = GenerateTable(&seed, numRightKeys, numRightRows, rightColumns);
+
+    // Residual θ over the joined row: keep only pairs where l1 < r1
+    // lexicographically. The symmetric join must apply this at the match
+    // point (before emit) and agree with the nested-loop oracle.
+    TJoinFilter filter = [](const TTableRow& row) {
+        auto l = row.Values.find("l1");
+        auto r = row.Values.find("r1");
+        return l != row.Values.end() && r != row.Values.end() && l->second < r->second;
+    };
+
+    auto joined = InnerJoin(leftTable, rightTable, filter);
+    auto oracle = NestedLoopInnerJoin(leftTable, rightTable, filter);
+    EXPECT_EQ(joined.size(), oracle.size());
+    EXPECT_LT(joined.size(), InnerJoin(leftTable, rightTable).size()); // filter removed some pairs
+    for (const auto& row : joined) {
+        auto it = std::find_if(oracle.begin(), oracle.end(), [&](const TTableRow& r) {
+            return r.Key == row.Key && r.Values == row.Values;
+        });
+        EXPECT_NE(it, oracle.end());
+    }
+
+    CheckJoinMatchesNestedLoop(leftTable, rightTable, filter);
 }
 
 int main(int argc, char** argv) {
