@@ -272,6 +272,39 @@ QumirDbModule::QumirDbModule() {
             .ArgTypes = {ptrU8Type, i64Type, boolType},
             .ReturnType = std::make_shared<TVoidType>(),
         },
+        {
+            .Name = "qdb_sql_bool_and",
+            .MangledName = "qdb_sql_bool_and",
+            .Ptr = reinterpret_cast<void*>(static_cast<int64_t(*)(
+                int64_t, int64_t)>(qdb_sql_bool_and)),
+            .Packed = +[](const uint64_t* args, size_t) -> uint64_t {
+                return qdb_sql_bool_and(args[0], args[1]);
+            },
+            .ArgTypes = {i64Type, i64Type},
+            .ReturnType = i64Type,
+        },
+        {
+            .Name = "qdb_sql_bool_or",
+            .MangledName = "qdb_sql_bool_or",
+            .Ptr = reinterpret_cast<void*>(static_cast<int64_t(*)(
+                int64_t, int64_t)>(qdb_sql_bool_or)),
+            .Packed = +[](const uint64_t* args, size_t) -> uint64_t {
+                return qdb_sql_bool_or(args[0], args[1]);
+            },
+            .ArgTypes = {i64Type, i64Type},
+            .ReturnType = i64Type,
+        },
+        {
+            .Name = "qdb_sql_bool_not",
+            .MangledName = "qdb_sql_bool_not",
+            .Ptr = reinterpret_cast<void*>(static_cast<int64_t(*)(
+                int64_t)>(qdb_sql_bool_not)),
+            .Packed = +[](const uint64_t* args, size_t) -> uint64_t {
+                return qdb_sql_bool_not(args[0]);
+            },
+            .ArgTypes = {i64Type},
+            .ReturnType = i64Type,
+        },
     };
 }
 
