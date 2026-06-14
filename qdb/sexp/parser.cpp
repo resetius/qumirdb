@@ -119,53 +119,52 @@ TNodeParserMap MakeRelParsers(TRelParserOptions options) {
             auto rightExpr = co_await h.Expr();
             auto right = std::static_pointer_cast<IOperator>(rightExpr);
 
+            // Key list: ((lk rk) (lk rk) ...)
+            co_await h.Take('(');
             std::vector<TJoinKey> keys;
-            EJoinType type = EJoinType::Inner;
-            TExprPtr filter;
-
             while (true) {
                 auto tok = h.Next();
-                if (IParseHandle::IsOp(tok, ')')) break;
+                if (IParseHandle::IsOp(tok, ')')) break; // end of key list
                 if (!IParseHandle::IsOp(tok, '(')) {
-                    co_return IParseHandle::MakeError(tok, "expected '(' before join clause");
+                    co_return IParseHandle::MakeError(tok, "expected '(' before join key pair");
                 }
-                auto clause = h.Next();
-                if (clause.Type != TToken::Identifier) {
-                    co_return IParseHandle::MakeError(clause, "expected join clause name (on/type/filter)");
+                auto leftKey = h.Next();
+                if (leftKey.Type != TToken::Identifier) {
+                    co_return IParseHandle::MakeError(leftKey, "expected left key column");
                 }
-                if (clause.Name == "on") {
-                    auto leftKey = h.Next();
-                    if (leftKey.Type != TToken::Identifier) {
-                        co_return IParseHandle::MakeError(leftKey, "expected left key column in (on ...)");
-                    }
-                    auto rightKey = h.Next();
-                    if (rightKey.Type != TToken::Identifier) {
-                        co_return IParseHandle::MakeError(rightKey, "expected right key column in (on ...)");
-                    }
-                    co_await h.Take(')');
-                    keys.push_back({leftKey.Name, rightKey.Name});
-                } else if (clause.Name == "type") {
-                    auto typeTok = h.Next();
-                    if (typeTok.Type != TToken::Identifier) {
-                        co_return IParseHandle::MakeError(typeTok, "expected join type name in (type ...)");
-                    }
-                    auto parsed = ParseJoinType(typeTok.Name);
-                    if (!parsed) {
-                        co_return IParseHandle::MakeError(typeTok, "unknown join type: " + typeTok.Name);
-                    }
-                    type = *parsed;
-                    co_await h.Take(')');
-                } else if (clause.Name == "filter") {
-                    filter = co_await h.Expr();
-                    co_await h.Take(')');
-                } else {
-                    co_return IParseHandle::MakeError(clause, "unknown join clause: " + clause.Name);
+                auto rightKey = h.Next();
+                if (rightKey.Type != TToken::Identifier) {
+                    co_return IParseHandle::MakeError(rightKey, "expected right key column");
                 }
+                co_await h.Take(')');
+                keys.push_back({leftKey.Name, rightKey.Name});
+            }
+            if (keys.empty()) {
+                co_return TError(loc, "(rel join) requires at least one (left right) key pair");
             }
 
-            if (keys.empty()) {
-                co_return TError(loc, "(rel join) requires at least one (on left right) key");
+            // Join type as a bare keyword: (inner)
+            co_await h.Take('(');
+            auto typeTok = h.Next();
+            if (typeTok.Type != TToken::Identifier) {
+                co_return IParseHandle::MakeError(typeTok, "expected join type name");
             }
+            auto parsedType = ParseJoinType(typeTok.Name);
+            if (!parsedType) {
+                co_return IParseHandle::MakeError(typeTok, "unknown join type: " + typeTok.Name);
+            }
+            co_await h.Take(')');
+            EJoinType type = *parsedType;
+
+            // Optional residual predicate, then the closing ')'.
+            TExprPtr filter;
+            auto tok = h.Next();
+            if (!IParseHandle::IsOp(tok, ')')) {
+                h.Unget(tok);
+                filter = co_await h.Expr();
+                co_await h.Take(')');
+            }
+
             auto output = ComputeJoinOutputType(
                 left->OutputColumns(), right->OutputColumns(), type);
             if (!output) {

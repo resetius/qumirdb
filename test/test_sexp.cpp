@@ -220,7 +220,7 @@ TEST(SexpPrinter, Join) {
     auto join = MakeJoin(l, r, {{"a", "c"}}, EJoinType::Inner);
     ASSERT_TRUE(join.has_value()) << (join ? "" : join.error().ToString());
     EXPECT_EQ(PrintAst(*join, MakePrintOpts()),
-              "(rel join (rel source) (rel source) (on a c) (type inner))");
+              "(rel join (rel source) (rel source) ((a c)) (inner))");
 }
 
 TEST(SexpPrinter, JoinWithFilterAndMultipleKeys) {
@@ -231,7 +231,7 @@ TEST(SexpPrinter, JoinWithFilterAndMultipleKeys) {
     auto join = MakeJoin(l, r, {{"a", "c"}, {"b", "d"}}, EJoinType::Left, "(< b d)");
     ASSERT_TRUE(join.has_value()) << (join ? "" : join.error().ToString());
     EXPECT_EQ(PrintAst(*join, MakePrintOpts()),
-              "(rel join (rel source) (rel source) (on a c) (on b d) (type left) (filter (< b d)))");
+              "(rel join (rel source) (rel source) ((a c) (b d)) (left) (< b d))");
 }
 
 TEST(SexpParser, JoinPrintRoundtrip) {
@@ -240,7 +240,7 @@ TEST(SexpParser, JoinPrintRoundtrip) {
 
     const std::string input =
         "(rel join (rel source \"left.parquet\") (rel source \"right.parquet\") "
-        "(on a c) (type left) (filter (< b d)))";
+        "((a c)) (left) (< b d))";
 
     TRelParserOptions opts;
     opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
@@ -279,7 +279,7 @@ TEST(SexpParser, JoinRejectsMissingKeys) {
     auto p = MakeParser(std::move(opts));
 
     std::istringstream in(
-        "(rel join (rel source \"left.parquet\") (rel source \"right.parquet\") (type inner))");
+        "(rel join (rel source \"left.parquet\") (rel source \"right.parquet\") () (inner))");
     TTokenStream ts(in);
     EXPECT_FALSE(p.Parse(ts).has_value());
 }

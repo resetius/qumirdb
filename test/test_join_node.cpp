@@ -145,9 +145,9 @@ TEST(JoinNode, ToStringRoundTripsTypeAndFilter) {
     ASSERT_TRUE(join);
     auto s = (*join)->ToString();
     EXPECT_NE(s.find("(rel join"), std::string::npos);
-    EXPECT_NE(s.find("(on a c)"), std::string::npos);
-    EXPECT_NE(s.find("(type left)"), std::string::npos);
-    EXPECT_NE(s.find("(filter"), std::string::npos);
+    EXPECT_NE(s.find("((a c))"), std::string::npos);
+    EXPECT_NE(s.find("(left)"), std::string::npos);
+    EXPECT_NE(s.find("(< b d)"), std::string::npos);
 }
 
 TEST(JoinNode, JoinTypeNameParseRoundTrip) {
