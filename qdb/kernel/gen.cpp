@@ -1135,33 +1135,40 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
         std::make_shared<TCastExpr>(loc,
             std::make_shared<TFieldAccessExpr>(loc, ident("ht"), "GroupKeys"),
             ptrKeyType)));
+    if (!ptrColumnType) {
+        throw std::invalid_argument(
+            "GenGenericAggregateFinalizeAst: missing TColumn type");
+    }
     for (size_t fieldIndex = 0; fieldIndex < key.Fields.size(); ++fieldIndex) {
         const bool isString = TMaybeType<TStringType>(
             UnwrapNamedType(key.Fields[fieldIndex].Type));
+        const std::string columnName =
+            "output_column_" + std::to_string(fieldIndex);
+        const std::string maskName =
+            "output_mask_" + std::to_string(fieldIndex);
+        project.push_back(std::make_shared<TVarStmt>(
+            loc, columnName, ptrColumnType));
+        auto raw = std::make_shared<TIndexExpr>(loc,
+            ident("output_key_buffers"),
+            std::make_shared<TNumberExpr>(
+                loc, static_cast<int64_t>(fieldIndex)));
+        project.push_back(std::make_shared<TAssignExpr>(loc, columnName,
+            std::make_shared<TCastExpr>(loc,
+                std::make_shared<TCastExpr>(loc, std::move(raw), i64Type),
+                ptrColumnType)));
+        auto column = std::make_shared<TIndexExpr>(
+            loc, ident(columnName), std::make_shared<TNumberExpr>(loc, int64_t{0}));
+        project.push_back(std::make_shared<TVarStmt>(loc, maskName, ptrU8Type));
+        project.push_back(std::make_shared<TAssignExpr>(loc, maskName,
+            std::make_shared<TFieldAccessExpr>(loc, column, "Mask")));
         if (isString) {
-            if (!ptrColumnType) {
-                throw std::invalid_argument(
-                    "GenGenericAggregateFinalizeAst: missing TColumn type");
-            }
-            const std::string columnName =
-                "output_column_" + std::to_string(fieldIndex);
             const std::string dataName =
                 "output_data_" + std::to_string(fieldIndex);
             const std::string offsetsName =
                 "output_offsets_" + std::to_string(fieldIndex);
             const std::string copyResultName =
                 "output_copy_result_" + std::to_string(fieldIndex);
-            project.push_back(std::make_shared<TVarStmt>(
-                loc, columnName, ptrColumnType));
-            auto raw = std::make_shared<TIndexExpr>(loc,
-                ident("output_key_buffers"),
-                std::make_shared<TNumberExpr>(
-                    loc, static_cast<int64_t>(fieldIndex)));
-            project.push_back(std::make_shared<TAssignExpr>(loc, columnName,
-                std::make_shared<TCastExpr>(loc,
-                    std::make_shared<TCastExpr>(loc, std::move(raw), i64Type),
-                    ptrColumnType)));
-            auto column = std::make_shared<TIndexExpr>(
+            column = std::make_shared<TIndexExpr>(
                 loc, ident(columnName), std::make_shared<TNumberExpr>(loc, int64_t{0}));
             project.push_back(std::make_shared<TVarStmt>(loc, dataName, ptrU8Type));
             project.push_back(std::make_shared<TAssignExpr>(loc, dataName,
@@ -1195,12 +1202,13 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
         const std::string name = "output_key_" + std::to_string(fieldIndex);
         auto ptrFieldType = std::make_shared<TPointerType>(key.Fields[fieldIndex].Type);
         project.push_back(std::make_shared<TVarStmt>(loc, name, ptrFieldType));
-        auto raw = std::make_shared<TIndexExpr>(
-            loc, ident("output_key_buffers"),
-            std::make_shared<TNumberExpr>(loc, static_cast<int64_t>(fieldIndex)));
+        column = std::make_shared<TIndexExpr>(
+            loc, ident(columnName), std::make_shared<TNumberExpr>(loc, int64_t{0}));
         project.push_back(std::make_shared<TAssignExpr>(loc, name,
             std::make_shared<TCastExpr>(loc,
-                std::make_shared<TCastExpr>(loc, std::move(raw), i64Type),
+                std::make_shared<TCastExpr>(loc,
+                    std::make_shared<TFieldAccessExpr>(
+                        loc, column, "Data"), i64Type),
                 ptrFieldType)));
     }
     project.push_back(std::make_shared<TVarStmt>(loc, "slot", i64Type));
@@ -1214,6 +1222,15 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
         TExprPtr value;
         value = std::make_shared<TFieldAccessExpr>(
             loc, keyValue, "key_" + std::to_string(fieldIndex));
+        keyValue = std::make_shared<TIndexExpr>(
+            loc, ident("group_keys"), ident("slot"));
+        auto valid = std::make_shared<TFieldAccessExpr>(
+            loc, keyValue, "valid_" + std::to_string(fieldIndex));
+        loopStmts.push_back(std::make_shared<TCallExpr>(loc,
+            ident("qdb_bitmap_set_valid"),
+            std::vector<TExprPtr>{
+                ident("output_mask_" + std::to_string(fieldIndex)),
+                ident("slot"), std::move(valid)}));
         const bool isString = TMaybeType<TStringType>(
             UnwrapNamedType(key.Fields[fieldIndex].Type));
         if (!isString) {

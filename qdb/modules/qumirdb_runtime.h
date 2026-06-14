@@ -20,4 +20,6 @@ int64_t qdb_filter_string_compare(
     const uint8_t* left, int64_t leftSize,
     const uint8_t* right, int64_t rightSize);
 
+void qdb_bitmap_set_valid(uint8_t* bitmap, int64_t index, bool valid);
+
 } // extern "C"

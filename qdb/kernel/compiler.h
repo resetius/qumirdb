@@ -34,8 +34,8 @@ using TAggregateMeasure = std::function<int64_t(
 // outputBuffers, i64 outputCapacity) -> i64. outputBuffers must have NumAggs
 // entries, each pointing to an int64_t[outputCapacity] buffer, in the same
 // order as the `aggs` passed to CompileAggregate. Returns ht.Size (number of
-// groups), or -1 if outputCapacity < ht.Size. outputKeyBuffers has one opaque
-// byte destination per group key; generated code casts each to <ptr Ti>.
+// groups), or -1 if outputCapacity < ht.Size. outputKeyBuffers has one
+// TColumn* destination per group key; generated code fills Data and Mask.
 using TAggregateFinalize = std::function<int64_t(void* ht, void** outputKeyBuffers, int64_t** outputBuffers, int64_t outputCapacity)>;
 
 enum class EAggregateOutputKeyKind {
