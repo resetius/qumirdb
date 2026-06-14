@@ -56,6 +56,15 @@ EFilterValueKind SpecializeFilterPredicate(
         literalStorage.push_back(std::move(storage));
         return EFilterValueKind::String;
     }
+    if (auto cast = TMaybeNode<TCastExpr>(expr)) {
+        if (SpecializeFilterPredicate(
+                cast.Cast()->Operand, stringFields, stringValues,
+                stringViewType, literalStorage) == EFilterValueKind::String) {
+            expr = std::move(cast.Cast()->Operand);
+            return EFilterValueKind::String;
+        }
+        return EFilterValueKind::Other;
+    }
     if (auto binary = TMaybeNode<TBinaryExpr>(expr)) {
         const auto leftKind = SpecializeFilterPredicate(
             binary.Cast()->Left, stringFields, stringValues, stringViewType,
