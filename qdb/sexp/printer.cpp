@@ -93,21 +93,29 @@ static void PrintRel(NQumir::NAst::TExpr& expr, TPrinter& printer, TPrintFrame f
         printer.PrintExpr(join.Left(), frame.AllowTypeWrap, frame.Level + 1);
         printer.Separator(frame.Level + 1);
         printer.PrintExpr(join.Right(), frame.AllowTypeWrap, frame.Level + 1);
+        // Key list: ((lk rk) (lk rk) ...)
+        printer.Separator(frame.Level + 1);
+        out << '(';
+        bool firstKey = true;
         for (const auto& key : join.Keys()) {
-            printer.Separator(frame.Level + 1);
-            out << "(on ";
+            if (!firstKey) {
+                printer.Space();
+            }
+            firstKey = false;
+            out << '(';
             printer.PrintIdentifier(key.Left);
             printer.Space();
             printer.PrintIdentifier(key.Right);
             out << ')';
         }
+        out << ')';
+        // Join type as a bare keyword: (inner)
         printer.Separator(frame.Level + 1);
-        out << "(type " << JoinTypeName(join.JoinType()) << ')';
+        out << '(' << JoinTypeName(join.JoinType()) << ')';
+        // Optional residual predicate, printed directly (no 'filter' label).
         if (join.Filter()) {
             printer.Separator(frame.Level + 1);
-            out << "(filter ";
-            printer.PrintExpr(join.Filter(), frame.AllowTypeWrap, frame.Level + 2);
-            out << ')';
+            printer.PrintExpr(join.Filter(), frame.AllowTypeWrap, frame.Level + 1);
         }
         out << ')';
         return;

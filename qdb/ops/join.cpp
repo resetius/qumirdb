@@ -146,13 +146,17 @@ std::unordered_set<std::string> TJoinOperator::ComputeReferencedColumns() const 
 
 const std::string TJoinOperator::ToString() const {
     using namespace NQumir::NAst::NCore;
-    std::string s = "(rel join " + Left_->ToString() + " " + Right_->ToString();
-    for (const auto& key : Keys_) {
-        s += " (on " + key.Left + " " + key.Right + ")";
+    std::string s = "(rel join " + Left_->ToString() + " " + Right_->ToString() + " (";
+    for (size_t i = 0; i < Keys_.size(); ++i) {
+        if (i != 0) {
+            s += " ";
+        }
+        s += "(" + Keys_[i].Left + " " + Keys_[i].Right + ")";
     }
-    s += " (type " + std::string(JoinTypeName(Type_)) + ")";
+    s += ")";
+    s += " (" + std::string(JoinTypeName(Type_)) + ")";
     if (Filter_) {
-        s += " (filter " + PrintAst(Filter_) + ")";
+        s += " " + PrintAst(Filter_);
     }
     return s + ")";
 }
