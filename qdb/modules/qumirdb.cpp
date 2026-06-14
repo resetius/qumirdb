@@ -242,6 +242,22 @@ QumirDbModule::QumirDbModule() {
             .ArgTypes = {f64Type},
             .ReturnType = u64Type,
         },
+        {
+            .Name = "qdb_filter_string_compare",
+            .MangledName = "qdb_filter_string_compare",
+            .Ptr = reinterpret_cast<void*>(static_cast<int64_t(*)(
+                const uint8_t*, int64_t, const uint8_t*, int64_t)>(
+                    qdb_filter_string_compare)),
+            .Packed = +[](const uint64_t* args, size_t) -> uint64_t {
+                return static_cast<uint64_t>(qdb_filter_string_compare(
+                    reinterpret_cast<const uint8_t*>(args[0]),
+                    static_cast<int64_t>(args[1]),
+                    reinterpret_cast<const uint8_t*>(args[2]),
+                    static_cast<int64_t>(args[3])));
+            },
+            .ArgTypes = {ptrU8Type, i64Type, ptrU8Type, i64Type},
+            .ReturnType = i64Type,
+        },
     };
 }
 

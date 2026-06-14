@@ -16,4 +16,8 @@ void qdb_free(void* ptr);
 // docs/issues/qumir_missing_scalar_bitcast.md.
 uint64_t qdb_f64_bits(double value);
 
+int64_t qdb_filter_string_compare(
+    const uint8_t* left, int64_t leftSize,
+    const uint8_t* right, int64_t rightSize);
+
 } // extern "C"

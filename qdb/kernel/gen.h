@@ -34,7 +34,8 @@ NQumir::NAst::TExprPtr GenFilterKernelAst(
     const NQumir::NAst::TStructType& inputType,
     const std::unordered_map<std::string, int32_t>& fieldIndices,
     NQumir::NAst::TTypePtr columnType,
-    NQumir::NAst::TTypePtr rowSetType);
+    NQumir::NAst::TTypePtr rowSetType,
+    NQumir::NAst::TTypePtr stringViewType);
 
 // Builds the generic aggregation dispatch entry over aht_init/aht_upsert_dual/
 // aht_destroy. Key extraction uses the common TColumn materializer and the
