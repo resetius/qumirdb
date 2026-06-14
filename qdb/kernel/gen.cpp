@@ -1,4 +1,5 @@
 #include <qdb/kernel/gen.h>
+#include <qdb/types/nullable.h>
 
 #include <qdb/kernel/column_value.h>
 
@@ -277,10 +278,15 @@ NQumir::NAst::TExprPtr HashKeyValue(
             auto fieldHash = HashKeyValue(
                 fieldType, root, path, body, nextTemporary);
             path.pop_back();
-            if (fieldName.starts_with("key_")) {
+            const std::string validityName = fieldName.starts_with("key_")
+                ? "valid_" + fieldName.substr(std::string("key_").size())
+                : std::string{};
+            const bool hasValidity = !validityName.empty() && std::ranges::any_of(
+                structure.Cast()->Fields,
+                [&](const auto& field) { return field.first == validityName; });
+            if (hasValidity) {
                 auto validPath = path;
-                validPath.push_back(
-                    "valid_" + fieldName.substr(std::string("key_").size()));
+                validPath.push_back(validityName);
                 fieldHash = std::make_shared<TIfExpr>(loc,
                     KeyValueExpr(root, validPath), std::move(fieldHash), number(0));
             }
@@ -362,10 +368,15 @@ NQumir::NAst::TExprPtr EqualKeyValue(
             path.push_back(fieldName);
             auto fieldEqual = EqualKeyValue(fieldType, rightField->second, path);
             path.pop_back();
-            if (fieldName.starts_with("key_")) {
+            const std::string validityName = fieldName.starts_with("key_")
+                ? "valid_" + fieldName.substr(std::string("key_").size())
+                : std::string{};
+            const bool hasValidity = !validityName.empty() && std::ranges::any_of(
+                leftStruct.Cast()->Fields,
+                [&](const auto& field) { return field.first == validityName; });
+            if (hasValidity) {
                 auto validPath = path;
-                validPath.push_back(
-                    "valid_" + fieldName.substr(std::string("key_").size()));
+                validPath.push_back(validityName);
                 fieldEqual = binary("||",
                     std::make_shared<TUnaryExpr>(loc, TOperator("!"),
                         KeyValueExpr("left", validPath)),
@@ -490,10 +501,15 @@ NQumir::NAst::TExprPtr KeyOwnedBytesExpr(
             path.push_back(fieldName);
             auto fieldBytes = KeyOwnedBytesExpr(fieldType, root, path);
             path.pop_back();
-            if (fieldName.starts_with("key_")) {
+            const std::string validityName = fieldName.starts_with("key_")
+                ? "valid_" + fieldName.substr(std::string("key_").size())
+                : std::string{};
+            const bool hasValidity = !validityName.empty() && std::ranges::any_of(
+                structure.Cast()->Fields,
+                [&](const auto& field) { return field.first == validityName; });
+            if (hasValidity) {
                 auto validPath = path;
-                validPath.push_back(
-                    "valid_" + fieldName.substr(std::string("key_").size()));
+                validPath.push_back(validityName);
                 fieldBytes = std::make_shared<TIfExpr>(loc,
                     KeyValueExpr(root, validPath), std::move(fieldBytes), zero());
             }
@@ -819,6 +835,19 @@ TFilterTruthAst BuildFilterTruthAst(
     return materialize(std::move(state));
 }
 
+bool UsesNullableValue(
+    const NQumir::NAst::TExprPtr& expr,
+    const std::unordered_map<std::string, std::string>& validityNames)
+{
+    using namespace NQumir::NAst;
+    if (auto ident = TMaybeNode<TIdentExpr>(expr)) {
+        return validityNames.contains(ident.Cast()->Name);
+    }
+    return std::ranges::any_of(expr->Children(), [&](const auto& child) {
+        return UsesNullableValue(child, validityNames);
+    });
+}
+
 // Kernel takes (ref TRowSet) directly. Column data pointers are extracted via
 // TRowSet.Columns[colIdx].Data with a two-step cast: <ptr i8> -> i64 -> <ptr T>.
 NQumir::NAst::TExprPtr GenFilterKernelAst(
@@ -837,7 +866,8 @@ NQumir::NAst::TExprPtr GenFilterKernelAst(
     std::unordered_set<std::string> stringFields;
     std::unordered_map<std::string, std::string> stringValues;
     for (const auto& [name, type] : inputType.Fields) {
-        if (TMaybeType<TStringType>(UnwrapNamedType(type))) {
+        if (TMaybeType<TStringType>(
+                UnwrapNamedType(UnwrapNullableType(type)))) {
             stringFields.insert(name);
             stringValues.emplace(name, name + "_value");
         } else {
@@ -906,10 +936,13 @@ NQumir::NAst::TExprPtr GenFilterKernelAst(
         loopSetup.insert(loopSetup.end(),
             std::make_move_iterator(materialized.Setup.begin()),
             std::make_move_iterator(materialized.Setup.end()));
-        const std::string valueName = TMaybeType<TStringType>(UnwrapNamedType(type))
+        const std::string valueName = TMaybeType<TStringType>(
+            UnwrapNamedType(UnwrapNullableType(type)))
             ? stringValues.at(name)
             : fixedValues.at(name);
-        validityNames.emplace(valueName, prefix + "_valid");
+        if (IsNullableType(type)) {
+            validityNames.emplace(valueName, prefix + "_valid");
+        }
         loopSetup.push_back(std::make_shared<TVarStmt>(
             loc, valueName, materialized.ValueType));
         loopSetup.push_back(std::make_shared<TAssignExpr>(
@@ -923,12 +956,17 @@ NQumir::NAst::TExprPtr GenFilterKernelAst(
     auto cond = std::make_shared<TBinaryExpr>(loc, TOperator("<"),
         std::make_shared<TIdentExpr>(loc, "i"),
         std::make_shared<TIdentExpr>(loc, "n"));
-    size_t nextTruthTemporary = 0;
-    auto truth = BuildFilterTruthAst(
-        std::move(predicate), validityNames, loopSetup, nextTruthTemporary);
-    auto selected = std::make_shared<TBinaryExpr>(loc, TOperator("=="),
-        std::make_shared<TIdentExpr>(loc, truth.State),
-        std::make_shared<TNumberExpr>(loc, int64_t{1}));
+    TExprPtr selected;
+    if (validityNames.empty() || !UsesNullableValue(predicate, validityNames)) {
+        selected = std::move(predicate);
+    } else {
+        size_t nextTruthTemporary = 0;
+        auto truth = BuildFilterTruthAst(
+            std::move(predicate), validityNames, loopSetup, nextTruthTemporary);
+        selected = std::make_shared<TBinaryExpr>(loc, TOperator("=="),
+            std::make_shared<TIdentExpr>(loc, truth.State),
+            std::make_shared<TNumberExpr>(loc, int64_t{1}));
+    }
     auto castedPred = std::make_shared<TCastExpr>(loc, std::move(selected),
         std::make_shared<TIntegerType>(TIntegerType::U8));
     auto writeSel = std::make_shared<TArrayAssignExpr>(loc, "selection",
@@ -1059,12 +1097,13 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
             throw std::invalid_argument(
                 "GenGenericAggregateDispatchAst: unknown argument column '" + *argField + "'");
         }
-        auto argType = TMaybeType<TIntegerType>(UnwrapNamedType(arg->second));
+        auto unwrappedArgType = UnwrapNullableType(arg->second);
+        auto argType = TMaybeType<TIntegerType>(UnwrapNamedType(unwrappedArgType));
         if (!argType) {
             throw std::invalid_argument(
                 "GenGenericAggregateDispatchAst: aggregate argument must be integer");
         }
-        valueType = arg->second;
+        valueType = std::move(unwrappedArgType);
         const auto index = static_cast<int32_t>(std::distance(inputType.Fields.begin(), arg));
         auto ptrValueType = std::make_shared<TPointerType>(valueType);
         update.push_back(var("values", ptrValueType));
@@ -1092,10 +1131,13 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
     keyFields.reserve(key.Fields.size());
     auto stringViewType = FindStringViewType(key.LookupType);
     for (size_t fieldIndex = 0; fieldIndex < key.Fields.size(); ++fieldIndex) {
+        auto logicalType = key.Fields[fieldIndex].IsNullable
+            ? std::make_shared<TNullable>(key.Fields[fieldIndex].Type)
+            : key.Fields[fieldIndex].Type;
         keyFields.push_back(BuildColumnValueAst(
             "key_column_" + std::to_string(fieldIndex), "i",
             "key_value_" + std::to_string(fieldIndex),
-            key.Fields[fieldIndex].Type, stringViewType));
+            std::move(logicalType), stringViewType));
     }
 
     std::vector<TExprPtr> fields;
@@ -1251,9 +1293,11 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
                 ptrColumnType)));
         auto column = std::make_shared<TIndexExpr>(
             loc, ident(columnName), std::make_shared<TNumberExpr>(loc, int64_t{0}));
-        project.push_back(std::make_shared<TVarStmt>(loc, maskName, ptrU8Type));
-        project.push_back(std::make_shared<TAssignExpr>(loc, maskName,
-            std::make_shared<TFieldAccessExpr>(loc, column, "Mask")));
+        if (key.Fields[fieldIndex].IsNullable) {
+            project.push_back(std::make_shared<TVarStmt>(loc, maskName, ptrU8Type));
+            project.push_back(std::make_shared<TAssignExpr>(loc, maskName,
+                std::make_shared<TFieldAccessExpr>(loc, column, "Mask")));
+        }
         if (isString) {
             const std::string dataName =
                 "output_data_" + std::to_string(fieldIndex);
@@ -1315,15 +1359,17 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
         TExprPtr value;
         value = std::make_shared<TFieldAccessExpr>(
             loc, keyValue, "key_" + std::to_string(fieldIndex));
-        keyValue = std::make_shared<TIndexExpr>(
-            loc, ident("group_keys"), ident("slot"));
-        auto valid = std::make_shared<TFieldAccessExpr>(
-            loc, keyValue, "valid_" + std::to_string(fieldIndex));
-        loopStmts.push_back(std::make_shared<TCallExpr>(loc,
-            ident("qdb_bitmap_set_valid"),
-            std::vector<TExprPtr>{
-                ident("output_mask_" + std::to_string(fieldIndex)),
-                ident("slot"), std::move(valid)}));
+        if (key.Fields[fieldIndex].IsNullable) {
+            keyValue = std::make_shared<TIndexExpr>(
+                loc, ident("group_keys"), ident("slot"));
+            auto valid = std::make_shared<TFieldAccessExpr>(
+                loc, keyValue, "valid_" + std::to_string(fieldIndex));
+            loopStmts.push_back(std::make_shared<TCallExpr>(loc,
+                ident("qdb_bitmap_set_valid"),
+                std::vector<TExprPtr>{
+                    ident("output_mask_" + std::to_string(fieldIndex)),
+                    ident("slot"), std::move(valid)}));
+        }
         const bool isString = TMaybeType<TStringType>(
             UnwrapNamedType(key.Fields[fieldIndex].Type));
         if (!isString) {

@@ -2,6 +2,7 @@
 
 #include <qdb/io/io.h>
 #include <qdb/kernel/compiler.h>
+#include <qdb/types/nullable.h>
 
 #include <qumir/codegen/llvm/llvm_initializer.h>
 #include <qumir/parser/core/lexer.h>
@@ -86,8 +87,8 @@ std::array<uint8_t, 6> RunNullableIntegerFilter(
             .Mask = rightMask.data()},
     };
     TStructType inputType({
-        {"left", std::make_shared<TIntegerType>()},
-        {"right", std::make_shared<TIntegerType>()},
+        {"left", std::make_shared<TNullable>(std::make_shared<TIntegerType>())},
+        {"right", std::make_shared<TNullable>(std::make_shared<TIntegerType>())},
     });
     auto dispatch = TKernelCompiler().CompileFilter(
         inputType, ParsePredicate(predicateSource));
@@ -195,6 +196,21 @@ TEST(FilterKernel, AppliesSqlThreeValuedLogicToNullableColumns) {
         (std::array<uint8_t, 6>{0, 0xff, 0, 0xff, 0xff, 0}));
     EXPECT_EQ(RunNullableIntegerFilter("(! (== left 1))"),
         (std::array<uint8_t, 6>{0xff, 0, 0, 0, 0, 0xff}));
+}
+
+TEST(FilterKernel, SkipsThreeValuedLogicForNonNullablePredicate) {
+    TStructType inputType({
+        {"plain", std::make_shared<TIntegerType>()},
+        {"optional", std::make_shared<TNullable>(
+            std::make_shared<TIntegerType>())},
+    });
+    std::ostringstream diagnostics;
+    TKernelCompiler compiler(&diagnostics);
+    auto dispatch = compiler.CompileFilter(
+        inputType, ParsePredicate("(== plain 1)"));
+    ASSERT_TRUE(dispatch);
+    EXPECT_EQ(diagnostics.str().find("qdb_sql_bool_"), std::string::npos);
+    EXPECT_EQ(diagnostics.str().find("filter_truth_state"), std::string::npos);
 }
 
 } // namespace

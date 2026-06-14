@@ -3,6 +3,7 @@
 #include <qdb/kernel/aggregate_key.h>
 #include <qdb/kernel/gen.h>
 #include <qdb/kernel/lib.h>
+#include <qdb/types/nullable.h>
 #include <qdb/modules/qumirdb.h>
 #include <qdb/modules/qumirdb_types.h>
 
@@ -19,6 +20,10 @@
 namespace {
 
 using namespace NQumir::NAst;
+
+TTypePtr Nullable(TTypePtr type) {
+    return std::make_shared<NQqb::TNullable>(std::move(type));
+}
 
 std::shared_ptr<TStructType> StructOf(const TTypePtr& type) {
     auto named = TMaybeType<TNamedType>(type);
@@ -239,7 +244,7 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileDualKeyEntry(
 }
 
 TEST(StringKeyDescriptor, BuildsScalarLookupAndStoredTypes) {
-    TStructType input({{"name", std::make_shared<TStringType>()}});
+    TStructType input({{"name", Nullable(std::make_shared<TStringType>())}});
     auto key = NQqb::NKernel::BuildAggregateKeyDescriptor(input, {"name"});
 
     ASSERT_TRUE(key.IsScalar());
@@ -264,7 +269,9 @@ TEST(StringKeyDescriptor, BuildsParallelCompositeLayouts) {
     auto i32 = std::make_shared<TIntegerType>(TIntegerType::I32);
     auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
     auto string = std::make_shared<TStringType>();
-    TStructType input({{"id", i64}, {"name", string}, {"code", i32}});
+    TStructType input({
+        {"id", Nullable(i64)}, {"name", Nullable(string)},
+        {"code", Nullable(i32)}});
     auto key = NQqb::NKernel::BuildAggregateKeyDescriptor(
         input, {"id", "name", "code"});
 
@@ -301,7 +308,7 @@ TEST(StringKeyDescriptor, RewritesNestedStringLeaves) {
     auto nested = std::make_shared<TStructType>(
         std::vector<std::pair<std::string, TTypePtr>>{
             {"prefix", i64}, {"text", std::make_shared<TStringType>()}});
-    TStructType input({{"nested", nested}});
+    TStructType input({{"nested", Nullable(nested)}});
     auto key = NQqb::NKernel::BuildAggregateKeyDescriptor(input, {"nested"});
 
     ASSERT_TRUE(key.IsScalar());
@@ -327,10 +334,37 @@ TEST(StringKeyDescriptor, KeepsFixedWidthRepresentationShared) {
     EXPECT_FALSE(key.HasDistinctLookupType());
     EXPECT_EQ(key.LookupType, key.StoredType);
     EXPECT_EQ(key.KeyType, key.StoredType);
+    EXPECT_EQ(key.Size, 16u);
+    auto stored = StructOf(key.StoredType);
+    ASSERT_NE(stored, nullptr);
+    EXPECT_EQ(stored->Fields.size(), 2u);
+    EXPECT_EQ(stored->Fields[0].first, "key_0");
+    EXPECT_EQ(stored->Fields[1].first, "key_1");
+    EXPECT_FALSE(key.Fields[0].IsNullable);
+    EXPECT_FALSE(key.Fields[1].IsNullable);
+}
+
+TEST(StringKeyDescriptor, AddsValidityOnlyForNullableFields) {
+    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
+    TStructType input({{"plain", i64}, {"optional", Nullable(i64)}});
+    auto key = NQqb::NKernel::BuildAggregateKeyDescriptor(
+        input, {"plain", "optional"});
+
+    auto stored = StructOf(key.StoredType);
+    ASSERT_NE(stored, nullptr);
+    EXPECT_EQ(key.Size, 24u);
+    EXPECT_FALSE(key.Fields[0].IsNullable);
+    EXPECT_TRUE(key.Fields[1].IsNullable);
+    EXPECT_EQ(stored->Fields[0].first, "key_0");
+    EXPECT_EQ(stored->Fields[1].first, "valid_1");
+    EXPECT_EQ(stored->Fields.back().first, "key_1");
+    for (const auto& field : key.Fields) {
+        EXPECT_FALSE(NQqb::IsNullableType(field.Type));
+    }
 }
 
 TEST(StringKeyDescriptor, CompilesScalarCrossRepresentationOperations) {
-    TStructType input({{"name", std::make_shared<TStringType>()}});
+    TStructType input({{"name", Nullable(std::make_shared<TStringType>())}});
     auto key = NQqb::NKernel::BuildAggregateKeyDescriptor(input, {"name"});
     auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
     auto boolean = std::make_shared<TBoolType>();
@@ -403,7 +437,9 @@ static_assert(sizeof(TStoredPair) == 40);
 
 TEST(StringKeyDescriptor, CompilesCompositeCrossRepresentationOperations) {
     auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
-    TStructType input({{"id", i64}, {"name", std::make_shared<TStringType>()}});
+    TStructType input({
+        {"id", Nullable(i64)},
+        {"name", Nullable(std::make_shared<TStringType>())}});
     auto key = NQqb::NKernel::BuildAggregateKeyDescriptor(input, {"id", "name"});
     auto boolean = std::make_shared<TBoolType>();
 
@@ -436,7 +472,7 @@ TEST(StringKeyDescriptor, CompilesCompositeCrossRepresentationOperations) {
 
 TEST(StringKeyDescriptor, FixedWidthOwnershipCloneIsIdentity) {
     auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
-    TStructType input({{"id", i64}});
+    TStructType input({{"id", Nullable(i64)}});
     auto key = NQqb::NKernel::BuildAggregateKeyDescriptor(input, {"id"});
     void* entry = nullptr;
     auto runner = CompileCloneEntry(key, entry);
@@ -452,7 +488,7 @@ TEST(StringKeyDescriptor, FixedWidthOwnershipCloneIsIdentity) {
 }
 
 TEST(StringKeyDescriptor, StringOwnershipCloneCopiesBytes) {
-    TStructType input({{"name", std::make_shared<TStringType>()}});
+    TStructType input({{"name", Nullable(std::make_shared<TStringType>())}});
     auto key = NQqb::NKernel::BuildAggregateKeyDescriptor(input, {"name"});
     void* entry = nullptr;
     auto runner = CompileCloneEntry(key, entry);
@@ -509,7 +545,9 @@ static_assert(sizeof(TStoredStrings) == 64);
 TEST(StringKeyDescriptor, CompositeOwnershipCloneUsesOneBlock) {
     auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
     auto string = std::make_shared<TStringType>();
-    TStructType input({{"id", i64}, {"first", string}, {"second", string}});
+    TStructType input({
+        {"id", Nullable(i64)}, {"first", Nullable(string)},
+        {"second", Nullable(string)}});
     auto key = NQqb::NKernel::BuildAggregateKeyDescriptor(
         input, {"id", "first", "second"});
     void* entry = nullptr;
