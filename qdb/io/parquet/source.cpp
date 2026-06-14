@@ -1,4 +1,5 @@
 #include <qdb/io/parquet/source.h>
+#include <qdb/types/nullable.h>
 
 #include <stdexcept>
 #include <cstdlib>
@@ -36,6 +37,14 @@ TTypePtr ArrowTypeToQumir(const std::shared_ptr<arrow::DataType>& type) {
         case arrow::Type::LARGE_STRING: return std::make_shared<NQumir::NAst::TStringType>();
         default: return nullptr;
     }
+}
+
+TTypePtr ArrowFieldToQumir(const std::shared_ptr<arrow::Field>& field) {
+    auto type = ArrowTypeToQumir(field->type());
+    if (type && field->nullable()) {
+        return std::make_shared<TNullable>(std::move(type));
+    }
+    return type;
 }
 
 struct TBatchData {
@@ -122,7 +131,7 @@ TParquetSource::TParquetSource(const std::string& path) {
         Names_.push_back(field->name());
         Columns_.push_back({
             .Name = Names_.back(),
-            .Type = ArrowTypeToQumir(field->type()),
+            .Type = ArrowFieldToQumir(field),
         });
     }
     Schema_ = TSchema{std::span<const TColumnSchema>(Columns_)};
@@ -158,7 +167,7 @@ void TParquetSource::RestrictColumns(const std::unordered_set<std::string>& name
         Names_.push_back(field->name());
         Columns_.push_back({
             .Name = Names_.back(),
-            .Type = ArrowTypeToQumir(field->type()),
+            .Type = ArrowFieldToQumir(field),
         });
     }
     Schema_ = TSchema{std::span<const TColumnSchema>(Columns_)};

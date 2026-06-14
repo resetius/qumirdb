@@ -1,4 +1,5 @@
 #include <qdb/io/text/sink.h>
+#include <qdb/types/nullable.h>
 
 #include <charconv>
 #include <iomanip>
@@ -79,7 +80,8 @@ std::string FormatCell(const TColumn& col, int32_t row, const TTypePtr& type) {
         return "?";
     }
     char buf[64];
-    if (auto t = TMaybeType<TIntegerType>(type)) {
+    const auto valueType = UnwrapNullableType(type);
+    if (auto t = TMaybeType<TIntegerType>(valueType)) {
         auto intType = t.Cast();
         const char* ptr = col.Data + row * (intType->BitWidth() / 8);
         std::to_chars_result r;
@@ -104,15 +106,15 @@ std::string FormatCell(const TColumn& col, int32_t row, const TTypePtr& type) {
         }
         return std::string(buf, r.ptr);
     }
-    if (TMaybeType<TFloatType>(type)) {
+    if (TMaybeType<TFloatType>(valueType)) {
         double v = reinterpret_cast<const double*>(col.Data)[row];
         auto r = std::to_chars(buf, buf + sizeof(buf), v);
         return std::string(buf, r.ptr);
     }
-    if (TMaybeType<TBoolType>(type)) {
+    if (TMaybeType<TBoolType>(valueType)) {
         return IsBitSet(col, row) ? "true" : "false";
     }
-    if (TMaybeType<TStringType>(type)) {
+    if (TMaybeType<TStringType>(valueType)) {
         if (col.OffsetWidth == 4) {
             auto sv = StringViewValue<int32_t>(col, row);
             return std::string(sv);
@@ -120,7 +122,7 @@ std::string FormatCell(const TColumn& col, int32_t row, const TTypePtr& type) {
         auto sv = StringViewValue<int64_t>(col, row);
         return std::string(sv);
     }
-    if (TMaybeType<TSymbolType>(type)) {
+    if (TMaybeType<TSymbolType>(valueType)) {
         return std::string(1, col.Data[row]);
     }
     return "?";
@@ -137,7 +139,8 @@ void WriteValue(std::ostream& out, const TColumn& col, int32_t row, const TTypeP
         return;
     }
 
-    if (auto t = TMaybeType<TIntegerType>(type)) {
+    const auto valueType = UnwrapNullableType(type);
+    if (auto t = TMaybeType<TIntegerType>(valueType)) {
         auto intType = t.Cast();
         const char* ptr = col.Data + row * (intType->BitWidth() / 8);
         char buffer[64];
@@ -179,22 +182,22 @@ void WriteValue(std::ostream& out, const TColumn& col, int32_t row, const TTypeP
                 }
                 return;
         }
-    } else if (TMaybeType<TFloatType>(type)) {
+    } else if (TMaybeType<TFloatType>(valueType)) {
         char buffer[64];
         auto view = ToCharsView(out, reinterpret_cast<const double*>(col.Data)[row], buffer, sizeof(buffer));
         out.write(view.data(), static_cast<std::streamsize>(view.size()));
         return;
-    } else if (TMaybeType<TBoolType>(type)) {
+    } else if (TMaybeType<TBoolType>(valueType)) {
         out << (IsBitSet(col, row) ? "true" : "false");
         return;
-    } else if (TMaybeType<TStringType>(type)) {
+    } else if (TMaybeType<TStringType>(valueType)) {
         if constexpr (std::is_same_v<TOffset, int32_t>) {
             CsvWriteEscapedView<int32_t>(out, StringViewValue<int32_t>(col, row), ',');
         } else {
             CsvWriteEscapedView<int64_t>(out, StringViewValue<int64_t>(col, row), ',');
         }
         return;
-    } else if (TMaybeType<TSymbolType>(type)) {
+    } else if (TMaybeType<TSymbolType>(valueType)) {
         out.put(col.Data[row]);
         return;
     }
@@ -203,8 +206,9 @@ void WriteValue(std::ostream& out, const TColumn& col, int32_t row, const TTypeP
 }
 
 bool IsNumeric(const TTypePtr& type) {
-    return static_cast<bool>(TMaybeType<TIntegerType>(type)) ||
-           static_cast<bool>(TMaybeType<TFloatType>(type));
+    const auto valueType = UnwrapNullableType(type);
+    return static_cast<bool>(TMaybeType<TIntegerType>(valueType)) ||
+           static_cast<bool>(TMaybeType<TFloatType>(valueType));
 }
 
 template <typename TOffset>
@@ -328,7 +332,7 @@ void TCsvSink::Write(const TRowSet& rowSet) {
                 Out_ << Separator_;
             }
             const auto& col = rowSet.Columns[c];
-            const auto& type = Schema_.Columns[c].Type;
+            const auto type = UnwrapNullableType(Schema_.Columns[c].Type);
             if (NoEscape_ && TMaybeType<TStringType>(type)) {
                 if (col.OffsetWidth == 4) {
                     WriteCsvStringRaw<int32_t>(Out_, col, row);
