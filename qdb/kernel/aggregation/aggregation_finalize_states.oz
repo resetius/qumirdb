@@ -4,6 +4,7 @@
   (fun aht_finalize_states
        ((var ht <ref HashTable>)
         (var output_buffers <ptr <ptr i64>>)
+        (var num_aggs i64)
         (var output_capacity i64)) -> i64
     (block
       (var size = (field ht Size))
@@ -14,7 +15,6 @@
       (if (>= result (: 0 i64))
         (block
           (var agg_buffers = (field ht AggBuffers))
-          (var num_aggs = (field ht NumAggs))
           (var a i64)
           (= a (: 0 i64))
           (while (< a num_aggs)

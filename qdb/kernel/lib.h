@@ -1,6 +1,7 @@
 #pragma once
 
 #include <qdb/kernel/aggregate_key.h>
+#include <qdb/kernel/gen.h>
 
 #include <qumir/error.h>
 #include <qumir/parser/ast.h>
@@ -56,7 +57,8 @@ BuildGenericAggregateProgramAst(
     const NQumir::NAst::TStructType& inputType,
     const TAggregateKeyDescriptor& key,
     const std::optional<std::string>& argField,
-    const std::vector<std::string>& reducers,
+    const TAggReducerLayout& layout,
+    bool argIsNullable,
     NQumir::NAst::TTypePtr columnType,
     NQumir::NAst::TTypePtr rowSetType,
     NQumir::NAst::TTypePtr hashTableType);
@@ -64,6 +66,7 @@ BuildGenericAggregateProgramAst(
 std::expected<NQumir::NAst::TExprPtr, NQumir::TError>
 BuildGenericAggregateFinalizeProgramAst(
     const TAggregateKeyDescriptor& key,
+    const TAggReducerLayout& layout,
     NQumir::NAst::TTypePtr hashTableType,
     NQumir::NAst::TTypePtr columnType = nullptr);
 

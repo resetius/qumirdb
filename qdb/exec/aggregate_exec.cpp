@@ -56,6 +56,7 @@ struct TAggregateRowSetData {
 
     std::vector<TKeyBuffer> Keys;
     std::vector<std::vector<int64_t>> AggBuffers;
+    std::vector<std::vector<uint8_t>> AggMasks;
     std::vector<TColumn> Columns;
 };
 
@@ -127,14 +128,21 @@ bool TRuntimeAggregate::Next(TRowSet& rowSet) {
         outputKeyBuffers[i] = &keyBuffer.Column;
     }
     data->AggBuffers.resize(Kernels_.NumAggs);
+    data->AggMasks.resize(Kernels_.NumAggs);
     std::vector<int64_t*> outputBuffers(Kernels_.NumAggs);
+    std::vector<uint8_t*> outputAggMasks(Kernels_.NumAggs, nullptr);
     for (size_t i = 0; i < Kernels_.NumAggs; ++i) {
         data->AggBuffers[i].resize(size);
         outputBuffers[i] = data->AggBuffers[i].data();
+        if (i < Kernels_.OutputAggs.size() && Kernels_.OutputAggs[i].IsNullable) {
+            data->AggMasks[i].resize((size + 7) / 8);
+            outputAggMasks[i] = data->AggMasks[i].data();
+        }
     }
 
     const int64_t finalized = Kernels_.Finalize(
-        ht.data(), outputKeyBuffers.data(), outputBuffers.data(), size);
+        ht.data(), outputKeyBuffers.data(), outputBuffers.data(),
+        outputAggMasks.data(), size);
     Kernels_.Dispatch(ht.data(), nullptr, 0, kOpDestroy);
     if (finalized != size) {
         delete data;
@@ -145,8 +153,11 @@ bool TRuntimeAggregate::Next(TRowSet& rowSet) {
     for (auto& buffer : data->Keys) {
         data->Columns.push_back(buffer.Column);
     }
-    for (auto& buffer : data->AggBuffers) {
-        data->Columns.push_back(TColumn{.Data = reinterpret_cast<char*>(buffer.data())});
+    for (size_t i = 0; i < data->AggBuffers.size(); ++i) {
+        auto& mask = data->AggMasks[i];
+        data->Columns.push_back(TColumn{
+            .Data = reinterpret_cast<char*>(data->AggBuffers[i].data()),
+            .Mask = mask.empty() ? nullptr : mask.data()});
     }
 
     rowSet = {

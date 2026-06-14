@@ -181,14 +181,21 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
         }
     }
     std::vector<std::string> funcs;
+    std::vector<bool> hasArg;
     funcs.reserve(aggs.size());
+    hasArg.reserve(aggs.size());
     std::optional<std::string> argField;
     for (const auto& agg : aggs) {
         if (agg.Func != "count" && agg.Func != "sum" && agg.Func != "min" && agg.Func != "max") {
             throw NQumir::TError("CompileAggregate: unsupported aggregate function '" + agg.Func + "'");
         }
         funcs.push_back(agg.Func);
+        hasArg.push_back(agg.Arg != nullptr);
 
+        if (agg.Func != "count" && !agg.Arg) {
+            throw NQumir::TError(
+                "CompileAggregate: '" + agg.Func + "' requires an argument column");
+        }
         if (agg.Arg) {
             auto ident = TMaybeNode<TIdentExpr>(agg.Arg);
             if (!ident) {
@@ -210,6 +217,9 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
             "CompileAggregate: aggregate argument column '" + *argField +
             "' must be integer while reducer states are i64");
     }
+    const bool argIsNullable =
+        argField && IsNullableType(requireField(*argField));
+    const auto layout = NKernel::BuildAggReducerLayout(funcs, hasArg, argIsNullable);
 
     auto dbModule = std::make_shared<NQumir::NRegistry::QumirDbModule>();
     TTypePtr columnType, rowSetType, hashTableType;
@@ -229,7 +239,7 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
     dispatchRunner->RegisterModule(dbModule, true);
 
     auto dispatchProgram = NKernel::BuildGenericAggregateProgramAst(
-        inputType, keyDescriptor, argField, funcs,
+        inputType, keyDescriptor, argField, layout, argIsNullable,
         columnType, rowSetType, hashTableType);
     if (!dispatchProgram) {
         throw NQumir::TError(
@@ -265,7 +275,7 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
     finalizeRunner->RegisterModule(dbModule, true);
 
     auto finalizeProgram = NKernel::BuildGenericAggregateFinalizeProgramAst(
-        keyDescriptor, hashTableType, columnType);
+        keyDescriptor, layout, hashTableType, columnType);
     if (!finalizeProgram) {
         throw NQumir::TError(
             "CompileAggregate: finalize program: " + finalizeProgram.error().ToString());
@@ -280,10 +290,14 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
 
     using TDispatchFn = int64_t(*)(void*, TRowSet*, int64_t, int64_t);
     using TMeasureFn = int64_t(*)(void*, int64_t*, int64_t);
-    using TFinalizeFn = int64_t(*)(void*, void**, int64_t**, int64_t);
+    using TFinalizeFn = int64_t(*)(void*, void**, int64_t**, uint8_t**, int64_t);
 
     TAggregateKernels kernels;
     kernels.NumAggs = funcs.size();
+    kernels.OutputAggs.reserve(layout.Reducers.size());
+    for (const auto& reducer : layout.Reducers) {
+        kernels.OutputAggs.push_back({.IsNullable = reducer.IsNullableOutput});
+    }
     kernels.OutputKeys.reserve(keyDescriptor.Fields.size());
     for (const auto& field : keyDescriptor.Fields) {
         const auto logicalType = UnwrapNamedType(field.Type);
@@ -302,8 +316,8 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
     kernels.Measure = [measureFn, measureRunner](void* ht, int64_t* outputKeyBytes, int64_t outputCapacity) {
         return reinterpret_cast<TMeasureFn>(measureFn)(ht, outputKeyBytes, outputCapacity);
     };
-    kernels.Finalize = [finalizeFn, finalizeRunner](void* ht, void** outputKeyBuffers, int64_t** outputBuffers, int64_t outputCapacity) {
-        return reinterpret_cast<TFinalizeFn>(finalizeFn)(ht, outputKeyBuffers, outputBuffers, outputCapacity);
+    kernels.Finalize = [finalizeFn, finalizeRunner](void* ht, void** outputKeyBuffers, int64_t** outputBuffers, uint8_t** outputAggMasks, int64_t outputCapacity) {
+        return reinterpret_cast<TFinalizeFn>(finalizeFn)(ht, outputKeyBuffers, outputBuffers, outputAggMasks, outputCapacity);
     };
     return kernels;
 }

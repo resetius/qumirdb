@@ -36,7 +36,10 @@ using TAggregateMeasure = std::function<int64_t(
 // order as the `aggs` passed to CompileAggregate. Returns ht.Size (number of
 // groups), or -1 if outputCapacity < ht.Size. outputKeyBuffers has one
 // TColumn* destination per group key; generated code fills Data and Mask.
-using TAggregateFinalize = std::function<int64_t(void* ht, void** outputKeyBuffers, int64_t** outputBuffers, int64_t outputCapacity)>;
+// outputAggMasks has one u8* per aggregate (NumAggs entries, same order as
+// `aggs`): a non-null entry points to a bitmap the generated code fills for a
+// nullable aggregate output; entries for non-nullable aggregates are ignored.
+using TAggregateFinalize = std::function<int64_t(void* ht, void** outputKeyBuffers, int64_t** outputBuffers, uint8_t** outputAggMasks, int64_t outputCapacity)>;
 
 enum class EAggregateOutputKeyKind {
     Fixed,
@@ -50,6 +53,10 @@ struct TAggregateOutputKey {
     size_t Alignment = 0;
 };
 
+struct TAggregateOutputAgg {
+    bool IsNullable = false;
+};
+
 // The compiled kernels for one Aggregation query: Dispatch handles
 // init/update/destroy of the HashTable (via agg_dispatch's op-codes),
 // Finalize copies the dense group keys/aggregate buffers to output arrays.
@@ -59,6 +66,7 @@ struct TAggregateKernels {
     TAggregateFinalize Finalize;
     size_t NumAggs = 0;
     std::vector<TAggregateOutputKey> OutputKeys;
+    std::vector<TAggregateOutputAgg> OutputAggs;
 };
 
 // Compiles qumir core-lang kernel sources to LLVM JIT function pointers.

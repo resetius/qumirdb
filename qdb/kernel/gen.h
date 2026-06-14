@@ -15,6 +15,36 @@
 namespace NQqb {
 namespace NKernel {
 
+// Per-reducer layout for the generic aggregation kernel. One TAggReducerInfo
+// per requested aggregate (same order/size as `funcs`/`aggs`); ValidBufIdx
+// (if >= 0) names an extra internal AggBuffers slot ("valid count") used to
+// skip NULL reducer arguments and to mark NULL output for sum/min/max when a
+// group has zero non-null contributions. NumAggBuffers is the total number of
+// AggBuffers slots the hash table must allocate (>= Reducers.size()); only
+// the first Reducers.size() slots are exposed to TAggregateFinalize's
+// outputBuffers.
+struct TAggReducerInfo {
+    std::string Func;
+    bool HasArg = false;            // agg.Arg != nullptr
+    bool NeedsValidity = false;     // argIsNullable && HasArg
+    bool IsNullableOutput = false;  // NeedsValidity && Func in {sum,min,max}
+    int ValidBufIdx = -1;           // -1 if IsNullableOutput == false
+};
+
+struct TAggReducerLayout {
+    std::vector<TAggReducerInfo> Reducers;
+    size_t NumAggBuffers = 0;
+};
+
+// Computes the AggBuffers layout for `funcs`/`hasArg` given whether the
+// shared reducer argument column is nullable. When argIsNullable is false,
+// NumAggBuffers == funcs.size() and every TAggReducerInfo::NeedsValidity is
+// false, preserving the existing one-buffer-per-reducer layout exactly.
+TAggReducerLayout BuildAggReducerLayout(
+    const std::vector<std::string>& funcs,
+    const std::vector<bool>& hasArg,
+    bool argIsNullable);
+
 // Generates concrete hash and equality overloads for lookup and stored keys.
 std::vector<NQumir::NAst::TExprPtr> GenKeyOperationFunDecls(
     const TAggregateKeyDescriptor& key);
@@ -47,7 +77,8 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
     const NQumir::NAst::TStructType& inputType,
     const TAggregateKeyDescriptor& key,
     const std::optional<std::string>& argField,
-    size_t numAggs,
+    const TAggReducerLayout& layout,
+    bool argIsNullable,
     NQumir::NAst::TTypePtr columnType,
     NQumir::NAst::TTypePtr rowSetType,
     NQumir::NAst::TTypePtr hashTableType);
@@ -57,6 +88,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
 // concrete pointer type and projects dense AoS Key values into SoA columns.
 NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
     const TAggregateKeyDescriptor& key,
+    const TAggReducerLayout& layout,
     NQumir::NAst::TTypePtr hashTableType,
     NQumir::NAst::TTypePtr columnType = nullptr);
 
@@ -77,7 +109,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateMeasureAst(
 // kernel compilation: generated table code calls reduce_0..reduce_{N-1}
 // directly by name (no function pointers, no runtime dispatch on Func).
 std::vector<NQumir::NAst::TExprPtr> GenReducerFunDecls(
-    const std::vector<std::string>& funcs);
+    const TAggReducerLayout& layout);
 
 // Generates a single FunDecl:
 //   agg_apply_reducers(<ptr <ptr i64>> agg_buffers, i64 dense_slot,
@@ -92,7 +124,7 @@ std::vector<NQumir::NAst::TExprPtr> GenReducerFunDecls(
 // L2b) calls by static name to update all N aggregate buffers for one dense
 // slot. Everything else in that library is agg-count-agnostic and driven by
 // ht.NumAggs/ht.AggBuffers at runtime.
-NQumir::NAst::TExprPtr GenApplyReducersFunDecl(size_t numReducers);
+NQumir::NAst::TExprPtr GenApplyReducersFunDecl(const TAggReducerLayout& layout);
 
 } // namespace NKernel
 } // namespace NQqb

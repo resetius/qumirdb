@@ -997,6 +997,402 @@ TEST(AggregateE2E, CompilesNullableReducerArgumentWithUnwrappedAstType) {
         NQqb::TKernelCompiler().CompileAggregate(inputType, {"k"}, aggs));
 }
 
+// M13.8: a nullable reducer argument must distinguish count(*) (every row) from
+// count(arg)/sum/min/max (only non-null arguments). A group whose argument is
+// NULL in every row produces a NULL sum/min/max (empty-input semantics) but a
+// non-null count(*).
+TEST(AggregateE2E, NullableReducerArgumentSeparatesCountStarFromCountArg) {
+    // k=1: v in {10, NULL, 4}; k=2: all NULL; k=3: v in {7}.
+    std::array<int64_t, 6> keys = {1, 1, 1, 2, 2, 3};
+    std::array<int64_t, 6> values = {10, 999, 4, 888, 777, 7};
+    // valid (non-null) at rows 0, 2, 5.
+    std::array<uint8_t, 1> mask = {0b00100101};
+    std::vector<TColumn> columns = {
+        TColumn{.Data = reinterpret_cast<char*>(keys.data())},
+        TColumn{.Data = reinterpret_cast<char*>(values.data()),
+            .Mask = mask.data()},
+    };
+    std::vector<TRowSet> batches = {TRowSet{
+        .Columns = columns.data(), .ColumnCount = 2, .RowCount = 6,
+        .Selection = nullptr, .RefCount = 1}};
+    TVectorSource source(
+        {"k", "v"}, std::move(batches),
+        {std::make_shared<TIntegerType>(),
+         std::make_shared<TNullable>(std::make_shared<TIntegerType>())});
+    auto root = ParsePlan(
+        "(rel aggregate (rel source \"data.parquet\") (keys k) "
+        "(agg c count) (agg cn count v) (agg s sum v) "
+        "(agg mn min v) (agg mx max v))",
+        source);
+    TPhysicalPlanner planner;
+    auto runtime = planner.Build(root);
+
+    TRowSet result{};
+    ASSERT_TRUE(runtime->Next(result));
+    ASSERT_EQ(result.ColumnCount, 6); // k, c, cn, s, mn, mx
+    ASSERT_EQ(result.RowCount, 3);
+    auto* outKeys = reinterpret_cast<int64_t*>(result.Columns[0].Data);
+    auto* countStar = reinterpret_cast<int64_t*>(result.Columns[1].Data);
+    auto* countArg = reinterpret_cast<int64_t*>(result.Columns[2].Data);
+    auto* sums = reinterpret_cast<int64_t*>(result.Columns[3].Data);
+    auto* mins = reinterpret_cast<int64_t*>(result.Columns[4].Data);
+    auto* maxs = reinterpret_cast<int64_t*>(result.Columns[5].Data);
+    // count(*) and count(arg) are always non-nullable.
+    EXPECT_EQ(result.Columns[1].Mask, nullptr);
+    EXPECT_EQ(result.Columns[2].Mask, nullptr);
+
+    for (int64_t row = 0; row < result.RowCount; ++row) {
+        const int64_t key = outKeys[row];
+        const bool sumValid = IsValid(result.Columns[3], row);
+        const bool minValid = IsValid(result.Columns[4], row);
+        const bool maxValid = IsValid(result.Columns[5], row);
+        if (key == 1) {
+            EXPECT_EQ(countStar[row], 3);
+            EXPECT_EQ(countArg[row], 2);
+            EXPECT_EQ(sums[row], 14);
+            EXPECT_EQ(mins[row], 4);
+            EXPECT_EQ(maxs[row], 10);
+            EXPECT_TRUE(sumValid);
+            EXPECT_TRUE(minValid);
+            EXPECT_TRUE(maxValid);
+        } else if (key == 2) {
+            EXPECT_EQ(countStar[row], 2);
+            EXPECT_EQ(countArg[row], 0);
+            EXPECT_FALSE(sumValid); // all-null group -> NULL aggregate output
+            EXPECT_FALSE(minValid);
+            EXPECT_FALSE(maxValid);
+        } else {
+            ASSERT_EQ(key, 3);
+            EXPECT_EQ(countStar[row], 1);
+            EXPECT_EQ(countArg[row], 1);
+            EXPECT_EQ(sums[row], 7);
+            EXPECT_EQ(mins[row], 7);
+            EXPECT_EQ(maxs[row], 7);
+            EXPECT_TRUE(sumValid);
+            EXPECT_TRUE(minValid);
+            EXPECT_TRUE(maxValid);
+        }
+    }
+    Release(&result);
+}
+
+// A row whose argument is NULL must not contribute even when it is selected, and
+// an unselected row must not contribute regardless of its argument validity.
+TEST(AggregateE2E, NullableReducerArgumentHonoursSelectionMask) {
+    // All rows share key 1. Selected: 0, 3, 4 (row 4 has a NULL argument).
+    std::array<int64_t, 5> keys = {1, 1, 1, 1, 1};
+    std::array<int64_t, 5> values = {10, 999, 777, 5, 888};
+    std::array<uint8_t, 1> mask = {0b00001011}; // valid at rows 0, 1, 3
+    std::array<uint8_t, 5> selection = {1, 0, 0, 1, 1};
+    std::vector<TColumn> columns = {
+        TColumn{.Data = reinterpret_cast<char*>(keys.data())},
+        TColumn{.Data = reinterpret_cast<char*>(values.data()),
+            .Mask = mask.data()},
+    };
+    std::vector<TRowSet> batches = {TRowSet{
+        .Columns = columns.data(), .ColumnCount = 2, .RowCount = 5,
+        .Selection = selection.data(), .RefCount = 1}};
+    TVectorSource source(
+        {"k", "v"}, std::move(batches),
+        {std::make_shared<TIntegerType>(),
+         std::make_shared<TNullable>(std::make_shared<TIntegerType>())});
+    auto root = ParsePlan(
+        "(rel aggregate (rel source \"data.parquet\") (keys k) "
+        "(agg c count) (agg cn count v) (agg s sum v) "
+        "(agg mn min v) (agg mx max v))",
+        source);
+    TPhysicalPlanner planner;
+    auto runtime = planner.Build(root);
+
+    TRowSet result{};
+    ASSERT_TRUE(runtime->Next(result));
+    ASSERT_EQ(result.RowCount, 1);
+    EXPECT_EQ(reinterpret_cast<int64_t*>(result.Columns[1].Data)[0], 3); // count(*)
+    EXPECT_EQ(reinterpret_cast<int64_t*>(result.Columns[2].Data)[0], 2); // count(v)
+    EXPECT_EQ(reinterpret_cast<int64_t*>(result.Columns[3].Data)[0], 15); // 10 + 5
+    EXPECT_EQ(reinterpret_cast<int64_t*>(result.Columns[4].Data)[0], 5);
+    EXPECT_EQ(reinterpret_cast<int64_t*>(result.Columns[5].Data)[0], 10);
+    EXPECT_TRUE(IsValid(result.Columns[3], 0));
+    EXPECT_TRUE(IsValid(result.Columns[4], 0));
+    EXPECT_TRUE(IsValid(result.Columns[5], 0));
+    Release(&result);
+}
+
+// Valid-count buffers must accumulate across multiple update batches, including
+// through a hash-table grow triggered by exceeding the initial capacity.
+TEST(AggregateE2E, NullableReducerArgumentAccumulatesAcrossBatchesAndGrow) {
+    constexpr int64_t kBatches = 3;
+    constexpr int64_t kPerBatch = 8;
+    std::vector<std::vector<int64_t>> keyStore(kBatches);
+    std::vector<std::vector<int64_t>> valStore(kBatches);
+    std::vector<std::vector<uint8_t>> maskStore(kBatches);
+    std::vector<std::vector<TColumn>> columnStore(kBatches);
+    std::vector<TRowSet> batches;
+
+    struct TRef {
+        int64_t CountStar = 0;
+        int64_t CountArg = 0;
+        int64_t Sum = 0;
+        int64_t Min = 0;
+        int64_t Max = 0;
+        bool Seen = false;
+    };
+    std::map<int64_t, TRef> reference;
+
+    for (int64_t b = 0; b < kBatches; ++b) {
+        keyStore[b].resize(kPerBatch);
+        valStore[b].resize(kPerBatch);
+        maskStore[b].assign((kPerBatch + 7) / 8, 0);
+        for (int64_t i = 0; i < kPerBatch; ++i) {
+            const int64_t row = b * kPerBatch + i;
+            const int64_t key = row % 10; // 10 distinct keys forces a grow
+            const int64_t value = row + 1;
+            const bool valid = (row % 3 != 0);
+            keyStore[b][i] = key;
+            valStore[b][i] = valid ? value : -123456; // poison ignored values
+            if (valid) {
+                maskStore[b][i / 8] |= (1u << (i % 8));
+            }
+            auto& ref = reference[key];
+            ref.CountStar += 1;
+            if (valid) {
+                if (!ref.Seen) {
+                    ref.Min = value;
+                    ref.Max = value;
+                    ref.Seen = true;
+                } else {
+                    ref.Min = std::min(ref.Min, value);
+                    ref.Max = std::max(ref.Max, value);
+                }
+                ref.CountArg += 1;
+                ref.Sum += value;
+            }
+        }
+        columnStore[b] = {
+            TColumn{.Data = reinterpret_cast<char*>(keyStore[b].data())},
+            TColumn{.Data = reinterpret_cast<char*>(valStore[b].data()),
+                .Mask = maskStore[b].data()},
+        };
+        batches.push_back(TRowSet{
+            .Columns = columnStore[b].data(), .ColumnCount = 2,
+            .RowCount = kPerBatch, .Selection = nullptr, .RefCount = 1});
+    }
+
+    TVectorSource source(
+        {"k", "v"}, std::move(batches),
+        {std::make_shared<TIntegerType>(),
+         std::make_shared<TNullable>(std::make_shared<TIntegerType>())});
+    auto root = ParsePlan(
+        "(rel aggregate (rel source \"data.parquet\") (keys k) "
+        "(agg c count) (agg cn count v) (agg s sum v) "
+        "(agg mn min v) (agg mx max v))",
+        source);
+    TPhysicalPlanner planner;
+    auto runtime = planner.Build(root);
+
+    TRowSet result{};
+    ASSERT_TRUE(runtime->Next(result));
+    ASSERT_EQ(result.RowCount, static_cast<int64_t>(reference.size()));
+    auto* outKeys = reinterpret_cast<int64_t*>(result.Columns[0].Data);
+    auto* countStar = reinterpret_cast<int64_t*>(result.Columns[1].Data);
+    auto* countArg = reinterpret_cast<int64_t*>(result.Columns[2].Data);
+    auto* sums = reinterpret_cast<int64_t*>(result.Columns[3].Data);
+    auto* mins = reinterpret_cast<int64_t*>(result.Columns[4].Data);
+    auto* maxs = reinterpret_cast<int64_t*>(result.Columns[5].Data);
+    for (int64_t row = 0; row < result.RowCount; ++row) {
+        const auto it = reference.find(outKeys[row]);
+        ASSERT_NE(it, reference.end());
+        const auto& ref = it->second;
+        EXPECT_EQ(countStar[row], ref.CountStar) << "key " << outKeys[row];
+        EXPECT_EQ(countArg[row], ref.CountArg) << "key " << outKeys[row];
+        EXPECT_EQ(IsValid(result.Columns[3], row), ref.Seen);
+        if (ref.Seen) {
+            EXPECT_EQ(sums[row], ref.Sum) << "key " << outKeys[row];
+            EXPECT_EQ(mins[row], ref.Min) << "key " << outKeys[row];
+            EXPECT_EQ(maxs[row], ref.Max) << "key " << outKeys[row];
+        }
+    }
+    Release(&result);
+}
+
+// Regression: a non-nullable argument column must keep aggregate outputs
+// non-nullable (no mask), and count(arg) must equal count(*) since no argument
+// can be skipped.
+TEST(AggregateE2E, NonNullableReducerArgumentKeepsAggregateOutputNonNull) {
+    std::array<int64_t, 5> keys = {1, 1, 2, 2, 2};
+    std::array<int64_t, 5> values = {10, 4, 7, 3, 5};
+    std::vector<TColumn> columns = {
+        TColumn{.Data = reinterpret_cast<char*>(keys.data())},
+        TColumn{.Data = reinterpret_cast<char*>(values.data())},
+    };
+    std::vector<TRowSet> batches = {TRowSet{
+        .Columns = columns.data(), .ColumnCount = 2, .RowCount = 5,
+        .Selection = nullptr, .RefCount = 1}};
+    TVectorSource source(
+        {"k", "v"}, std::move(batches),
+        {std::make_shared<TIntegerType>(),
+         std::make_shared<TIntegerType>()});
+    auto root = ParsePlan(
+        "(rel aggregate (rel source \"data.parquet\") (keys k) "
+        "(agg c count) (agg cn count v) (agg s sum v) "
+        "(agg mn min v) (agg mx max v))",
+        source);
+    TPhysicalPlanner planner;
+    auto runtime = planner.Build(root);
+
+    TRowSet result{};
+    ASSERT_TRUE(runtime->Next(result));
+    ASSERT_EQ(result.RowCount, 2);
+    // Non-nullable argument: no aggregate output carries a mask.
+    for (int col = 1; col <= 5; ++col) {
+        EXPECT_EQ(result.Columns[col].Mask, nullptr) << "column " << col;
+    }
+    auto* outKeys = reinterpret_cast<int64_t*>(result.Columns[0].Data);
+    auto* countStar = reinterpret_cast<int64_t*>(result.Columns[1].Data);
+    auto* countArg = reinterpret_cast<int64_t*>(result.Columns[2].Data);
+    auto* sums = reinterpret_cast<int64_t*>(result.Columns[3].Data);
+    auto* mins = reinterpret_cast<int64_t*>(result.Columns[4].Data);
+    auto* maxs = reinterpret_cast<int64_t*>(result.Columns[5].Data);
+    for (int64_t row = 0; row < result.RowCount; ++row) {
+        EXPECT_EQ(countStar[row], countArg[row]);
+        if (outKeys[row] == 1) {
+            EXPECT_EQ(countStar[row], 2);
+            EXPECT_EQ(sums[row], 14);
+            EXPECT_EQ(mins[row], 4);
+            EXPECT_EQ(maxs[row], 10);
+        } else {
+            ASSERT_EQ(outKeys[row], 2);
+            EXPECT_EQ(countStar[row], 3);
+            EXPECT_EQ(sums[row], 15);
+            EXPECT_EQ(mins[row], 3);
+            EXPECT_EQ(maxs[row], 7);
+        }
+    }
+    Release(&result);
+}
+
+// Composite {i32, string} key combined with a nullable argument across all four
+// aggregate functions.
+TEST(AggregateE2E, NullableReducerArgumentWithCompositeStringKey) {
+    std::array<int32_t, 5> ids = {1, 1, 2, 2, 1};
+    std::string names = "aabba";
+    std::array<int32_t, 6> offsets = {0, 1, 2, 3, 4, 5};
+    std::array<int64_t, 5> values = {10, 999, 4, 6, 888};
+    std::array<uint8_t, 1> mask = {0b00001101}; // valid at rows 0, 2, 3
+    std::vector<TColumn> columns = {
+        TColumn{.Data = reinterpret_cast<char*>(ids.data())},
+        TColumn{.Data = names.data(), .Mask = nullptr,
+            .Offsets = offsets.data(), .OffsetWidth = 4},
+        TColumn{.Data = reinterpret_cast<char*>(values.data()),
+            .Mask = mask.data()},
+    };
+    std::vector<TRowSet> batches = {TRowSet{
+        .Columns = columns.data(), .ColumnCount = 3, .RowCount = 5,
+        .Selection = nullptr, .RefCount = 1}};
+    TVectorSource source(
+        {"id", "name", "v"}, std::move(batches),
+        {std::make_shared<TIntegerType>(TIntegerType::I32),
+         std::make_shared<TStringType>(),
+         std::make_shared<TNullable>(std::make_shared<TIntegerType>())});
+    auto root = ParsePlan(
+        "(rel aggregate (rel source \"data.parquet\") (keys id name) "
+        "(agg c count) (agg cn count v) (agg s sum v) "
+        "(agg mn min v) (agg mx max v))",
+        source);
+    TPhysicalPlanner planner;
+    auto runtime = planner.Build(root);
+
+    TRowSet result{};
+    ASSERT_TRUE(runtime->Next(result));
+    ASSERT_EQ(result.ColumnCount, 7); // id, name, c, cn, s, mn, mx
+    ASSERT_EQ(result.RowCount, 2);
+    auto* outIds = reinterpret_cast<int32_t*>(result.Columns[0].Data);
+    auto* outOffsets = static_cast<int64_t*>(result.Columns[1].Offsets);
+    auto* countStar = reinterpret_cast<int64_t*>(result.Columns[2].Data);
+    auto* countArg = reinterpret_cast<int64_t*>(result.Columns[3].Data);
+    auto* sums = reinterpret_cast<int64_t*>(result.Columns[4].Data);
+    auto* mins = reinterpret_cast<int64_t*>(result.Columns[5].Data);
+    auto* maxs = reinterpret_cast<int64_t*>(result.Columns[6].Data);
+    for (int64_t row = 0; row < result.RowCount; ++row) {
+        const std::string name(result.Columns[1].Data + outOffsets[row],
+            result.Columns[1].Data + outOffsets[row + 1]);
+        if (outIds[row] == 1) {
+            EXPECT_EQ(name, "a");
+            EXPECT_EQ(countStar[row], 3);
+            EXPECT_EQ(countArg[row], 1);
+            EXPECT_EQ(sums[row], 10);
+            EXPECT_EQ(mins[row], 10);
+            EXPECT_EQ(maxs[row], 10);
+        } else {
+            ASSERT_EQ(outIds[row], 2);
+            EXPECT_EQ(name, "b");
+            EXPECT_EQ(countStar[row], 2);
+            EXPECT_EQ(countArg[row], 2);
+            EXPECT_EQ(sums[row], 10);
+            EXPECT_EQ(mins[row], 4);
+            EXPECT_EQ(maxs[row], 6);
+        }
+        EXPECT_TRUE(IsValid(result.Columns[4], row));
+        EXPECT_TRUE(IsValid(result.Columns[5], row));
+        EXPECT_TRUE(IsValid(result.Columns[6], row));
+    }
+    Release(&result);
+}
+
+// Null string key combined with a nullable argument: the NULL-key group and the
+// valid-key group must each track argument validity independently.
+TEST(AggregateE2E, NullableReducerArgumentWithNullStringKey) {
+    std::string data = "xx"; // rows: "x", "", "", "x"
+    std::array<int32_t, 5> offsets = {0, 1, 1, 1, 2};
+    std::array<uint8_t, 1> keyMask = {0b00001001}; // key valid at rows 0, 3
+    std::array<int64_t, 4> values = {10, 999, 5, 888};
+    std::array<uint8_t, 1> valMask = {0b00000101}; // arg valid at rows 0, 2
+    std::vector<TColumn> columns = {
+        TColumn{.Data = data.data(), .Mask = keyMask.data(),
+            .Offsets = offsets.data(), .OffsetWidth = 4},
+        TColumn{.Data = reinterpret_cast<char*>(values.data()),
+            .Mask = valMask.data()},
+    };
+    std::vector<TRowSet> batches = {TRowSet{
+        .Columns = columns.data(), .ColumnCount = 2, .RowCount = 4,
+        .Selection = nullptr, .RefCount = 1}};
+    TVectorSource source(
+        {"k", "v"}, std::move(batches),
+        {std::make_shared<TNullable>(std::make_shared<TStringType>()),
+         std::make_shared<TNullable>(std::make_shared<TIntegerType>())});
+    auto root = ParsePlan(
+        "(rel aggregate (rel source \"data.parquet\") (keys k) "
+        "(agg c count) (agg cn count v) (agg s sum v))",
+        source);
+    TPhysicalPlanner planner;
+    auto runtime = planner.Build(root);
+
+    TRowSet result{};
+    ASSERT_TRUE(runtime->Next(result));
+    ASSERT_EQ(result.RowCount, 2);
+    auto* countStar = reinterpret_cast<int64_t*>(result.Columns[1].Data);
+    auto* countArg = reinterpret_cast<int64_t*>(result.Columns[2].Data);
+    auto* sums = reinterpret_cast<int64_t*>(result.Columns[3].Data);
+    auto* outOffsets = static_cast<int64_t*>(result.Columns[0].Offsets);
+    for (int64_t row = 0; row < result.RowCount; ++row) {
+        const std::string key(result.Columns[0].Data + outOffsets[row],
+            result.Columns[0].Data + outOffsets[row + 1]);
+        // Valid string-key group: rows 0 ("x", v=10) and 3 (v NULL).
+        // NULL-key group: rows 1 (v NULL) and 2 (v=5); finalizes to empty bytes.
+        EXPECT_EQ(countStar[row], 2);
+        EXPECT_EQ(countArg[row], 1);
+        if (IsValid(result.Columns[0], row)) {
+            EXPECT_EQ(key, "x");
+            EXPECT_EQ(sums[row], 10);
+        } else {
+            EXPECT_TRUE(key.empty());
+            EXPECT_EQ(sums[row], 5);
+        }
+        EXPECT_TRUE(IsValid(result.Columns[3], row));
+    }
+    Release(&result);
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     NQumir::NCodeGen::TLLVMInitializer llvmInit;
