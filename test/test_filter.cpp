@@ -72,6 +72,37 @@ std::array<uint8_t, 4> RunStringLiteralFilter(
     return selection;
 }
 
+std::array<uint8_t, 6> RunNullableIntegerFilter(
+    const std::string& predicateSource)
+{
+    std::array<int64_t, 6> left = {0, 1, 91, 92, 1, 0};
+    std::array<int64_t, 6> right = {81, 82, 0, 1, 1, 0};
+    std::array<uint8_t, 1> leftMask = {0b00110011};
+    std::array<uint8_t, 1> rightMask = {0b00111100};
+    std::array<TColumn, 2> columns = {
+        TColumn{.Data = reinterpret_cast<char*>(left.data()),
+            .Mask = leftMask.data()},
+        TColumn{.Data = reinterpret_cast<char*>(right.data()),
+            .Mask = rightMask.data()},
+    };
+    TStructType inputType({
+        {"left", std::make_shared<TIntegerType>()},
+        {"right", std::make_shared<TIntegerType>()},
+    });
+    auto dispatch = TKernelCompiler().CompileFilter(
+        inputType, ParsePredicate(predicateSource));
+    std::array<uint8_t, 6> selection{};
+    TRowSet rowSet{
+        .Columns = columns.data(),
+        .ColumnCount = static_cast<int64_t>(columns.size()),
+        .RowCount = static_cast<int64_t>(selection.size()),
+        .Selection = selection.data(),
+        .RefCount = 1,
+    };
+    dispatch(rowSet);
+    return selection;
+}
+
 TEST(FilterKernel, ComparesStringColumnsWithoutMutatingLogicalPredicate) {
     const std::string leftData = "absamez";
     const std::string rightData = "basamey";
@@ -153,6 +184,17 @@ TEST(FilterKernel, PreservesEmptyUtf8AndEmbeddedNullLiterals) {
     EXPECT_EQ(RunStringLiteralFilter(
         data, offsets, "==", "\xD0\xAF", false, true),
         (std::array<uint8_t, 4>{0, 0xff, 0, 0}));
+}
+
+TEST(FilterKernel, AppliesSqlThreeValuedLogicToNullableColumns) {
+    EXPECT_EQ(RunNullableIntegerFilter(
+        "(&& (== left 1) (== right 1))"),
+        (std::array<uint8_t, 6>{0, 0, 0, 0, 0xff, 0}));
+    EXPECT_EQ(RunNullableIntegerFilter(
+        "(|| (== left 1) (== right 1))"),
+        (std::array<uint8_t, 6>{0, 0xff, 0, 0xff, 0xff, 0}));
+    EXPECT_EQ(RunNullableIntegerFilter("(! (== left 1))"),
+        (std::array<uint8_t, 6>{0xff, 0, 0, 0, 0, 0xff}));
 }
 
 } // namespace

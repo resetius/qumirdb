@@ -22,4 +22,8 @@ int64_t qdb_filter_string_compare(
 
 void qdb_bitmap_set_valid(uint8_t* bitmap, int64_t index, bool valid);
 
+int64_t qdb_sql_bool_and(int64_t left, int64_t right);
+int64_t qdb_sql_bool_or(int64_t left, int64_t right);
+int64_t qdb_sql_bool_not(int64_t value);
+
 } // extern "C"
