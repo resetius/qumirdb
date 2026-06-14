@@ -12,6 +12,7 @@ add_library(qumirdb
     ops/filter.cpp
     ops/project.cpp
     ops/aggregate.cpp
+    ops/join.cpp
     ops/parse_kernel.cpp
     sexp/printer.cpp
     sexp/parser.cpp
