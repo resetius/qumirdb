@@ -28,7 +28,8 @@ std::string ReadJoinKernel(const std::string& name);
 // Assembles the Stage-1 join kernel library (i64 key ops + generic Robin Hood
 // rehash + the aggregation HashTable lifecycle minus aht_update + the join
 // sources). Wrap in a (block ...) and compile with AllowOverloads=true,
-// selecting an entry (jt_init / jt_process_batch / jt_destroy / pb_destroy).
+// selecting an entry (jt_init / jt_destroy / pb_destroy; the per-query
+// jt_process_left / jt_process_right are generated separately, see join_gen.h).
 std::expected<std::vector<NQumir::NAst::TExprPtr>, NQumir::TError>
 BuildJoinKernelLibrary();
 

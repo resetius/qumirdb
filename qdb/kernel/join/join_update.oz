@@ -74,40 +74,4 @@
           (field_assign own Size (+ size (: 1 i64)))))
       (if (! (call jb_append own own_slot own_row_id))
         (block (return #f)))
-      (return #t)))
-
-  ;; Concrete i64 reader (Stage 1 entry): reads an i64 key column directly and
-  ;; delegates per row to jt_emit_and_insert<i64>. Generic-key queries use the
-  ;; generated jt_process_left / jt_process_right instead (join_gen.cpp).
-  (fun jt_process_batch ((var own <ref HashTable>)
-                         (var opp <ref HashTable>)
-                         (var batch <ref TRowSet>)
-                         (var key_col_idx i64)
-                         (var batch_idx i64)
-                         (var is_left i64)
-                         (var pairs <ref PairBuffer>)) -> bool
-    (block
-      (var columns = (field batch Columns))
-      (var row_count = (field batch RowCount))
-      (var selection = (field batch Selection))
-      (var key_col = (index columns key_col_idx))
-      (var key_data = (cast (field key_col Data) <ptr i64>))
-      (var row i64)
-      (= row (: 0 i64))
-      (while (< row row_count)
-        (block
-          (var selected bool)
-          (= selected #t)
-          (if (!= (cast selection i64) (: 0 i64))
-            (block
-              (if (== (index selection row) (: 0 u8))
-                (block (= selected #f)))))
-          (if selected
-            (block
-              (var key = (index key_data row))
-              (var own_row_id = (+ (<< batch_idx (: 32 i64))
-                                   (& row (: 4294967295 i64))))
-              (if (! (call jt_emit_and_insert own opp key own_row_id is_left pairs))
-                (block (return #f)))))
-          (= row (+ row (: 1 i64)))))
       (return #t))))
