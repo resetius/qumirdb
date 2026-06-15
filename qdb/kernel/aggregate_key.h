@@ -9,6 +9,32 @@
 
 namespace NQqb::NKernel {
 
+// Byte layout of a key (component) type.
+struct TKeyLayout {
+    size_t Size = 0;
+    size_t Alignment = 0;
+};
+
+// Lookup/stored representations of a single key column type, shared by the
+// aggregation and join key descriptors. For strings the lookup type is a
+// non-owning StringView and the stored type an OwnedString; for fixed-width
+// and string-free composites Lookup == Stored == Inner.
+struct TRepresentedKeyType {
+    NQumir::NAst::TTypePtr Lookup;
+    NQumir::NAst::TTypePtr Stored;
+    TKeyLayout Layout;
+    bool HasString = false;
+    bool Nullable = false;
+    NQumir::NAst::TTypePtr Inner; // type with the Nullable wrapper stripped
+};
+
+size_t AlignUp(size_t value, size_t alignment);
+
+// Computes the lookup/stored representation + byte layout of one key column
+// type (integer/f64/bool/string/composite). Throws NQumir::TError for
+// unsupported types.
+TRepresentedKeyType RepresentKeyType(const NQumir::NAst::TTypePtr& original);
+
 struct TAggregateKeyField {
     std::string ColumnName;
     int32_t ColumnIndex = -1;

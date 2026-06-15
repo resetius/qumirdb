@@ -1,11 +1,13 @@
 #include <qdb/exec/planner.h>
 #include <qdb/exec/aggregate_exec.h>
 #include <qdb/exec/filter_exec.h>
+#include <qdb/exec/join_exec.h>
 #include <qdb/exec/project_exec.h>
 #include <qdb/exec/source_exec.h>
 #include <qdb/ops/aggregate.h>
 #include <qdb/ops/source.h>
 #include <qdb/ops/filter.h>
+#include <qdb/ops/join.h>
 #include <qdb/ops/project.h>
 
 #include <qumir/parser/type.h>
@@ -44,6 +46,12 @@ void TPhysicalPlanner::PrintRuntimePlan(const TOperatorPtr& root, int depth) con
     if (auto node = TMaybeOp<TAggregateOperator>(root)) {
         *Diagnostics_ << "aggregate [JIT: update + finalize]\n";
         PrintRuntimePlan(node.Cast()->Input(), depth + 1);
+        return;
+    }
+    if (auto node = TMaybeOp<TJoinOperator>(root)) {
+        *Diagnostics_ << "join [symmetric hash, JIT probe+insert]\n";
+        PrintRuntimePlan(node.Cast()->Left(), depth + 1);
+        PrintRuntimePlan(node.Cast()->Right(), depth + 1);
         return;
     }
     *Diagnostics_ << "unknown\n";
@@ -131,6 +139,40 @@ std::unique_ptr<IRuntimeNode> TPhysicalPlanner::Build(const TOperatorPtr& root) 
             std::move(input),
             std::move(outputType),
             std::move(kernels));
+    }
+
+    if (auto maybe = TMaybeOp<TJoinOperator>(root)) {
+        auto join = maybe.Cast();
+        if (join->Filter()) {
+            throw std::runtime_error(
+                "join residual filter is not supported yet (Stage 1)");
+        }
+        if (join->Keys().size() != 1) {
+            throw std::runtime_error(
+                "join supports exactly one equi-key pair (Stage 1)");
+        }
+        auto left = Build(join->Left());
+        auto right = Build(join->Right());
+        auto* leftType = static_cast<NQumir::NAst::TStructType*>(left->OutputType().get());
+        auto* rightType = static_cast<NQumir::NAst::TStructType*>(right->OutputType().get());
+        if (!leftType || !rightType) {
+            throw std::runtime_error("join inputs must have TStructType");
+        }
+
+        TKernelCompiler compiler(Diagnostics_);
+        auto kernels = compiler.CompileJoin(
+            *leftType, *rightType,
+            join->Keys()[0].Left, join->Keys()[0].Right, join->JoinType());
+
+        // Output type from the physical (pruned) input types.
+        auto outputType = ComputeJoinOutputType(
+            left->OutputType(), right->OutputType(), join->JoinType());
+        if (!outputType) {
+            throw std::runtime_error("join: " + outputType.error().ToString());
+        }
+
+        return std::make_unique<TRuntimeJoin>(
+            std::move(left), std::move(right), std::move(*outputType), std::move(kernels));
     }
 
     throw std::runtime_error("TPhysicalPlanner: unknown operator");
