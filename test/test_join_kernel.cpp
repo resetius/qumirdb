@@ -2,6 +2,8 @@
 
 #include <qdb/io/io.h>
 #include <qdb/kernel/compiler.h>
+#include <qdb/kernel/join_gen.h>
+#include <qdb/kernel/join_key.h>
 #include <qdb/kernel/lib.h>
 #include <qdb/modules/qumirdb.h>
 #include <qdb/modules/qumirdb_runtime.h>
@@ -362,6 +364,104 @@ TEST(CompileJoin, RejectsNonI64KeyAndNonInner) {
                  NQumir::TError);
     EXPECT_THROW(compiler.CompileJoin(leftType, rightType, "missing", "rk", EJoinType::Inner),
                  NQumir::TError);
+}
+
+namespace {
+
+// Compiles one entry of the GENERIC join program: key-ops overloads for the
+// join key + the shared library + generated jt_process_left/right.
+std::unique_ptr<NQumir::TLLVMRunner> CompileGenericJoin(
+    const NKernel::TJoinKeyDescriptor& keyDesc, const std::string& entry, void*& fn)
+{
+    using namespace NQumir::NAst;
+    auto module = std::make_shared<NQumir::NRegistry::QumirDbModule>();
+    TTypePtr columnType, rowSetType, hashTableType, pairBufferType;
+    for (const auto& et : module->ExternalTypes()) {
+        if (et.Name == "TColumn") columnType = et.Type;
+        else if (et.Name == "TRowSet") rowSetType = et.Type;
+        else if (et.Name == "HashTable") hashTableType = et.Type;
+        else if (et.Name == "PairBuffer") pairBufferType = et.Type;
+    }
+    auto lib = NKernel::BuildJoinKernelLibrary();
+    if (!lib) { ADD_FAILURE() << lib.error().ToString(); return {}; }
+    std::vector<TExprPtr> program;
+    for (auto& f : NKernel::GenJoinKeyTypeDecls(keyDesc)) program.push_back(std::move(f));
+    for (auto& f : NKernel::GenJoinKeyOpsFunDecls(keyDesc)) program.push_back(std::move(f));
+    for (auto& f : *lib) program.push_back(std::move(f));
+    program.push_back(NKernel::GenJoinProcessAst(keyDesc, true, "jt_process_left",
+        columnType, rowSetType, hashTableType, pairBufferType));
+    program.push_back(NKernel::GenJoinProcessAst(keyDesc, false, "jt_process_right",
+        columnType, rowSetType, hashTableType, pairBufferType));
+
+    NQumir::TLLVMRunnerOptions options;
+    options.CoreInput = true;
+    options.NativeCode = true;
+    options.AllowOverloads = true;
+    auto runner = std::make_unique<NQumir::TLLVMRunner>(options);
+    runner->RegisterModule(std::make_shared<NQumir::NRegistry::QumirDbModule>(), true);
+    auto prog = std::make_shared<TBlockExpr>(NQumir::TLocation{}, std::move(program));
+    std::string error;
+    fn = runner->CompileKernelAst(prog, entry, &error);
+    EXPECT_NE(fn, nullptr) << error;
+    return runner;
+}
+
+} // namespace
+
+TEST(JoinKernelGeneric, Int32KeyMatchesNestedLoop) {
+    using namespace NQumir::NAst;
+    auto i32 = std::make_shared<TIntegerType>(TIntegerType::I32);
+    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
+    TStructType leftType({{"lk", i32}, {"lv", i64}});
+    TStructType rightType({{"rk", i32}, {"rv", i64}});
+    auto keyDesc = NKernel::BuildJoinKeyDescriptor(leftType, rightType, {{"lk", "rk"}});
+
+    void* initFn = nullptr;   auto r1 = CompileGenericJoin(keyDesc, "jt_init", initFn);
+    void* destroyFn = nullptr; auto r2 = CompileGenericJoin(keyDesc, "jt_destroy", destroyFn);
+    void* pbDestroyFn = nullptr; auto r3 = CompileGenericJoin(keyDesc, "pb_destroy", pbDestroyFn);
+    void* leftFn = nullptr;   auto r4 = CompileGenericJoin(keyDesc, "jt_process_left", leftFn);
+    void* rightFn = nullptr;  auto r5 = CompileGenericJoin(keyDesc, "jt_process_right", rightFn);
+    ASSERT_NE(leftFn, nullptr);
+    ASSERT_NE(rightFn, nullptr);
+
+    auto jtInit = reinterpret_cast<bool(*)(void*, int64_t, int64_t)>(initFn);
+    auto jtDestroy = reinterpret_cast<void(*)(void*)>(destroyFn);
+    auto pbDestroy = reinterpret_cast<void(*)(void*)>(pbDestroyFn);
+    auto procLeft = reinterpret_cast<bool(*)(void*, void*, TRowSet*, int64_t, void*)>(leftFn);
+    auto procRight = reinterpret_cast<bool(*)(void*, void*, TRowSet*, int64_t, void*)>(rightFn);
+
+    // int32 keys, i64 values.
+    std::vector<int32_t> lk = {1, 2, 1}; std::vector<int64_t> lv = {10, 20, 30};
+    std::vector<int32_t> rk = {1, 1, 3}; std::vector<int64_t> rv = {100, 200, 300};
+    auto batch = [](int32_t* keys, int64_t* vals, int64_t rows, std::vector<TColumn>& cols) {
+        cols = {TColumn{.Data = reinterpret_cast<char*>(keys)},
+                TColumn{.Data = reinterpret_cast<char*>(vals)}};
+        return TRowSet{.Columns = cols.data(), .ColumnCount = 2, .RowCount = rows, .RefCount = 1};
+    };
+    std::vector<TColumn> lcols, rcols;
+    TRowSet lbatch = batch(lk.data(), lv.data(), 3, lcols);
+    TRowSet rbatch = batch(rk.data(), rv.data(), 3, rcols);
+
+    // The Key descriptor's struct may be wider than 4 bytes; jt_init uses its Size.
+    const int64_t keySize = static_cast<int64_t>(keyDesc.Size);
+    THashTable left{}, right{};
+    ASSERT_TRUE(jtInit(&left, 8, keySize));
+    ASSERT_TRUE(jtInit(&right, 8, keySize));
+    TPairBuffer pairs{};
+    ASSERT_TRUE(procLeft(&left, &right, &lbatch, 0, &pairs));
+    ASSERT_TRUE(procRight(&right, &left, &rbatch, 0, &pairs));
+
+    std::vector<std::tuple<int64_t, int64_t>> got;
+    for (int64_t i = 0; i < pairs.Count; ++i) {
+        got.emplace_back(pairs.Data[2 * i] & 0xffffffff, pairs.Data[2 * i + 1] & 0xffffffff);
+    }
+    std::vector<std::tuple<int64_t, int64_t>> expected = {{0, 0}, {0, 1}, {2, 0}, {2, 1}};
+    std::sort(got.begin(), got.end());
+    EXPECT_EQ(got, expected);
+
+    pbDestroy(&pairs);
+    jtDestroy(&left);
+    jtDestroy(&right);
 }
 
 int main(int argc, char** argv) {
