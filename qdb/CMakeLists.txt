@@ -23,6 +23,7 @@ add_library(qumirdb
     kernel/gen.cpp
     kernel/aggregate_key.cpp
     kernel/join_key.cpp
+    kernel/join_gen.cpp
     kernel/lib.cpp
     kernel/compiler.cpp
     exec/source_exec.cpp
