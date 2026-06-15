@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 
@@ -34,6 +35,42 @@ std::string ReadJoinKernel(const std::string& name) {
     std::ostringstream source;
     source << input.rdbuf();
     return source.str();
+}
+
+std::expected<std::vector<NQumir::NAst::TExprPtr>, NQumir::TError>
+BuildJoinKernelLibrary() {
+    std::vector<NQumir::NAst::TExprPtr> library;
+    auto add = [&](const std::string& source,
+        const std::unordered_set<std::string>& exclude = {})
+        -> std::optional<NQumir::TError>
+    {
+        auto parsed = ParseFunctionLibrary(source, exclude);
+        if (!parsed) {
+            return parsed.error();
+        }
+        for (auto& fn : *parsed) {
+            library.push_back(std::move(fn));
+        }
+        return std::nullopt;
+    };
+
+    if (auto e = add(ReadAggregationKernel("key_ops_i64.oz"))) {
+        return std::unexpected(*e);
+    }
+    if (auto e = add(ReadAggregationKernel("robin_hood_rehash_generic.oz"))) {
+        return std::unexpected(*e);
+    }
+    if (auto e = add(ReadAggregationKernel("aggregation_hashtable_generic.oz"),
+            {"aht_update"})) {
+        return std::unexpected(*e);
+    }
+    if (auto e = add(ReadJoinKernel("join_table.oz"))) {
+        return std::unexpected(*e);
+    }
+    if (auto e = add(ReadJoinKernel("join_update.oz"))) {
+        return std::unexpected(*e);
+    }
+    return library;
 }
 
 std::expected<std::vector<NQumir::NAst::TExprPtr>, NQumir::TError>

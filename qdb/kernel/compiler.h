@@ -2,6 +2,7 @@
 
 #include <qdb/io/io.h>
 #include <qdb/ops/aggregate.h>
+#include <qdb/ops/join.h>
 
 #include <qumir/parser/type.h>
 #include <qumir/runner/runner_llvm.h>
@@ -69,6 +70,25 @@ struct TAggregateKernels {
     std::vector<TAggregateOutputAgg> OutputAggs;
 };
 
+// The compiled kernels for one symmetric hash join. Each side's hash map is a
+// caller-owned, zero-initialized HashTable buffer (kHashTableSize); the output
+// pair buffer is a zero-initialized buffer of kPairBufferSize. LeftKeyColIdx /
+// RightKeyColIdx are the equi-key column positions in each side's schema.
+struct TJoinKernels {
+    // jt_init(table, capacity) — initializes one side's HashTable. Returns
+    // false on allocation failure.
+    std::function<bool(void* table, int64_t capacity)> Init;
+    // jt_process_batch(own, opp, batch, keyColIdx, batchIdx, isLeft, pairs):
+    // probes opp and appends matching pairs, then inserts the batch's rows into
+    // own. isLeft (0/1) orders emitted pairs as (left, right).
+    std::function<bool(void* own, void* opp, TRowSet* batch, int64_t keyColIdx,
+        int64_t batchIdx, int64_t isLeft, void* pairs)> Process;
+    std::function<void(void* table)> DestroyTable;
+    std::function<void(void* pairs)> DestroyPairs;
+    int32_t LeftKeyColIdx = 0;
+    int32_t RightKeyColIdx = 0;
+};
+
 // Compiles qumir core-lang kernel sources to LLVM JIT function pointers.
 class TKernelCompiler {
 public:
@@ -108,6 +128,16 @@ public:
         const NQumir::NAst::TStructType& inputType,
         const std::vector<std::string>& groupKeys,
         const std::vector<TAggregateSpec>& aggs);
+
+    // Compiles the symmetric hash join kernels for `leftKey == rightKey` over
+    // rows of leftType/rightType. Stage 1 constraints (NQumir::TError if
+    // violated): type == Inner; leftKey/rightKey name i64 columns.
+    TJoinKernels CompileJoin(
+        const NQumir::NAst::TStructType& leftType,
+        const NQumir::NAst::TStructType& rightType,
+        const std::string& leftKey,
+        const std::string& rightKey,
+        EJoinType type);
 
 private:
     std::ostream* Diagnostics_ = nullptr;

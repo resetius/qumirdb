@@ -3,6 +3,8 @@
 #include <qdb/exec/join_exec.h>
 #include <qdb/io/io.h>
 
+#include <qumir/codegen/llvm/llvm_initializer.h>
+
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -300,7 +302,144 @@ TEST(JoinOutputBuilder, EmptyPairsProduceNoBatch) {
     EXPECT_FALSE(builder.NextBatch(out));
 }
 
+namespace {
+
+using namespace NQumir::NAst;
+
+// IRuntimeNode that yields pre-built batches (Destroy=nullptr, data test-owned).
+struct TVectorRuntimeSource : IRuntimeNode {
+    TTypePtr Type;
+    std::vector<TRowSet> Batches;
+    size_t Index = 0;
+
+    TVectorRuntimeSource(TTypePtr type, std::vector<TRowSet> batches)
+        : Type(std::move(type)), Batches(std::move(batches)) {}
+
+    TTypePtr OutputType() const override { return Type; }
+    bool Next(TRowSet& out) override {
+        if (Index >= Batches.size()) return false;
+        out = Batches[Index++];
+        return true;
+    }
+};
+
+TTypePtr I64Type() { return std::make_shared<TIntegerType>(TIntegerType::I64); }
+
+TTypePtr KeyValSchema(const std::string& key, const std::string& val) {
+    return std::make_shared<TStructType>(
+        std::vector<std::pair<std::string, TTypePtr>>{{key, I64Type()}, {val, I64Type()}});
+}
+
+// Builds a (key, value) i64 batch over caller-owned column storage.
+TRowSet KeyValBatch(int64_t* keys, int64_t* vals, int64_t rows, std::vector<TColumn>& cols) {
+    cols = {TColumn{.Data = reinterpret_cast<char*>(keys)},
+            TColumn{.Data = reinterpret_cast<char*>(vals)}};
+    return TRowSet{.Columns = cols.data(), .ColumnCount = 2, .RowCount = rows, .RefCount = 1};
+}
+
+struct TOut4 {
+    int64_t Lk, Lv, Rk, Rv;
+    auto operator<=>(const TOut4&) const = default;
+};
+
+} // namespace
+
+TEST(RuntimeJoin, InnerJoinEndToEnd) {
+    std::vector<int64_t> lk = {1, 2, 1}, lv = {10, 20, 30};
+    std::vector<int64_t> rk = {1, 1, 3}, rv = {100, 200, 300};
+    std::vector<TColumn> lcols, rcols;
+
+    auto leftType = KeyValSchema("lk", "lv");
+    auto rightType = KeyValSchema("rk", "rv");
+    std::vector<TRowSet> lbatches = {KeyValBatch(lk.data(), lv.data(), 3, lcols)};
+    std::vector<TRowSet> rbatches = {KeyValBatch(rk.data(), rv.data(), 3, rcols)};
+
+    auto left = std::make_unique<TVectorRuntimeSource>(leftType, std::move(lbatches));
+    auto right = std::make_unique<TVectorRuntimeSource>(rightType, std::move(rbatches));
+
+    TKernelCompiler compiler;
+    auto kernels = compiler.CompileJoin(
+        static_cast<TStructType&>(*leftType), static_cast<TStructType&>(*rightType),
+        "lk", "rk", EJoinType::Inner);
+    auto outputType = ComputeJoinOutputType(leftType, rightType, EJoinType::Inner);
+    ASSERT_TRUE(outputType);
+
+    TRuntimeJoin join(std::move(left), std::move(right), *outputType, std::move(kernels));
+
+    std::vector<TOut4> got;
+    TRowSet out{};
+    while (join.Next(out)) {
+        ASSERT_EQ(out.ColumnCount, 4);
+        const auto* c0 = reinterpret_cast<const int64_t*>(out.Columns[0].Data);
+        const auto* c1 = reinterpret_cast<const int64_t*>(out.Columns[1].Data);
+        const auto* c2 = reinterpret_cast<const int64_t*>(out.Columns[2].Data);
+        const auto* c3 = reinterpret_cast<const int64_t*>(out.Columns[3].Data);
+        for (int64_t i = 0; i < out.RowCount; ++i) {
+            got.push_back({c0[i], c1[i], c2[i], c3[i]});
+        }
+        Release(&out);
+    }
+
+    std::vector<TOut4> expected = {
+        {1, 10, 1, 100}, {1, 10, 1, 200}, {1, 30, 1, 100}, {1, 30, 1, 200}};
+    std::sort(got.begin(), got.end());
+    std::sort(expected.begin(), expected.end());
+    EXPECT_EQ(got, expected);
+}
+
+TEST(RuntimeJoin, MultipleBatchesMatchNestedLoop) {
+    int seed = 777;
+    auto rnd = [&]() { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed; };
+    std::vector<int64_t> lk, lv, rk, rv;
+    for (int i = 0; i < 50; ++i) { lk.push_back(rnd() % 12); lv.push_back(i); }
+    for (int i = 0; i < 45; ++i) { rk.push_back(rnd() % 12); rv.push_back(1000 + i); }
+
+    // Split each side into batches of 10 rows to exercise multi-batch RowIds.
+    auto leftType = KeyValSchema("lk", "lv");
+    auto rightType = KeyValSchema("rk", "rv");
+    std::vector<std::vector<TColumn>> colStorage;
+    auto split = [&](std::vector<int64_t>& keys, std::vector<int64_t>& vals) {
+        std::vector<TRowSet> batches;
+        for (size_t off = 0; off < keys.size(); off += 10) {
+            int64_t n = std::min<int64_t>(10, keys.size() - off);
+            colStorage.emplace_back();
+            batches.push_back(KeyValBatch(keys.data() + off, vals.data() + off, n, colStorage.back()));
+        }
+        return batches;
+    };
+    auto lbatches = split(lk, lv);
+    auto rbatches = split(rk, rv);
+
+    auto left = std::make_unique<TVectorRuntimeSource>(leftType, std::move(lbatches));
+    auto right = std::make_unique<TVectorRuntimeSource>(rightType, std::move(rbatches));
+
+    TKernelCompiler compiler;
+    auto kernels = compiler.CompileJoin(
+        static_cast<TStructType&>(*leftType), static_cast<TStructType&>(*rightType),
+        "lk", "rk", EJoinType::Inner);
+    auto outputType = ComputeJoinOutputType(leftType, rightType, EJoinType::Inner);
+    ASSERT_TRUE(outputType);
+    TRuntimeJoin join(std::move(left), std::move(right), *outputType, std::move(kernels));
+
+    int64_t rowCount = 0;
+    TRowSet out{};
+    while (join.Next(out)) {
+        for (int64_t i = 0; i < out.RowCount; ++i) {
+            int64_t lkv = reinterpret_cast<const int64_t*>(out.Columns[0].Data)[i];
+            int64_t rkv = reinterpret_cast<const int64_t*>(out.Columns[2].Data)[i];
+            ASSERT_EQ(lkv, rkv); // every emitted row has matching keys
+        }
+        rowCount += out.RowCount;
+        Release(&out);
+    }
+
+    int64_t expected = 0;
+    for (int64_t a : lk) for (int64_t b : rk) if (a == b) ++expected;
+    EXPECT_EQ(rowCount, expected);
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
+    NQumir::NCodeGen::TLLVMInitializer initializer;
     return RUN_ALL_TESTS();
 }
