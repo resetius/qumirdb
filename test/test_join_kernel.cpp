@@ -173,139 +173,6 @@ TEST(JoinKernel, PairBufferPushGrowsAndStoresPairs) {
     EXPECT_EQ(buf.Data, nullptr);
 }
 
-TEST(JoinKernel, ProcessBatchMatchesNestedLoop) {
-    void* initEntry = nullptr;
-    auto initRunner = CompileJoinEntry("jt_init", initEntry);
-    void* destroyEntry = nullptr;
-    auto destroyRunner = CompileJoinEntry("jt_destroy", destroyEntry);
-    void* procEntry = nullptr;
-    auto procRunner = CompileJoinEntry("jt_process_batch", procEntry);
-    void* pbDestroyEntry = nullptr;
-    auto pbDestroyRunner = CompileJoinEntry("pb_destroy", pbDestroyEntry);
-    ASSERT_NE(procEntry, nullptr);
-
-    auto jtInit = reinterpret_cast<bool(*)(void*, int64_t, int64_t)>(initEntry);
-    auto jtDestroy = reinterpret_cast<void(*)(void*)>(destroyEntry);
-    auto pbDestroy = reinterpret_cast<void(*)(void*)>(pbDestroyEntry);
-    auto process = reinterpret_cast<bool(*)(
-        void*, void*, TRowSet*, int64_t, int64_t, int64_t, void*)>(procEntry);
-
-    std::vector<int64_t> lkeys = {1, 2, 1};
-    std::vector<int64_t> rkeys = {1, 1, 3};
-
-    auto makeBatch = [](std::vector<int64_t>& keys, std::vector<TColumn>& cols) {
-        cols = {TColumn{.Data = reinterpret_cast<char*>(keys.data())}};
-        return TRowSet{.Columns = cols.data(), .ColumnCount = 1,
-            .RowCount = static_cast<int64_t>(keys.size()), .RefCount = 1};
-    };
-    std::vector<TColumn> lcols, rcols;
-    TRowSet lbatch = makeBatch(lkeys, lcols);
-    TRowSet rbatch = makeBatch(rkeys, rcols);
-
-    THashTable left{}, right{};
-    ASSERT_TRUE(jtInit(&left, 8, 8));
-    ASSERT_TRUE(jtInit(&right, 8, 8));
-    TPairBuffer pairs{};
-
-    // Process left batch (probe right=empty, insert left), then right batch
-    // (probe left, emit, insert right). batch_idx = 0 for both.
-    ASSERT_TRUE(process(&left, &right, &lbatch, 0, 0, /*is_left=*/1, &pairs));
-    ASSERT_TRUE(process(&right, &left, &rbatch, 0, 0, /*is_left=*/0, &pairs));
-
-    // Collect emitted (leftRow, rightRow) pairs (batch_idx 0 -> RowId == rowIdx).
-    std::vector<std::tuple<int64_t, int64_t>> got;
-    for (int64_t i = 0; i < pairs.Count; ++i) {
-        int64_t leftId = pairs.Data[2 * i];
-        int64_t rightId = pairs.Data[2 * i + 1];
-        got.emplace_back(leftId & 0xffffffff, rightId & 0xffffffff);
-    }
-
-    // Nested-loop oracle.
-    std::vector<std::tuple<int64_t, int64_t>> expected;
-    for (size_t li = 0; li < lkeys.size(); ++li) {
-        for (size_t ri = 0; ri < rkeys.size(); ++ri) {
-            if (lkeys[li] == rkeys[ri]) {
-                expected.emplace_back(static_cast<int64_t>(li), static_cast<int64_t>(ri));
-            }
-        }
-    }
-    std::sort(got.begin(), got.end());
-    std::sort(expected.begin(), expected.end());
-    EXPECT_EQ(got, expected);
-
-    pbDestroy(&pairs);
-    jtDestroy(&left);
-    jtDestroy(&right);
-}
-
-TEST(JoinKernel, ProcessBatchTriggersRehashAndStaysCorrect) {
-    void* initEntry = nullptr;
-    auto initRunner = CompileJoinEntry("jt_init", initEntry);
-    void* destroyEntry = nullptr;
-    auto destroyRunner = CompileJoinEntry("jt_destroy", destroyEntry);
-    void* procEntry = nullptr;
-    auto procRunner = CompileJoinEntry("jt_process_batch", procEntry);
-    void* pbDestroyEntry = nullptr;
-    auto pbDestroyRunner = CompileJoinEntry("pb_destroy", pbDestroyEntry);
-    ASSERT_NE(procEntry, nullptr);
-
-    auto jtInit = reinterpret_cast<bool(*)(void*, int64_t, int64_t)>(initEntry);
-    auto jtDestroy = reinterpret_cast<void(*)(void*)>(destroyEntry);
-    auto pbDestroy = reinterpret_cast<void(*)(void*)>(pbDestroyEntry);
-    auto process = reinterpret_cast<bool(*)(
-        void*, void*, TRowSet*, int64_t, int64_t, int64_t, void*)>(procEntry);
-
-    // ~25 distinct keys over 60 rows per side forces several rehashes from an
-    // initial capacity of 4 (also exercises bucket-pointer carry across rehash).
-    int seed = 12345;
-    auto rnd = [&]() { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed; };
-    std::vector<int64_t> lkeys, rkeys;
-    for (int i = 0; i < 60; ++i) lkeys.push_back(rnd() % 25);
-    for (int i = 0; i < 60; ++i) rkeys.push_back(rnd() % 25);
-
-    auto makeBatch = [](std::vector<int64_t>& keys, std::vector<TColumn>& cols) {
-        cols = {TColumn{.Data = reinterpret_cast<char*>(keys.data())}};
-        return TRowSet{.Columns = cols.data(), .ColumnCount = 1,
-            .RowCount = static_cast<int64_t>(keys.size()), .RefCount = 1};
-    };
-    std::vector<TColumn> lcols, rcols;
-    TRowSet lbatch = makeBatch(lkeys, lcols);
-    TRowSet rbatch = makeBatch(rkeys, rcols);
-
-    THashTable left{}, right{};
-    ASSERT_TRUE(jtInit(&left, 4, 8)); // tiny initial capacity -> forces rehash
-    ASSERT_TRUE(jtInit(&right, 4, 8));
-    TPairBuffer pairs{};
-    ASSERT_TRUE(process(&left, &right, &lbatch, 0, 0, 1, &pairs));
-    ASSERT_TRUE(process(&right, &left, &rbatch, 0, 0, 0, &pairs));
-
-    std::vector<std::tuple<int64_t, int64_t>> got;
-    for (int64_t i = 0; i < pairs.Count; ++i) {
-        int64_t leftRow = pairs.Data[2 * i] & 0xffffffff;
-        int64_t rightRow = pairs.Data[2 * i + 1] & 0xffffffff;
-        // Every emitted pair must have matching keys.
-        ASSERT_EQ(lkeys[leftRow], rkeys[rightRow]);
-        got.emplace_back(leftRow, rightRow);
-    }
-
-    std::vector<std::tuple<int64_t, int64_t>> expected;
-    for (size_t li = 0; li < lkeys.size(); ++li) {
-        for (size_t ri = 0; ri < rkeys.size(); ++ri) {
-            if (lkeys[li] == rkeys[ri]) {
-                expected.emplace_back(static_cast<int64_t>(li), static_cast<int64_t>(ri));
-            }
-        }
-    }
-    std::sort(got.begin(), got.end());
-    std::sort(expected.begin(), expected.end());
-    EXPECT_EQ(got, expected);
-    EXPECT_GT(left.Capacity, 4); // confirm a rehash actually happened
-
-    pbDestroy(&pairs);
-    jtDestroy(&left);
-    jtDestroy(&right);
-}
-
 TEST(CompileJoin, ProducesWorkingInnerJoinKernels) {
     using namespace NQumir::NAst;
     auto i64 = [] { return std::make_shared<TIntegerType>(TIntegerType::I64); };
@@ -464,6 +331,67 @@ TEST(JoinKernelGeneric, Int32KeyMatchesNestedLoop) {
     std::vector<std::tuple<int64_t, int64_t>> expected = {{0, 0}, {0, 1}, {2, 0}, {2, 1}};
     std::sort(got.begin(), got.end());
     EXPECT_EQ(got, expected);
+
+    pbDestroy(&pairs);
+    jtDestroy(&left);
+    jtDestroy(&right);
+}
+
+TEST(JoinKernelGeneric, Int32KeyTriggersRehash) {
+    using namespace NQumir::NAst;
+    auto i32 = std::make_shared<TIntegerType>(TIntegerType::I32);
+    TStructType leftType({{"lk", i32}});
+    TStructType rightType({{"rk", i32}});
+    auto keyDesc = NKernel::BuildJoinKeyDescriptor(leftType, rightType, {{"lk", "rk"}});
+
+    void* initFn = nullptr;      auto r1 = CompileGenericJoin(keyDesc, "jt_init", initFn);
+    void* destroyFn = nullptr;   auto r2 = CompileGenericJoin(keyDesc, "jt_destroy", destroyFn);
+    void* pbDestroyFn = nullptr; auto r3 = CompileGenericJoin(keyDesc, "pb_destroy", pbDestroyFn);
+    void* leftFn = nullptr;      auto r4 = CompileGenericJoin(keyDesc, "jt_process_left", leftFn);
+    void* rightFn = nullptr;     auto r5 = CompileGenericJoin(keyDesc, "jt_process_right", rightFn);
+    ASSERT_NE(leftFn, nullptr);
+    ASSERT_NE(rightFn, nullptr);
+
+    auto jtInit = reinterpret_cast<bool(*)(void*, int64_t, int64_t)>(initFn);
+    auto jtDestroy = reinterpret_cast<void(*)(void*)>(destroyFn);
+    auto pbDestroy = reinterpret_cast<void(*)(void*)>(pbDestroyFn);
+    auto procLeft = reinterpret_cast<bool(*)(void*, void*, TRowSet*, int64_t, void*)>(leftFn);
+    auto procRight = reinterpret_cast<bool(*)(void*, void*, TRowSet*, int64_t, void*)>(rightFn);
+
+    // ~25 distinct int32 keys over 60 rows/side forces rehashes from capacity 4.
+    int seed = 12345;
+    auto rnd = [&]() { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed; };
+    std::vector<int32_t> lk, rk;
+    for (int i = 0; i < 60; ++i) lk.push_back(rnd() % 25);
+    for (int i = 0; i < 60; ++i) rk.push_back(rnd() % 25);
+    auto batch = [](std::vector<int32_t>& keys, std::vector<TColumn>& cols) {
+        cols = {TColumn{.Data = reinterpret_cast<char*>(keys.data())}};
+        return TRowSet{.Columns = cols.data(), .ColumnCount = 1,
+            .RowCount = static_cast<int64_t>(keys.size()), .RefCount = 1};
+    };
+    std::vector<TColumn> lcols, rcols;
+    TRowSet lbatch = batch(lk, lcols);
+    TRowSet rbatch = batch(rk, rcols);
+
+    const int64_t keySize = static_cast<int64_t>(keyDesc.Size);
+    THashTable left{}, right{};
+    ASSERT_TRUE(jtInit(&left, 4, keySize)); // tiny capacity -> forces rehash
+    ASSERT_TRUE(jtInit(&right, 4, keySize));
+    TPairBuffer pairs{};
+    ASSERT_TRUE(procLeft(&left, &right, &lbatch, 0, &pairs));
+    ASSERT_TRUE(procRight(&right, &left, &rbatch, 0, &pairs));
+
+    int64_t matched = 0;
+    for (int64_t i = 0; i < pairs.Count; ++i) {
+        int64_t leftRow = pairs.Data[2 * i] & 0xffffffff;
+        int64_t rightRow = pairs.Data[2 * i + 1] & 0xffffffff;
+        ASSERT_EQ(lk[leftRow], rk[rightRow]); // every emitted pair has matching keys
+        ++matched;
+    }
+    int64_t expected = 0;
+    for (int32_t a : lk) for (int32_t b : rk) if (a == b) ++expected;
+    EXPECT_EQ(matched, expected);
+    EXPECT_GT(left.Capacity, 4); // rehash happened (bucket pointers carried)
 
     pbDestroy(&pairs);
     jtDestroy(&left);
