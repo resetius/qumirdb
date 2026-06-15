@@ -47,36 +47,14 @@ struct TPairBuffer {
 };
 static_assert(sizeof(TPairBuffer) == TKernelCompiler::kPairBufferSize);
 
-// Assembles the full join kernel library: i64 key ops + generic Robin Hood
-// rehash + the aggregation HashTable lifecycle (minus aht_update, which needs
-// agg_apply_reducers) + the join sources.
-std::vector<NQumir::NAst::TExprPtr> JoinLibrary() {
-    using NKernel::ParseFunctionLibrary;
-    using NKernel::ReadAggregationKernel;
-    using NKernel::ReadJoinKernel;
-    std::vector<NQumir::NAst::TExprPtr> lib;
-    auto append = [&](std::expected<std::vector<NQumir::NAst::TExprPtr>, NQumir::TError> parsed) {
-        if (!parsed) {
-            ADD_FAILURE() << parsed.error().ToString();
-            return;
-        }
-        for (auto& fn : *parsed) {
-            lib.push_back(std::move(fn));
-        }
-    };
-    append(ParseFunctionLibrary(ReadAggregationKernel("key_ops_i64.oz")));
-    append(ParseFunctionLibrary(ReadAggregationKernel("robin_hood_rehash_generic.oz")));
-    append(ParseFunctionLibrary(
-        ReadAggregationKernel("aggregation_hashtable_generic.oz"), {"aht_update"}));
-    append(ParseFunctionLibrary(ReadJoinKernel("join_table.oz")));
-    append(ParseFunctionLibrary(ReadJoinKernel("join_update.oz")));
-    return lib;
-}
-
 std::unique_ptr<NQumir::TLLVMRunner> CompileJoinEntry(
     const std::string& entryName, void*& entry)
 {
-    auto lib = JoinLibrary();
+    auto lib = NKernel::BuildJoinKernelLibrary();
+    if (!lib) {
+        ADD_FAILURE() << lib.error().ToString();
+        return {};
+    }
     NQumir::TLLVMRunnerOptions options;
     options.CoreInput = true;
     options.NativeCode = true;
@@ -85,7 +63,7 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileJoinEntry(
     runner->RegisterModule(
         std::make_shared<NQumir::NRegistry::QumirDbModule>(), true);
     auto program = std::make_shared<NQumir::NAst::TBlockExpr>(
-        NQumir::TLocation{}, std::move(lib));
+        NQumir::TLocation{}, std::move(*lib));
     std::string error;
     entry = runner->CompileKernelAst(program, entryName, &error);
     EXPECT_NE(entry, nullptr) << error;
@@ -324,6 +302,66 @@ TEST(JoinKernel, ProcessBatchTriggersRehashAndStaysCorrect) {
     pbDestroy(&pairs);
     jtDestroy(&left);
     jtDestroy(&right);
+}
+
+TEST(CompileJoin, ProducesWorkingInnerJoinKernels) {
+    using namespace NQumir::NAst;
+    auto i64 = [] { return std::make_shared<TIntegerType>(TIntegerType::I64); };
+    TStructType leftType({{"lk", i64()}, {"lv", i64()}});
+    TStructType rightType({{"rk", i64()}, {"rv", i64()}});
+
+    TKernelCompiler compiler;
+    auto kernels = compiler.CompileJoin(leftType, rightType, "lk", "rk", EJoinType::Inner);
+    EXPECT_EQ(kernels.LeftKeyColIdx, 0);
+    EXPECT_EQ(kernels.RightKeyColIdx, 0);
+
+    std::vector<int64_t> lkeys = {1, 2, 1};
+    std::vector<int64_t> rkeys = {1, 1, 3};
+    auto makeBatch = [](std::vector<int64_t>& keys, std::vector<TColumn>& cols) {
+        // Two columns (key, value); only the key column is read here.
+        cols = {TColumn{.Data = reinterpret_cast<char*>(keys.data())},
+                TColumn{.Data = reinterpret_cast<char*>(keys.data())}};
+        return TRowSet{.Columns = cols.data(), .ColumnCount = 2,
+            .RowCount = static_cast<int64_t>(keys.size()), .RefCount = 1};
+    };
+    std::vector<TColumn> lcols, rcols;
+    TRowSet lbatch = makeBatch(lkeys, lcols);
+    TRowSet rbatch = makeBatch(rkeys, rcols);
+
+    THashTable left{}, right{};
+    TPairBuffer pairs{};
+    ASSERT_TRUE(kernels.Init(&left, 8));
+    ASSERT_TRUE(kernels.Init(&right, 8));
+    ASSERT_TRUE(kernels.Process(&left, &right, &lbatch, kernels.LeftKeyColIdx, 0, 1, &pairs));
+    ASSERT_TRUE(kernels.Process(&right, &left, &rbatch, kernels.RightKeyColIdx, 0, 0, &pairs));
+
+    std::vector<std::tuple<int64_t, int64_t>> got;
+    for (int64_t i = 0; i < pairs.Count; ++i) {
+        got.emplace_back(pairs.Data[2 * i] & 0xffffffff, pairs.Data[2 * i + 1] & 0xffffffff);
+    }
+    std::vector<std::tuple<int64_t, int64_t>> expected = {{0, 0}, {0, 1}, {2, 0}, {2, 1}};
+    std::sort(got.begin(), got.end());
+    EXPECT_EQ(got, expected);
+
+    kernels.DestroyPairs(&pairs);
+    kernels.DestroyTable(&left);
+    kernels.DestroyTable(&right);
+}
+
+TEST(CompileJoin, RejectsNonI64KeyAndNonInner) {
+    using namespace NQumir::NAst;
+    auto i64 = [] { return std::make_shared<TIntegerType>(TIntegerType::I64); };
+    TStructType strLeft({{"lk", std::make_shared<TStringType>()}});
+    TStructType rightType({{"rk", i64()}});
+    TKernelCompiler compiler;
+    EXPECT_THROW(compiler.CompileJoin(strLeft, rightType, "lk", "rk", EJoinType::Inner),
+                 NQumir::TError);
+
+    TStructType leftType({{"lk", i64()}});
+    EXPECT_THROW(compiler.CompileJoin(leftType, rightType, "lk", "rk", EJoinType::Left),
+                 NQumir::TError);
+    EXPECT_THROW(compiler.CompileJoin(leftType, rightType, "missing", "rk", EJoinType::Inner),
+                 NQumir::TError);
 }
 
 int main(int argc, char** argv) {

@@ -185,4 +185,102 @@ bool TJoinOutputBuilder::NextBatch(TRowSet& out) {
     return true;
 }
 
+namespace {
+
+constexpr int64_t kJoinInitialCapacity = 256;
+
+} // namespace
+
+TRuntimeJoin::TRuntimeJoin(std::unique_ptr<IRuntimeNode> left,
+    std::unique_ptr<IRuntimeNode> right,
+    NQumir::NAst::TTypePtr outputType, TJoinKernels kernels)
+    : Left_(std::move(left))
+    , Right_(std::move(right))
+    , OutputType_(std::move(outputType))
+    , Kernels_(std::move(kernels))
+{
+    // Output columns = all left columns, then all right columns (INNER), in the
+    // order ComputeJoinOutputType produces.
+    std::vector<TJoinColumnRef> columns;
+    auto* leftStruct = static_cast<TStructType*>(Left_->OutputType().get());
+    auto* rightStruct = static_cast<TStructType*>(Right_->OutputType().get());
+    if (leftStruct) {
+        for (int32_t i = 0; i < static_cast<int32_t>(leftStruct->Fields.size()); ++i) {
+            columns.push_back({EJoinSide::Left, i, leftStruct->Fields[i].second});
+        }
+    }
+    if (rightStruct) {
+        for (int32_t j = 0; j < static_cast<int32_t>(rightStruct->Fields.size()); ++j) {
+            columns.push_back({EJoinSide::Right, j, rightStruct->Fields[j].second});
+        }
+    }
+    Builder_.emplace(&LeftRows_, &RightRows_, std::move(columns));
+}
+
+TRuntimeJoin::~TRuntimeJoin() {
+    if (Initialized_) {
+        Kernels_.DestroyTable(LeftTable_.data());
+        Kernels_.DestroyTable(RightTable_.data());
+    }
+    // pb_destroy is null-safe even if no pairs were ever pushed.
+    Kernels_.DestroyPairs(&PairBuffer_);
+}
+
+void TRuntimeJoin::EnsureInit() {
+    if (Initialized_) {
+        return;
+    }
+    Initialized_ = true;
+    Kernels_.Init(LeftTable_.data(), kJoinInitialCapacity);
+    Kernels_.Init(RightTable_.data(), kJoinInitialCapacity);
+}
+
+void TRuntimeJoin::DrainKernelPairs() {
+    for (int64_t i = 0; i < PairBuffer_.Count; ++i) {
+        Builder_->AddPair(PairBuffer_.Data[2 * i], PairBuffer_.Data[2 * i + 1]);
+    }
+    PairBuffer_.Count = 0; // reuse the allocation for the next batch
+}
+
+void TRuntimeJoin::PullOneInputBatch() {
+    TRowSet batch = {};
+    if (!LeftDone_) {
+        if (Left_->Next(batch)) {
+            int32_t batchIdx = LeftRows_.PushBatch(batch);
+            Kernels_.Process(LeftTable_.data(), RightTable_.data(),
+                const_cast<TRowSet*>(&LeftRows_.Batch(batchIdx)),
+                Kernels_.LeftKeyColIdx, batchIdx, /*isLeft=*/1, &PairBuffer_);
+            DrainKernelPairs();
+            return;
+        }
+        LeftDone_ = true;
+    }
+    if (!RightDone_) {
+        if (Right_->Next(batch)) {
+            int32_t batchIdx = RightRows_.PushBatch(batch);
+            Kernels_.Process(RightTable_.data(), LeftTable_.data(),
+                const_cast<TRowSet*>(&RightRows_.Batch(batchIdx)),
+                Kernels_.RightKeyColIdx, batchIdx, /*isLeft=*/0, &PairBuffer_);
+            DrainKernelPairs();
+            return;
+        }
+        RightDone_ = true;
+    }
+    BothDone_ = LeftDone_ && RightDone_;
+}
+
+bool TRuntimeJoin::Next(TRowSet& rowSet) {
+    EnsureInit();
+    for (;;) {
+        if (Builder_->NextBatch(rowSet)) {
+            return true;
+        }
+        Builder_->ClearPairs();
+        if (BothDone_) {
+            return false;
+        }
+        PullOneInputBatch();
+    }
+}
+
 } // namespace NQqb

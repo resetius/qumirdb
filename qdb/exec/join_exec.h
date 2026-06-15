@@ -1,10 +1,15 @@
 #pragma once
 
+#include <qdb/exec/executor.h>
 #include <qdb/io/io.h>
+#include <qdb/kernel/compiler.h>
 
 #include <qumir/parser/type.h>
 
+#include <array>
 #include <cstdint>
+#include <memory>
+#include <optional>
 #include <vector>
 
 namespace NQqb {
@@ -146,6 +151,49 @@ private:
     std::vector<TRowId> LeftIds_;
     std::vector<TRowId> RightIds_;
     size_t Cursor_ = 0;
+};
+
+// Symmetric (pipelined) hash join executor. Stage 1: INNER, i64 key, both
+// inputs held in memory. Pulls input batches, retains them in per-side
+// TRowStores, feeds them to the compiled probe+insert kernel, and drains the
+// matched RowId pairs into output batches via gather (TJoinOutputBuilder).
+class TRuntimeJoin : public IRuntimeNode {
+public:
+    TRuntimeJoin(std::unique_ptr<IRuntimeNode> left,
+        std::unique_ptr<IRuntimeNode> right,
+        NQumir::NAst::TTypePtr outputType, TJoinKernels kernels);
+    ~TRuntimeJoin() override;
+
+    NQumir::NAst::TTypePtr OutputType() const override { return OutputType_; }
+    bool Next(TRowSet& rowSet) override;
+
+private:
+    // Mirrors the PairBuffer external type (modules/qumirdb.cpp).
+    struct TPairBufferState {
+        int64_t Count = 0;
+        int64_t Capacity = 0;
+        int64_t* Data = nullptr;
+    };
+    static_assert(sizeof(TPairBufferState) == TKernelCompiler::kPairBufferSize);
+
+    void EnsureInit();
+    void PullOneInputBatch();
+    void DrainKernelPairs();
+
+    std::unique_ptr<IRuntimeNode> Left_;
+    std::unique_ptr<IRuntimeNode> Right_;
+    NQumir::NAst::TTypePtr OutputType_;
+    TJoinKernels Kernels_;
+    TRowStore LeftRows_;
+    TRowStore RightRows_;
+    std::array<uint8_t, TKernelCompiler::kHashTableSize> LeftTable_{};
+    std::array<uint8_t, TKernelCompiler::kHashTableSize> RightTable_{};
+    TPairBufferState PairBuffer_;
+    std::optional<TJoinOutputBuilder> Builder_;
+    bool Initialized_ = false;
+    bool LeftDone_ = false;
+    bool RightDone_ = false;
+    bool BothDone_ = false;
 };
 
 } // namespace NQqb

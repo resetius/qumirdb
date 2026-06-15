@@ -323,4 +323,99 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
     return kernels;
 }
 
+TJoinKernels TKernelCompiler::CompileJoin(
+    const NQumir::NAst::TStructType& leftType,
+    const NQumir::NAst::TStructType& rightType,
+    const std::string& leftKey,
+    const std::string& rightKey,
+    EJoinType type)
+{
+    using namespace NQumir::NAst;
+
+    if (type != EJoinType::Inner) {
+        throw NQumir::TError("CompileJoin: only INNER join is supported in Stage 1");
+    }
+
+    auto findKey = [](const TStructType& schema, const std::string& name,
+        const char* side) -> int32_t
+    {
+        for (int32_t i = 0; i < static_cast<int32_t>(schema.Fields.size()); ++i) {
+            if (schema.Fields[i].first == name) {
+                const auto unwrapped =
+                    UnwrapNamedType(UnwrapNullableType(schema.Fields[i].second));
+                auto integer = TMaybeType<TIntegerType>(unwrapped);
+                if (!integer || integer.Cast()->BitWidth() != 64) {
+                    throw NQumir::TError(
+                        std::string("CompileJoin: ") + side + " join key '" + name +
+                        "' must be an i64 column");
+                }
+                return i;
+            }
+        }
+        throw NQumir::TError(
+            std::string("CompileJoin: ") + side + " join key column '" + name +
+            "' not found");
+    };
+    const int32_t leftIdx = findKey(leftType, leftKey, "left");
+    const int32_t rightIdx = findKey(rightType, rightKey, "right");
+
+    auto compileEntry = [&](const std::string& entry)
+        -> std::pair<void*, std::shared_ptr<NQumir::TLLVMRunner>>
+    {
+        auto library = NKernel::BuildJoinKernelLibrary();
+        if (!library) {
+            throw NQumir::TError("CompileJoin: " + library.error().ToString());
+        }
+        NQumir::TLLVMRunnerOptions options;
+        options.CoreInput = true;
+        options.NativeCode = true;
+        options.AllowOverloads = true;
+        options.OptLevel = 3;
+        options.PrintIr = Diagnostics_ != nullptr;
+        auto runner = std::make_shared<NQumir::TLLVMRunner>(options);
+        runner->RegisterModule(
+            std::make_shared<NQumir::NRegistry::QumirDbModule>(), true);
+        auto program = std::make_shared<TBlockExpr>(
+            NQumir::TLocation{}, std::move(*library));
+        PrintKernelAst(Diagnostics_, "join." + entry, program);
+        std::string error;
+        void* fn = runner->CompileKernelAst(program, entry, &error);
+        FinishKernelDiagnostics(Diagnostics_);
+        if (!fn) {
+            throw std::runtime_error("CompileJoin: " + entry + " compilation failed: " + error);
+        }
+        return {fn, std::move(runner)};
+    };
+
+    auto [initFn, initRunner] = compileEntry("jt_init");
+    auto [processFn, processRunner] = compileEntry("jt_process_batch");
+    auto [destroyTableFn, destroyTableRunner] = compileEntry("jt_destroy");
+    auto [destroyPairsFn, destroyPairsRunner] = compileEntry("pb_destroy");
+
+    using TInitFn = bool(*)(void*, int64_t, int64_t);
+    using TProcessFn = bool(*)(void*, void*, TRowSet*, int64_t, int64_t, int64_t, void*);
+    using TDestroyFn = void(*)(void*);
+
+    constexpr int64_t kKeySize = 8; // i64
+
+    TJoinKernels kernels;
+    kernels.LeftKeyColIdx = leftIdx;
+    kernels.RightKeyColIdx = rightIdx;
+    kernels.Init = [initFn, initRunner](void* table, int64_t capacity) {
+        return reinterpret_cast<TInitFn>(initFn)(table, capacity, kKeySize);
+    };
+    kernels.Process = [processFn, processRunner](void* own, void* opp, TRowSet* batch,
+        int64_t keyColIdx, int64_t batchIdx, int64_t isLeft, void* pairs) {
+        return reinterpret_cast<TProcessFn>(processFn)(
+            own, opp, batch, keyColIdx, batchIdx, isLeft, pairs);
+    };
+    kernels.DestroyTable = [destroyTableFn, destroyTableRunner](void* table) {
+        reinterpret_cast<TDestroyFn>(destroyTableFn)(table);
+    };
+    kernels.DestroyPairs = [destroyPairsFn, destroyPairsRunner](void* pairs) {
+        reinterpret_cast<TDestroyFn>(destroyPairsFn)(pairs);
+    };
+    return kernels;
+}
+
 } // namespace NQqb
