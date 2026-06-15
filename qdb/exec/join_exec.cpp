@@ -247,9 +247,9 @@ void TRuntimeJoin::PullOneInputBatch() {
     if (!LeftDone_) {
         if (Left_->Next(batch)) {
             int32_t batchIdx = LeftRows_.PushBatch(batch);
-            Kernels_.Process(LeftTable_.data(), RightTable_.data(),
+            Kernels_.ProcessLeft(LeftTable_.data(), RightTable_.data(),
                 const_cast<TRowSet*>(&LeftRows_.Batch(batchIdx)),
-                Kernels_.LeftKeyColIdx, batchIdx, /*isLeft=*/1, &PairBuffer_);
+                batchIdx, &PairBuffer_);
             DrainKernelPairs();
             return;
         }
@@ -258,9 +258,9 @@ void TRuntimeJoin::PullOneInputBatch() {
     if (!RightDone_) {
         if (Right_->Next(batch)) {
             int32_t batchIdx = RightRows_.PushBatch(batch);
-            Kernels_.Process(RightTable_.data(), LeftTable_.data(),
+            Kernels_.ProcessRight(RightTable_.data(), LeftTable_.data(),
                 const_cast<TRowSet*>(&RightRows_.Batch(batchIdx)),
-                Kernels_.RightKeyColIdx, batchIdx, /*isLeft=*/0, &PairBuffer_);
+                batchIdx, &PairBuffer_);
             DrainKernelPairs();
             return;
         }

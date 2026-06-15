@@ -313,9 +313,7 @@ TEST(CompileJoin, ProducesWorkingInnerJoinKernels) {
     TStructType rightType({{"rk", i64()}, {"rv", i64()}});
 
     TKernelCompiler compiler;
-    auto kernels = compiler.CompileJoin(leftType, rightType, "lk", "rk", EJoinType::Inner);
-    EXPECT_EQ(kernels.LeftKeyColIdx, 0);
-    EXPECT_EQ(kernels.RightKeyColIdx, 0);
+    auto kernels = compiler.CompileJoin(leftType, rightType, {{"lk", "rk"}}, EJoinType::Inner);
 
     std::vector<int64_t> lkeys = {1, 2, 1};
     std::vector<int64_t> rkeys = {1, 1, 3};
@@ -334,8 +332,8 @@ TEST(CompileJoin, ProducesWorkingInnerJoinKernels) {
     TPairBuffer pairs{};
     ASSERT_TRUE(kernels.Init(&left, 8));
     ASSERT_TRUE(kernels.Init(&right, 8));
-    ASSERT_TRUE(kernels.Process(&left, &right, &lbatch, kernels.LeftKeyColIdx, 0, 1, &pairs));
-    ASSERT_TRUE(kernels.Process(&right, &left, &rbatch, kernels.RightKeyColIdx, 0, 0, &pairs));
+    ASSERT_TRUE(kernels.ProcessLeft(&left, &right, &lbatch, 0, &pairs));
+    ASSERT_TRUE(kernels.ProcessRight(&right, &left, &rbatch, 0, &pairs));
 
     std::vector<std::tuple<int64_t, int64_t>> got;
     for (int64_t i = 0; i < pairs.Count; ++i) {
@@ -350,19 +348,27 @@ TEST(CompileJoin, ProducesWorkingInnerJoinKernels) {
     kernels.DestroyTable(&right);
 }
 
-TEST(CompileJoin, RejectsNonI64KeyAndNonInner) {
+TEST(CompileJoin, RejectsStringKeyNonInnerAndIncompatible) {
     using namespace NQumir::NAst;
     auto i64 = [] { return std::make_shared<TIntegerType>(TIntegerType::I64); };
-    TStructType strLeft({{"lk", std::make_shared<TStringType>()}});
-    TStructType rightType({{"rk", i64()}});
     TKernelCompiler compiler;
-    EXPECT_THROW(compiler.CompileJoin(strLeft, rightType, "lk", "rk", EJoinType::Inner),
+
+    // String keys are not supported yet (fixed-key scope).
+    TStructType strLeft({{"lk", std::make_shared<TStringType>()}});
+    TStructType strRight({{"rk", std::make_shared<TStringType>()}});
+    EXPECT_THROW(compiler.CompileJoin(strLeft, strRight, {{"lk", "rk"}}, EJoinType::Inner),
                  NQumir::TError);
 
     TStructType leftType({{"lk", i64()}});
-    EXPECT_THROW(compiler.CompileJoin(leftType, rightType, "lk", "rk", EJoinType::Left),
+    TStructType rightType({{"rk", i64()}});
+    // Non-Inner.
+    EXPECT_THROW(compiler.CompileJoin(leftType, rightType, {{"lk", "rk"}}, EJoinType::Left),
                  NQumir::TError);
-    EXPECT_THROW(compiler.CompileJoin(leftType, rightType, "missing", "rk", EJoinType::Inner),
+    // Missing column.
+    EXPECT_THROW(compiler.CompileJoin(leftType, rightType, {{"missing", "rk"}}, EJoinType::Inner),
+                 NQumir::TError);
+    // Incompatible key types (i64 vs string).
+    EXPECT_THROW(compiler.CompileJoin(leftType, strRight, {{"lk", "rk"}}, EJoinType::Inner),
                  NQumir::TError);
 }
 

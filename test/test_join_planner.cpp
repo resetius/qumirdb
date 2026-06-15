@@ -34,10 +34,14 @@ struct TVectorSource : ISource {
     std::vector<TRowSet> Batches;
     size_t Index = 0;
 
-    TVectorSource(std::vector<std::string> names, std::vector<TRowSet> batches)
-        : Names(std::move(names)), Batches(std::move(batches)) {
-        for (auto& n : Names) {
-            Cols.push_back({n, std::make_shared<TIntegerType>(TIntegerType::I64)});
+    std::vector<TTypePtr> Types;
+
+    TVectorSource(std::vector<std::string> names, std::vector<TRowSet> batches,
+        std::vector<TTypePtr> types = {})
+        : Names(std::move(names)), Batches(std::move(batches)), Types(std::move(types)) {
+        for (size_t i = 0; i < Names.size(); ++i) {
+            Cols.push_back({Names[i], i < Types.size() ? Types[i]
+                : std::make_shared<TIntegerType>(TIntegerType::I64)});
         }
         Schema_ = TSchema{Cols};
     }
@@ -146,6 +150,85 @@ TEST(JoinPlanner, ProjectOnTopPrunesJoinInputs) {
     std::sort(got.begin(), got.end());
     std::sort(expected.begin(), expected.end());
     EXPECT_EQ(got, expected);
+}
+
+namespace {
+
+TTypePtr I32() { return std::make_shared<TIntegerType>(TIntegerType::I32); }
+TTypePtr I64T() { return std::make_shared<TIntegerType>(TIntegerType::I64); }
+
+} // namespace
+
+TEST(JoinPlanner, Int32KeyE2E) {
+    // int32 join key (the TPC-H *_key case) flows through the generic path.
+    std::vector<int32_t> lk = {1, 2, 1}; std::vector<int64_t> lv = {10, 20, 30};
+    std::vector<int32_t> rk = {1, 1, 3}; std::vector<int64_t> rv = {100, 200, 300};
+    std::vector<TColumn> lcols = {TColumn{.Data = reinterpret_cast<char*>(lk.data())},
+                                  TColumn{.Data = reinterpret_cast<char*>(lv.data())}};
+    std::vector<TColumn> rcols = {TColumn{.Data = reinterpret_cast<char*>(rk.data())},
+                                  TColumn{.Data = reinterpret_cast<char*>(rv.data())}};
+    TRowSet lbatch{.Columns = lcols.data(), .ColumnCount = 2, .RowCount = 3, .RefCount = 1};
+    TRowSet rbatch{.Columns = rcols.data(), .ColumnCount = 2, .RowCount = 3, .RefCount = 1};
+
+    TVectorSource left({"lk", "lv"}, {lbatch}, {I32(), I64T()});
+    TVectorSource right({"rk", "rv"}, {rbatch}, {I32(), I64T()});
+
+    auto plan = PlanJoin(
+        "(rel join (rel source \"L\") (rel source \"R\") ((lk rk)) (inner))", left, right);
+
+    std::vector<std::tuple<int64_t, int64_t>> got; // (lv, rv) of matched rows
+    TRowSet out{};
+    while (plan->Next(out)) {
+        ASSERT_EQ(out.ColumnCount, 4); // lk(i32), lv(i64), rk(i32), rv(i64)
+        for (int64_t i = 0; i < out.RowCount; ++i) {
+            // Keys equal: out col0 (lk i32) == out col2 (rk i32).
+            EXPECT_EQ(reinterpret_cast<const int32_t*>(out.Columns[0].Data)[i],
+                      reinterpret_cast<const int32_t*>(out.Columns[2].Data)[i]);
+            got.emplace_back(reinterpret_cast<const int64_t*>(out.Columns[1].Data)[i],
+                             reinterpret_cast<const int64_t*>(out.Columns[3].Data)[i]);
+        }
+        Release(&out);
+    }
+    std::vector<std::tuple<int64_t, int64_t>> expected = {
+        {10, 100}, {10, 200}, {30, 100}, {30, 200}};
+    std::sort(got.begin(), got.end());
+    std::sort(expected.begin(), expected.end());
+    EXPECT_EQ(got, expected);
+}
+
+TEST(JoinPlanner, CompositeI32KeyE2E) {
+    // Composite (i32, i32) key.
+    std::vector<int32_t> la = {1, 1, 2}; std::vector<int32_t> lb = {7, 8, 7};
+    std::vector<int32_t> ra = {1, 2, 1}; std::vector<int32_t> rb = {7, 7, 9};
+    std::vector<TColumn> lcols = {TColumn{.Data = reinterpret_cast<char*>(la.data())},
+                                  TColumn{.Data = reinterpret_cast<char*>(lb.data())}};
+    std::vector<TColumn> rcols = {TColumn{.Data = reinterpret_cast<char*>(ra.data())},
+                                  TColumn{.Data = reinterpret_cast<char*>(rb.data())}};
+    TRowSet lbatch{.Columns = lcols.data(), .ColumnCount = 2, .RowCount = 3, .RefCount = 1};
+    TRowSet rbatch{.Columns = rcols.data(), .ColumnCount = 2, .RowCount = 3, .RefCount = 1};
+
+    TVectorSource left({"la", "lb"}, {lbatch}, {I32(), I32()});
+    TVectorSource right({"ra", "rb"}, {rbatch}, {I32(), I32()});
+
+    auto plan = PlanJoin(
+        "(rel join (rel source \"L\") (rel source \"R\") ((la ra) (lb rb)) (inner))",
+        left, right);
+
+    int64_t rows = 0;
+    TRowSet out{};
+    while (plan->Next(out)) {
+        for (int64_t i = 0; i < out.RowCount; ++i) {
+            // Both key components equal.
+            EXPECT_EQ(reinterpret_cast<const int32_t*>(out.Columns[0].Data)[i],
+                      reinterpret_cast<const int32_t*>(out.Columns[2].Data)[i]);
+            EXPECT_EQ(reinterpret_cast<const int32_t*>(out.Columns[1].Data)[i],
+                      reinterpret_cast<const int32_t*>(out.Columns[3].Data)[i]);
+        }
+        rows += out.RowCount;
+        Release(&out);
+    }
+    // (1,7)x(1,7) and (2,7)x(2,7) match -> 2 rows.
+    EXPECT_EQ(rows, 2);
 }
 
 int main(int argc, char** argv) {

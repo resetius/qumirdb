@@ -147,10 +147,6 @@ std::unique_ptr<IRuntimeNode> TPhysicalPlanner::Build(const TOperatorPtr& root) 
             throw std::runtime_error(
                 "join residual filter is not supported yet (Stage 1)");
         }
-        if (join->Keys().size() != 1) {
-            throw std::runtime_error(
-                "join supports exactly one equi-key pair (Stage 1)");
-        }
         auto left = Build(join->Left());
         auto right = Build(join->Right());
         auto* leftType = static_cast<NQumir::NAst::TStructType*>(left->OutputType().get());
@@ -159,10 +155,15 @@ std::unique_ptr<IRuntimeNode> TPhysicalPlanner::Build(const TOperatorPtr& root) 
             throw std::runtime_error("join inputs must have TStructType");
         }
 
+        std::vector<std::pair<std::string, std::string>> keys;
+        keys.reserve(join->Keys().size());
+        for (const auto& key : join->Keys()) {
+            keys.emplace_back(key.Left, key.Right);
+        }
+
         TKernelCompiler compiler(Diagnostics_);
         auto kernels = compiler.CompileJoin(
-            *leftType, *rightType,
-            join->Keys()[0].Left, join->Keys()[0].Right, join->JoinType());
+            *leftType, *rightType, keys, join->JoinType());
 
         // Output type from the physical (pruned) input types.
         auto outputType = ComputeJoinOutputType(

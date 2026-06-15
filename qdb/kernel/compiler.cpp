@@ -2,6 +2,8 @@
 #include <qdb/types/nullable.h>
 #include <qdb/kernel/aggregate_key.h>
 #include <qdb/kernel/gen.h>
+#include <qdb/kernel/join_gen.h>
+#include <qdb/kernel/join_key.h>
 #include <qdb/kernel/lib.h>
 #include <qdb/modules/qumirdb.h>
 
@@ -49,7 +51,7 @@ NQumir::NAst::TExprPtr ClonePredicate(
         result = std::make_shared<TStringLiteralExpr>(
             predicate->Location, literal.Cast()->Value);
     } else if (auto number = TMaybeNode<TNumberExpr>(predicate)) {
-        result = number.Cast()->IsFloat
+        result = number.Cast()->IsFloat()
             ? std::static_pointer_cast<TExpr>(std::make_shared<TNumberExpr>(
                 predicate->Location, number.Cast()->FloatValue))
             : std::static_pointer_cast<TExpr>(std::make_shared<TNumberExpr>(
@@ -326,8 +328,7 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
 TJoinKernels TKernelCompiler::CompileJoin(
     const NQumir::NAst::TStructType& leftType,
     const NQumir::NAst::TStructType& rightType,
-    const std::string& leftKey,
-    const std::string& rightKey,
+    const std::vector<std::pair<std::string, std::string>>& keys,
     EJoinType type)
 {
     using namespace NQumir::NAst;
@@ -336,36 +337,42 @@ TJoinKernels TKernelCompiler::CompileJoin(
         throw NQumir::TError("CompileJoin: only INNER join is supported in Stage 1");
     }
 
-    auto findKey = [](const TStructType& schema, const std::string& name,
-        const char* side) -> int32_t
-    {
-        for (int32_t i = 0; i < static_cast<int32_t>(schema.Fields.size()); ++i) {
-            if (schema.Fields[i].first == name) {
-                const auto unwrapped =
-                    UnwrapNamedType(UnwrapNullableType(schema.Fields[i].second));
-                auto integer = TMaybeType<TIntegerType>(unwrapped);
-                if (!integer || integer.Cast()->BitWidth() != 64) {
-                    throw NQumir::TError(
-                        std::string("CompileJoin: ") + side + " join key '" + name +
-                        "' must be an i64 column");
-                }
-                return i;
-            }
-        }
-        throw NQumir::TError(
-            std::string("CompileJoin: ") + side + " join key column '" + name +
-            "' not found");
-    };
-    const int32_t leftIdx = findKey(leftType, leftKey, "left");
-    const int32_t rightIdx = findKey(rightType, rightKey, "right");
+    // Unified key descriptor (reuses the aggregation key machinery). Throws on
+    // incompatible types / missing columns; string keys are rejected by
+    // GenJoinProcessAst below.
+    const auto keyDesc = NKernel::BuildJoinKeyDescriptor(leftType, rightType, keys);
+    const int64_t keySize = static_cast<int64_t>(keyDesc.Size);
 
-    auto compileEntry = [&](const std::string& entry)
-        -> std::pair<void*, std::shared_ptr<NQumir::TLLVMRunner>>
-    {
+    auto dbModule = std::make_shared<NQumir::NRegistry::QumirDbModule>();
+    TTypePtr columnType, rowSetType, hashTableType, pairBufferType;
+    for (const auto& et : dbModule->ExternalTypes()) {
+        if (et.Name == "TColumn") columnType = et.Type;
+        else if (et.Name == "TRowSet") rowSetType = et.Type;
+        else if (et.Name == "HashTable") hashTableType = et.Type;
+        else if (et.Name == "PairBuffer") pairBufferType = et.Type;
+    }
+
+    // Fresh program per entry (CompileKernelAst consumes the AST): key type
+    // decls + key-ops overloads + shared library + generated process functions.
+    auto buildProgram = [&]() -> std::vector<TExprPtr> {
         auto library = NKernel::BuildJoinKernelLibrary();
         if (!library) {
             throw NQumir::TError("CompileJoin: " + library.error().ToString());
         }
+        std::vector<TExprPtr> program;
+        for (auto& f : NKernel::GenJoinKeyTypeDecls(keyDesc)) program.push_back(std::move(f));
+        for (auto& f : NKernel::GenJoinKeyOpsFunDecls(keyDesc)) program.push_back(std::move(f));
+        for (auto& f : *library) program.push_back(std::move(f));
+        program.push_back(NKernel::GenJoinProcessAst(keyDesc, /*isLeft=*/true,
+            "jt_process_left", columnType, rowSetType, hashTableType, pairBufferType));
+        program.push_back(NKernel::GenJoinProcessAst(keyDesc, /*isLeft=*/false,
+            "jt_process_right", columnType, rowSetType, hashTableType, pairBufferType));
+        return program;
+    };
+
+    auto compileEntry = [&](const std::string& entry)
+        -> std::pair<void*, std::shared_ptr<NQumir::TLLVMRunner>>
+    {
         NQumir::TLLVMRunnerOptions options;
         options.CoreInput = true;
         options.NativeCode = true;
@@ -373,10 +380,8 @@ TJoinKernels TKernelCompiler::CompileJoin(
         options.OptLevel = 3;
         options.PrintIr = Diagnostics_ != nullptr;
         auto runner = std::make_shared<NQumir::TLLVMRunner>(options);
-        runner->RegisterModule(
-            std::make_shared<NQumir::NRegistry::QumirDbModule>(), true);
-        auto program = std::make_shared<TBlockExpr>(
-            NQumir::TLocation{}, std::move(*library));
+        runner->RegisterModule(dbModule, true);
+        auto program = std::make_shared<TBlockExpr>(NQumir::TLocation{}, buildProgram());
         PrintKernelAst(Diagnostics_, "join." + entry, program);
         std::string error;
         void* fn = runner->CompileKernelAst(program, entry, &error);
@@ -388,26 +393,26 @@ TJoinKernels TKernelCompiler::CompileJoin(
     };
 
     auto [initFn, initRunner] = compileEntry("jt_init");
-    auto [processFn, processRunner] = compileEntry("jt_process_batch");
+    auto [leftFn, leftRunner] = compileEntry("jt_process_left");
+    auto [rightFn, rightRunner] = compileEntry("jt_process_right");
     auto [destroyTableFn, destroyTableRunner] = compileEntry("jt_destroy");
     auto [destroyPairsFn, destroyPairsRunner] = compileEntry("pb_destroy");
 
     using TInitFn = bool(*)(void*, int64_t, int64_t);
-    using TProcessFn = bool(*)(void*, void*, TRowSet*, int64_t, int64_t, int64_t, void*);
+    using TProcessFn = bool(*)(void*, void*, TRowSet*, int64_t, void*);
     using TDestroyFn = void(*)(void*);
 
-    constexpr int64_t kKeySize = 8; // i64
-
     TJoinKernels kernels;
-    kernels.LeftKeyColIdx = leftIdx;
-    kernels.RightKeyColIdx = rightIdx;
-    kernels.Init = [initFn, initRunner](void* table, int64_t capacity) {
-        return reinterpret_cast<TInitFn>(initFn)(table, capacity, kKeySize);
+    kernels.Init = [initFn, initRunner, keySize](void* table, int64_t capacity) {
+        return reinterpret_cast<TInitFn>(initFn)(table, capacity, keySize);
     };
-    kernels.Process = [processFn, processRunner](void* own, void* opp, TRowSet* batch,
-        int64_t keyColIdx, int64_t batchIdx, int64_t isLeft, void* pairs) {
-        return reinterpret_cast<TProcessFn>(processFn)(
-            own, opp, batch, keyColIdx, batchIdx, isLeft, pairs);
+    kernels.ProcessLeft = [leftFn, leftRunner](void* own, void* opp, TRowSet* batch,
+        int64_t batchIdx, void* pairs) {
+        return reinterpret_cast<TProcessFn>(leftFn)(own, opp, batch, batchIdx, pairs);
+    };
+    kernels.ProcessRight = [rightFn, rightRunner](void* own, void* opp, TRowSet* batch,
+        int64_t batchIdx, void* pairs) {
+        return reinterpret_cast<TProcessFn>(rightFn)(own, opp, batch, batchIdx, pairs);
     };
     kernels.DestroyTable = [destroyTableFn, destroyTableRunner](void* table) {
         reinterpret_cast<TDestroyFn>(destroyTableFn)(table);

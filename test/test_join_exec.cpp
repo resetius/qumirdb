@@ -360,7 +360,7 @@ TEST(RuntimeJoin, InnerJoinEndToEnd) {
     TKernelCompiler compiler;
     auto kernels = compiler.CompileJoin(
         static_cast<TStructType&>(*leftType), static_cast<TStructType&>(*rightType),
-        "lk", "rk", EJoinType::Inner);
+        {{"lk", "rk"}}, EJoinType::Inner);
     auto outputType = ComputeJoinOutputType(leftType, rightType, EJoinType::Inner);
     ASSERT_TRUE(outputType);
 
@@ -416,7 +416,7 @@ TEST(RuntimeJoin, MultipleBatchesMatchNestedLoop) {
     TKernelCompiler compiler;
     auto kernels = compiler.CompileJoin(
         static_cast<TStructType&>(*leftType), static_cast<TStructType&>(*rightType),
-        "lk", "rk", EJoinType::Inner);
+        {{"lk", "rk"}}, EJoinType::Inner);
     auto outputType = ComputeJoinOutputType(leftType, rightType, EJoinType::Inner);
     ASSERT_TRUE(outputType);
     TRuntimeJoin join(std::move(left), std::move(right), *outputType, std::move(kernels));
