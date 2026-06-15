@@ -159,38 +159,11 @@ QumirDbModule::QumirDbModule() {
             {"KeySize", i64Type},
         });
 
-    // JoinTable C layout (symmetric hash join, one per side). Sparse Robin Hood
-    // probe arrays + dense storage indexed by stable SlotId. The dense per-slot
-    // RowId bucket is kept as three parallel arrays (count/capacity/data),
-    // mirroring AggBuffers, so growth/rehash never mutate a struct in place.
-    //
-    // offset  0: Keys        uint8_t*   <ptr u8>        probe table, Capacity*KeySize
-    // offset  8: Dist        int64_t*   <ptr i64>       probe distance; -1 = empty
-    // offset 16: SlotId      int64_t*   <ptr i64>       dense slot id for occupied entry
-    // offset 24: GroupKeys   uint8_t*   <ptr u8>        dense keys, Capacity*KeySize
-    // offset 32: BucketCount int64_t*   <ptr i64>       per dense slot: # of RowIds
-    // offset 40: BucketCap   int64_t*   <ptr i64>       per dense slot: bucket capacity
-    // offset 48: BucketData  int64_t**  <ptr <ptr i64>> per dense slot: heap RowId array
-    // offset 56: Capacity    int64_t    i64             power of two
-    // offset 64: Size        int64_t    i64             number of distinct keys
-    // offset 72: KeySize     int64_t    i64             sizeof the query-local Key
-    // sizeof = 80
-    auto joinTableType = std::make_shared<TStructType>(
-        std::vector<std::pair<std::string, TTypePtr>>{
-            {"Keys", ptrU8Type},
-            {"Dist", ptrI64Type},
-            {"SlotId", ptrI64Type},
-            {"GroupKeys", ptrU8Type},
-            {"BucketCount", ptrI64Type},
-            {"BucketCap", ptrI64Type},
-            {"BucketData", ptrPtrI64Type},
-            {"Capacity", i64Type},
-            {"Size", i64Type},
-            {"KeySize", i64Type},
-        });
-
     // PairBuffer C layout: growable list of (leftRowId, rightRowId) i64 pairs.
-    // Data holds 2*Count int64 (interleaved). sizeof = 24.
+    // Data holds 2*Count int64 (interleaved). sizeof = 24. The symmetric hash
+    // join reuses the aggregation HashTable as its hash map (dense per-slot
+    // RowId bucket stored in AggBuffers with NumAggs=3), so no separate
+    // JoinTable type is needed.
     auto pairBufferType = std::make_shared<TStructType>(
         std::vector<std::pair<std::string, TTypePtr>>{
             {"Count", i64Type},
@@ -202,7 +175,6 @@ QumirDbModule::QumirDbModule() {
         { .Name = "TColumn", .Type = columnType },
         { .Name = "TRowSet", .Type = rowSetType },
         { .Name = "HashTable", .Type = hashTableType },
-        { .Name = "JoinTable", .Type = joinTableType },
         { .Name = "PairBuffer", .Type = pairBufferType },
         { .Name = "StringView", .Type = stringViewType },
         { .Name = "OwnedString", .Type = ownedStringType },
