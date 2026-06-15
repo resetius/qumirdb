@@ -1,116 +1,52 @@
 (block
-  ;; Symmetric hash join table lifecycle + dense bucket / pair-buffer growth.
-  ;; JoinTable and PairBuffer are external types (see modules/qumirdb.cpp).
-  ;; The dense per-slot RowId bucket is kept as three parallel arrays
-  ;; (BucketCount / BucketCap / BucketData), mirroring AggBuffers, so growth and
-  ;; rehash never mutate a struct in place. Concrete i64 storage only — no
-  ;; template key here (that arrives with jt_process_batch in E2).
+  ;; The symmetric hash join reuses the aggregation Robin Hood HashTable
+  ;; (modules/qumirdb.cpp) as its hash map, so the probe table and lifecycle
+  ;; (aht_init / aht_rehash / aht_destroy) are NOT duplicated here. The dense
+  ;; per-slot RowId bucket is stored in the generic AggBuffers as three int64
+  ;; "columns" (NumAggs = 3):
+  ;;   AggBuffers[0][slot] = bucket length
+  ;;   AggBuffers[1][slot] = bucket capacity
+  ;;   AggBuffers[2][slot] = heap RowId array pointer (stored as i64)
+  ;; aht_init zeroes these, so empty buckets (len=0, cap=0, data=null) come for
+  ;; free; aht_rehash copies the int64 values, which carries the bucket pointers
+  ;; without recopying their contents.
 
-  ;; ---- JoinTable lifecycle (byte-allocating, width-agnostic) ----
-
-  (fun jt_init ((var ht <ref JoinTable>)
-                (var capacity i64)
-                (var key_size i64)) -> bool
+  ;; jt_init: a HashTable specialized for joins (3 dense int64 columns).
+  (fun jt_init ((var ht <ref HashTable>) (var capacity i64) (var key_size i64)) -> bool
     (block
-      (if (|| (< capacity (: 1 i64))
-              (> capacity (: 1152921504606846975 i64)))
-        (block (return #f)))
-      (if (|| (< key_size (: 1 i64))
-              (> capacity (/ (: 9223372036854775807 i64) key_size)))
-        (block (return #f)))
-      (var key_bytes = (* capacity key_size))
-      (var meta_bytes = (* capacity (: 8 i64)))
-      (var keys = (cast (call qdb_alloc key_bytes) <ptr u8>))
-      (var dist = (cast (call qdb_alloc meta_bytes) <ptr i64>))
-      (var slot_ids = (cast (call qdb_alloc meta_bytes) <ptr i64>))
-      (var group_keys = (cast (call qdb_alloc key_bytes) <ptr u8>))
-      (var bucket_count = (cast (call qdb_alloc meta_bytes) <ptr i64>))
-      (var bucket_cap = (cast (call qdb_alloc meta_bytes) <ptr i64>))
-      (var bucket_data = (cast (call qdb_alloc meta_bytes) <ptr <ptr i64>>))
-      (var failed bool)
-      (= failed #f)
-      (if (== (cast keys i64) (: 0 i64)) (block (= failed #t)))
-      (if (== (cast dist i64) (: 0 i64)) (block (= failed #t)))
-      (if (== (cast slot_ids i64) (: 0 i64)) (block (= failed #t)))
-      (if (== (cast group_keys i64) (: 0 i64)) (block (= failed #t)))
-      (if (== (cast bucket_count i64) (: 0 i64)) (block (= failed #t)))
-      (if (== (cast bucket_cap i64) (: 0 i64)) (block (= failed #t)))
-      (if (== (cast bucket_data i64) (: 0 i64)) (block (= failed #t)))
-      (if failed
-        (block
-          (if (!= (cast keys i64) (: 0 i64)) (block (call qdb_free (cast keys <ptr i8>))))
-          (if (!= (cast dist i64) (: 0 i64)) (block (call qdb_free (cast dist <ptr i8>))))
-          (if (!= (cast slot_ids i64) (: 0 i64)) (block (call qdb_free (cast slot_ids <ptr i8>))))
-          (if (!= (cast group_keys i64) (: 0 i64)) (block (call qdb_free (cast group_keys <ptr i8>))))
-          (if (!= (cast bucket_count i64) (: 0 i64)) (block (call qdb_free (cast bucket_count <ptr i8>))))
-          (if (!= (cast bucket_cap i64) (: 0 i64)) (block (call qdb_free (cast bucket_cap <ptr i8>))))
-          (if (!= (cast bucket_data i64) (: 0 i64)) (block (call qdb_free (cast bucket_data <ptr i8>))))
-          (return #f)))
-      (var i i64)
-      (= i (: 0 i64))
-      (while (< i capacity)
-        (block
-          (= dist [i] (: -1 i64))
-          (= slot_ids [i] (: -1 i64))
-          (= bucket_count [i] (: 0 i64))
-          (= bucket_cap [i] (: 0 i64))
-          (= bucket_data [i] (cast (: 0 i64) <ptr i64>))
-          (= i (+ i (: 1 i64)))))
-      (field_assign ht Keys keys)
-      (field_assign ht Dist dist)
-      (field_assign ht SlotId slot_ids)
-      (field_assign ht GroupKeys group_keys)
-      (field_assign ht BucketCount bucket_count)
-      (field_assign ht BucketCap bucket_cap)
-      (field_assign ht BucketData bucket_data)
-      (field_assign ht Capacity capacity)
-      (field_assign ht Size (: 0 i64))
-      (field_assign ht KeySize key_size)
-      (return #t)))
+      (return (call aht_init ht capacity (: 3 i64) key_size))))
 
-  (fun jt_destroy ((var ht <ref JoinTable>))
+  ;; jt_destroy: free the per-slot bucket data blocks (which aht_destroy does
+  ;; not know about), then the generic destroy frees everything else.
+  (fun jt_destroy ((var ht <ref HashTable>))
     (block
-      (var capacity = (field ht Capacity))
-      (var bucket_data = (field ht BucketData))
-      (if (!= (cast bucket_data i64) (: 0 i64))
+      (var aggs = (field ht AggBuffers))
+      (if (!= (cast aggs i64) (: 0 i64))
         (block
+          (var datas = (index aggs (: 2 i64)))
+          (var size = (field ht Size))
           (var i i64)
           (= i (: 0 i64))
-          (while (< i capacity)
+          (while (< i size)
             (block
-              (var data = (index bucket_data i))
-              (if (!= (cast data i64) (: 0 i64))
-                (block (call qdb_free (cast data <ptr i8>))))
+              (var blk = (index datas i))
+              (if (!= blk (: 0 i64)) (block (call qdb_free (cast blk <ptr i8>))))
               (= i (+ i (: 1 i64)))))))
-      (if (!= (cast (field ht Keys) i64) (: 0 i64)) (block (call qdb_free (cast (field ht Keys) <ptr i8>))))
-      (if (!= (cast (field ht Dist) i64) (: 0 i64)) (block (call qdb_free (cast (field ht Dist) <ptr i8>))))
-      (if (!= (cast (field ht SlotId) i64) (: 0 i64)) (block (call qdb_free (cast (field ht SlotId) <ptr i8>))))
-      (if (!= (cast (field ht GroupKeys) i64) (: 0 i64)) (block (call qdb_free (cast (field ht GroupKeys) <ptr i8>))))
-      (if (!= (cast (field ht BucketCount) i64) (: 0 i64)) (block (call qdb_free (cast (field ht BucketCount) <ptr i8>))))
-      (if (!= (cast (field ht BucketCap) i64) (: 0 i64)) (block (call qdb_free (cast (field ht BucketCap) <ptr i8>))))
-      (if (!= (cast bucket_data i64) (: 0 i64)) (block (call qdb_free (cast bucket_data <ptr i8>))))
-      (field_assign ht Keys (cast (: 0 i64) <ptr u8>))
-      (field_assign ht Dist (cast (: 0 i64) <ptr i64>))
-      (field_assign ht SlotId (cast (: 0 i64) <ptr i64>))
-      (field_assign ht GroupKeys (cast (: 0 i64) <ptr u8>))
-      (field_assign ht BucketCount (cast (: 0 i64) <ptr i64>))
-      (field_assign ht BucketCap (cast (: 0 i64) <ptr i64>))
-      (field_assign ht BucketData (cast (: 0 i64) <ptr <ptr i64>>))
-      (field_assign ht Capacity (: 0 i64))
-      (field_assign ht Size (: 0 i64))))
+      (call aht_destroy ht)))
 
-  ;; ---- dense RowId bucket growth (amortized O(1), x2 from capacity 4) ----
-
-  (fun jb_append ((var ht <ref JoinTable>)
-                  (var slot i64)
-                  (var row_id i64)) -> bool
+  ;; Appends row_id to the dense RowId bucket at dense slot `slot`
+  ;; (amortized O(1), x2 growth from capacity 4). The slot's three columns must
+  ;; already be zeroed (aht_init does this; new slots after rehash are zeroed by
+  ;; jt_process_batch before the first append).
+  (fun jb_append ((var ht <ref HashTable>) (var slot i64) (var row_id i64)) -> bool
     (block
-      (var counts = (field ht BucketCount))
-      (var caps = (field ht BucketCap))
-      (var datas = (field ht BucketData))
+      (var aggs = (field ht AggBuffers))
+      (var counts = (index aggs (: 0 i64)))
+      (var caps = (index aggs (: 1 i64)))
+      (var datas = (index aggs (: 2 i64)))
       (var count = (index counts slot))
       (var capacity = (index caps slot))
-      (var data = (index datas slot))
+      (var data = (cast (index datas slot) <ptr i64>))
       (if (== count capacity)
         (block
           (var new_cap i64)
@@ -123,7 +59,7 @@
           (= data new_data)
           (= capacity new_cap)
           (= caps [slot] capacity)
-          (= datas [slot] data)))
+          (= datas [slot] (cast data i64))))
       (= data [count] row_id)
       (= counts [slot] (+ count (: 1 i64)))
       (return #t)))
