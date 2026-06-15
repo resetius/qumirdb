@@ -8,25 +8,14 @@
 
 namespace NQqb::NKernel {
 
-namespace {
-
-struct TLayout {
-    size_t Size;
-    size_t Alignment;
-};
-
-struct TRepresentedType {
-    NQumir::NAst::TTypePtr Lookup;
-    NQumir::NAst::TTypePtr Stored;
-    TLayout Layout;
-    bool HasString = false;
-    bool Nullable = false;
-    NQumir::NAst::TTypePtr Inner;
-};
-
 size_t AlignUp(size_t value, size_t alignment) {
     return (value + alignment - 1) & ~(alignment - 1);
 }
+
+namespace {
+
+using TLayout = TKeyLayout;
+using TRepresentedType = TRepresentedKeyType;
 
 TLayout TypeLayout(const NQumir::NAst::TTypePtr& original) {
     using namespace NQumir::NAst;
@@ -71,7 +60,22 @@ NQumir::NAst::TTypePtr StringHandleType(const std::string& name) {
     return std::make_shared<TNamedType>(name, std::move(structure));
 }
 
-TRepresentedType RepresentKeyType(const NQumir::NAst::TTypePtr& original) {
+std::string KeyTypeName(const std::vector<TAggregateKeyField>& fields) {
+    std::string name = "AggKey";
+    for (const auto& field : fields) {
+        name += "_" + field.ColumnName + "_" + field.Type->ToString();
+    }
+    for (char& c : name) {
+        if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_') {
+            c = '_';
+        }
+    }
+    return name;
+}
+
+} // namespace
+
+TRepresentedKeyType RepresentKeyType(const NQumir::NAst::TTypePtr& original) {
     using namespace NQumir::NAst;
 
     const bool nullable = IsNullableType(original);
@@ -147,24 +151,9 @@ TRepresentedType RepresentKeyType(const NQumir::NAst::TTypePtr& original) {
         };
     }
     throw NQumir::TError(
-        "aggregation key type is not supported: " +
+        "key type is not supported: " +
         (original ? original->ToString() : std::string("<null>")));
 }
-
-std::string KeyTypeName(const std::vector<TAggregateKeyField>& fields) {
-    std::string name = "AggKey";
-    for (const auto& field : fields) {
-        name += "_" + field.ColumnName + "_" + field.Type->ToString();
-    }
-    for (char& c : name) {
-        if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_') {
-            c = '_';
-        }
-    }
-    return name;
-}
-
-} // namespace
 
 TAggregateKeyDescriptor BuildAggregateKeyDescriptor(
     const NQumir::NAst::TStructType& inputType,
