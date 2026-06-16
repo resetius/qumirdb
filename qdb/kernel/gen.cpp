@@ -8,6 +8,7 @@
 #include <qumir/location.h>
 
 #include <algorithm>
+#include <functional>
 #include <iterator>
 #include <map>
 #include <stdexcept>
@@ -1032,6 +1033,20 @@ NQumir::NAst::TExprPtr GenProjectKernelAst(
     auto ptrU8Type = std::make_shared<TPointerType>(u8Type);
     auto ptrPtrU8Type = std::make_shared<TPointerType>(ptrU8Type);
 
+    // Collect column names referenced in computed expressions before substitution.
+    std::unordered_set<std::string> referencedCols;
+    {
+        std::function<void(const TExprPtr&)> collect = [&](const TExprPtr& e) {
+            if (!e) return;
+            if (auto id = TMaybeNode<TIdentExpr>(e)) {
+                referencedCols.insert(id.Cast()->Name);
+                return;
+            }
+            for (const auto& child : e->Children()) collect(child);
+        };
+        for (const auto& expr : computedExprs) collect(expr);
+    }
+
     // Value-variable naming, identical to the filter kernel.
     std::unordered_map<std::string, std::string> fixedValues;
     std::unordered_set<std::string> stringFields;
@@ -1082,9 +1097,12 @@ NQumir::NAst::TExprPtr GenProjectKernelAst(
     bodyStmts.push_back(var("cols", ptrColumnType));
     bodyStmts.push_back(assign("cols", fieldOf("Columns")));
 
-    // Bind + materialize every input column (Stage 1: ignore validity).
+    // Bind + materialize only columns referenced in computed expressions.
     std::vector<TExprPtr> loopSetup;
     for (const auto& [name, type] : inputType.Fields) {
+        if (!referencedCols.contains(name)) {
+            continue;
+        }
         const int32_t idx = fieldIndices.at(name);
         auto colElem = std::make_shared<TIndexExpr>(loc, ident("cols"), numI64(idx));
         bodyStmts.push_back(var(name, columnValueType));

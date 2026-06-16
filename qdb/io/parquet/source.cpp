@@ -35,6 +35,8 @@ TTypePtr ArrowTypeToQumir(const std::shared_ptr<arrow::DataType>& type) {
         case arrow::Type::BOOL: return std::make_shared<NQumir::NAst::TBoolType>();
         case arrow::Type::STRING:
         case arrow::Type::LARGE_STRING: return std::make_shared<NQumir::NAst::TStringType>();
+        case arrow::Type::DATE32: return std::make_shared<TIntegerType>(TIntegerType::I32);
+        case arrow::Type::DATE64: return std::make_shared<TIntegerType>(TIntegerType::I64);
         default: return nullptr;
     }
 }
@@ -213,7 +215,9 @@ bool TParquetSource::Next(TRowSet& rowSet) {
             case arrow::Type::UINT16:
             case arrow::Type::UINT32:
             case arrow::Type::UINT64:
-            case arrow::Type::DOUBLE: {
+            case arrow::Type::DOUBLE:
+            case arrow::Type::DATE32:
+            case arrow::Type::DATE64: {
                 col.Data = NumericData(arr);
                 break;
             }
