@@ -10,12 +10,37 @@
 #include <qdb/ops/join.h>
 #include <qdb/ops/project.h>
 
+#include <qdb/kernel/project_type.h>
+#include <qdb/types/nullable.h>
+
 #include <qumir/parser/type.h>
 
 #include <algorithm>
 #include <stdexcept>
 
 namespace NQqb {
+
+namespace {
+
+// Byte width of a computed project column's physical type.
+size_t ProjectColumnWidth(const NQumir::NAst::TTypePtr& type) {
+    using namespace NQumir::NAst;
+    auto inner = UnwrapNamedType(UnwrapNullableType(type));
+    if (auto integer = TMaybeType<TIntegerType>(inner)) {
+        return static_cast<size_t>(integer.Cast()->BitWidth() / 8);
+    }
+    if (TMaybeType<TFloatType>(inner)) {
+        return 8;
+    }
+    if (TMaybeType<TBoolType>(inner)) {
+        return 1;
+    }
+    throw std::runtime_error(
+        "project: unsupported computed column type " +
+        (type ? type->ToString() : std::string("<null>")));
+}
+
+} // namespace
 
 void TPhysicalPlanner::PrintRuntimePlan(const TOperatorPtr& root) const {
     if (!Diagnostics_) {
@@ -96,28 +121,47 @@ std::unique_ptr<IRuntimeNode> TPhysicalPlanner::Build(const TOperatorPtr& root) 
             throw std::runtime_error("project input must have TStructType");
         }
 
-        std::vector<int32_t> columnIndices;
-        columnIndices.reserve(project->Projections().size());
+        // Hybrid: ident projections stay zero-copy; computed projections go
+        // through the project kernel into owned buffers.
+        std::vector<TProjectColumn> columns;
+        std::vector<NQumir::NAst::TExprPtr> computedExprs;
+        std::vector<NQumir::NAst::TTypePtr> computedTypes;
+        std::vector<size_t> computedWidths;
+        std::vector<std::pair<std::string, NQumir::NAst::TTypePtr>> outFields;
         for (const auto& projection : project->Projections()) {
-            auto identNode = NQumir::NAst::TMaybeNode<NQumir::NAst::TIdentExpr>(projection.Expression);
-            if (!identNode) {
-                throw std::runtime_error("project expression kernels are not implemented yet: " + projection.Name);
+            if (auto identNode = NQumir::NAst::TMaybeNode<NQumir::NAst::TIdentExpr>(
+                    projection.Expression)) {
+                const std::string& exprName = identNode.Cast()->Name;
+                auto it = std::find_if(
+                    inputType->Fields.begin(), inputType->Fields.end(),
+                    [&](const auto& field) { return field.first == exprName; });
+                if (it == inputType->Fields.end()) {
+                    throw std::runtime_error("project column not found: " + exprName);
+                }
+                columns.push_back({.Computed = false,
+                    .Index = static_cast<int32_t>(std::distance(inputType->Fields.begin(), it))});
+                outFields.emplace_back(projection.Name, it->second);
+            } else {
+                auto type = NKernel::InferProjectExprType(projection.Expression, *inputType);
+                columns.push_back({.Computed = true,
+                    .Index = static_cast<int32_t>(computedExprs.size())});
+                computedExprs.push_back(projection.Expression);
+                computedTypes.push_back(type);
+                computedWidths.push_back(ProjectColumnWidth(type));
+                outFields.emplace_back(projection.Name, type);
             }
-            const std::string& exprName = identNode.Cast()->Name;
-            auto it = std::find_if(
-                inputType->Fields.begin(),
-                inputType->Fields.end(),
-                [&](const auto& field) { return field.first == exprName; });
-            if (it == inputType->Fields.end()) {
-                throw std::runtime_error("project column not found: " + exprName);
-            }
-            columnIndices.push_back(static_cast<int32_t>(std::distance(inputType->Fields.begin(), it)));
+        }
+
+        TKernelCompiler::TProjectDispatch dispatch;
+        if (!computedExprs.empty()) {
+            TKernelCompiler compiler(Diagnostics_);
+            dispatch = compiler.CompileProject(*inputType, computedExprs, computedTypes);
         }
 
         return std::make_unique<TRuntimeProject>(
             std::move(input),
-            project->OutputColumns(),
-            std::move(columnIndices));
+            std::make_shared<NQumir::NAst::TStructType>(std::move(outFields)),
+            std::move(columns), std::move(dispatch), std::move(computedWidths));
     }
 
     if (auto maybe = TMaybeOp<TAggregateOperator>(root)) {

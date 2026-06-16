@@ -1,0 +1,82 @@
+#include <gtest/gtest.h>
+
+#include <qdb/io/io.h>
+#include <qdb/kernel/compiler.h>
+#include <qdb/kernel/project_type.h>
+
+#include <qumir/codegen/llvm/llvm_initializer.h>
+#include <qumir/parser/core/lexer.h>
+#include <qumir/parser/core/parser.h>
+#include <qumir/parser/type.h>
+
+#include <array>
+#include <memory>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+using namespace NQqb;
+using namespace NQumir::NAst;
+
+namespace {
+
+TExprPtr Parse(const std::string& src) {
+    std::istringstream in(src);
+    NCore::TTokenStream tokens(in);
+    NCore::TParser parser;
+    auto parsed = parser.Parse(tokens);
+    if (!parsed) {
+        throw std::runtime_error(parsed.error().ToString());
+    }
+    return *parsed;
+}
+
+} // namespace
+
+TEST(CompileProject, ComputesF64AndI64Columns) {
+    // Input: p (f64), d (f64), k (i64).
+    TStructType inputType({
+        {"p", std::make_shared<TFloatType>()},
+        {"d", std::make_shared<TFloatType>()},
+        {"k", std::make_shared<TIntegerType>(TIntegerType::I64)},
+    });
+
+    // Computed: disc = p * (1.0 - d)  [f64];  bumped = k + 100  [i64].
+    std::vector<TExprPtr> exprs = {Parse("(* p (- 1.0 d))"), Parse("(+ k 100)")};
+    std::vector<TTypePtr> types;
+    for (auto& e : exprs) {
+        types.push_back(NKernel::InferProjectExprType(e, inputType));
+    }
+    ASSERT_TRUE(TMaybeType<TFloatType>(types[0]));
+    ASSERT_TRUE(TMaybeType<TIntegerType>(types[1]));
+
+    TKernelCompiler compiler;
+    auto dispatch = compiler.CompileProject(inputType, exprs, types);
+
+    std::array<double, 3> p = {100.0, 200.0, 50.0};
+    std::array<double, 3> d = {0.1, 0.05, 0.2};
+    std::array<int64_t, 3> k = {5, 6, 7};
+    std::array<TColumn, 3> cols = {
+        TColumn{.Data = reinterpret_cast<char*>(p.data())},
+        TColumn{.Data = reinterpret_cast<char*>(d.data())},
+        TColumn{.Data = reinterpret_cast<char*>(k.data())},
+    };
+    TRowSet batch{.Columns = cols.data(), .ColumnCount = 3, .RowCount = 3, .RefCount = 1};
+
+    std::array<double, 3> outDisc{};
+    std::array<int64_t, 3> outBumped{};
+    std::array<void*, 2> outBuffers = {outDisc.data(), outBumped.data()};
+    dispatch(&batch, outBuffers.data());
+
+    for (int i = 0; i < 3; ++i) {
+        EXPECT_DOUBLE_EQ(outDisc[i], p[i] * (1.0 - d[i]));
+        EXPECT_EQ(outBumped[i], k[i] + 100);
+    }
+}
+
+int main(int argc, char** argv) {
+    ::testing::InitGoogleTest(&argc, argv);
+    NQumir::NCodeGen::TLLVMInitializer initializer;
+    return RUN_ALL_TESTS();
+}
