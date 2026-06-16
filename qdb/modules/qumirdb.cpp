@@ -256,6 +256,16 @@ QumirDbModule::QumirDbModule() {
             .ReturnType = u64Type,
         },
         {
+            .Name = "qdb_bits_f64",
+            .MangledName = "qdb_bits_f64",
+            .Ptr = reinterpret_cast<void*>(static_cast<double(*)(uint64_t)>(qdb_bits_f64)),
+            .Packed = +[](const uint64_t* args, size_t) -> uint64_t {
+                return std::bit_cast<uint64_t>(qdb_bits_f64(args[0]));
+            },
+            .ArgTypes = {u64Type},
+            .ReturnType = f64Type,
+        },
+        {
             .Name = "qdb_filter_string_compare",
             .MangledName = "qdb_filter_string_compare",
             .Ptr = reinterpret_cast<void*>(static_cast<int64_t(*)(

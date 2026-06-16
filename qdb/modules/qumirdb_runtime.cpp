@@ -25,6 +25,10 @@ void qdb_free(void* ptr) {
     std::free(ptr);
 }
 
+double qdb_bits_f64(uint64_t bits) {
+    return std::bit_cast<double>(bits);
+}
+
 uint64_t qdb_f64_bits(double value) {
     return std::bit_cast<uint64_t>(value);
 }
