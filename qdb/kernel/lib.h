@@ -68,9 +68,7 @@ std::expected<NQumir::NAst::TExprPtr, NQumir::TError>
 BuildGenericAggregateProgramAst(
     const NQumir::NAst::TStructType& inputType,
     const TAggregateKeyDescriptor& key,
-    const std::optional<std::string>& argField,
     const TAggReducerLayout& layout,
-    bool argIsNullable,
     NQumir::NAst::TTypePtr columnType,
     NQumir::NAst::TTypePtr rowSetType,
     NQumir::NAst::TTypePtr hashTableType);

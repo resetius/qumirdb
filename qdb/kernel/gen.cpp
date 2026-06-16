@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <iterator>
+#include <map>
 #include <stdexcept>
 #include <string_view>
 
@@ -1128,9 +1129,7 @@ NQumir::NAst::TExprPtr GenProjectKernelAst(
 
 TAggReducerLayout BuildAggReducerLayout(
     const std::vector<std::string>& funcs,
-    const std::vector<bool>& hasArg,
-    bool argIsNullable,
-    bool argIsFloat)
+    const std::vector<TAggArg>& args)
 {
     TAggReducerLayout layout;
     layout.Reducers.reserve(funcs.size());
@@ -1138,11 +1137,13 @@ TAggReducerLayout BuildAggReducerLayout(
     for (size_t i = 0; i < funcs.size(); ++i) {
         TAggReducerInfo info;
         info.Func = funcs[i];
-        info.HasArg = i < hasArg.size() && hasArg[i];
-        info.NeedsValidity = argIsNullable && info.HasArg;
+        const TAggArg& arg = args[i];
+        info.HasArg = arg.ColumnIndex >= 0;
+        info.ArgColumnIndex = arg.ColumnIndex;
+        info.NeedsValidity = arg.IsNullable && info.HasArg;
         const bool isAggFunc =
             info.Func == "sum" || info.Func == "min" || info.Func == "max";
-        info.IsFloat = argIsFloat && info.HasArg && isAggFunc;
+        info.IsFloat = arg.IsFloat && info.HasArg && isAggFunc;
         info.IsNullableOutput = info.NeedsValidity && isAggFunc;
         if (info.IsNullableOutput) {
             info.ValidBufIdx = nextBufIdx++;
@@ -1156,9 +1157,7 @@ TAggReducerLayout BuildAggReducerLayout(
 NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
     const NQumir::NAst::TStructType& inputType,
     const TAggregateKeyDescriptor& key,
-    const std::optional<std::string>& argField,
     const TAggReducerLayout& layout,
-    bool argIsNullable,
     NQumir::NAst::TTypePtr columnType,
     NQumir::NAst::TTypePtr rowSetType,
     NQumir::NAst::TTypePtr hashTableType)
@@ -1171,7 +1170,6 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
     auto boolType = std::make_shared<TBoolType>();
     auto ptrU8Type = std::make_shared<TPointerType>(u8Type);
     auto ptrI64Type = std::make_shared<TPointerType>(i64Type);
-    TTypePtr valueType = i64Type;
 
     auto ident = [&](const std::string& name) -> TExprPtr {
         return std::make_shared<TIdentExpr>(loc, name);
@@ -1254,41 +1252,41 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
         update.push_back(assign(name, columnAt(keyField.ColumnIndex)));
     }
     auto stringViewType = FindStringViewType(key.LookupType);
-    std::optional<TColumnValueAst> argValueAst;
-    bool argIsFloat = false;
-    if (argField) {
-        auto arg = std::find_if(inputType.Fields.begin(), inputType.Fields.end(),
-            [&](const auto& item) { return item.first == *argField; });
-        if (arg == inputType.Fields.end()) {
-            throw std::invalid_argument(
-                "GenGenericAggregateDispatchAst: unknown argument column '" + *argField + "'");
+
+    // Materialize each DISTINCT argument column once. Non-nullable columns
+    // expose a typed data pointer (values_<idx>); nullable columns go through
+    // the shared TColumn materializer (arg_column_<idx>). Reducers then read
+    // their own column by index (layout's ArgColumnIndex).
+    struct TArgColumn {
+        bool Float = false;
+        bool Nullable = false;
+        std::optional<TColumnValueAst> Mat; // set for nullable columns
+    };
+    std::map<int32_t, TArgColumn> argColumns;
+    for (const auto& r : layout.Reducers) {
+        if (r.ArgColumnIndex < 0 || argColumns.contains(r.ArgColumnIndex)) {
+            continue;
         }
-        auto unwrappedArgType = UnwrapNullableType(arg->second);
-        auto unwrappedNamed = UnwrapNamedType(unwrappedArgType);
-        const bool argIsInteger = static_cast<bool>(TMaybeType<TIntegerType>(unwrappedNamed));
-        argIsFloat = static_cast<bool>(TMaybeType<TFloatType>(unwrappedNamed));
-        if (!argIsInteger && !argIsFloat) {
-            throw std::invalid_argument(
-                "GenGenericAggregateDispatchAst: aggregate argument must be integer or f64");
-        }
-        if (argIsFloat && argIsNullable) {
-            throw std::invalid_argument(
-                "GenGenericAggregateDispatchAst: nullable f64 aggregate not supported yet");
-        }
-        valueType = unwrappedArgType;
-        const auto index = static_cast<int32_t>(std::distance(inputType.Fields.begin(), arg));
-        if (argIsNullable) {
-            // Materialize the argument column like a key column so the shared
-            // TColumn value builder can produce both value and validity.
-            update.push_back(var("arg_column", columnValueType));
-            update.push_back(assign("arg_column", columnAt(index)));
-            argValueAst = BuildColumnValueAst(
-                "arg_column", "i", "arg_value", arg->second, stringViewType);
+        const int32_t idx = r.ArgColumnIndex;
+        const auto& colType = inputType.Fields[idx].second;
+        TArgColumn ac;
+        ac.Float = static_cast<bool>(
+            TMaybeType<TFloatType>(UnwrapNamedType(UnwrapNullableType(colType))));
+        ac.Nullable = IsNullableType(colType);
+        if (ac.Nullable) {
+            const std::string colName = "arg_column_" + std::to_string(idx);
+            update.push_back(var(colName, columnValueType));
+            update.push_back(assign(colName, columnAt(idx)));
+            ac.Mat = BuildColumnValueAst(
+                colName, "i", "arg_value_" + std::to_string(idx), colType, stringViewType);
         } else {
-            auto ptrValueType = std::make_shared<TPointerType>(valueType);
-            update.push_back(var("values", ptrValueType));
-            update.push_back(assign("values", columnData(index, ptrValueType)));
+            auto valType = UnwrapNullableType(colType);
+            auto ptrValType = std::make_shared<TPointerType>(valType);
+            const std::string ptrName = "values_" + std::to_string(idx);
+            update.push_back(var(ptrName, ptrValType));
+            update.push_back(assign(ptrName, columnData(idx, ptrValType)));
         }
+        argColumns.emplace(idx, std::move(ac));
     }
     update.push_back(var("selection_is_null", boolType));
     update.push_back(assign("selection_is_null",
@@ -1305,22 +1303,6 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
     auto selected = binary("||", ident("selection_is_null"),
         binary("!=", std::make_shared<TIndexExpr>(loc, ident("selection"), ident("i")),
             number(0, u8Type)));
-    TExprPtr value;
-    TExprPtr valueIsValid;
-    if (!argField) {
-        value = numI64(0);
-        valueIsValid = number(1, boolType);
-    } else if (argIsNullable) {
-        value = cast(argValueAst->Value, i64Type);
-        valueIsValid = argValueAst->IsValid;
-    } else {
-        auto cell = std::make_shared<TIndexExpr>(loc, ident("values"), ident("i"));
-        // f64 values are carried as i64 bits so the i64 reducer ABI is unchanged.
-        value = argIsFloat
-            ? cast(call("qdb_f64_bits", {std::move(cell)}), i64Type)
-            : cast(std::move(cell), i64Type);
-        valueIsValid = number(1, boolType);
-    }
     std::vector<TColumnValueAst> keyFields;
     keyFields.reserve(key.Fields.size());
     for (size_t fieldIndex = 0; fieldIndex < key.Fields.size(); ++fieldIndex) {
@@ -1373,29 +1355,92 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
         ident("stored_witness"),
         ident("is_new"),
     });
+    auto ptrPtrI64Type = std::make_shared<TPointerType>(ptrI64Type);
+    auto slotIndex = [&](const std::string& buf) -> TExprPtr {
+        return std::make_shared<TIndexExpr>(loc, ident(buf), ident("dense_slot"));
+    };
+
     std::vector<TExprPtr> materialize;
     for (auto& keyField : keyFields) {
         materialize.insert(materialize.end(),
             std::make_move_iterator(keyField.Setup.begin()),
             std::make_move_iterator(keyField.Setup.end()));
     }
-    if (argValueAst) {
-        materialize.insert(materialize.end(),
-            std::make_move_iterator(argValueAst->Setup.begin()),
-            std::make_move_iterator(argValueAst->Setup.end()));
+    // Compute each arg column's value (as i64 bits) and validity once per row.
+    for (auto& [idx, ac] : argColumns) {
+        const std::string vname = "arg_val_" + std::to_string(idx);
+        TExprPtr valExpr;
+        if (ac.Nullable) {
+            materialize.insert(materialize.end(),
+                std::make_move_iterator(ac.Mat->Setup.begin()),
+                std::make_move_iterator(ac.Mat->Setup.end()));
+            valExpr = cast(ac.Mat->Value, i64Type); // nullable f64 disallowed upstream
+        } else {
+            auto cell = std::make_shared<TIndexExpr>(loc,
+                ident("values_" + std::to_string(idx)), ident("i"));
+            valExpr = ac.Float
+                ? cast(call("qdb_f64_bits", {std::move(cell)}), i64Type)
+                : cast(std::move(cell), i64Type);
+        }
+        materialize.push_back(var(vname, i64Type));
+        materialize.push_back(assign(vname, std::move(valExpr)));
+        if (ac.Nullable) {
+            const std::string validName = "arg_valid_" + std::to_string(idx);
+            materialize.push_back(var(validName, boolType));
+            materialize.push_back(assign(validName, ac.Mat->IsValid));
+        }
     }
-    auto reduceCall = call("agg_apply_reducers", {
-        field("ht", "AggBuffers"), ident("dense_slot"), std::move(value),
-        std::move(valueIsValid), binary("!=", ident("is_new"), numI64(0)),
-    });
-    auto validProcess = block({
+
+    // Inlined per-reducer applications (each reads its own column's value).
+    std::vector<TExprPtr> reducerStmts;
+    reducerStmts.push_back(var("agg_buffers", ptrPtrI64Type));
+    reducerStmts.push_back(assign("agg_buffers", field("ht", "AggBuffers")));
+    for (size_t ri = 0; ri < layout.Reducers.size(); ++ri) {
+        const auto& info = layout.Reducers[ri];
+        const std::string bufName = "buf_" + std::to_string(ri);
+        const std::string reduceName = "reduce_" + std::to_string(ri);
+        reducerStmts.push_back(var(bufName, ptrI64Type));
+        reducerStmts.push_back(assign(bufName,
+            std::make_shared<TIndexExpr>(loc, ident("agg_buffers"),
+                numI64(static_cast<int64_t>(ri)))));
+        auto valueI = [&]() -> TExprPtr {
+            return info.HasArg ? ident("arg_val_" + std::to_string(info.ArgColumnIndex))
+                               : numI64(0);
+        };
+        auto validI = [&]() -> TExprPtr {
+            return info.NeedsValidity
+                ? ident("arg_valid_" + std::to_string(info.ArgColumnIndex))
+                : number(1, boolType);
+        };
+        if (!info.NeedsValidity) {
+            auto callR = call(reduceName, {slotIndex(bufName), valueI(),
+                binary("!=", ident("is_new"), numI64(0))});
+            reducerStmts.push_back(std::make_shared<TArrayAssignExpr>(loc, bufName,
+                std::vector<TExprPtr>{ident("dense_slot")}, std::move(callR)));
+        } else if (info.Func == "count") {
+            reducerStmts.push_back(call(reduceName,
+                {ident(bufName), ident("dense_slot"), validI()}));
+        } else {
+            const std::string validBufName = "validbuf_" + std::to_string(ri);
+            reducerStmts.push_back(var(validBufName, ptrI64Type));
+            reducerStmts.push_back(assign(validBufName,
+                std::make_shared<TIndexExpr>(loc, ident("agg_buffers"),
+                    numI64(static_cast<int64_t>(info.ValidBufIdx)))));
+            reducerStmts.push_back(call(reduceName, {ident(bufName),
+                ident(validBufName), ident("dense_slot"), valueI(), validI()}));
+        }
+    }
+
+    std::vector<TExprPtr> validBody = {
         assign("dense_slot", std::move(upsertCall)),
         std::make_shared<TIfExpr>(loc,
             binary("<", ident("dense_slot"), numI64(0)),
             block({std::make_shared<TReturnExpr>(loc, numI64(-1))}), nullptr),
-        std::move(reduceCall),
-    });
-    materialize.push_back(std::move(validProcess));
+    };
+    validBody.insert(validBody.end(),
+        std::make_move_iterator(reducerStmts.begin()),
+        std::make_move_iterator(reducerStmts.end()));
+    materialize.push_back(block(std::move(validBody)));
     auto process = block(std::move(materialize));
     auto loop = block({
         std::make_shared<TIfExpr>(loc, std::move(selected), std::move(process), nullptr),
