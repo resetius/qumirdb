@@ -29,6 +29,7 @@ struct TAggReducerInfo {
     bool NeedsValidity = false;     // argIsNullable && HasArg
     bool IsNullableOutput = false;  // NeedsValidity && Func in {sum,min,max}
     int ValidBufIdx = -1;           // -1 if IsNullableOutput == false
+    bool IsFloat = false;           // argIsFloat && HasArg && Func in {sum,min,max}
 };
 
 struct TAggReducerLayout {
@@ -43,7 +44,8 @@ struct TAggReducerLayout {
 TAggReducerLayout BuildAggReducerLayout(
     const std::vector<std::string>& funcs,
     const std::vector<bool>& hasArg,
-    bool argIsNullable);
+    bool argIsNullable,
+    bool argIsFloat = false);
 
 // Generates concrete hash and equality overloads for lookup and stored keys.
 std::vector<NQumir::NAst::TExprPtr> GenKeyOperationFunDecls(

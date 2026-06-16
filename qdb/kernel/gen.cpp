@@ -1129,7 +1129,8 @@ NQumir::NAst::TExprPtr GenProjectKernelAst(
 TAggReducerLayout BuildAggReducerLayout(
     const std::vector<std::string>& funcs,
     const std::vector<bool>& hasArg,
-    bool argIsNullable)
+    bool argIsNullable,
+    bool argIsFloat)
 {
     TAggReducerLayout layout;
     layout.Reducers.reserve(funcs.size());
@@ -1141,6 +1142,7 @@ TAggReducerLayout BuildAggReducerLayout(
         info.NeedsValidity = argIsNullable && info.HasArg;
         const bool isAggFunc =
             info.Func == "sum" || info.Func == "min" || info.Func == "max";
+        info.IsFloat = argIsFloat && info.HasArg && isAggFunc;
         info.IsNullableOutput = info.NeedsValidity && isAggFunc;
         if (info.IsNullableOutput) {
             info.ValidBufIdx = nextBufIdx++;
@@ -1253,6 +1255,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
     }
     auto stringViewType = FindStringViewType(key.LookupType);
     std::optional<TColumnValueAst> argValueAst;
+    bool argIsFloat = false;
     if (argField) {
         auto arg = std::find_if(inputType.Fields.begin(), inputType.Fields.end(),
             [&](const auto& item) { return item.first == *argField; });
@@ -1261,10 +1264,16 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
                 "GenGenericAggregateDispatchAst: unknown argument column '" + *argField + "'");
         }
         auto unwrappedArgType = UnwrapNullableType(arg->second);
-        auto argType = TMaybeType<TIntegerType>(UnwrapNamedType(unwrappedArgType));
-        if (!argType) {
+        auto unwrappedNamed = UnwrapNamedType(unwrappedArgType);
+        const bool argIsInteger = static_cast<bool>(TMaybeType<TIntegerType>(unwrappedNamed));
+        argIsFloat = static_cast<bool>(TMaybeType<TFloatType>(unwrappedNamed));
+        if (!argIsInteger && !argIsFloat) {
             throw std::invalid_argument(
-                "GenGenericAggregateDispatchAst: aggregate argument must be integer");
+                "GenGenericAggregateDispatchAst: aggregate argument must be integer or f64");
+        }
+        if (argIsFloat && argIsNullable) {
+            throw std::invalid_argument(
+                "GenGenericAggregateDispatchAst: nullable f64 aggregate not supported yet");
         }
         valueType = unwrappedArgType;
         const auto index = static_cast<int32_t>(std::distance(inputType.Fields.begin(), arg));
@@ -1305,7 +1314,11 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
         value = cast(argValueAst->Value, i64Type);
         valueIsValid = argValueAst->IsValid;
     } else {
-        value = cast(std::make_shared<TIndexExpr>(loc, ident("values"), ident("i")), i64Type);
+        auto cell = std::make_shared<TIndexExpr>(loc, ident("values"), ident("i"));
+        // f64 values are carried as i64 bits so the i64 reducer ABI is unchanged.
+        value = argIsFloat
+            ? cast(call("qdb_f64_bits", {std::move(cell)}), i64Type)
+            : cast(std::move(cell), i64Type);
         valueIsValid = number(1, boolType);
     }
     std::vector<TColumnValueAst> keyFields;
@@ -1817,7 +1830,39 @@ std::vector<NQumir::NAst::TExprPtr> GenReducerFunDecls(
                 std::make_shared<TVarStmt>(loc, "is_new", boolType),
             };
             TExprPtr resultExpr;
-            if (func == "count") {
+            if (r.IsFloat) {
+                // f64 reducer: states/values are carried as i64 bits, so we
+                // bitcast to f64, run f64 arithmetic, and bitcast back to i64.
+                auto u64Type = std::make_shared<TIntegerType>(TIntegerType::U64);
+                auto bitsToF64 = [&](const std::string& v) -> TExprPtr {
+                    return std::make_shared<TCallExpr>(loc, ident("qdb_bits_f64"),
+                        std::vector<TExprPtr>{std::make_shared<TCastExpr>(loc, ident(v), u64Type)});
+                };
+                auto f64ToBits = [&](TExprPtr e) -> TExprPtr {
+                    return std::make_shared<TCastExpr>(loc,
+                        std::make_shared<TCallExpr>(loc, ident("qdb_f64_bits"),
+                            std::vector<TExprPtr>{std::move(e)}),
+                        i64Type);
+                };
+                auto prevF = bitsToF64("prev");
+                auto valueF = bitsToF64("value");
+                if (func == "sum") {
+                    resultExpr = f64ToBits(binary("+", prevF, valueF));
+                } else if (func == "min") {
+                    resultExpr = f64ToBits(std::make_shared<TIfExpr>(loc, ident("is_new"),
+                        bitsToF64("value"),
+                        std::make_shared<TIfExpr>(loc, binary("<", valueF, prevF),
+                            bitsToF64("value"), bitsToF64("prev"))));
+                } else if (func == "max") {
+                    resultExpr = f64ToBits(std::make_shared<TIfExpr>(loc, ident("is_new"),
+                        bitsToF64("value"),
+                        std::make_shared<TIfExpr>(loc, binary(">", valueF, prevF),
+                            bitsToF64("value"), bitsToF64("prev"))));
+                } else {
+                    throw std::invalid_argument(
+                        "GenReducerFunDecls: unsupported float aggregate: " + func);
+                }
+            } else if (func == "count") {
                 resultExpr = binary("+", ident("prev"), numI64(1));
             } else if (func == "sum") {
                 resultExpr = binary("+", ident("prev"), ident("value"));

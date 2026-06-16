@@ -267,16 +267,25 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
             argField = name;
         }
     }
-    if (argField &&
-        !TMaybeType<TIntegerType>(
-            UnwrapNamedType(UnwrapNullableType(requireField(*argField))))) {
-        throw NQumir::TError(
-            "CompileAggregate: aggregate argument column '" + *argField +
-            "' must be integer while reducer states are i64");
+    bool argIsFloat = false;
+    if (argField) {
+        const auto unwrapped =
+            UnwrapNamedType(UnwrapNullableType(requireField(*argField)));
+        argIsFloat = static_cast<bool>(TMaybeType<TFloatType>(unwrapped));
+        if (!TMaybeType<TIntegerType>(unwrapped) && !argIsFloat) {
+            throw NQumir::TError(
+                "CompileAggregate: aggregate argument column '" + *argField +
+                "' must be integer or f64");
+        }
     }
     const bool argIsNullable =
         argField && IsNullableType(requireField(*argField));
-    const auto layout = NKernel::BuildAggReducerLayout(funcs, hasArg, argIsNullable);
+    if (argIsFloat && argIsNullable) {
+        throw NQumir::TError(
+            "CompileAggregate: nullable f64 aggregates are not supported yet");
+    }
+    const auto layout =
+        NKernel::BuildAggReducerLayout(funcs, hasArg, argIsNullable, argIsFloat);
 
     auto dbModule = std::make_shared<NQumir::NRegistry::QumirDbModule>();
     TTypePtr columnType, rowSetType, hashTableType;
