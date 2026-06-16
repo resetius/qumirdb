@@ -5,6 +5,7 @@
 #include <qdb/ops/join.h>
 #include <qdb/ops/project.h>
 #include <qdb/ops/source.h>
+#include <qdb/kernel/project_type.h>
 
 #include <qumir/parser/type.h>
 
@@ -46,6 +47,9 @@ void AnnotateTypes(const TOperatorPtr& root) {
                     for (auto& [name, type] : inputStruct->Fields) {
                         if (name == ident.Cast()->Name) { fieldType = type; break; }
                     }
+                } else {
+                    // Computed column: infer the expression's result type.
+                    fieldType = NKernel::InferProjectExprType(spec.Expression, *inputStruct);
                 }
                 outFields.emplace_back(spec.Name, fieldType);
             }

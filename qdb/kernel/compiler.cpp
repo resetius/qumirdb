@@ -150,6 +150,61 @@ TKernelCompiler::TFilterDispatch TKernelCompiler::CompileFilter(
     return dispatch;
 }
 
+TKernelCompiler::TProjectDispatch TKernelCompiler::CompileProject(
+    const NQumir::NAst::TStructType& inputType,
+    const std::vector<NQumir::NAst::TExprPtr>& computedExprs,
+    const std::vector<NQumir::NAst::TTypePtr>& computedTypes)
+{
+    std::unordered_map<std::string, int32_t> fieldIndices;
+    for (int32_t i = 0; i < static_cast<int32_t>(inputType.Fields.size()); ++i) {
+        fieldIndices[inputType.Fields[i].first] = i;
+    }
+
+    auto dbModule = std::make_shared<NQumir::NRegistry::QumirDbModule>();
+    NQumir::NAst::TTypePtr columnType, rowSetType, stringViewType;
+    for (const auto& et : dbModule->ExternalTypes()) {
+        if (et.Name == "TColumn") columnType = et.Type;
+        else if (et.Name == "TRowSet") rowSetType = et.Type;
+        else if (et.Name == "StringView") stringViewType = et.Type;
+    }
+
+    auto literalStorage =
+        std::make_shared<std::vector<std::shared_ptr<std::string>>>();
+    std::vector<NQumir::NAst::TExprPtr> cloned;
+    cloned.reserve(computedExprs.size());
+    for (const auto& expr : computedExprs) {
+        cloned.push_back(ClonePredicate(expr));
+    }
+
+    auto kernelAst = NKernel::GenProjectKernelAst(
+        std::move(cloned), computedTypes, inputType, fieldIndices,
+        columnType, rowSetType, stringViewType, *literalStorage);
+
+    NQumir::TLLVMRunnerOptions opts;
+    opts.CoreInput = true;
+    opts.ResolveCoreInput = true;
+    opts.OptLevel = 3;
+    opts.NativeCode = true;
+    opts.PrintIr = Diagnostics_ != nullptr;
+    auto runner = std::make_unique<NQumir::TLLVMRunner>(opts);
+    runner->RegisterModule(dbModule, true);
+
+    PrintKernelAst(Diagnostics_, "project", kernelAst);
+
+    std::string err;
+    void* fnPtr = runner->CompileKernelAst(std::move(kernelAst), "<project>", &err);
+    FinishKernelDiagnostics(Diagnostics_);
+    if (!fnPtr) {
+        throw std::runtime_error("project kernel compilation failed: " + err);
+    }
+
+    using TProjectFn = void(*)(void*, void**);
+    auto sharedRunner = std::shared_ptr<NQumir::TLLVMRunner>(std::move(runner));
+    return [fnPtr, sharedRunner, literalStorage](TRowSet* in, void** outBuffers) {
+        reinterpret_cast<TProjectFn>(fnPtr)(in, outBuffers);
+    };
+}
+
 TAggregateKernels TKernelCompiler::CompileAggregate(
     const NQumir::NAst::TStructType& inputType,
     const std::vector<std::string>& groupKeys,

@@ -69,6 +69,21 @@ NQumir::NAst::TExprPtr GenFilterKernelAst(
     NQumir::NAst::TTypePtr stringViewType,
     std::vector<std::shared_ptr<std::string>>& literalStorage);
 
+// Builds a vectorized project kernel for the COMPUTED columns only.
+// Signature: void <kernel>(rowSet: <ref TRowSet>, out: <ptr <ptr i8>>) — for each
+// row i and each computed projection k: out[k][i] = (cast) <expr_k>. Output
+// buffer k holds values of computedTypes[k]; the explicit cast pins the buffer
+// type. ident projections are NOT here (handled zero-copy by TRuntimeProject).
+NQumir::NAst::TExprPtr GenProjectKernelAst(
+    std::vector<NQumir::NAst::TExprPtr> computedExprs,
+    const std::vector<NQumir::NAst::TTypePtr>& computedTypes,
+    const NQumir::NAst::TStructType& inputType,
+    const std::unordered_map<std::string, int32_t>& fieldIndices,
+    NQumir::NAst::TTypePtr columnType,
+    NQumir::NAst::TTypePtr rowSetType,
+    NQumir::NAst::TTypePtr stringViewType,
+    std::vector<std::shared_ptr<std::string>>& literalStorage);
+
 // Builds the generic aggregation dispatch entry over aht_init/aht_upsert_dual/
 // aht_destroy. Key extraction uses the common TColumn materializer and the
 // descriptor's borrowed LookupType/stored StoredType representations. Aggregate

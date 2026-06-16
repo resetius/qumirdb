@@ -991,6 +991,141 @@ NQumir::NAst::TExprPtr GenFilterKernelAst(
     return std::make_shared<TBlockExpr>(loc, std::vector<TExprPtr>{funDecl});
 }
 
+// Project kernel for COMPUTED columns. Mirrors GenFilterKernelAst's column
+// binding/materialization (column refs in the exprs are rewritten to {name}_value
+// temps), but instead of writing a selection mask it writes each computed
+// expression to its output buffer: out[k][i] = cast(<expr_k>, computedTypes[k]).
+NQumir::NAst::TExprPtr GenProjectKernelAst(
+    std::vector<NQumir::NAst::TExprPtr> computedExprs,
+    const std::vector<NQumir::NAst::TTypePtr>& computedTypes,
+    const NQumir::NAst::TStructType& inputType,
+    const std::unordered_map<std::string, int32_t>& fieldIndices,
+    NQumir::NAst::TTypePtr columnType,
+    NQumir::NAst::TTypePtr rowSetType,
+    NQumir::NAst::TTypePtr stringViewType,
+    std::vector<std::shared_ptr<std::string>>& literalStorage)
+{
+    using namespace NQumir::NAst;
+    NQumir::TLocation loc{};
+
+    auto ident = [&](const std::string& name) -> TExprPtr {
+        return std::make_shared<TIdentExpr>(loc, name);
+    };
+    auto numI64 = [&](int64_t v) -> TExprPtr {
+        auto r = std::make_shared<TNumberExpr>(loc, v);
+        r->Type = std::make_shared<TIntegerType>();
+        return r;
+    };
+    auto var = [&](const std::string& name, TTypePtr type) -> TExprPtr {
+        return std::make_shared<TVarStmt>(loc, name, std::move(type));
+    };
+    auto assign = [&](const std::string& name, TExprPtr value) -> TExprPtr {
+        return std::make_shared<TAssignExpr>(loc, name, std::move(value));
+    };
+    auto cast = [&](TExprPtr e, TTypePtr t) -> TExprPtr {
+        return std::make_shared<TCastExpr>(loc, std::move(e), std::move(t));
+    };
+
+    auto i64Type = std::make_shared<TIntegerType>();
+    auto u8Type = std::make_shared<TIntegerType>(TIntegerType::U8);
+    auto ptrU8Type = std::make_shared<TPointerType>(u8Type);
+    auto ptrPtrU8Type = std::make_shared<TPointerType>(ptrU8Type);
+
+    // Value-variable naming, identical to the filter kernel.
+    std::unordered_map<std::string, std::string> fixedValues;
+    std::unordered_set<std::string> stringFields;
+    std::unordered_map<std::string, std::string> stringValues;
+    for (const auto& [name, type] : inputType.Fields) {
+        if (TMaybeType<TStringType>(UnwrapNamedType(UnwrapNullableType(type)))) {
+            stringFields.insert(name);
+            stringValues.emplace(name, name + "_value");
+        } else {
+            fixedValues.emplace(name, name + "_value");
+        }
+    }
+    for (auto& expr : computedExprs) {
+        SpecializeFilterPredicate(
+            expr, stringFields, stringValues, stringViewType, literalStorage);
+        SubstFieldsInPlace(expr, fixedValues);
+    }
+
+    auto rowSetRefType = std::make_shared<TReferenceType>(rowSetType);
+    std::vector<TParam> params = {
+        std::make_shared<TVarStmt>(loc, "rowSet", rowSetRefType),
+        std::make_shared<TVarStmt>(loc, "out", ptrPtrU8Type),
+    };
+
+    std::vector<TExprPtr> bodyStmts;
+    auto identRowSet = ident("rowSet");
+    auto fieldOf = [&](const std::string& name) {
+        return std::make_shared<TFieldAccessExpr>(loc, identRowSet, name);
+    };
+    bodyStmts.push_back(var("n", i64Type));
+    bodyStmts.push_back(assign("n", fieldOf("RowCount")));
+
+    auto ptrColumnType = [&]() -> TTypePtr {
+        auto* rs = static_cast<TStructType*>(rowSetType.get());
+        for (const auto& [name, type] : rs->Fields) {
+            if (name == "Columns") {
+                return type;
+            }
+        }
+        return std::make_shared<TPointerType>(columnType);
+    }();
+    auto columnValueType = [&]() -> TTypePtr {
+        if (auto pointer = TMaybeType<TPointerType>(ptrColumnType)) {
+            return pointer.Cast()->PointeeType;
+        }
+        return columnType;
+    }();
+    bodyStmts.push_back(var("cols", ptrColumnType));
+    bodyStmts.push_back(assign("cols", fieldOf("Columns")));
+
+    // Bind + materialize every input column (Stage 1: ignore validity).
+    std::vector<TExprPtr> loopSetup;
+    for (const auto& [name, type] : inputType.Fields) {
+        const int32_t idx = fieldIndices.at(name);
+        auto colElem = std::make_shared<TIndexExpr>(loc, ident("cols"), numI64(idx));
+        bodyStmts.push_back(var(name, columnValueType));
+        bodyStmts.push_back(assign(name, colElem));
+        auto materialized = BuildColumnValueAst(name, "i", name + "_proj", type, stringViewType);
+        loopSetup.insert(loopSetup.end(),
+            std::make_move_iterator(materialized.Setup.begin()),
+            std::make_move_iterator(materialized.Setup.end()));
+        const std::string valueName = stringFields.contains(name)
+            ? stringValues.at(name) : fixedValues.at(name);
+        loopSetup.push_back(var(valueName, materialized.ValueType));
+        loopSetup.push_back(assign(valueName, std::move(materialized.Value)));
+    }
+
+    // Hoist typed output pointers: out_k = (<ptr T_k>) out[k].
+    for (size_t k = 0; k < computedExprs.size(); ++k) {
+        auto ptrTk = std::make_shared<TPointerType>(computedTypes[k]);
+        auto outK = std::make_shared<TIndexExpr>(loc, ident("out"), numI64(int64_t(k)));
+        bodyStmts.push_back(var("out_" + std::to_string(k), ptrTk));
+        bodyStmts.push_back(assign("out_" + std::to_string(k),
+            cast(cast(outK, i64Type), ptrTk)));
+    }
+
+    bodyStmts.push_back(var("i", i64Type));
+    bodyStmts.push_back(assign("i", numI64(0)));
+    for (size_t k = 0; k < computedExprs.size(); ++k) {
+        loopSetup.push_back(std::make_shared<TArrayAssignExpr>(loc,
+            "out_" + std::to_string(k), std::vector<TExprPtr>{ident("i")},
+            cast(std::move(computedExprs[k]), computedTypes[k])));
+    }
+    loopSetup.push_back(assign("i",
+        std::make_shared<TBinaryExpr>(loc, TOperator("+"), ident("i"), numI64(1))));
+    auto cond = std::make_shared<TBinaryExpr>(loc, TOperator("<"), ident("i"), ident("n"));
+    bodyStmts.push_back(std::make_shared<TWhileStmtExpr>(loc, cond,
+        std::make_shared<TBlockExpr>(loc, std::move(loopSetup))));
+
+    auto funBody = std::make_shared<TBlockExpr>(loc, std::move(bodyStmts));
+    auto funDecl = std::make_shared<TFunDecl>(loc, "<project>",
+        std::move(params), funBody, std::make_shared<TVoidType>());
+    return std::make_shared<TBlockExpr>(loc, std::vector<TExprPtr>{funDecl});
+}
+
 TAggReducerLayout BuildAggReducerLayout(
     const std::vector<std::string>& funcs,
     const std::vector<bool>& hasArg,

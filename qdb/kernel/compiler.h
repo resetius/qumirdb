@@ -97,6 +97,12 @@ public:
     // Filter dispatch: called per batch to fill the selection buffer.
     using TFilterDispatch = std::function<void(TRowSet& rowSet)>;
 
+    // Project dispatch: called per batch; for each computed column k and row i,
+    // writes outBuffers[k][i] = <expr_k>. outBuffers has one pointer per computed
+    // projection, each to a caller-owned buffer of RowCount * sizeof(computed
+    // type). Only computed (non-ident) columns go through this kernel.
+    using TProjectDispatch = std::function<void(TRowSet* in, void** outBuffers)>;
+
     // sizeof(HashTable) per modules/qumirdb.cpp's layout — callers of
     // CompileAggregate must allocate a zero-initialized buffer this large
     // for `ht`.
@@ -113,6 +119,15 @@ public:
     TFilterDispatch CompileFilter(
         const NQumir::NAst::TStructType& inputType,
         const NQumir::NAst::TExprPtr& predicate);
+
+    // Compiles a project kernel for the computed (non-ident) projections.
+    // computedExprs and computedTypes are parallel; computedTypes[k] is the
+    // inferred output type of computedExprs[k] (see InferProjectExprType). The
+    // kernel writes each expression to its output buffer, casting to that type.
+    TProjectDispatch CompileProject(
+        const NQumir::NAst::TStructType& inputType,
+        const std::vector<NQumir::NAst::TExprPtr>& computedExprs,
+        const std::vector<NQumir::NAst::TTypePtr>& computedTypes);
 
     // Compiles the per-query generic update and finalize programs for `aggs`
     // grouped by `groupKeys`, over rows of `inputType`.
