@@ -113,6 +113,56 @@ TEST(AggregateF64, SumMinMaxOverFloatColumn) {
     EXPECT_DOUBLE_EQ(got[2].mx, 10.0);
 }
 
+TEST(AggregateF64, MultipleDistinctColumns) {
+    // key (i64), a (i64), b (f64). Different aggregates over different columns.
+    std::array<int64_t, 4> k = {1, 2, 1, 2};
+    std::array<int64_t, 4> a = {10, 5, 30, 7};
+    std::array<double, 4> b = {1.5, 100.0, 2.5, 0.25};
+    std::array<TColumn, 3> cols = {
+        TColumn{.Data = reinterpret_cast<char*>(k.data())},
+        TColumn{.Data = reinterpret_cast<char*>(a.data())},
+        TColumn{.Data = reinterpret_cast<char*>(b.data())},
+    };
+    TRowSet batch{.Columns = cols.data(), .ColumnCount = 3, .RowCount = 4, .RefCount = 1};
+    TStubSource src({"k", "a", "b"},
+        {std::make_shared<TIntegerType>(TIntegerType::I64),
+         std::make_shared<TIntegerType>(TIntegerType::I64),
+         std::make_shared<TFloatType>()},
+        {batch});
+
+    auto plan = Plan(
+        "(rel aggregate (rel source \"L\") (keys k) "
+        "(agg sa sum a) (agg sb sum b) (agg mxa max a) (agg cnt count))", src);
+
+    // Output: k(i64), sa(i64), sb(f64), mxa(i64), cnt(i64).
+    auto* outType = static_cast<TStructType*>(plan->OutputType().get());
+    ASSERT_EQ(outType->Fields.size(), 5u);
+    EXPECT_TRUE(TMaybeType<TIntegerType>(outType->Fields[1].second)); // sa
+    EXPECT_TRUE(TMaybeType<TFloatType>(outType->Fields[2].second));   // sb
+
+    struct TRow { int64_t sa; double sb; int64_t mxa; int64_t cnt; };
+    std::map<int64_t, TRow> got;
+    TRowSet out{};
+    while (plan->Next(out)) {
+        const auto* kc = reinterpret_cast<const int64_t*>(out.Columns[0].Data);
+        const auto* sa = reinterpret_cast<const int64_t*>(out.Columns[1].Data);
+        const auto* sb = reinterpret_cast<const double*>(out.Columns[2].Data);
+        const auto* mxa = reinterpret_cast<const int64_t*>(out.Columns[3].Data);
+        const auto* cnt = reinterpret_cast<const int64_t*>(out.Columns[4].Data);
+        for (int64_t i = 0; i < out.RowCount; ++i) got[kc[i]] = {sa[i], sb[i], mxa[i], cnt[i]};
+        Release(&out);
+    }
+    ASSERT_EQ(got.size(), 2u);
+    EXPECT_EQ(got[1].sa, 40);        // 10 + 30
+    EXPECT_DOUBLE_EQ(got[1].sb, 4.0); // 1.5 + 2.5
+    EXPECT_EQ(got[1].mxa, 30);
+    EXPECT_EQ(got[1].cnt, 2);
+    EXPECT_EQ(got[2].sa, 12);         // 5 + 7
+    EXPECT_DOUBLE_EQ(got[2].sb, 100.25);
+    EXPECT_EQ(got[2].mxa, 7);
+    EXPECT_EQ(got[2].cnt, 2);
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     NQumir::NCodeGen::TLLVMInitializer initializer;

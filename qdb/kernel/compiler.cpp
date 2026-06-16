@@ -237,55 +237,54 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
                 "' must be integer, f64, or string");
         }
     }
+    auto columnIndex = [&](const std::string& name) -> int32_t {
+        for (int32_t i = 0; i < static_cast<int32_t>(inputType.Fields.size()); ++i) {
+            if (inputType.Fields[i].first == name) {
+                return i;
+            }
+        }
+        return -1;
+    };
+
     std::vector<std::string> funcs;
-    std::vector<bool> hasArg;
+    std::vector<NKernel::TAggArg> args;
     funcs.reserve(aggs.size());
-    hasArg.reserve(aggs.size());
-    std::optional<std::string> argField;
+    args.reserve(aggs.size());
     for (const auto& agg : aggs) {
         if (agg.Func != "count" && agg.Func != "sum" && agg.Func != "min" && agg.Func != "max") {
             throw NQumir::TError("CompileAggregate: unsupported aggregate function '" + agg.Func + "'");
         }
         funcs.push_back(agg.Func);
-        hasArg.push_back(agg.Arg != nullptr);
 
         if (agg.Func != "count" && !agg.Arg) {
             throw NQumir::TError(
                 "CompileAggregate: '" + agg.Func + "' requires an argument column");
         }
+        NKernel::TAggArg arg;
         if (agg.Arg) {
             auto ident = TMaybeNode<TIdentExpr>(agg.Arg);
             if (!ident) {
                 throw NQumir::TError("CompileAggregate: aggregate argument must be a column reference");
             }
             const std::string& name = ident.Cast()->Name;
-            if (argField && *argField != name) {
+            const auto type = requireField(name);
+            const auto unwrapped = UnwrapNamedType(UnwrapNullableType(type));
+            arg.IsFloat = static_cast<bool>(TMaybeType<TFloatType>(unwrapped));
+            if (!TMaybeType<TIntegerType>(unwrapped) && !arg.IsFloat) {
                 throw NQumir::TError(
-                    "CompileAggregate: reducers currently support a single shared value column for "
-                    "all aggregates, got '" + *argField + "' and '" + name + "'");
+                    "CompileAggregate: aggregate argument column '" + name +
+                    "' must be integer or f64");
             }
-            argField = name;
+            arg.IsNullable = IsNullableType(type);
+            if (arg.IsFloat && arg.IsNullable) {
+                throw NQumir::TError(
+                    "CompileAggregate: nullable f64 aggregates are not supported yet");
+            }
+            arg.ColumnIndex = columnIndex(name);
         }
+        args.push_back(arg);
     }
-    bool argIsFloat = false;
-    if (argField) {
-        const auto unwrapped =
-            UnwrapNamedType(UnwrapNullableType(requireField(*argField)));
-        argIsFloat = static_cast<bool>(TMaybeType<TFloatType>(unwrapped));
-        if (!TMaybeType<TIntegerType>(unwrapped) && !argIsFloat) {
-            throw NQumir::TError(
-                "CompileAggregate: aggregate argument column '" + *argField +
-                "' must be integer or f64");
-        }
-    }
-    const bool argIsNullable =
-        argField && IsNullableType(requireField(*argField));
-    if (argIsFloat && argIsNullable) {
-        throw NQumir::TError(
-            "CompileAggregate: nullable f64 aggregates are not supported yet");
-    }
-    const auto layout =
-        NKernel::BuildAggReducerLayout(funcs, hasArg, argIsNullable, argIsFloat);
+    const auto layout = NKernel::BuildAggReducerLayout(funcs, args);
 
     auto dbModule = std::make_shared<NQumir::NRegistry::QumirDbModule>();
     TTypePtr columnType, rowSetType, hashTableType;
@@ -306,7 +305,7 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
     dispatchRunner->RegisterModule(dbModule, true);
 
     auto dispatchProgram = NKernel::BuildGenericAggregateProgramAst(
-        inputType, keyDescriptor, argField, layout, argIsNullable,
+        inputType, keyDescriptor, layout,
         columnType, rowSetType, hashTableType);
     if (!dispatchProgram) {
         throw NQumir::TError(

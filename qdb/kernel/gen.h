@@ -26,10 +26,19 @@ namespace NKernel {
 struct TAggReducerInfo {
     std::string Func;
     bool HasArg = false;            // agg.Arg != nullptr
-    bool NeedsValidity = false;     // argIsNullable && HasArg
+    bool NeedsValidity = false;     // arg nullable && HasArg
     bool IsNullableOutput = false;  // NeedsValidity && Func in {sum,min,max}
     int ValidBufIdx = -1;           // -1 if IsNullableOutput == false
-    bool IsFloat = false;           // argIsFloat && HasArg && Func in {sum,min,max}
+    bool IsFloat = false;           // arg f64 && HasArg && Func in {sum,min,max}
+    int ArgColumnIndex = -1;        // input column index of this agg's arg; -1 = count(*)
+};
+
+// Per-aggregate argument column descriptor (parallel to funcs). ColumnIndex -1
+// means no argument (count(*)). Aggregates may reference different columns.
+struct TAggArg {
+    int ColumnIndex = -1;
+    bool IsFloat = false;
+    bool IsNullable = false;
 };
 
 struct TAggReducerLayout {
@@ -43,9 +52,7 @@ struct TAggReducerLayout {
 // false, preserving the existing one-buffer-per-reducer layout exactly.
 TAggReducerLayout BuildAggReducerLayout(
     const std::vector<std::string>& funcs,
-    const std::vector<bool>& hasArg,
-    bool argIsNullable,
-    bool argIsFloat = false);
+    const std::vector<TAggArg>& args);
 
 // Generates concrete hash and equality overloads for lookup and stored keys.
 std::vector<NQumir::NAst::TExprPtr> GenKeyOperationFunDecls(
@@ -89,13 +96,13 @@ NQumir::NAst::TExprPtr GenProjectKernelAst(
 // Builds the generic aggregation dispatch entry over aht_init/aht_upsert_dual/
 // aht_destroy. Key extraction uses the common TColumn materializer and the
 // descriptor's borrowed LookupType/stored StoredType representations. Aggregate
-// values still use one shared integer input column and i64 reducer states.
+// aht_destroy. Each reducer reads its own argument column (layout's
+// ArgColumnIndex), so different aggregates may aggregate different columns; the
+// reducer applications are inlined per row with per-reducer values.
 NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
     const NQumir::NAst::TStructType& inputType,
     const TAggregateKeyDescriptor& key,
-    const std::optional<std::string>& argField,
     const TAggReducerLayout& layout,
-    bool argIsNullable,
     NQumir::NAst::TTypePtr columnType,
     NQumir::NAst::TTypePtr rowSetType,
     NQumir::NAst::TTypePtr hashTableType);

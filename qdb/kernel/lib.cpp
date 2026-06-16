@@ -157,9 +157,7 @@ std::expected<NQumir::NAst::TExprPtr, NQumir::TError>
 BuildGenericAggregateProgramAst(
     const NQumir::NAst::TStructType& inputType,
     const TAggregateKeyDescriptor& key,
-    const std::optional<std::string>& argField,
     const TAggReducerLayout& layout,
-    bool argIsNullable,
     NQumir::NAst::TTypePtr columnType,
     NQumir::NAst::TTypePtr rowSetType,
     NQumir::NAst::TTypePtr hashTableType)
@@ -215,7 +213,7 @@ BuildGenericAggregateProgramAst(
     }
 
     auto entry = GenGenericAggregateDispatchAst(
-        inputType, key, argField, layout, argIsNullable, std::move(columnType),
+        inputType, key, layout, std::move(columnType),
         std::move(rowSetType), std::move(hashTableType));
     auto block = NQumir::NAst::TMaybeNode<NQumir::NAst::TBlockExpr>(entry);
     if (!block || block.Cast()->Stmts.size() != 1) {
