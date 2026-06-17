@@ -111,7 +111,15 @@ class TKernelCompiler {
 public:
     explicit TKernelCompiler(std::ostream* diagnostics = nullptr)
         : Diagnostics_(diagnostics)
-    {}
+    {
+        Opts_.CoreInput = true;
+        Opts_.ResolveCoreInput = true;
+        Opts_.NativeCode = true;
+        Opts_.OptLevel = 3;
+        Opts_.AllowOverloads = true;
+        Opts_.PrintIr = Diagnostics_ != nullptr;
+        Opts_.PrintLlvm = Diagnostics_ != nullptr;
+    }
 
     // Filter dispatch: called per batch to fill the selection buffer.
     using TFilterDispatch = std::function<void(TRowSet& rowSet)>;
@@ -174,6 +182,7 @@ public:
 
 private:
     std::ostream* Diagnostics_ = nullptr;
+    NQumir::TLLVMRunnerOptions Opts_;
 };
 
 } // namespace NQqb
