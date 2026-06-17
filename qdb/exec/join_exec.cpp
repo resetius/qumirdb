@@ -311,6 +311,31 @@ bool TRuntimeJoin::Next(TRowSet& rowSet) {
         return false;
     }
 
+    // LEFT / RIGHT OUTER: pipelined streaming (same as INNER) + deferred final scan.
+    if (JoinType_ == EJoinType::Left || JoinType_ == EJoinType::Right) {
+        for (;;) {
+            if (Builder_->NextBatch(rowSet)) return true;
+            Builder_->ClearPairs();
+            if (OuterFinalized_) return false;
+            if (!BothDone_) {
+                PullOneInputBatch();
+            } else {
+                // Scan the unmatched side: for Left, scan LeftTable_ vs RightTable_;
+                // for Right, scan RightTable_ vs LeftTable_ (pairs come out as
+                // (rightRowId, -1) and are swapped to (-1, rightRowId) below).
+                if (JoinType_ == EJoinType::Left) {
+                    Kernels_.FinalizeOuter(LeftTable_.data(), RightTable_.data(), &PairBuffer_);
+                } else {
+                    Kernels_.FinalizeOuter(RightTable_.data(), LeftTable_.data(), &PairBuffer_);
+                    for (int64_t i = 0; i < PairBuffer_.Count; ++i)
+                        std::swap(PairBuffer_.Data[2 * i], PairBuffer_.Data[2 * i + 1]);
+                }
+                DrainKernelPairs();
+                OuterFinalized_ = true;
+            }
+        }
+    }
+
     // INNER join: pipelined — pull one batch per iteration.
     for (;;) {
         if (Builder_->NextBatch(rowSet)) {
