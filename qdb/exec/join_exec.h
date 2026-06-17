@@ -153,15 +153,17 @@ private:
     size_t Cursor_ = 0;
 };
 
-// Symmetric (pipelined) hash join executor. Stage 1: INNER, i64 key, both
-// inputs held in memory. Pulls input batches, retains them in per-side
-// TRowStores, feeds them to the compiled probe+insert kernel, and drains the
-// matched RowId pairs into output batches via gather (TJoinOutputBuilder).
+// Symmetric (pipelined) hash join executor.
+// - Inner: streams matched pairs as both inputs arrive (pipelined).
+// - LeftSemi/LeftAnti: blocking — consumes all inputs first, then does a final
+//   scan of the left table against the right table to find matching/missing
+//   keys, emitting left rows accordingly (right_row_id = kNullRowId).
 class TRuntimeJoin : public IRuntimeNode {
 public:
     TRuntimeJoin(std::unique_ptr<IRuntimeNode> left,
         std::unique_ptr<IRuntimeNode> right,
-        NQumir::NAst::TTypePtr outputType, TJoinKernels kernels);
+        NQumir::NAst::TTypePtr outputType, TJoinKernels kernels,
+        EJoinType joinType);
     ~TRuntimeJoin() override;
 
     NQumir::NAst::TTypePtr OutputType() const override { return OutputType_; }
@@ -184,6 +186,7 @@ private:
     std::unique_ptr<IRuntimeNode> Right_;
     NQumir::NAst::TTypePtr OutputType_;
     TJoinKernels Kernels_;
+    EJoinType JoinType_;
     TRowStore LeftRows_;
     TRowStore RightRows_;
     std::array<uint8_t, TKernelCompiler::kHashTableSize> LeftTable_{};
@@ -194,6 +197,7 @@ private:
     bool LeftDone_ = false;
     bool RightDone_ = false;
     bool BothDone_ = false;
+    bool SemiAntiFinalized_ = false;
 };
 
 } // namespace NQqb
