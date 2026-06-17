@@ -1,9 +1,31 @@
 (rel project
   (rel aggregate
     (rel project
-      (rel join
-        (rel source "__LINEITEM__")
-        (rel source "__PART__") ((l_partkey p_partkey)) (inner))
+      (rel filter
+        (rel join
+          (rel source "__LINEITEM__")
+          (rel source "__PART__") ((l_partkey p_partkey)) (inner))
+        (: (|| (&& (== p_brand "Brand#35")
+                (&& (|| (== p_container "SM CASE") (|| (== p_container "SM BOX")
+                    (|| (== p_container "SM PACK")     (== p_container "SM PKG"))))
+                    (&& (>= l_quantity (: 10.0 f64)) (&& (<= l_quantity (: 20.0 f64))
+                        (&& (>= p_size (: 1 i32)) (&& (<= p_size (: 5 i32))
+                            (&& (|| (== l_shipmode "AIR") (== l_shipmode "AIR REG"))
+                                (== l_shipinstruct "DELIVER IN PERSON"))))))))
+            (|| (&& (== p_brand "Brand#34")
+                    (&& (|| (== p_container "MED BAG") (|| (== p_container "MED BOX")
+                        (|| (== p_container "MED PKG")     (== p_container "MED PACK"))))
+                        (&& (>= l_quantity (: 18.0 f64)) (&& (<= l_quantity (: 28.0 f64))
+                            (&& (>= p_size (: 1 i32)) (&& (<= p_size (: 10 i32))
+                                (&& (|| (== l_shipmode "AIR") (== l_shipmode "AIR REG"))
+                                    (== l_shipinstruct "DELIVER IN PERSON"))))))))
+                (&& (== p_brand "Brand#23")
+                    (&& (|| (== p_container "LG CASE") (|| (== p_container "LG BOX")
+                        (|| (== p_container "LG PACK")     (== p_container "LG PKG"))))
+                        (&& (>= l_quantity (: 24.0 f64)) (&& (<= l_quantity (: 34.0 f64))
+                            (&& (>= p_size (: 1 i32)) (&& (<= p_size (: 15 i32))
+                                (&& (|| (== l_shipmode "AIR") (== l_shipmode "AIR REG"))
+                                    (== l_shipinstruct "DELIVER IN PERSON")))))))))) u8))
       (disc_price (* l_extendedprice (- (: 1.0 f64) l_discount)))
       (dummy (: 1 i64)))
     (keys dummy)
