@@ -396,8 +396,10 @@ TJoinKernels TKernelCompiler::CompileJoin(
 {
     using namespace NQumir::NAst;
 
-    if (type != EJoinType::Inner) {
-        throw NQumir::TError("CompileJoin: only INNER join is supported in Stage 1");
+    const bool isSemiAnti = (type == EJoinType::LeftSemi || type == EJoinType::LeftAnti);
+    if (!isSemiAnti && type != EJoinType::Inner) {
+        throw NQumir::TError(
+            "CompileJoin: only Inner, LeftSemi, and LeftAnti join types are supported");
     }
 
     // Unified key descriptor (reuses the aggregation key machinery). Throws on
@@ -430,6 +432,14 @@ TJoinKernels TKernelCompiler::CompileJoin(
             "jt_process_left", columnType, rowSetType, hashTableType, pairBufferType));
         program.push_back(NKernel::GenJoinProcessAst(keyDesc, /*isLeft=*/false,
             "jt_process_right", columnType, rowSetType, hashTableType, pairBufferType));
+        if (isSemiAnti) {
+            program.push_back(NKernel::GenJoinInsertKeyOnlyAst(
+                keyDesc, "jt_insert_key_only",
+                columnType, rowSetType, hashTableType, pairBufferType));
+            program.push_back(NKernel::GenJoinFinalizeSemiAntiAst(
+                keyDesc, /*isAnti=*/type == EJoinType::LeftAnti,
+                "jt_finalize_semi_anti", hashTableType, pairBufferType));
+        }
         return program;
     };
 
@@ -483,6 +493,23 @@ TJoinKernels TKernelCompiler::CompileJoin(
     kernels.DestroyPairs = [destroyPairsFn, destroyPairsRunner](void* pairs) {
         reinterpret_cast<TDestroyFn>(destroyPairsFn)(pairs);
     };
+
+    if (isSemiAnti) {
+        using TFinalizeSemiFn = bool(*)(void*, void*, void*);
+        auto [insertKeyOnlyFn, insertKeyOnlyRunner] = compileEntry("jt_insert_key_only");
+        auto [finalizeFn, finalizeRunner] = compileEntry("jt_finalize_semi_anti");
+        kernels.InsertKeyOnly =
+            [insertKeyOnlyFn, insertKeyOnlyRunner](void* own, void* opp, TRowSet* batch,
+                int64_t batchIdx, void* pairs) {
+                return reinterpret_cast<TProcessFn>(insertKeyOnlyFn)(
+                    own, opp, batch, batchIdx, pairs);
+            };
+        kernels.FinalizeAntiSemi =
+            [finalizeFn, finalizeRunner](void* own, void* opp, void* pairs) {
+                return reinterpret_cast<TFinalizeSemiFn>(finalizeFn)(own, opp, pairs);
+            };
+    }
+
     return kernels;
 }
 

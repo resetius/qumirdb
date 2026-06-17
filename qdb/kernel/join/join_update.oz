@@ -74,4 +74,35 @@
           (field_assign own Size (+ size (: 1 i64)))))
       (if (! (call jb_append own own_slot own_row_id))
         (block (return #f)))
+      (return #t)))
+
+  ;; Insert only the key into own table without storing a row ID.
+  ;; Used for the non-retained side (right side) of SEMI / ANTI joins —
+  ;; the right table is queried for key existence only, not row materialization.
+  (fun jt_insert_slot_only ((var own <ref HashTable>)
+                             (var key <named Key (template readable mutable)>)) -> bool
+    (block
+      (var own_keys =
+        (cast (field own Keys) <ptr <named Key (template readable mutable)>>))
+      (var own_slot = (call rh_lookup_slot own_keys (field own Dist)
+                        (field own SlotId) (field own Capacity) key))
+      (if (== own_slot (: -1 i64))
+        (block
+          (var capacity = (field own Capacity))
+          (var size = (field own Size))
+          (if (> (+ size (: 1 i64)) (- capacity (/ capacity (: 4 i64))))
+            (block
+              (if (! (call aht_rehash own (* capacity (: 2 i64)) key))
+                (block (return #f)))
+              (= capacity (field own Capacity))))
+          (= own_keys
+            (cast (field own Keys) <ptr <named Key (template readable mutable)>>))
+          (= own_slot size)
+          (if (! (call rh_insert_displace own_keys (field own Dist)
+                        (field own SlotId) capacity key own_slot))
+            (block (return #f)))
+          (var group_keys =
+            (cast (field own GroupKeys) <ptr <named Key (template readable mutable)>>))
+          (= group_keys [own_slot] key)
+          (field_assign own Size (+ size (: 1 i64)))))
       (return #t))))

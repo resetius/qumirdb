@@ -89,6 +89,11 @@ TTypePtr InferProjectExprType(const TExprPtr& expr, const TStructType& inputType
             op.ToString() + "'");
     }
 
+    // (if cond then else) — infer from the then-branch.
+    if (auto ifExpr = TMaybeNode<TIfExpr>(expr)) {
+        return InferProjectExprType(ifExpr.Cast()->Then, inputType);
+    }
+
     throw NQumir::TError(
         "project type inference: unsupported expression '" +
         std::string(expr->NodeName()) + "'");

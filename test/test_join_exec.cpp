@@ -364,7 +364,7 @@ TEST(RuntimeJoin, InnerJoinEndToEnd) {
     auto outputType = ComputeJoinOutputType(leftType, rightType, EJoinType::Inner);
     ASSERT_TRUE(outputType);
 
-    TRuntimeJoin join(std::move(left), std::move(right), *outputType, std::move(kernels));
+    TRuntimeJoin join(std::move(left), std::move(right), *outputType, std::move(kernels), EJoinType::Inner);
 
     std::vector<TOut4> got;
     TRowSet out{};
@@ -419,7 +419,7 @@ TEST(RuntimeJoin, MultipleBatchesMatchNestedLoop) {
         {{"lk", "rk"}}, EJoinType::Inner);
     auto outputType = ComputeJoinOutputType(leftType, rightType, EJoinType::Inner);
     ASSERT_TRUE(outputType);
-    TRuntimeJoin join(std::move(left), std::move(right), *outputType, std::move(kernels));
+    TRuntimeJoin join(std::move(left), std::move(right), *outputType, std::move(kernels), EJoinType::Inner);
 
     int64_t rowCount = 0;
     TRowSet out{};

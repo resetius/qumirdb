@@ -9,6 +9,30 @@
 
 namespace NQqb::NKernel {
 
+// Generates jt_insert_key_only: iterates a batch, extracts the key, and
+// inserts only the key into the own table (no row-ID storage via jb_append).
+// Used for the right side of SEMI/ANTI joins. Signature is identical to
+// GenJoinProcessAst so the same TProcessFn ABI can be reused; `opp` and
+// `pairs` parameters are present but unused in the generated body.
+NQumir::NAst::TExprPtr GenJoinInsertKeyOnlyAst(
+    const TJoinKeyDescriptor& key,
+    const std::string& funcName,
+    NQumir::NAst::TTypePtr columnType,
+    NQumir::NAst::TTypePtr rowSetType,
+    NQumir::NAst::TTypePtr hashTableType,
+    NQumir::NAst::TTypePtr pairBufferType);
+
+// Generates jt_finalize_semi / jt_finalize_anti: iterates own.GroupKeys,
+// probes opp for each key, and pushes matching (SEMI) or non-matching (ANTI)
+// left RowIds to pairs (right_row_id = -1, ignored by TJoinOutputBuilder when
+// output schema contains only left columns).
+NQumir::NAst::TExprPtr GenJoinFinalizeSemiAntiAst(
+    const TJoinKeyDescriptor& key,
+    bool isAnti,
+    const std::string& funcName,
+    NQumir::NAst::TTypePtr hashTableType,
+    NQumir::NAst::TTypePtr pairBufferType);
+
 // Generates one side's process function (jt_process_left / jt_process_right):
 // reads the side's key columns, assembles the <named Key>, and calls the
 // generic jt_emit_and_insert for each selected row. Reuses BuildColumnValueAst

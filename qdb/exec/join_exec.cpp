@@ -193,14 +193,16 @@ constexpr int64_t kJoinInitialCapacity = 256;
 
 TRuntimeJoin::TRuntimeJoin(std::unique_ptr<IRuntimeNode> left,
     std::unique_ptr<IRuntimeNode> right,
-    NQumir::NAst::TTypePtr outputType, TJoinKernels kernels)
+    NQumir::NAst::TTypePtr outputType, TJoinKernels kernels,
+    EJoinType joinType)
     : Left_(std::move(left))
     , Right_(std::move(right))
     , OutputType_(std::move(outputType))
     , Kernels_(std::move(kernels))
+    , JoinType_(joinType)
 {
-    // Output columns = all left columns, then all right columns (INNER), in the
-    // order ComputeJoinOutputType produces.
+    // Output columns follow ComputeJoinOutputType: all left columns, then all
+    // right columns (INNER), or only left columns (LeftSemi / LeftAnti).
     std::vector<TJoinColumnRef> columns;
     auto* leftStruct = static_cast<TStructType*>(Left_->OutputType().get());
     auto* rightStruct = static_cast<TStructType*>(Right_->OutputType().get());
@@ -271,6 +273,43 @@ void TRuntimeJoin::PullOneInputBatch() {
 
 bool TRuntimeJoin::Next(TRowSet& rowSet) {
     EnsureInit();
+
+    if (JoinType_ == EJoinType::LeftSemi || JoinType_ == EJoinType::LeftAnti) {
+        if (!SemiAntiFinalized_) {
+            // Phase 1: consume all left batches → LeftTable_ + LeftRows_.
+            // Right table is still empty so jt_emit_and_insert finds no matches
+            // and emits no pairs — left row IDs accumulate in LeftTable_ buckets.
+            TRowSet batch{};
+            while (Left_->Next(batch)) {
+                int32_t idx = LeftRows_.PushBatch(batch);
+                Kernels_.ProcessLeft(LeftTable_.data(), RightTable_.data(),
+                    const_cast<TRowSet*>(&LeftRows_.Batch(idx)), idx, &PairBuffer_);
+                PairBuffer_.Count = 0;
+            }
+            // Phase 2: consume all right batches → RightTable_ (keys only,
+            // no row IDs). Batches are released immediately; no RightRows_ store.
+            while (Right_->Next(batch)) {
+                Kernels_.InsertKeyOnly(RightTable_.data(), nullptr,
+                    &batch, 0, &PairBuffer_);
+                Release(&batch);
+                PairBuffer_.Count = 0;
+            }
+            // Phase 3: finalize — scan left table, probe right table, emit.
+            Kernels_.FinalizeAntiSemi(LeftTable_.data(), RightTable_.data(), &PairBuffer_);
+            for (int64_t i = 0; i < PairBuffer_.Count; ++i) {
+                Builder_->AddPair(PairBuffer_.Data[2 * i], PairBuffer_.Data[2 * i + 1]);
+            }
+            PairBuffer_.Count = 0;
+            SemiAntiFinalized_ = true;
+        }
+        if (Builder_->NextBatch(rowSet)) {
+            return true;
+        }
+        Builder_->ClearPairs();
+        return false;
+    }
+
+    // INNER join: pipelined — pull one batch per iteration.
     for (;;) {
         if (Builder_->NextBatch(rowSet)) {
             return true;

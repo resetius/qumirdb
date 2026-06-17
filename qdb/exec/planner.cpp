@@ -217,7 +217,8 @@ std::unique_ptr<IRuntimeNode> TPhysicalPlanner::Build(const TOperatorPtr& root) 
         }
 
         return std::make_unique<TRuntimeJoin>(
-            std::move(left), std::move(right), std::move(*outputType), std::move(kernels));
+            std::move(left), std::move(right), std::move(*outputType), std::move(kernels),
+            join->JoinType());
     }
 
     throw std::runtime_error("TPhysicalPlanner: unknown operator");

@@ -85,6 +85,16 @@ struct TJoinKernels {
     std::function<bool(void* own, void* opp, TRowSet* batch, int64_t batchIdx, void* pairs)> ProcessRight;
     std::function<void(void* table)> DestroyTable;
     std::function<void(void* pairs)> DestroyPairs;
+
+    // Filled only for LeftSemi / LeftAnti joins (null otherwise).
+    // InsertKeyOnly(own, /*opp=*/nullptr, batch, /*batchIdx=*/0, /*pairs=*/nullptr):
+    //   inserts only the key for each selected row, with no row-ID storage.
+    //   Used to build the right-side table for SEMI/ANTI without jb_append.
+    // FinalizeAntiSemi(own=left, opp=right, pairs):
+    //   iterates own.GroupKeys, probes opp, and pushes matching (SEMI) or
+    //   non-matching (ANTI) left RowIds into pairs (right_id = -1).
+    std::function<bool(void* own, void* opp, TRowSet* batch, int64_t batchIdx, void* pairs)> InsertKeyOnly;
+    std::function<bool(void* own, void* opp, void* pairs)> FinalizeAntiSemi;
 };
 
 // Compiles qumir core-lang kernel sources to LLVM JIT function pointers.
