@@ -104,5 +104,12 @@
           (var group_keys =
             (cast (field own GroupKeys) <ptr <named Key (template readable mutable)>>))
           (= group_keys [own_slot] key)
+          (var own_aggs = (field own AggBuffers))
+          (var own_counts = (index own_aggs (: 0 i64)))
+          (var own_caps = (index own_aggs (: 1 i64)))
+          (var own_datas = (index own_aggs (: 2 i64)))
+          (= own_counts [own_slot] (: 0 i64))
+          (= own_caps [own_slot] (: 0 i64))
+          (= own_datas [own_slot] (: 0 i64))
           (field_assign own Size (+ size (: 1 i64)))))
       (return #t))))
