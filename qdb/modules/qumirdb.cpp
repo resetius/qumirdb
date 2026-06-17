@@ -56,6 +56,7 @@ QumirDbModule::QumirDbModule() {
             });
     };
     auto stringViewType = makeStringHandleType();
+    auto namedStringViewType = std::make_shared<TNamedType>("StringView", stringViewType);
     auto ownedStringType = makeStringHandleType();
     auto stringLiteralType = std::make_shared<TStringType>();
 
@@ -291,7 +292,7 @@ QumirDbModule::QumirDbModule() {
                 qdb_string_view str = *reinterpret_cast<const qdb_string_view*>(args[0]);
                 return static_cast<uint64_t>(qdb_string_view_sql_like(str, reinterpret_cast<const char*>(args[1])));
             },
-            .ArgTypes = {stringViewType, stringLiteralType},
+            .ArgTypes = {namedStringViewType, stringLiteralType},
             .ReturnType = i64Type,
         },
         {
@@ -340,6 +341,17 @@ QumirDbModule::QumirDbModule() {
             },
             .ArgTypes = {i64Type},
             .ReturnType = i64Type,
+        },
+        {
+            .Name = "qdb_date_year",
+            .MangledName = "qdb_date_year",
+            .Ptr = reinterpret_cast<void*>(static_cast<int32_t(*)(int32_t)>(qdb_date_year)),
+            .Packed = +[](const uint64_t* args, size_t) -> uint64_t {
+                return static_cast<uint64_t>(static_cast<uint32_t>(
+                    qdb_date_year(static_cast<int32_t>(args[0]))));
+            },
+            .ArgTypes = {i32Type},
+            .ReturnType = i32Type,
         },
     };
 }

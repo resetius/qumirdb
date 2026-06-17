@@ -218,6 +218,21 @@ TEST(QumirDbStringOps, SqlLikeBacktracksOverPercent) {
     EXPECT_EQ(like(View("mississippi"), "m%iss%ppi"), 1);
 }
 
+TEST(DateYear, KnownDates) {
+    // 1970-01-01 = day 0
+    EXPECT_EQ(qdb_date_year(0), 1970);
+    // 1995-01-01 = 9131 days (used in TPC-H Q7/Q8/Q9)
+    EXPECT_EQ(qdb_date_year(9131), 1995);
+    // 1996-12-31 = 9861 days
+    EXPECT_EQ(qdb_date_year(9861), 1996);
+    // 1998-12-01 (approximate Q1 upper bound area)
+    EXPECT_EQ(qdb_date_year(10471), 1998);
+    // 2000-01-01 (leap year boundary)
+    EXPECT_EQ(qdb_date_year(10957), 2000);
+    // Negative: 1969-12-31 = -1
+    EXPECT_EQ(qdb_date_year(-1), 1969);
+}
+
 } // namespace
 
 int main(int argc, char** argv) {

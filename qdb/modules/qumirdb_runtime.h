@@ -29,6 +29,9 @@ struct qdb_string_view {
 
 int64_t qdb_string_view_sql_like(qdb_string_view str, const char* pattern);
 
+// Returns the Gregorian year for a date given as days since 1970-01-01.
+int32_t qdb_date_year(int32_t days);
+
 void qdb_bitmap_set_valid(uint8_t* bitmap, int64_t index, bool valid);
 
 int64_t qdb_sql_bool_and(int64_t left, int64_t right);

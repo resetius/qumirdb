@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 QDB_BIN="${QDB_BIN:-"$(cd "$SCRIPT_DIR/../.." && pwd)/build/bin/qdb"}"
 QUERIES_DIR="$SCRIPT_DIR/queries"
 PARAMS_DIR="$SCRIPT_DIR/params"
+OUT_DIR="${OUT_DIR:-./results}"
 
 usage() {
     echo "Usage: $0 <base_dir> [scale] [query_filter]"
@@ -52,22 +53,25 @@ query_enabled() {
     return 1
 }
 
-# Run qdb and return "<seconds_float> <rc>" parsed from its output line:
-#   "Processed N rowsets in X.XXXXXX seconds"
+# Run qdb; append full output to LOG_FILE, return "<seconds_float> <rc>" on stdout.
 run_query() {
     local sexp_file="$1"
     local qdb_bin="$2"
+    local label="$3"
     local out rc seconds
     set +e
     out=$("$qdb_bin" -i "$sexp_file" 2>&1)
     rc=$?
     set -e
+    printf '\n=== %s (rc=%s) ===\n%s\n' "$label" "$rc" "$out" >> "$LOG_FILE"
     seconds=$(echo "$out" | grep -o 'Processed [0-9]* rowsets in [0-9.]*' | grep -o '[0-9.]*$' || echo "0")
     echo "$seconds $rc"
 }
 
-TMPDIR_BASE=$(mktemp -d)
-trap 'rm -rf "$TMPDIR_BASE"' EXIT
+mkdir -p "$OUT_DIR"
+
+tmpdir="$(mktemp -d)"
+trap 'rm -rf "$tmpdir"' EXIT
 
 for scale in "${SCALES[@]}"; do
     sf_num="${scale#pq}"
@@ -75,15 +79,18 @@ for scale in "${SCALES[@]}"; do
     data_dir="$BASE_DIR/$scale"
 
     if [[ ! -f "$params_file" ]]; then
-        echo "[SKIP] $scale — no params file $params_file"
+        echo "[qdb] skip $scale — no params file $params_file" >&2
         continue
     fi
+
+    LOG_FILE="$OUT_DIR/tpch_sf${sf_num}.log"
+    : > "$LOG_FILE"
 
     # shellcheck source=/dev/null
     source "$params_file"
 
-    echo ""
-    echo "========== Scale factor $sf_num ($scale) =========="
+    echo "[qdb] scale=$sf_num parquet=$data_dir" | tee -a "$LOG_FILE" >&2
+
     printf "%-6s  %-12s  %s\n" "Query" "Time(s)" "Status"
     printf "%-6s  %-12s  %s\n" "------" "------------" "------"
 
@@ -96,7 +103,7 @@ for scale in "${SCALES[@]}"; do
         template="$QUERIES_DIR/q${q_num}.sexp"
         [[ -f "$template" ]] || continue
 
-        tmp_sexp="$TMPDIR_BASE/q${q_num}_sf${sf_num}.sexp"
+        tmp_sexp="$tmpdir/q${q_num}_sf${sf_num}.sexp"
         sed \
             -e "s|__LINEITEM__|${data_dir}/lineitem.parquet|g" \
             -e "s|__ORDERS__|${data_dir}/orders.parquet|g" \
@@ -123,6 +130,11 @@ for scale in "${SCALES[@]}"; do
             -e "s|__Q6_QUANTITY__|${Q6_QUANTITY:-0.0}|g" \
             -e "s|__Q7_NATION1__|${Q7_NATION1:-}|g" \
             -e "s|__Q7_NATION2__|${Q7_NATION2:-}|g" \
+            -e "s|__Q8_DATE_LOW__|${Q8_DATE_LOW:-0}|g" \
+            -e "s|__Q8_DATE_HIGH__|${Q8_DATE_HIGH:-0}|g" \
+            -e "s|__Q8_REGION__|${Q8_REGION:-}|g" \
+            -e "s|__Q8_PTYPE__|${Q8_PTYPE:-}|g" \
+            -e "s|__Q8_NATION__|${Q8_NATION:-}|g" \
             -e "s|__Q10_DATE_LOW__|${Q10_DATE_LOW:-0}|g" \
             -e "s|__Q10_DATE_HIGH__|${Q10_DATE_HIGH:-0}|g" \
             -e "s|__Q11_NATION__|${Q11_NATION:-}|g" \
@@ -141,19 +153,28 @@ for scale in "${SCALES[@]}"; do
             -e "s|__Q20_DATE_LOW__|${Q20_DATE_LOW:-0}|g" \
             -e "s|__Q20_DATE_HIGH__|${Q20_DATE_HIGH:-0}|g" \
             -e "s|__Q21_NATION__|${Q21_NATION:-}|g" \
+            -e "s|__Q22_CC1__|${Q22_CC1:-}|g" \
+            -e "s|__Q22_CC2__|${Q22_CC2:-}|g" \
+            -e "s|__Q22_CC3__|${Q22_CC3:-}|g" \
+            -e "s|__Q22_CC4__|${Q22_CC4:-}|g" \
+            -e "s|__Q22_CC5__|${Q22_CC5:-}|g" \
+            -e "s|__Q22_CC6__|${Q22_CC6:-}|g" \
+            -e "s|__Q22_CC7__|${Q22_CC7:-}|g" \
             "$template" > "$tmp_sexp"
 
-        read -r seconds rc <<< "$(run_query "$tmp_sexp" "$QDB_BIN")"
+        read -r seconds rc <<< "$(run_query "$tmp_sexp" "$QDB_BIN" "Q${q_num} sf${sf_num}")"
         total_s=$(python3 -c "print(round($total_s + $seconds, 3))")
 
         if [[ $rc -eq 0 ]]; then
             printf "Q%-5s  %-12s  OK\n" "$q_num" "${seconds}s"
+            echo "[qdb] q${q_num} ${seconds}s OK" >> "$LOG_FILE"
         else
             printf "Q%-5s  %-12s  FAILED\n" "$q_num" "${seconds}s"
+            echo "[qdb] q${q_num} FAILED" >> "$LOG_FILE"
             (( failed++ )) || true
         fi
     done
 
-    echo "------"
     printf "Total: %ss,  Failed: %s\n" "$total_s" "$failed"
+    echo "[qdb] log: $LOG_FILE" >&2
 done
