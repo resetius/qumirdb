@@ -3,6 +3,7 @@
 #include <qdb/kernel/lib.h>
 #include <qdb/modules/qumirdb.h>
 #include <qdb/modules/qumirdb_types.h>
+#include <qdb/modules/qumirdb_runtime.h>
 
 #include <qumir/codegen/llvm/llvm_initializer.h>
 #include <qumir/runner/runner_llvm.h>
@@ -166,6 +167,55 @@ TEST(QumirDbStringOps, ViewAndOwnedOverloadsShareContract) {
     auto equal = reinterpret_cast<bool(*)(NQqb::TStringView, NQqb::TOwnedString)>(
         equalEntry);
     EXPECT_TRUE(equal(view, owned));
+}
+
+TEST(QumirDbStringOps, SqlLikeMatchesSqlWildcards) {
+    void* likeEntry = (void*)qdb_string_view_sql_like;
+    ASSERT_NE(likeEntry, nullptr);
+
+    auto like = reinterpret_cast<int64_t(*)(NQqb::TStringView, const char*)>(
+        likeEntry);
+
+    const std::string value("same\0bytes", 10);
+    auto view = View(value);
+
+    EXPECT_EQ(like(view, "same%"), 1);
+    EXPECT_EQ(like(view, "same_bytes"), 1);
+    EXPECT_EQ(like(view, "%bytes"), 1);
+    EXPECT_EQ(like(view, "%bytez"), 0);
+    EXPECT_EQ(like(view, "same%xxx"), 0);
+
+    EXPECT_EQ(like(view, "same"), 0);
+    EXPECT_EQ(like(view, "same_bytes_"), 0);
+    EXPECT_EQ(like(view, "same%xxx"), 0);
+}
+
+TEST(QumirDbStringOps, SqlLikeHandlesEmptyAndPercentOnlyPatterns) {
+    void* likeEntry = (void*)qdb_string_view_sql_like;
+    ASSERT_NE(likeEntry, nullptr);
+
+    auto like = reinterpret_cast<int64_t(*)(NQqb::TStringView, const char*)>(
+        likeEntry);
+
+    EXPECT_EQ(like(View(""), ""), 1);
+    EXPECT_EQ(like(View("abc"), "%"), 1);
+    EXPECT_EQ(like(View(""), "%"), 1);
+    EXPECT_EQ(like(View("abc"), "%%"), 1);
+    EXPECT_EQ(like(View("abc"), ""), 0);
+}
+
+TEST(QumirDbStringOps, SqlLikeBacktracksOverPercent) {
+    void* likeEntry = (void*)qdb_string_view_sql_like;
+    ASSERT_NE(likeEntry, nullptr);
+
+    auto like = reinterpret_cast<int64_t(*)(NQqb::TStringView, const char*)>(
+        likeEntry);
+
+    EXPECT_EQ(like(View("abbbc"), "a%c"), 1);
+    EXPECT_EQ(like(View("abbbc"), "a%b%c"), 1);
+    EXPECT_EQ(like(View("abbbc"), "a%bc"), 1);
+    EXPECT_EQ(like(View("abbbc"), "a%d"), 0);
+    EXPECT_EQ(like(View("mississippi"), "m%iss%ppi"), 1);
 }
 
 } // namespace
