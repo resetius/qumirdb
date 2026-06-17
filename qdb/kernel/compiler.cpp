@@ -74,9 +74,93 @@ NQumir::NAst::TExprPtr ClonePredicate(
     } else if (auto cast = TMaybeNode<TCastExpr>(predicate)) {
         result = std::make_shared<TCastExpr>(predicate->Location,
             ClonePredicate(cast.Cast()->Operand), predicate->Type);
+    } else if (auto ifExpr = TMaybeNode<TIfExpr>(predicate)) {
+        result = std::make_shared<TIfExpr>(predicate->Location,
+            ClonePredicate(ifExpr.Cast()->Cond),
+            ClonePredicate(ifExpr.Cast()->Then),
+            ifExpr.Cast()->Else ? ClonePredicate(ifExpr.Cast()->Else) : nullptr);
+    } else if (auto block = TMaybeNode<TBlockExpr>(predicate)) {
+        std::vector<TExprPtr> stmts;
+        stmts.reserve(block.Cast()->Stmts.size());
+        for (const auto& s : block.Cast()->Stmts) stmts.push_back(ClonePredicate(s));
+        result = std::make_shared<TBlockExpr>(predicate->Location, std::move(stmts));
+    } else if (auto var = TMaybeNode<TVarStmt>(predicate)) {
+        std::vector<std::pair<TExprPtr, TExprPtr>> bounds;
+        bounds.reserve(var.Cast()->Bounds.size());
+        for (const auto& [lo, hi] : var.Cast()->Bounds)
+            bounds.emplace_back(ClonePredicate(lo), ClonePredicate(hi));
+        auto v = std::make_shared<TVarStmt>(predicate->Location,
+            var.Cast()->Name, predicate->Type, std::move(bounds));
+        if (var.Cast()->Init) v->Init = ClonePredicate(var.Cast()->Init);
+        result = std::move(v);
+    } else if (auto assign = TMaybeNode<TAssignExpr>(predicate)) {
+        result = std::make_shared<TAssignExpr>(predicate->Location,
+            assign.Cast()->Name, ClonePredicate(assign.Cast()->Value));
+    } else if (auto aarr = TMaybeNode<TArrayAssignExpr>(predicate)) {
+        std::vector<TExprPtr> idxs;
+        idxs.reserve(aarr.Cast()->Indices.size());
+        for (const auto& i : aarr.Cast()->Indices) idxs.push_back(ClonePredicate(i));
+        result = std::make_shared<TArrayAssignExpr>(predicate->Location,
+            aarr.Cast()->Name, std::move(idxs), ClonePredicate(aarr.Cast()->Value));
+    } else if (auto ret = TMaybeNode<TReturnExpr>(predicate)) {
+        result = std::make_shared<TReturnExpr>(predicate->Location,
+            ret.Cast()->Value ? ClonePredicate(ret.Cast()->Value) : nullptr);
+    } else if (TMaybeNode<TBreakStmt>(predicate)) {
+        result = std::make_shared<TBreakStmt>(predicate->Location);
+    } else if (TMaybeNode<TContinueStmt>(predicate)) {
+        result = std::make_shared<TContinueStmt>(predicate->Location);
+    } else if (auto idx = TMaybeNode<TIndexExpr>(predicate)) {
+        result = std::make_shared<TIndexExpr>(predicate->Location,
+            ClonePredicate(idx.Cast()->Collection), ClonePredicate(idx.Cast()->Index));
+    } else if (auto midx = TMaybeNode<TMultiIndexExpr>(predicate)) {
+        std::vector<TExprPtr> indices;
+        indices.reserve(midx.Cast()->Indices.size());
+        for (const auto& i : midx.Cast()->Indices) indices.push_back(ClonePredicate(i));
+        result = std::make_shared<TMultiIndexExpr>(predicate->Location,
+            ClonePredicate(midx.Cast()->Collection), std::move(indices));
+    } else if (auto slice = TMaybeNode<TSliceExpr>(predicate)) {
+        result = std::make_shared<TSliceExpr>(predicate->Location,
+            ClonePredicate(slice.Cast()->Collection),
+            ClonePredicate(slice.Cast()->Start),
+            ClonePredicate(slice.Cast()->End));
+    } else if (auto fa = TMaybeNode<TFieldAccessExpr>(predicate)) {
+        result = std::make_shared<TFieldAccessExpr>(predicate->Location,
+            ClonePredicate(fa.Cast()->Object), fa.Cast()->FieldName);
+    } else if (auto fassign = TMaybeNode<TFieldAssignExpr>(predicate)) {
+        result = std::make_shared<TFieldAssignExpr>(predicate->Location,
+            ClonePredicate(fassign.Cast()->Object), fassign.Cast()->FieldName,
+            ClonePredicate(fassign.Cast()->Value));
+    } else if (auto sc = TMaybeNode<TStructConstructExpr>(predicate)) {
+        std::vector<TExprPtr> fields;
+        fields.reserve(sc.Cast()->Fields.size());
+        for (const auto& f : sc.Cast()->Fields) fields.push_back(ClonePredicate(f));
+        result = std::make_shared<TStructConstructExpr>(predicate->Location,
+            predicate->Type, std::move(fields));
+    } else if (auto wh = TMaybeNode<TWhileStmtExpr>(predicate)) {
+        result = std::make_shared<TWhileStmtExpr>(predicate->Location,
+            ClonePredicate(wh.Cast()->Cond), ClonePredicate(wh.Cast()->Body));
+    } else if (auto rep = TMaybeNode<TRepeatStmtExpr>(predicate)) {
+        result = std::make_shared<TRepeatStmtExpr>(predicate->Location,
+            ClonePredicate(rep.Cast()->Body), ClonePredicate(rep.Cast()->Cond));
+    } else if (auto forst = TMaybeNode<TForStmtExpr>(predicate)) {
+        result = std::make_shared<TForStmtExpr>(predicate->Location,
+            forst.Cast()->VarName,
+            ClonePredicate(forst.Cast()->From), ClonePredicate(forst.Cast()->To),
+            ClonePredicate(forst.Cast()->Step), ClonePredicate(forst.Cast()->Body));
+    } else if (auto times = TMaybeNode<TTimesStmtExpr>(predicate)) {
+        result = std::make_shared<TTimesStmtExpr>(predicate->Location,
+            ClonePredicate(times.Cast()->Count), ClonePredicate(times.Cast()->Body));
+    } else if (auto await = TMaybeNode<TAwaitExpr>(predicate)) {
+        result = std::make_shared<TAwaitExpr>(predicate->Location,
+            ClonePredicate(await.Cast()->Operand));
+    } else if (auto asrt = TMaybeNode<TAssertStmt>(predicate)) {
+        result = std::make_shared<TAssertStmt>(predicate->Location,
+            ClonePredicate(asrt.Cast()->Expr));
+    } else if (TMaybeNode<TTypeDeclStmt>(predicate)) {
+        result = std::make_shared<TTypeDeclStmt>(predicate->Location, predicate->Type);
     } else {
         throw NQumir::TError(
-            "filter predicate clone does not support " +
+            "CloneExpr: unsupported node type " +
             std::string(predicate->NodeName()));
     }
     result->Type = predicate->Type;
