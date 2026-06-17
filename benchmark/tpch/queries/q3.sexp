@@ -1,14 +1,12 @@
 (rel aggregate
   (rel project
-    (rel filter
+    (rel join
       (rel join
-        (rel join
-          (rel filter (rel source "__CUSTOMER__") (: (== c_mktsegment "__Q3_SEGMENT__") u8))
-          (rel filter (rel source "__ORDERS__") (: (< o_orderdate (: __Q3_DATE__ i32)) u8))
-          ((c_custkey o_custkey)) (inner))
-        (rel filter (rel source "__LINEITEM__") (: (> l_shipdate (: __Q3_DATE__ i32)) u8))
-        ((o_orderkey l_orderkey)) (inner))
-      (: (: 1 i64) u8))
+        (rel filter (rel source "__CUSTOMER__") (: (== c_mktsegment "__Q3_SEGMENT__") u8))
+        (rel filter (rel source "__ORDERS__") (: (< o_orderdate (: __Q3_DATE__ i32)) u8))
+        ((c_custkey o_custkey)) (inner))
+      (rel filter (rel source "__LINEITEM__") (: (> l_shipdate (: __Q3_DATE__ i32)) u8))
+      ((o_orderkey l_orderkey)) (inner))
     (l_orderkey      l_orderkey)
     (o_orderdate     o_orderdate)
     (o_shippriority  o_shippriority)

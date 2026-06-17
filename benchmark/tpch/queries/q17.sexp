@@ -2,7 +2,7 @@
   (rel aggregate
     (rel project
       (rel join
-        (rel filter (rel source "__LINEITEM__") (: (: 1 i64) u8))
+        (rel source "__LINEITEM__")
         (rel filter (rel source "__PART__")
           (: (&& (== p_brand "__Q17_BRAND__") (== p_container "__Q17_CONTAINER__")) u8))
         ((l_partkey p_partkey)) (inner))
