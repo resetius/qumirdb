@@ -211,7 +211,9 @@ TRuntimeJoin::TRuntimeJoin(std::unique_ptr<IRuntimeNode> left,
             columns.push_back({EJoinSide::Left, i, leftStruct->Fields[i].second});
         }
     }
-    if (rightStruct) {
+    const bool isSemiAnti =
+        (joinType == EJoinType::LeftSemi || joinType == EJoinType::LeftAnti);
+    if (rightStruct && !isSemiAnti) {
         for (int32_t j = 0; j < static_cast<int32_t>(rightStruct->Fields.size()); ++j) {
             columns.push_back({EJoinSide::Right, j, rightStruct->Fields[j].second});
         }
