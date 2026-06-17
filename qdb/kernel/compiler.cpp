@@ -210,6 +210,7 @@ TKernelCompiler::TFilterDispatch TKernelCompiler::CompileFilter(
     opts.OptLevel = 3;
     opts.NativeCode = true;
     opts.PrintIr = Diagnostics_ != nullptr;
+    opts.PrintLlvm = Diagnostics_ != nullptr;
     auto runner = std::make_unique<NQumir::TLLVMRunner>(opts);
     runner->RegisterModule(dbModule, true);
 
@@ -247,9 +248,13 @@ TKernelCompiler::TProjectDispatch TKernelCompiler::CompileProject(
     auto dbModule = std::make_shared<NQumir::NRegistry::QumirDbModule>();
     NQumir::NAst::TTypePtr columnType, rowSetType, stringViewType;
     for (const auto& et : dbModule->ExternalTypes()) {
-        if (et.Name == "TColumn") columnType = et.Type;
-        else if (et.Name == "TRowSet") rowSetType = et.Type;
-        else if (et.Name == "StringView") stringViewType = et.Type;
+        if (et.Name == "TColumn") {
+            columnType = et.Type;
+        } else if (et.Name == "TRowSet") {
+            rowSetType = et.Type;
+        } else if (et.Name == "StringView") {
+            stringViewType = et.Type;
+        }
     }
 
     auto literalStorage =
@@ -270,6 +275,7 @@ TKernelCompiler::TProjectDispatch TKernelCompiler::CompileProject(
     opts.OptLevel = 3;
     opts.NativeCode = true;
     opts.PrintIr = Diagnostics_ != nullptr;
+    opts.PrintLlvm = Diagnostics_ != nullptr;
     auto runner = std::make_unique<NQumir::TLLVMRunner>(opts);
     runner->RegisterModule(dbModule, true);
 
@@ -373,9 +379,13 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
     auto dbModule = std::make_shared<NQumir::NRegistry::QumirDbModule>();
     TTypePtr columnType, rowSetType, hashTableType;
     for (const auto& et : dbModule->ExternalTypes()) {
-        if (et.Name == "TColumn") columnType = et.Type;
-        else if (et.Name == "TRowSet") rowSetType = et.Type;
-        else if (et.Name == "HashTable") hashTableType = et.Type;
+        if (et.Name == "TColumn") {
+            columnType = et.Type;
+        } else if (et.Name == "TRowSet") {
+            rowSetType = et.Type;
+        } else if (et.Name == "HashTable") {
+            hashTableType = et.Type;
+        }
     }
 
     NQumir::TLLVMRunnerOptions options;
@@ -384,6 +394,7 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
     options.AllowOverloads = true;
     options.OptLevel = 3;
     options.PrintIr = Diagnostics_ != nullptr;
+    options.PrintLlvm = Diagnostics_ != nullptr;
 
     auto dispatchRunner = std::make_shared<NQumir::TLLVMRunner>(options);
     dispatchRunner->RegisterModule(dbModule, true);
@@ -543,6 +554,7 @@ TJoinKernels TKernelCompiler::CompileJoin(
         options.AllowOverloads = true;
         options.OptLevel = 3;
         options.PrintIr = Diagnostics_ != nullptr;
+        options.PrintLlvm = Diagnostics_ != nullptr;
         auto runner = std::make_shared<NQumir::TLLVMRunner>(options);
         runner->RegisterModule(dbModule, true);
         auto program = std::make_shared<TBlockExpr>(NQumir::TLocation{}, buildProgram());
