@@ -104,6 +104,16 @@ EFilterValueKind SpecializeFilterPredicate(
         }
         return EFilterValueKind::Other;
     }
+    if (auto call = TMaybeNode<TCallExpr>(expr)) {
+        for (auto& arg : call.Cast()->Args) {
+            if (TMaybeNode<TStringLiteralExpr>(arg)) {
+                continue;
+            }
+            SpecializeFilterPredicate(arg, stringFields, stringValues,
+                stringViewType, literalStorage);
+        }
+        return EFilterValueKind::Other;
+    }
     for (auto* child : expr->MutableChildren()) {
         if (SpecializeFilterPredicate(
                 *child, stringFields, stringValues, stringViewType,

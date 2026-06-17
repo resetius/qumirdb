@@ -100,6 +100,20 @@ int64_t qdb_string_view_sql_like(qdb_string_view str, const char* pattern)
     return *p == '\0' ? 1 : 0;
 }
 
+// Howard Hinnant's date algorithm: https://howardhinnant.github.io/date_algorithms.html
+int32_t qdb_date_year(int32_t days) {
+    // Shift epoch from 1970-01-01 to 0000-03-01 so leap-day falls at year end.
+    int32_t z = days + 719468;
+    int32_t era = (z >= 0 ? z : z - 146096) / 146097;
+    int32_t doe = z - era * 146097;                        // day of era  [0, 146096]
+    int32_t yoe = (doe - doe/1460 + doe/36524 - doe/146096) / 365; // year of era [0, 399]
+    int32_t y   = yoe + era * 400;
+    int32_t doy = doe - (365*yoe + yoe/4 - yoe/100);      // day of year [0, 365]
+    int32_t mp  = (5*doy + 2) / 153;                      // month [0=Mar … 11=Feb]
+    y += (mp >= 10);                                       // Jan/Feb belong to next year
+    return y;
+}
+
 void qdb_bitmap_set_valid(uint8_t* bitmap, int64_t index, bool valid) {
     const auto byteIndex = static_cast<size_t>(index >> 3);
     const auto bit = static_cast<uint8_t>(1u << (index & 7));
