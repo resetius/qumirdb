@@ -4,6 +4,7 @@
 #include <bit>
 #include <cstdlib>
 #include <cstring>
+#include <string_view>
 
 extern "C" {
 
@@ -51,6 +52,52 @@ int64_t qdb_filter_string_compare(
         return 1;
     }
     return (leftSize > rightSize) - (leftSize < rightSize);
+}
+
+
+int64_t qdb_string_view_sql_like(qdb_string_view str, const char* pattern)
+{
+    if (!pattern) {
+        return 0;
+    }
+
+    const char* p = pattern;
+    size_t s = 0;
+
+    const char* last_percent = nullptr;
+    size_t s_after_percent = 0;
+
+    while (s < str.Size) {
+        if (*p == '%') {
+            // collapse multiple %%
+            while (*p == '%') {
+                ++p;
+            }
+
+            if (*p == '\0') {
+                return 1; // trailing % matches everything
+            }
+
+            last_percent = p;
+            s_after_percent = s;
+        } else if (*p == '_' || *p == str.Data[s]) {
+            ++p;
+            ++s;
+        } else if (last_percent) {
+            // backtrack: let previous % consume one more char
+            p = last_percent;
+            s = ++s_after_percent;
+        } else {
+            return 0;
+        }
+    }
+
+    // remaining pattern must be only %
+    while (*p == '%') {
+        ++p;
+    }
+
+    return *p == '\0' ? 1 : 0;
 }
 
 void qdb_bitmap_set_valid(uint8_t* bitmap, int64_t index, bool valid) {

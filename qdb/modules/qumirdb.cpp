@@ -57,6 +57,7 @@ QumirDbModule::QumirDbModule() {
     };
     auto stringViewType = makeStringHandleType();
     auto ownedStringType = makeStringHandleType();
+    auto stringLiteralType = std::make_shared<TStringType>();
 
     // TColumn C layout (all fields at 8-byte boundaries due to pointer padding):
     // offset  0: Data          char*      <ptr i8>
@@ -279,6 +280,18 @@ QumirDbModule::QumirDbModule() {
                     static_cast<int64_t>(args[3])));
             },
             .ArgTypes = {ptrU8Type, i64Type, ptrU8Type, i64Type},
+            .ReturnType = i64Type,
+        },
+        {
+            .Name = "qdb_string_view_sql_like",
+            .MangledName = "qdb_string_view_sql_like",
+            .Ptr = reinterpret_cast<void*>(static_cast<int64_t(*)(
+                qdb_string_view, const char*)>(qdb_string_view_sql_like)),
+            .Packed = +[](const uint64_t* args, size_t) -> uint64_t {
+                qdb_string_view str = *reinterpret_cast<const qdb_string_view*>(args[0]);
+                return static_cast<uint64_t>(qdb_string_view_sql_like(str, reinterpret_cast<const char*>(args[1])));
+            },
+            .ArgTypes = {stringViewType, stringLiteralType},
             .ReturnType = i64Type,
         },
         {
