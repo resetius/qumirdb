@@ -26,11 +26,26 @@ TNodeParserMap MakeRelParsers(TRelParserOptions options) {
             if (pathTok.Type != TToken::String) {
                 co_return IParseHandle::MakeError(pathTok, "(rel source) expects a path string");
             }
-            co_await h.Take(')');
+            // Optional explicit alias: (rel source "path" "alias")
+            std::string explicitAlias;
+            auto peek = h.Next();
+            if (peek.Type == TToken::String) {
+                explicitAlias = peek.Name;
+                co_await h.Take(')');
+            } else if (!IParseHandle::IsOp(peek, ')')) {
+                co_return IParseHandle::MakeError(peek, "(rel source) expects ')' or alias string");
+            }
             if (!opts.SourceFactory) {
                 co_return TError(loc, "(rel source) requires a SourceFactory");
             }
-            co_return opts.SourceFactory(std::string_view(pathTok.Name), loc);
+            auto opExpr = opts.SourceFactory(std::string_view(pathTok.Name), loc);
+            if (!opExpr) co_return TError(loc, "(rel source) factory returned null");
+            if (!explicitAlias.empty()) {
+                if (auto* src = dynamic_cast<TSourceOperator*>(opExpr.get())) {
+                    src->SetAlias(std::move(explicitAlias));
+                }
+            }
+            co_return opExpr;
         }
 
         if (nameTok.Name == TFilterOperator::OpId) {
@@ -165,11 +180,6 @@ TNodeParserMap MakeRelParsers(TRelParserOptions options) {
                 co_await h.Take(')');
             }
 
-            auto output = ComputeJoinOutputType(
-                left->OutputColumns(), right->OutputColumns(), type);
-            if (!output) {
-                co_return output.error();
-            }
             co_return std::make_shared<TJoinOperator>(
                 std::move(left), std::move(right), std::move(keys), type, std::move(filter));
         }

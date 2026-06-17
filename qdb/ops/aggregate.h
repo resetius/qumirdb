@@ -35,7 +35,9 @@ public:
 
     TOperatorPtr Input() const { return Input_; }
     const std::vector<std::string>& GroupKeys() const { return GroupKeys_; }
+    std::vector<std::string>& MutableGroupKeys() { return GroupKeys_; }
     const std::vector<TAggregateSpec>& Aggs() const { return Aggs_; }
+    std::vector<TAggregateSpec>& MutableAggs() { return Aggs_; }
 
 private:
     TOperatorPtr Input_;

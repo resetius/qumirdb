@@ -3,6 +3,7 @@
 #include <qdb/io/text/sink.h>
 #include <qdb/ops/source.h>
 #include <qdb/pipeline/column_pruning.h>
+#include <qdb/pipeline/qualify_columns.h>
 #include <qdb/pipeline/typing.h>
 #include <qdb/sexp/parser.h>
 #include <qdb/sexp/printer.h>
@@ -222,6 +223,8 @@ int main(int argc, char** argv) {
             return 1;
         }
 
+        NQqb::AssignSourceAliases(plan);
+        NQqb::QualifyColumns(plan);
         NQqb::AnnotateTypes(plan);
         NQqb::ApplyColumnPruning(plan);
 

@@ -58,9 +58,11 @@ public:
     TOperatorPtr Left() const { return Left_; }
     TOperatorPtr Right() const { return Right_; }
     const std::vector<TJoinKey>& Keys() const { return Keys_; }
+    std::vector<TJoinKey>& MutableKeys() { return Keys_; }
     EJoinType JoinType() const { return Type_; }
     // Residual predicate, applied before emit; nullptr if absent.
     const NQumir::NAst::TExprPtr& Filter() const { return Filter_; }
+    NQumir::NAst::TExprPtr& MutableFilter() { return Filter_; }
 
 private:
     TOperatorPtr Left_, Right_;

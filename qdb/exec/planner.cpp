@@ -86,15 +86,48 @@ std::unique_ptr<IRuntimeNode> TPhysicalPlanner::Build(const TOperatorPtr& root) 
     if (auto maybe = TMaybeOp<TSourceOperator>(root)) {
         auto src = maybe.Cast();
         // After column pruning, RequiredColumns() holds the narrowed struct.
-        // If set, restrict the physical scan to those columns.
+        // Column names may be qualified ("alias.col") after QualifyColumns —
+        // strip the prefix so the physical source gets bare column names.
         if (auto required = src->RequiredColumns()) {
             auto* st = static_cast<NQumir::NAst::TStructType*>(required.get());
             std::unordered_set<std::string> cols;
-            for (auto& [name, _] : st->Fields) cols.insert(name);
+            for (auto& [name, _] : st->Fields) {
+                auto dot = name.rfind('.');
+                cols.insert(dot != std::string::npos ? name.substr(dot + 1) : name);
+            }
             src->GetSource().RestrictColumns(cols);
         }
-        auto actualType = StructTypeFromSchema(src->GetSource().Schema());
-        return std::make_unique<TRuntimeSource>(src->GetSource(), actualType);
+        // Build a runtime type that uses qualified names (so kernel variable names
+        // match predicate idents) but in physical column ORDER (post-RestrictColumns).
+        // The physical and logical orders may differ for mock sources in tests.
+        {
+            auto* qualSt = static_cast<NQumir::NAst::TStructType*>(
+                src->OutputColumns().get());
+            // Map bare name → (qualified name, type)
+            std::unordered_map<std::string,
+                std::pair<std::string, NQumir::NAst::TTypePtr>> bareToQual;
+            if (qualSt) {
+                for (const auto& [qname, ftype] : qualSt->Fields) {
+                    auto dot = qname.rfind('.');
+                    auto bare = (dot != std::string::npos)
+                        ? qname.substr(dot + 1) : qname;
+                    bareToQual.try_emplace(bare, qname, ftype);
+                }
+            }
+            std::vector<std::pair<std::string, NQumir::NAst::TTypePtr>> fields;
+            for (const auto& col : src->GetSource().Schema().Columns) {
+                auto bare = std::string(col.Name);
+                auto it = bareToQual.find(bare);
+                if (it != bareToQual.end()) {
+                    fields.emplace_back(it->second.first, it->second.second);
+                } else {
+                    fields.emplace_back(bare, col.Type);
+                }
+            }
+            auto actualType = std::make_shared<NQumir::NAst::TStructType>(
+                std::move(fields));
+            return std::make_unique<TRuntimeSource>(src->GetSource(), actualType);
+        }
     }
 
     if (auto maybe = TMaybeOp<TFilterOperator>(root)) {
