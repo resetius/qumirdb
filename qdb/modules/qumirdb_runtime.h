@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string_view>
 
 extern "C" {
 
@@ -20,6 +21,13 @@ double qdb_bits_f64(uint64_t bits);
 int64_t qdb_filter_string_compare(
     const uint8_t* left, int64_t leftSize,
     const uint8_t* right, int64_t rightSize);
+
+struct qdb_string_view {
+    const uint8_t* Data;
+    int64_t Size;
+};
+
+int64_t qdb_string_view_sql_like(qdb_string_view str, const char* pattern);
 
 void qdb_bitmap_set_valid(uint8_t* bitmap, int64_t index, bool valid);
 
