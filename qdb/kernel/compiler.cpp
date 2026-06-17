@@ -204,14 +204,7 @@ TKernelCompiler::TFilterDispatch TKernelCompiler::CompileFilter(
             "CompileFilter: " + kernelAst.error().ToString());
     }
 
-    NQumir::TLLVMRunnerOptions opts;
-    opts.CoreInput = true;
-    opts.ResolveCoreInput = true;
-    opts.OptLevel = 3;
-    opts.NativeCode = true;
-    opts.PrintIr = Diagnostics_ != nullptr;
-    opts.PrintLlvm = Diagnostics_ != nullptr;
-    auto runner = std::make_unique<NQumir::TLLVMRunner>(opts);
+    auto runner = std::make_unique<NQumir::TLLVMRunner>(Opts_);
     runner->RegisterModule(dbModule, true);
 
     PrintKernelAst(Diagnostics_, "filter", *kernelAst);
@@ -269,14 +262,7 @@ TKernelCompiler::TProjectDispatch TKernelCompiler::CompileProject(
         std::move(cloned), computedTypes, inputType, fieldIndices,
         columnType, rowSetType, stringViewType, *literalStorage);
 
-    NQumir::TLLVMRunnerOptions opts;
-    opts.CoreInput = true;
-    opts.ResolveCoreInput = true;
-    opts.OptLevel = 3;
-    opts.NativeCode = true;
-    opts.PrintIr = Diagnostics_ != nullptr;
-    opts.PrintLlvm = Diagnostics_ != nullptr;
-    auto runner = std::make_unique<NQumir::TLLVMRunner>(opts);
+    auto runner = std::make_unique<NQumir::TLLVMRunner>(Opts_);
     runner->RegisterModule(dbModule, true);
 
     PrintKernelAst(Diagnostics_, "project", kernelAst);
@@ -388,15 +374,7 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
         }
     }
 
-    NQumir::TLLVMRunnerOptions options;
-    options.CoreInput = true;
-    options.NativeCode = true;
-    options.AllowOverloads = true;
-    options.OptLevel = 3;
-    options.PrintIr = Diagnostics_ != nullptr;
-    options.PrintLlvm = Diagnostics_ != nullptr;
-
-    auto dispatchRunner = std::make_shared<NQumir::TLLVMRunner>(options);
+    auto dispatchRunner = std::make_shared<NQumir::TLLVMRunner>(Opts_);
     dispatchRunner->RegisterModule(dbModule, true);
 
     auto dispatchProgram = NKernel::BuildGenericAggregateProgramAst(
@@ -415,7 +393,7 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
         throw std::runtime_error("CompileAggregate: agg_dispatch compilation failed: " + error);
     }
 
-    auto measureRunner = std::make_shared<NQumir::TLLVMRunner>(options);
+    auto measureRunner = std::make_shared<NQumir::TLLVMRunner>(Opts_);
     measureRunner->RegisterModule(dbModule, true);
     auto measureProgram = NKernel::BuildGenericAggregateMeasureProgramAst(
         keyDescriptor, hashTableType);
@@ -432,7 +410,7 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
             "CompileAggregate: agg_measure_keys compilation failed: " + error);
     }
 
-    auto finalizeRunner = std::make_shared<NQumir::TLLVMRunner>(options);
+    auto finalizeRunner = std::make_shared<NQumir::TLLVMRunner>(Opts_);
     finalizeRunner->RegisterModule(dbModule, true);
 
     auto finalizeProgram = NKernel::BuildGenericAggregateFinalizeProgramAst(
