@@ -26,6 +26,10 @@ static void PrintRel(NQumir::NAst::TExpr& expr, TPrinter& printer, TPrintFrame f
             out << ' ';
             printer.PrintString(src.SourcePath(), '"');
         }
+        if (!src.GetAlias().empty()) {
+            out << ' ';
+            printer.PrintString(src.GetAlias(), '"');
+        }
         out << ')';
         return;
     }

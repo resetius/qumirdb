@@ -33,6 +33,7 @@ public:
 
     TOperatorPtr Input() const { return Input_; }
     const std::vector<TProjectionSpec>& Projections() const { return Projections_; }
+    std::vector<TProjectionSpec>& MutableProjections() { return Projections_; }
 
 private:
     TOperatorPtr Input_;

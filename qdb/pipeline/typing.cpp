@@ -22,9 +22,12 @@ void AnnotateTypes(const TOperatorPtr& root) {
     }
 
     if (auto maybe = TMaybeOp<TSourceOperator>(root)) {
+        auto src = maybe.Cast();
+        // If QualifyColumns has already set a qualified schema, keep it.
+        if (!src->GetAlias().empty()) return;
         root->Type = std::make_shared<TFunctionType>(
             std::vector<TTypePtr>{},
-            StructTypeFromSchema(maybe.Cast()->GetSource().Schema()));
+            StructTypeFromSchema(src->GetSource().Schema()));
         return;
     }
 
