@@ -397,9 +397,10 @@ TJoinKernels TKernelCompiler::CompileJoin(
     using namespace NQumir::NAst;
 
     const bool isSemiAnti = (type == EJoinType::LeftSemi || type == EJoinType::LeftAnti);
-    if (!isSemiAnti && type != EJoinType::Inner) {
+    const bool isOuter = (type == EJoinType::Left || type == EJoinType::Right);
+    if (!isSemiAnti && !isOuter && type != EJoinType::Inner) {
         throw NQumir::TError(
-            "CompileJoin: only Inner, LeftSemi, and LeftAnti join types are supported");
+            "CompileJoin: only Inner, Left, Right, LeftSemi, and LeftAnti join types are supported");
     }
 
     // Unified key descriptor (reuses the aggregation key machinery). Throws on
@@ -439,6 +440,12 @@ TJoinKernels TKernelCompiler::CompileJoin(
             program.push_back(NKernel::GenJoinFinalizeSemiAntiAst(
                 keyDesc, /*isAnti=*/type == EJoinType::LeftAnti,
                 "jt_finalize_semi_anti", hashTableType, pairBufferType));
+        }
+        if (isOuter) {
+            // jt_finalize_outer: same logic as ANTI (emit own rows with no opp match)
+            program.push_back(NKernel::GenJoinFinalizeSemiAntiAst(
+                keyDesc, /*isAnti=*/true,
+                "jt_finalize_outer", hashTableType, pairBufferType));
         }
         return program;
     };
@@ -494,8 +501,9 @@ TJoinKernels TKernelCompiler::CompileJoin(
         reinterpret_cast<TDestroyFn>(destroyPairsFn)(pairs);
     };
 
+    using TFinalizeFn = bool(*)(void*, void*, void*);
+
     if (isSemiAnti) {
-        using TFinalizeSemiFn = bool(*)(void*, void*, void*);
         auto [insertKeyOnlyFn, insertKeyOnlyRunner] = compileEntry("jt_insert_key_only");
         auto [finalizeFn, finalizeRunner] = compileEntry("jt_finalize_semi_anti");
         kernels.InsertKeyOnly =
@@ -506,7 +514,15 @@ TJoinKernels TKernelCompiler::CompileJoin(
             };
         kernels.FinalizeAntiSemi =
             [finalizeFn, finalizeRunner](void* own, void* opp, void* pairs) {
-                return reinterpret_cast<TFinalizeSemiFn>(finalizeFn)(own, opp, pairs);
+                return reinterpret_cast<TFinalizeFn>(finalizeFn)(own, opp, pairs);
+            };
+    }
+
+    if (isOuter) {
+        auto [finalizeFn, finalizeRunner] = compileEntry("jt_finalize_outer");
+        kernels.FinalizeOuter =
+            [finalizeFn, finalizeRunner](void* own, void* opp, void* pairs) {
+                return reinterpret_cast<TFinalizeFn>(finalizeFn)(own, opp, pairs);
             };
     }
 

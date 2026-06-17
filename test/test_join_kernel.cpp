@@ -228,8 +228,8 @@ TEST(CompileJoin, RejectsStringKeyNonInnerAndIncompatible) {
 
     TStructType leftType({{"lk", i64()}});
     TStructType rightType({{"rk", i64()}});
-    // Non-Inner.
-    EXPECT_THROW(compiler.CompileJoin(leftType, rightType, {{"lk", "rk"}}, EJoinType::Left),
+    // Unsupported join type (Full not implemented yet).
+    EXPECT_THROW(compiler.CompileJoin(leftType, rightType, {{"lk", "rk"}}, EJoinType::Full),
                  NQumir::TError);
     // Missing column.
     EXPECT_THROW(compiler.CompileJoin(leftType, rightType, {{"missing", "rk"}}, EJoinType::Inner),

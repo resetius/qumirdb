@@ -665,6 +665,233 @@ TEST(RuntimeJoin, LeftAntiMultiBatch) {
     EXPECT_EQ(got, expected);
 }
 
+// ─── Left / Right Outer Join ───────────────────────────────────────────────
+
+namespace {
+
+// Left outer oracle: for each left row (lk[i], lv[i]), find all right rows with
+// matching key. If none found, emit (lk[i], lv[i], nullKey, nullVal) where null
+// values are represented as -1 (kNullRowId rows → mask bit 0 → zeroed data, but
+// we use -1 sentinel for comparison in the oracle).
+struct TOuterRow {
+    int64_t Lk, Lv;
+    bool RNull;   // true  → right side is NULL
+    int64_t Rk, Rv;
+    auto operator<=>(const TOuterRow&) const = default;
+};
+
+std::vector<TOuterRow> LeftOuterOracle(
+    const std::vector<int64_t>& lk, const std::vector<int64_t>& lv,
+    const std::vector<int64_t>& rk, const std::vector<int64_t>& rv)
+{
+    std::vector<TOuterRow> result;
+    for (size_t i = 0; i < lk.size(); ++i) {
+        bool matched = false;
+        for (size_t j = 0; j < rk.size(); ++j) {
+            if (lk[i] == rk[j]) {
+                result.push_back({lk[i], lv[i], false, rk[j], rv[j]});
+                matched = true;
+            }
+        }
+        if (!matched) {
+            result.push_back({lk[i], lv[i], true, 0, 0});
+        }
+    }
+    return result;
+}
+
+// Drains a Left outer join — expects 4 columns (lk, lv, rk, rv).
+// Right-side nulls are detected via the mask and represented as (rNull=true, rk=0, rv=0).
+std::vector<TOuterRow> DrainOuterJoin(TRuntimeJoin& join) {
+    std::vector<TOuterRow> got;
+    TRowSet out{};
+    while (join.Next(out)) {
+        EXPECT_EQ(out.ColumnCount, 4);
+        const auto* c0 = reinterpret_cast<const int64_t*>(out.Columns[0].Data);
+        const auto* c1 = reinterpret_cast<const int64_t*>(out.Columns[1].Data);
+        const auto* c2 = reinterpret_cast<const int64_t*>(out.Columns[2].Data);
+        const auto* c3 = reinterpret_cast<const int64_t*>(out.Columns[3].Data);
+        for (int64_t i = 0; i < out.RowCount; ++i) {
+            bool rNull = !OutValid(out.Columns[2], static_cast<size_t>(i));
+            got.push_back({c0[i], c1[i], rNull,
+                rNull ? int64_t{0} : c2[i],
+                rNull ? int64_t{0} : c3[i]});
+        }
+        Release(&out);
+    }
+    return got;
+}
+
+} // namespace
+
+TEST(RuntimeJoin, LeftOuterScalarKey) {
+    std::vector<int64_t> lk = {1, 2, 3, 4}, lv = {10, 20, 30, 40};
+    std::vector<int64_t> rk = {2, 3, 5},    rv = {200, 300, 500};
+    std::vector<TColumn> lcols, rcols;
+
+    auto leftType  = KeyValSchema("lk", "lv");
+    auto rightType = KeyValSchema("rk", "rv");
+    std::vector<TRowSet> lbatches = {KeyValBatch(lk.data(), lv.data(), 4, lcols)};
+    std::vector<TRowSet> rbatches = {KeyValBatch(rk.data(), rv.data(), 3, rcols)};
+
+    auto left  = std::make_unique<TVectorRuntimeSource>(leftType,  std::move(lbatches));
+    auto right = std::make_unique<TVectorRuntimeSource>(rightType, std::move(rbatches));
+
+    TKernelCompiler compiler;
+    auto kernels = compiler.CompileJoin(
+        static_cast<TStructType&>(*leftType), static_cast<TStructType&>(*rightType),
+        {{"lk", "rk"}}, EJoinType::Left);
+    auto outputType = ComputeJoinOutputType(leftType, rightType, EJoinType::Left);
+    ASSERT_TRUE(outputType);
+
+    TRuntimeJoin join(std::move(left), std::move(right), *outputType,
+        std::move(kernels), EJoinType::Left);
+    auto got = DrainOuterJoin(join);
+
+    auto expected = LeftOuterOracle(lk, lv, rk, rv);
+    std::sort(got.begin(), got.end());
+    std::sort(expected.begin(), expected.end());
+    EXPECT_EQ(got, expected);
+}
+
+TEST(RuntimeJoin, LeftOuterEmptyRight) {
+    std::vector<int64_t> lk = {1, 2, 3}, lv = {10, 20, 30};
+    std::vector<int64_t> rk = {},         rv = {};
+    std::vector<TColumn> lcols, rcols;
+
+    auto leftType  = KeyValSchema("lk", "lv");
+    auto rightType = KeyValSchema("rk", "rv");
+    std::vector<TRowSet> lbatches = {KeyValBatch(lk.data(), lv.data(), 3, lcols)};
+    std::vector<TRowSet> rbatches = {};
+
+    auto left  = std::make_unique<TVectorRuntimeSource>(leftType,  std::move(lbatches));
+    auto right = std::make_unique<TVectorRuntimeSource>(rightType, std::move(rbatches));
+
+    TKernelCompiler compiler;
+    auto kernels = compiler.CompileJoin(
+        static_cast<TStructType&>(*leftType), static_cast<TStructType&>(*rightType),
+        {{"lk", "rk"}}, EJoinType::Left);
+    auto outputType = ComputeJoinOutputType(leftType, rightType, EJoinType::Left);
+    ASSERT_TRUE(outputType);
+
+    TRuntimeJoin join(std::move(left), std::move(right), *outputType,
+        std::move(kernels), EJoinType::Left);
+    auto got = DrainOuterJoin(join);
+
+    auto expected = LeftOuterOracle(lk, lv, rk, rv);
+    std::sort(got.begin(), got.end());
+    std::sort(expected.begin(), expected.end());
+    EXPECT_EQ(got, expected); // all left rows, rNull=true
+}
+
+TEST(RuntimeJoin, LeftOuterMultiBatch) {
+    int seed = 42;
+    auto rnd = [&]() { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed; };
+    std::vector<int64_t> lk, lv, rk, rv;
+    for (int i = 0; i < 30; ++i) { lk.push_back(rnd() % 8); lv.push_back(i); }
+    for (int i = 0; i < 25; ++i) { rk.push_back(rnd() % 8); rv.push_back(100 + i); }
+
+    auto leftType  = KeyValSchema("lk", "lv");
+    auto rightType = KeyValSchema("rk", "rv");
+    std::vector<std::vector<TColumn>> colStorage;
+    auto split = [&](std::vector<int64_t>& keys, std::vector<int64_t>& vals) {
+        std::vector<TRowSet> batches;
+        for (size_t off = 0; off < keys.size(); off += 10) {
+            int64_t n = std::min<int64_t>(10, static_cast<int64_t>(keys.size() - off));
+            colStorage.emplace_back();
+            batches.push_back(KeyValBatch(keys.data() + off, vals.data() + off, n, colStorage.back()));
+        }
+        return batches;
+    };
+
+    auto left  = std::make_unique<TVectorRuntimeSource>(leftType,  split(lk, lv));
+    auto right = std::make_unique<TVectorRuntimeSource>(rightType, split(rk, rv));
+
+    TKernelCompiler compiler;
+    auto kernels = compiler.CompileJoin(
+        static_cast<TStructType&>(*leftType), static_cast<TStructType&>(*rightType),
+        {{"lk", "rk"}}, EJoinType::Left);
+    auto outputType = ComputeJoinOutputType(leftType, rightType, EJoinType::Left);
+    ASSERT_TRUE(outputType);
+
+    TRuntimeJoin join(std::move(left), std::move(right), *outputType,
+        std::move(kernels), EJoinType::Left);
+    auto got = DrainOuterJoin(join);
+
+    auto expected = LeftOuterOracle(lk, lv, rk, rv);
+    std::sort(got.begin(), got.end());
+    std::sort(expected.begin(), expected.end());
+    EXPECT_EQ(got, expected);
+}
+
+// Right outer: equivalent to Left outer with sides swapped.
+// Oracle: for each right row, find all matching left rows; if none, right row has NULL left.
+TEST(RuntimeJoin, RightOuterScalarKey) {
+    std::vector<int64_t> lk = {2, 3, 5}, lv = {20, 30, 50};
+    std::vector<int64_t> rk = {1, 2, 3, 4}, rv = {100, 200, 300, 400};
+    std::vector<TColumn> lcols, rcols;
+
+    auto leftType  = KeyValSchema("lk", "lv");
+    auto rightType = KeyValSchema("rk", "rv");
+    std::vector<TRowSet> lbatches = {KeyValBatch(lk.data(), lv.data(), 3, lcols)};
+    std::vector<TRowSet> rbatches = {KeyValBatch(rk.data(), rv.data(), 4, rcols)};
+
+    auto left  = std::make_unique<TVectorRuntimeSource>(leftType,  std::move(lbatches));
+    auto right = std::make_unique<TVectorRuntimeSource>(rightType, std::move(rbatches));
+
+    TKernelCompiler compiler;
+    auto kernels = compiler.CompileJoin(
+        static_cast<TStructType&>(*leftType), static_cast<TStructType&>(*rightType),
+        {{"lk", "rk"}}, EJoinType::Right);
+    auto outputType = ComputeJoinOutputType(leftType, rightType, EJoinType::Right);
+    ASSERT_TRUE(outputType);
+
+    TRuntimeJoin join(std::move(left), std::move(right), *outputType,
+        std::move(kernels), EJoinType::Right);
+
+    // Drain: for Right join output is [nullable(left) ++ right] = [lk,lv,rk,rv]
+    // where left cols are nullable.
+    struct TRightRow {
+        bool LNull; int64_t Lk, Lv, Rk, Rv;
+        auto operator<=>(const TRightRow&) const = default;
+    };
+    std::vector<TRightRow> got;
+    TRowSet out{};
+    while (join.Next(out)) {
+        EXPECT_EQ(out.ColumnCount, 4);
+        const auto* c0 = reinterpret_cast<const int64_t*>(out.Columns[0].Data);
+        const auto* c1 = reinterpret_cast<const int64_t*>(out.Columns[1].Data);
+        const auto* c2 = reinterpret_cast<const int64_t*>(out.Columns[2].Data);
+        const auto* c3 = reinterpret_cast<const int64_t*>(out.Columns[3].Data);
+        for (int64_t i = 0; i < out.RowCount; ++i) {
+            bool lNull = !OutValid(out.Columns[0], static_cast<size_t>(i));
+            got.push_back({lNull,
+                lNull ? int64_t{0} : c0[i],
+                lNull ? int64_t{0} : c1[i],
+                c2[i], c3[i]});
+        }
+        Release(&out);
+    }
+
+    // Oracle: for each right row, find matching left rows; unmatched → lNull
+    std::vector<TRightRow> expected;
+    for (size_t j = 0; j < rk.size(); ++j) {
+        bool matched = false;
+        for (size_t i = 0; i < lk.size(); ++i) {
+            if (lk[i] == rk[j]) {
+                expected.push_back({false, lk[i], lv[i], rk[j], rv[j]});
+                matched = true;
+            }
+        }
+        if (!matched) {
+            expected.push_back({true, 0, 0, rk[j], rv[j]});
+        }
+    }
+    std::sort(got.begin(), got.end());
+    std::sort(expected.begin(), expected.end());
+    EXPECT_EQ(got, expected);
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     NQumir::NCodeGen::TLLVMInitializer initializer;

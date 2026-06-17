@@ -95,6 +95,15 @@ struct TJoinKernels {
     //   non-matching (ANTI) left RowIds into pairs (right_id = -1).
     std::function<bool(void* own, void* opp, TRowSet* batch, int64_t batchIdx, void* pairs)> InsertKeyOnly;
     std::function<bool(void* own, void* opp, void* pairs)> FinalizeAntiSemi;
+
+    // Filled only for Left / Right outer joins (null otherwise).
+    // FinalizeOuter(own, opp, pairs):
+    //   iterates own.GroupKeys; for each slot where rh_lookup_slot(opp, key)==-1
+    //   (unmatched), drains own RowBucket and pushes (ownRowId, -1) into pairs.
+    //   For Left outer: call with own=LeftTable_, opp=RightTable_.
+    //   For Right outer: call with own=RightTable_, opp=LeftTable_,
+    //   then swap pair halves before draining.
+    std::function<bool(void* own, void* opp, void* pairs)> FinalizeOuter;
 };
 
 // Compiles qumir core-lang kernel sources to LLVM JIT function pointers.

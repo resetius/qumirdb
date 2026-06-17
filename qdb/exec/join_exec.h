@@ -198,6 +198,7 @@ private:
     bool RightDone_ = false;
     bool BothDone_ = false;
     bool SemiAntiFinalized_ = false;
+    bool OuterFinalized_ = false;
 };
 
 } // namespace NQqb
