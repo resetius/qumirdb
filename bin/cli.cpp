@@ -117,6 +117,7 @@ int main(int argc, char** argv) {
     std::string queryFile;
     TFormatSpec formatSpec;
     int maxRowSets = -1;
+    bool verbose = false;
 
     for (int i = 1; i < argc; ++i) {
         if (!std::strcmp(argv[i], "-i")) {
@@ -149,6 +150,8 @@ int main(int argc, char** argv) {
                 std::cerr << "--rowsets requires an argument\n";
                 return 1;
             }
+        } else if (!std::strcmp(argv[i], "--verbose")) {
+            verbose = true;
         } else if (!std::strcmp(argv[i], "--help") || !std::strcmp(argv[i], "-h")) {
             std::cout <<
                 "qdb [options]\n"
@@ -162,6 +165,7 @@ int main(int argc, char** argv) {
                 "    <separator=X,escape>csv    CSV with custom separator + escaping\n"
                 "    null                       Consume rows without output\n"
                 "  --rowsets <n>                Stop after n rowsets\n"
+                "  --verbose                    Print debug information\n"
                 "  --help|-h                    Show this help message\n"
                 "\n"
                 "Query file format (s-expression):\n"
@@ -237,7 +241,7 @@ int main(int argc, char** argv) {
             });
         std::cerr << "\n==================================\n";
 
-        NQqb::TPhysicalPlanner planner(&std::cerr);
+        NQqb::TPhysicalPlanner planner(verbose ? &std::cerr : nullptr);
         planner.PrintRuntimePlan(plan);
         auto executor = planner.Build(plan);
 
