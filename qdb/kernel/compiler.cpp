@@ -485,10 +485,15 @@ TJoinKernels TKernelCompiler::CompileJoin(
     auto dbModule = std::make_shared<NQumir::NRegistry::QumirDbModule>();
     TTypePtr columnType, rowSetType, hashTableType, pairBufferType;
     for (const auto& et : dbModule->ExternalTypes()) {
-        if (et.Name == "TColumn") columnType = et.Type;
-        else if (et.Name == "TRowSet") rowSetType = et.Type;
-        else if (et.Name == "HashTable") hashTableType = et.Type;
-        else if (et.Name == "PairBuffer") pairBufferType = et.Type;
+        if (et.Name == "TColumn") {
+            columnType = et.Type;
+        } else if (et.Name == "TRowSet") {
+            rowSetType = et.Type;
+        } else if (et.Name == "HashTable") {
+            hashTableType = et.Type;
+        } else if (et.Name == "PairBuffer") {
+            pairBufferType = et.Type;
+        }
     }
 
     // Fresh program per entry (CompileKernelAst consumes the AST): key type
