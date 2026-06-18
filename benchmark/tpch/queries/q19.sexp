@@ -3,8 +3,16 @@
     (rel project
       (rel filter
         (rel join
-          (rel source "__LINEITEM__")
-          (rel source "__PART__") ((l_partkey p_partkey)) (inner))
+          (rel filter
+            (rel source "__LINEITEM__")
+            (: (&& (== l_shipinstruct "DELIVER IN PERSON")
+                   (&& (|| (== l_shipmode "AIR") (== l_shipmode "AIR REG"))
+                       (&& (>= l_quantity (: 10.0 f64)) (<= l_quantity (: 34.0 f64))))) u8))
+          (rel filter
+            (rel source "__PART__")
+            (: (&& (|| (== p_brand "Brand#35") (|| (== p_brand "Brand#34") (== p_brand "Brand#23")))
+                   (&& (>= p_size (: 1 i32)) (<= p_size (: 15 i32)))) u8))
+          ((l_partkey p_partkey)) (inner))
         (: (|| (&& (== p_brand "Brand#35")
                 (&& (|| (== p_container "SM CASE") (|| (== p_container "SM BOX")
                     (|| (== p_container "SM PACK")     (== p_container "SM PKG"))))
