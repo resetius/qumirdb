@@ -154,10 +154,6 @@ TNodeParserMap MakeRelParsers(TRelParserOptions options) {
                 co_await h.Take(')');
                 keys.push_back({leftKey.Name, rightKey.Name});
             }
-            if (keys.empty()) {
-                co_return TError(loc, "(rel join) requires at least one (left right) key pair");
-            }
-
             // Join type as a bare keyword: (inner)
             co_await h.Take('(');
             auto typeTok = h.Next();
@@ -170,6 +166,9 @@ TNodeParserMap MakeRelParsers(TRelParserOptions options) {
             }
             co_await h.Take(')');
             EJoinType type = *parsedType;
+            if (keys.empty() && type != EJoinType::Inner) {
+                co_return TError(loc, "cross join (empty key list) only supports inner type");
+            }
 
             // Optional residual predicate, then the closing ')'.
             TExprPtr filter;

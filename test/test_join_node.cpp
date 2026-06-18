@@ -119,8 +119,13 @@ TEST(JoinNode, OverlappingColumnNamesAreRejected) {
     EXPECT_NE(join.error().ToString().find("shared"), std::string::npos);
 }
 
-TEST(JoinNode, EmptyKeyListIsRejected) {
+TEST(JoinNode, EmptyKeyListAcceptedForInner) {
     auto join = MakeJoin(LeftAB(), RightCD(), {}, EJoinType::Inner);
+    EXPECT_TRUE(join);
+}
+
+TEST(JoinNode, EmptyKeyListRejectedForNonInner) {
+    auto join = MakeJoin(LeftAB(), RightCD(), {}, EJoinType::LeftSemi);
     EXPECT_FALSE(join);
 }
 
