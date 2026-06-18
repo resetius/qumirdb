@@ -28,7 +28,8 @@ public:
         NQumir::NAst::TTypePtr outputType,
         std::vector<TProjectColumn> columns,
         TKernelCompiler::TProjectDispatch computeDispatch,
-        std::vector<size_t> computedWidths);
+        std::vector<size_t> computedWidths,
+        std::vector<bool> computedIsString = {});
 
     NQumir::NAst::TTypePtr OutputType() const override { return OutputType_; }
     bool Next(TRowSet& rowSet) override;
@@ -38,7 +39,8 @@ private:
     NQumir::NAst::TTypePtr OutputType_;
     std::vector<TProjectColumn> Columns_;
     TKernelCompiler::TProjectDispatch ComputeDispatch_; // null if no computed columns
-    std::vector<size_t> ComputedWidths_;                // byte width per computed column
+    std::vector<size_t> ComputedWidths_;
+    std::vector<bool> ComputedIsString_;
 };
 
 } // namespace NQqb
