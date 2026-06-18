@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <unordered_set>
 #include <vector>
 
 namespace NQqb {
@@ -189,7 +190,9 @@ public:
     TRuntimeJoin(std::unique_ptr<IRuntimeNode> left,
         std::unique_ptr<IRuntimeNode> right,
         NQumir::NAst::TTypePtr outputType, TJoinKernels kernels,
-        EJoinType joinType);
+        EJoinType joinType,
+        TKernelCompiler::TFilterDispatch residualFilter = {},
+        NQumir::NAst::TTypePtr innerOutputType = {});
     ~TRuntimeJoin() override;
 
     NQumir::NAst::TTypePtr OutputType() const override { return OutputType_; }
@@ -207,6 +210,7 @@ private:
     void EnsureInit();
     void PullOneInputBatch();
     void DrainKernelPairs();
+    void DrainPairsToResidualVecs();
 
     std::unique_ptr<IRuntimeNode> Left_;
     std::unique_ptr<IRuntimeNode> Right_;
@@ -225,6 +229,18 @@ private:
     bool BothDone_ = false;
     bool SemiAntiFinalized_ = false;
     bool OuterFinalized_ = false;
+
+    // Residual filter (null = no filter)
+    TKernelCompiler::TFilterDispatch ResidualFilter_;
+    // Reusable selection buffer for residual filter (1 byte per row, not bit-packed).
+    std::vector<uint8_t> ResidualSelBuf_;
+    // For LeftSemi/LeftAnti + residual: inner (left++right) builder + pair vecs
+    NQumir::NAst::TTypePtr InnerOutputType_;
+    std::optional<TJoinOutputBuilder> InnerBuilder_;
+    std::vector<TRowId> InnerLeftIds_;
+    std::vector<TRowId> InnerRightIds_;
+    std::unordered_set<TRowId> MatchedLeftIds_;
+    bool ResidualSemiAntiDone_ = false;
 };
 
 } // namespace NQqb

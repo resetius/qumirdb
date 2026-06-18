@@ -257,12 +257,16 @@ constexpr int64_t kJoinInitialCapacity = 256;
 TRuntimeJoin::TRuntimeJoin(std::unique_ptr<IRuntimeNode> left,
     std::unique_ptr<IRuntimeNode> right,
     NQumir::NAst::TTypePtr outputType, TJoinKernels kernels,
-    EJoinType joinType)
+    EJoinType joinType,
+    TKernelCompiler::TFilterDispatch residualFilter,
+    NQumir::NAst::TTypePtr innerOutputType)
     : Left_(std::move(left))
     , Right_(std::move(right))
     , OutputType_(std::move(outputType))
     , Kernels_(std::move(kernels))
     , JoinType_(joinType)
+    , ResidualFilter_(std::move(residualFilter))
+    , InnerOutputType_(std::move(innerOutputType))
 {
     // Output columns follow ComputeJoinOutputType: all left columns, then all
     // right columns (INNER), or only left columns (LeftSemi / LeftAnti).
@@ -282,6 +286,18 @@ TRuntimeJoin::TRuntimeJoin(std::unique_ptr<IRuntimeNode> left,
         }
     }
     Builder_.emplace(&LeftRows_, &RightRows_, std::move(columns));
+
+    // For LeftSemi/LeftAnti + residual filter: build inner (left++right) builder.
+    if (ResidualFilter_ && isSemiAnti && leftStruct && rightStruct) {
+        std::vector<TJoinColumnRef> innerCols;
+        for (int32_t i = 0; i < static_cast<int32_t>(leftStruct->Fields.size()); ++i) {
+            innerCols.push_back({EJoinSide::Left, i, leftStruct->Fields[i].second});
+        }
+        for (int32_t j = 0; j < static_cast<int32_t>(rightStruct->Fields.size()); ++j) {
+            innerCols.push_back({EJoinSide::Right, j, rightStruct->Fields[j].second});
+        }
+        InnerBuilder_.emplace(&LeftRows_, &RightRows_, std::move(innerCols));
+    }
 }
 
 TRuntimeJoin::~TRuntimeJoin() {
@@ -306,7 +322,15 @@ void TRuntimeJoin::DrainKernelPairs() {
     for (int64_t i = 0; i < PairBuffer_.Count; ++i) {
         Builder_->AddPair(PairBuffer_.Data[2 * i], PairBuffer_.Data[2 * i + 1]);
     }
-    PairBuffer_.Count = 0; // reuse the allocation for the next batch
+    PairBuffer_.Count = 0;
+}
+
+void TRuntimeJoin::DrainPairsToResidualVecs() {
+    for (int64_t i = 0; i < PairBuffer_.Count; ++i) {
+        InnerLeftIds_.push_back(PairBuffer_.Data[2 * i]);
+        InnerRightIds_.push_back(PairBuffer_.Data[2 * i + 1]);
+    }
+    PairBuffer_.Count = 0;
 }
 
 void TRuntimeJoin::PullOneInputBatch() {
@@ -338,6 +362,67 @@ void TRuntimeJoin::PullOneInputBatch() {
 
 bool TRuntimeJoin::Next(TRowSet& rowSet) {
     EnsureInit();
+
+    // ── LeftSemi / LeftAnti + residual filter ────────────────────────────────
+    if ((JoinType_ == EJoinType::LeftSemi || JoinType_ == EJoinType::LeftAnti)
+        && ResidualFilter_)
+    {
+        if (!ResidualSemiAntiDone_) {
+            // Phase 1: drain all inputs using INNER pair generation.
+            TRowSet batch{};
+            while (Left_->Next(batch)) {
+                int32_t bi = LeftRows_.PushBatch(batch);
+                Kernels_.ProcessLeft(LeftTable_.data(), RightTable_.data(),
+                    const_cast<TRowSet*>(&LeftRows_.Batch(bi)), bi, &PairBuffer_);
+                DrainPairsToResidualVecs();
+            }
+            while (Right_->Next(batch)) {
+                int32_t bi = RightRows_.PushBatch(batch);
+                Kernels_.ProcessRight(RightTable_.data(), LeftTable_.data(),
+                    const_cast<TRowSet*>(&RightRows_.Batch(bi)), bi, &PairBuffer_);
+                DrainPairsToResidualVecs();
+            }
+
+            // Phase 2: materialise pairs in chunks, apply residual filter.
+            const size_t chunkSz = static_cast<size_t>(kJoinOutputBatchRows);
+            for (size_t s = 0; s < InnerLeftIds_.size(); s += chunkSz) {
+                const size_t n = std::min(chunkSz, InnerLeftIds_.size() - s);
+                for (size_t j = s; j < s + n; ++j) {
+                    InnerBuilder_->AddPair(InnerLeftIds_[j], InnerRightIds_[j]);
+                }
+                TRowSet inner{};
+                if (InnerBuilder_->NextBatch(inner)) {
+                    ResidualSelBuf_.assign(n, 0);
+                    inner.Selection = ResidualSelBuf_.data();
+                    ResidualFilter_(inner);
+                    for (size_t r = 0; r < n; ++r) {
+                        if (ResidualSelBuf_[r]) {
+                            MatchedLeftIds_.insert(InnerLeftIds_[s + r]);
+                        }
+                    }
+                    Release(&inner);
+                }
+                InnerBuilder_->ClearPairs();
+            }
+
+            // Phase 3: populate Builder_ with qualifying left rows.
+            for (int32_t b = 0; b < LeftRows_.BatchCount(); ++b) {
+                const int32_t cnt = LeftRows_.Batch(b).RowCount;
+                for (int32_t r = 0; r < cnt; ++r) {
+                    const TRowId id = MakeRowId(b, r);
+                    const bool matched = MatchedLeftIds_.count(id) > 0;
+                    if ((JoinType_ == EJoinType::LeftSemi && matched) ||
+                        (JoinType_ == EJoinType::LeftAnti && !matched)) {
+                        Builder_->AddPair(id, kNullRowId);
+                    }
+                }
+            }
+            ResidualSemiAntiDone_ = true;
+        }
+        if (Builder_->NextBatch(rowSet)) return true;
+        Builder_->ClearPairs();
+        return false;
+    }
 
     if (JoinType_ == EJoinType::LeftSemi || JoinType_ == EJoinType::LeftAnti) {
         if (!SemiAntiFinalized_) {
@@ -402,6 +487,11 @@ bool TRuntimeJoin::Next(TRowSet& rowSet) {
     // INNER join: pipelined — pull one batch per iteration.
     for (;;) {
         if (Builder_->NextBatch(rowSet)) {
+            if (ResidualFilter_) {
+                ResidualSelBuf_.assign(rowSet.RowCount, 0);
+                rowSet.Selection = ResidualSelBuf_.data();
+                ResidualFilter_(rowSet);
+            }
             return true;
         }
         Builder_->ClearPairs();

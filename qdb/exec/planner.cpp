@@ -250,15 +250,12 @@ std::unique_ptr<IRuntimeNode> TPhysicalPlanner::Build(const TOperatorPtr& root) 
     }
 
     if (auto maybe = TMaybeOp<TJoinOperator>(root)) {
+        using namespace NQumir::NAst;
         auto join = maybe.Cast();
-        if (join->Filter()) {
-            throw std::runtime_error(
-                "join residual filter is not supported yet (Stage 1)");
-        }
         auto left = Build(join->Left());
         auto right = Build(join->Right());
-        auto* leftType = static_cast<NQumir::NAst::TStructType*>(left->OutputType().get());
-        auto* rightType = static_cast<NQumir::NAst::TStructType*>(right->OutputType().get());
+        auto* leftType = static_cast<TStructType*>(left->OutputType().get());
+        auto* rightType = static_cast<TStructType*>(right->OutputType().get());
         if (!leftType || !rightType) {
             throw std::runtime_error("join inputs must have TStructType");
         }
@@ -280,9 +277,39 @@ std::unique_ptr<IRuntimeNode> TPhysicalPlanner::Build(const TOperatorPtr& root) 
             keys.emplace_back(key.Left, key.Right);
         }
 
+        // Residual filter: supported for Inner, LeftSemi, LeftAnti.
+        TKernelCompiler::TFilterDispatch residualDispatch;
+        TTypePtr innerOutputType;
+        if (join->Filter()) {
+            const auto jt = join->JoinType();
+            if (jt != EJoinType::Inner &&
+                jt != EJoinType::LeftSemi &&
+                jt != EJoinType::LeftAnti) {
+                throw std::runtime_error(
+                    "join residual filter is not yet supported for this join type");
+            }
+            auto innerOut = ComputeJoinOutputType(
+                left->OutputType(), right->OutputType(), EJoinType::Inner);
+            if (!innerOut) {
+                throw std::runtime_error(
+                    "residual filter: " + innerOut.error().ToString());
+            }
+            innerOutputType = *innerOut;
+            auto* innerSt = static_cast<TStructType*>(innerOutputType.get());
+            TKernelCompiler fc(Diagnostics_);
+            residualDispatch = fc.CompileFilter(*innerSt, join->Filter());
+        }
+
+        // For LeftSemi/LeftAnti + residual: compile INNER kernels for pair gen.
+        const EJoinType kernelType =
+            (residualDispatch &&
+             (join->JoinType() == EJoinType::LeftSemi ||
+              join->JoinType() == EJoinType::LeftAnti))
+            ? EJoinType::Inner
+            : join->JoinType();
+
         TKernelCompiler compiler(Diagnostics_);
-        auto kernels = compiler.CompileJoin(
-            *leftType, *rightType, keys, join->JoinType());
+        auto kernels = compiler.CompileJoin(*leftType, *rightType, keys, kernelType);
 
         // Output type from the physical (pruned) input types.
         auto outputType = ComputeJoinOutputType(
@@ -293,7 +320,8 @@ std::unique_ptr<IRuntimeNode> TPhysicalPlanner::Build(const TOperatorPtr& root) 
 
         return std::make_unique<TRuntimeJoin>(
             std::move(left), std::move(right), std::move(*outputType), std::move(kernels),
-            join->JoinType());
+            join->JoinType(),
+            std::move(residualDispatch), std::move(innerOutputType));
     }
 
     throw std::runtime_error("TPhysicalPlanner: unknown operator");
