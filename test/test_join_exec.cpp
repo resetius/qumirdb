@@ -696,6 +696,83 @@ TEST(RuntimeJoin, LeftAntiScalarKey) {
     EXPECT_EQ(got, expected); // {(1,10),(4,40)}
 }
 
+TEST(RuntimeJoin, LeftSemiResidualStreamsRight) {
+    std::vector<int64_t> lk = {1, 1, 2}, lv = {10, 20, 30};
+    std::vector<int64_t> rk = {1, 2}, rv = {10, 30};
+    std::vector<TColumn> lcols, rcols;
+
+    auto leftType  = KeyValSchema("lk", "lv");
+    auto rightType = KeyValSchema("rk", "rv");
+    std::vector<TRowSet> lbatches = {KeyValBatch(lk.data(), lv.data(), 3, lcols)};
+    std::vector<TRowSet> rbatches = {KeyValBatch(rk.data(), rv.data(), 2, rcols)};
+
+    auto left  = std::make_unique<TVectorRuntimeSource>(leftType,  std::move(lbatches));
+    auto right = std::make_unique<TVectorRuntimeSource>(rightType, std::move(rbatches));
+
+    auto residual = std::make_shared<TBinaryExpr>(
+        NQumir::TLocation{}, TOperator("!="),
+        std::make_shared<TIdentExpr>(NQumir::TLocation{}, "lv"),
+        std::make_shared<TIdentExpr>(NQumir::TLocation{}, "rv"));
+    TStructType innerType({
+        {"lk", I64Type()}, {"lv", I64Type()},
+        {"rk", I64Type()}, {"rv", I64Type()},
+    });
+
+    TKernelCompiler compiler;
+    auto kernels = compiler.CompileJoin(
+        static_cast<TStructType&>(*leftType), static_cast<TStructType&>(*rightType),
+        {{"lk", "rk"}}, EJoinType::Inner, residual, &innerType, 2);
+    auto outputType = ComputeJoinOutputType(leftType, rightType, EJoinType::LeftSemi);
+    ASSERT_TRUE(outputType);
+
+    TRuntimeJoin join(std::move(left), std::move(right), *outputType,
+        std::move(kernels), EJoinType::LeftSemi, /*hasResidual=*/true);
+    auto got = DrainSemiAntiJoin(join, /*cols=*/2);
+
+    std::vector<std::pair<int64_t,int64_t>> expected = {{1, 20}};
+    std::sort(got.begin(), got.end());
+    EXPECT_EQ(got, expected);
+}
+
+TEST(RuntimeJoin, LeftAntiResidualStreamsRight) {
+    std::vector<int64_t> lk = {1, 1, 2}, lv = {10, 20, 30};
+    std::vector<int64_t> rk = {1, 2}, rv = {10, 30};
+    std::vector<TColumn> lcols, rcols;
+
+    auto leftType  = KeyValSchema("lk", "lv");
+    auto rightType = KeyValSchema("rk", "rv");
+    std::vector<TRowSet> lbatches = {KeyValBatch(lk.data(), lv.data(), 3, lcols)};
+    std::vector<TRowSet> rbatches = {KeyValBatch(rk.data(), rv.data(), 2, rcols)};
+
+    auto left  = std::make_unique<TVectorRuntimeSource>(leftType,  std::move(lbatches));
+    auto right = std::make_unique<TVectorRuntimeSource>(rightType, std::move(rbatches));
+
+    auto residual = std::make_shared<TBinaryExpr>(
+        NQumir::TLocation{}, TOperator("!="),
+        std::make_shared<TIdentExpr>(NQumir::TLocation{}, "lv"),
+        std::make_shared<TIdentExpr>(NQumir::TLocation{}, "rv"));
+    TStructType innerType({
+        {"lk", I64Type()}, {"lv", I64Type()},
+        {"rk", I64Type()}, {"rv", I64Type()},
+    });
+
+    TKernelCompiler compiler;
+    auto kernels = compiler.CompileJoin(
+        static_cast<TStructType&>(*leftType), static_cast<TStructType&>(*rightType),
+        {{"lk", "rk"}}, EJoinType::Inner, residual, &innerType, 2);
+    auto outputType = ComputeJoinOutputType(leftType, rightType, EJoinType::LeftAnti);
+    ASSERT_TRUE(outputType);
+
+    TRuntimeJoin join(std::move(left), std::move(right), *outputType,
+        std::move(kernels), EJoinType::LeftAnti, /*hasResidual=*/true);
+    auto got = DrainSemiAntiJoin(join, /*cols=*/2);
+
+    std::vector<std::pair<int64_t,int64_t>> expected = {{1, 10}, {2, 30}};
+    std::sort(got.begin(), got.end());
+    std::sort(expected.begin(), expected.end());
+    EXPECT_EQ(got, expected);
+}
+
 TEST(RuntimeJoin, LeftSemiEmptyRight) {
     std::vector<int64_t> lk = {1, 2, 3}, lv = {10, 20, 30};
     std::vector<TColumn> lcols;

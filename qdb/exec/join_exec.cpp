@@ -610,12 +610,11 @@ bool TRuntimeJoin::Next(TRowSet& rowSet) {
                 CollectMatchedLeftIds();
             }
             while (Right_->Next(batch)) {
-                int32_t bi = RightRows_.PushBatch(batch);
-                Kernels_.ProcessRight(RightTable_.data(), LeftTable_.data(),
-                    const_cast<TRowSet*>(&RightRows_.Batch(bi)), bi, &PairBuffer_,
+                Kernels_.ProbeRightStream(LeftTable_.data(), &batch, -1, &PairBuffer_,
                     const_cast<TRowSet*>(LeftRows_.Data()),
                     const_cast<TRowSet*>(RightRows_.Data()));
                 CollectMatchedLeftIds();
+                Release(&batch);
             }
 
             // Phase 2: emit each left row once based on match membership.
