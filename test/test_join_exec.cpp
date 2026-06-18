@@ -387,6 +387,106 @@ TEST(RuntimeJoin, InnerJoinEndToEnd) {
     EXPECT_EQ(got, expected);
 }
 
+TEST(RuntimeJoin, InnerJoinStreamsRightAfterLeftEof) {
+    std::vector<int64_t> lk = {1, 2, 1}, lv = {10, 20, 30};
+    std::vector<int64_t> rk0 = {2, 3}, rv0 = {200, 300};
+    std::vector<int64_t> rk1 = {1, 1}, rv1 = {100, 101};
+    std::vector<TColumn> lcols, rcols0, rcols1;
+
+    auto leftType = KeyValSchema("lk", "lv");
+    auto rightType = KeyValSchema("rk", "rv");
+    std::vector<TRowSet> lbatches = {KeyValBatch(lk.data(), lv.data(), 3, lcols)};
+    std::vector<TRowSet> rbatches = {
+        KeyValBatch(rk0.data(), rv0.data(), 2, rcols0),
+        KeyValBatch(rk1.data(), rv1.data(), 2, rcols1),
+    };
+
+    auto left = std::make_unique<TVectorRuntimeSource>(leftType, std::move(lbatches));
+    auto right = std::make_unique<TVectorRuntimeSource>(rightType, std::move(rbatches));
+
+    TKernelCompiler compiler;
+    auto kernels = compiler.CompileJoin(
+        static_cast<TStructType&>(*leftType), static_cast<TStructType&>(*rightType),
+        {{"lk", "rk"}}, EJoinType::Inner);
+    auto outputType = ComputeJoinOutputType(leftType, rightType, EJoinType::Inner);
+    ASSERT_TRUE(outputType);
+
+    TRuntimeJoin join(std::move(left), std::move(right), *outputType, std::move(kernels), EJoinType::Inner);
+
+    std::vector<TOut4> got;
+    TRowSet out{};
+    while (join.Next(out)) {
+        ASSERT_EQ(out.ColumnCount, 4);
+        const auto* c0 = reinterpret_cast<const int64_t*>(out.Columns[0].Data);
+        const auto* c1 = reinterpret_cast<const int64_t*>(out.Columns[1].Data);
+        const auto* c2 = reinterpret_cast<const int64_t*>(out.Columns[2].Data);
+        const auto* c3 = reinterpret_cast<const int64_t*>(out.Columns[3].Data);
+        for (int64_t i = 0; i < out.RowCount; ++i) {
+            got.push_back({c0[i], c1[i], c2[i], c3[i]});
+        }
+        Release(&out);
+    }
+
+    std::vector<TOut4> expected = {
+        {1, 10, 1, 100}, {1, 10, 1, 101},
+        {1, 30, 1, 100}, {1, 30, 1, 101},
+        {2, 20, 2, 200},
+    };
+    std::sort(got.begin(), got.end());
+    std::sort(expected.begin(), expected.end());
+    EXPECT_EQ(got, expected);
+}
+
+TEST(RuntimeJoin, InnerJoinStreamsLeftAfterRightEof) {
+    std::vector<int64_t> lk0 = {2, 3}, lv0 = {20, 30};
+    std::vector<int64_t> lk1 = {1, 1}, lv1 = {10, 11};
+    std::vector<int64_t> rk = {1, 2, 1}, rv = {100, 200, 101};
+    std::vector<TColumn> lcols0, lcols1, rcols;
+
+    auto leftType = KeyValSchema("lk", "lv");
+    auto rightType = KeyValSchema("rk", "rv");
+    std::vector<TRowSet> lbatches = {
+        KeyValBatch(lk0.data(), lv0.data(), 2, lcols0),
+        KeyValBatch(lk1.data(), lv1.data(), 2, lcols1),
+    };
+    std::vector<TRowSet> rbatches = {KeyValBatch(rk.data(), rv.data(), 3, rcols)};
+
+    auto left = std::make_unique<TVectorRuntimeSource>(leftType, std::move(lbatches));
+    auto right = std::make_unique<TVectorRuntimeSource>(rightType, std::move(rbatches));
+
+    TKernelCompiler compiler;
+    auto kernels = compiler.CompileJoin(
+        static_cast<TStructType&>(*leftType), static_cast<TStructType&>(*rightType),
+        {{"lk", "rk"}}, EJoinType::Inner);
+    auto outputType = ComputeJoinOutputType(leftType, rightType, EJoinType::Inner);
+    ASSERT_TRUE(outputType);
+
+    TRuntimeJoin join(std::move(left), std::move(right), *outputType, std::move(kernels), EJoinType::Inner);
+
+    std::vector<TOut4> got;
+    TRowSet out{};
+    while (join.Next(out)) {
+        ASSERT_EQ(out.ColumnCount, 4);
+        const auto* c0 = reinterpret_cast<const int64_t*>(out.Columns[0].Data);
+        const auto* c1 = reinterpret_cast<const int64_t*>(out.Columns[1].Data);
+        const auto* c2 = reinterpret_cast<const int64_t*>(out.Columns[2].Data);
+        const auto* c3 = reinterpret_cast<const int64_t*>(out.Columns[3].Data);
+        for (int64_t i = 0; i < out.RowCount; ++i) {
+            got.push_back({c0[i], c1[i], c2[i], c3[i]});
+        }
+        Release(&out);
+    }
+
+    std::vector<TOut4> expected = {
+        {1, 10, 1, 100}, {1, 10, 1, 101},
+        {1, 11, 1, 100}, {1, 11, 1, 101},
+        {2, 20, 2, 200},
+    };
+    std::sort(got.begin(), got.end());
+    std::sort(expected.begin(), expected.end());
+    EXPECT_EQ(got, expected);
+}
+
 TEST(RuntimeJoin, MultipleBatchesMatchNestedLoop) {
     int seed = 777;
     auto rnd = [&]() { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed; };
