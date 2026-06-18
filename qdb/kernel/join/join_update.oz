@@ -8,6 +8,54 @@
   ;; takes the already-assembled <named Key> and reuses rh_lookup_slot /
   ;; rh_insert_displace / aht_rehash from aggregation.
 
+  ;; Probe `build` for `key` and emit one pair per matching stored row. is_left
+  ;; orders the emitted pair as (left, right): non-zero means the current row is
+  ;; left, zero means it is right. Returns #f only on PairBuffer allocation
+  ;; failure.
+  (fun jt_probe_and_emit ((var build <ref HashTable>)
+                          (var key <named Key (template readable mutable)>)
+                          (var row_id i64)
+                          (var is_left i64)
+                          (var pairs <ref PairBuffer>)
+                          (var left_store <ptr TRowSet>)
+                          (var right_store <ptr TRowSet>)) -> bool
+    (block
+      (var build_keys =
+        (cast (field build Keys) <ptr <named Key (template readable mutable)>>))
+      (var build_slot = (call rh_lookup_slot build_keys (field build Dist)
+                        (field build SlotId) (field build Capacity) key))
+      (if (!= build_slot (: -1 i64))
+        (block
+          (var build_aggs = (field build AggBuffers))
+          (var build_counts = (index build_aggs (: 0 i64)))
+          (var build_datas = (index build_aggs (: 2 i64)))
+          (var bcount = (index build_counts build_slot))
+          (var bdata = (cast (index build_datas build_slot) <ptr i64>))
+          (var k i64)
+          (= k (: 0 i64))
+          (while (< k bcount)
+            (block
+              (var build_row_id = (index bdata k))
+              (var flt_l i64)
+              (= flt_l row_id)
+              (var flt_r i64)
+              (= flt_r build_row_id)
+              (if (== is_left (: 0 i64))
+                (block
+                  (= flt_l build_row_id)
+                  (= flt_r row_id)))
+              (if (call jt_residual_filter left_store right_store flt_l flt_r)
+                (block
+                  (if (!= is_left (: 0 i64))
+                    (block
+                      (if (! (call pb_push pairs row_id build_row_id))
+                        (block (return #f))))
+                    (block
+                      (if (! (call pb_push pairs build_row_id row_id))
+                        (block (return #f)))))))
+              (= k (+ k (: 1 i64)))))))
+      (return #t)))
+
   ;; Probe the opposite table for `key`, emit one pair per matching stored row,
   ;; then insert `own_row_id` under `key` into the own table. is_left orders the
   ;; emitted pair as (left, right). Returns #f only on allocation failure.
@@ -20,40 +68,9 @@
                            (var left_store <ptr TRowSet>)
                            (var right_store <ptr TRowSet>)) -> bool
     (block
-      (var opp_keys =
-        (cast (field opp Keys) <ptr <named Key (template readable mutable)>>))
-      (var opp_slot = (call rh_lookup_slot opp_keys (field opp Dist)
-                        (field opp SlotId) (field opp Capacity) key))
-      (if (!= opp_slot (: -1 i64))
-        (block
-          (var opp_aggs = (field opp AggBuffers))
-          (var opp_counts = (index opp_aggs (: 0 i64)))
-          (var opp_datas = (index opp_aggs (: 2 i64)))
-          (var bcount = (index opp_counts opp_slot))
-          (var bdata = (cast (index opp_datas opp_slot) <ptr i64>))
-          (var k i64)
-          (= k (: 0 i64))
-          (while (< k bcount)
-            (block
-              (var opp_row_id = (index bdata k))
-              (var flt_l i64)
-              (= flt_l own_row_id)
-              (var flt_r i64)
-              (= flt_r opp_row_id)
-              (if (== is_left (: 0 i64))
-                (block
-                  (= flt_l opp_row_id)
-                  (= flt_r own_row_id)))
-              (if (call jt_residual_filter left_store right_store flt_l flt_r)
-                (block
-                  (if (!= is_left (: 0 i64))
-                    (block
-                      (if (! (call pb_push pairs own_row_id opp_row_id))
-                        (block (return #f))))
-                    (block
-                      (if (! (call pb_push pairs opp_row_id own_row_id))
-                        (block (return #f)))))))
-              (= k (+ k (: 1 i64)))))))
+      (if (! (call jt_probe_and_emit opp key own_row_id is_left pairs
+                    left_store right_store))
+        (block (return #f)))
       (var own_keys =
         (cast (field own Keys) <ptr <named Key (template readable mutable)>>))
       (var own_slot = (call rh_lookup_slot own_keys (field own Dist)

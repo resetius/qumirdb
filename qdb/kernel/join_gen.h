@@ -53,6 +53,18 @@ NQumir::NAst::TExprPtr GenJoinProcessAst(
     NQumir::NAst::TTypePtr hashTableType,
     NQumir::NAst::TTypePtr pairBufferType);
 
+// Generates one side's probe-only function (jt_probe_left_stream /
+// jt_probe_right_stream): reads stream batch keys, probes the already-built
+// opposite table, and emits pairs without inserting stream rows into any table.
+NQumir::NAst::TExprPtr GenJoinProbeAst(
+    const TJoinKeyDescriptor& key,
+    bool isLeft,
+    const std::string& funcName,
+    NQumir::NAst::TTypePtr columnType,
+    NQumir::NAst::TTypePtr rowSetType,
+    NQumir::NAst::TTypePtr hashTableType,
+    NQumir::NAst::TTypePtr pairBufferType);
+
 // Generates the rh_hash / rh_key_equal overloads for the join key type, reusing
 // the aggregation key-ops generator (GenKeyOperationFunDecls).
 std::vector<NQumir::NAst::TExprPtr> GenJoinKeyOpsFunDecls(const TJoinKeyDescriptor& key);

@@ -217,6 +217,67 @@ TEST(CompileJoin, ProducesWorkingInnerJoinKernels) {
     kernels.DestroyTable(&right);
 }
 
+TEST(CompileJoin, ProbeOnlyStreamsWithoutInserting) {
+    using namespace NQumir::NAst;
+    auto i64 = [] { return std::make_shared<TIntegerType>(TIntegerType::I64); };
+    TStructType leftType({{"lk", i64()}, {"lv", i64()}});
+    TStructType rightType({{"rk", i64()}, {"rv", i64()}});
+
+    TKernelCompiler compiler;
+    auto kernels = compiler.CompileJoin(leftType, rightType, {{"lk", "rk"}}, EJoinType::Inner);
+
+    std::vector<int64_t> lkeys = {1, 2, 1};
+    std::vector<int64_t> rkeys = {1, 1, 3};
+    auto makeBatch = [](std::vector<int64_t>& keys, std::vector<TColumn>& cols) {
+        cols = {TColumn{.Data = reinterpret_cast<char*>(keys.data())},
+                TColumn{.Data = reinterpret_cast<char*>(keys.data())}};
+        return TRowSet{.Columns = cols.data(), .ColumnCount = 2,
+            .RowCount = static_cast<int64_t>(keys.size()), .RefCount = 1};
+    };
+    std::vector<TColumn> lcols, rcols;
+    TRowSet lbatch = makeBatch(lkeys, lcols);
+    TRowSet rbatch = makeBatch(rkeys, rcols);
+
+    THashTable left{}, right{};
+    TPairBuffer pairs{};
+    ASSERT_TRUE(kernels.Init(&left, 8));
+    ASSERT_TRUE(kernels.Init(&right, 8));
+    ASSERT_TRUE(kernels.ProcessLeft(&left, &right, &lbatch, 0, &pairs, &lbatch, &rbatch));
+    ASSERT_EQ(pairs.Count, 0);
+    ASSERT_TRUE(kernels.ProbeRightStream(&left, &rbatch, 7, &pairs, &lbatch, &rbatch));
+    EXPECT_EQ(right.Size, 0);
+
+    std::vector<std::tuple<int64_t, int64_t>> got;
+    for (int64_t i = 0; i < pairs.Count; ++i) {
+        got.emplace_back(pairs.Data[2 * i] & 0xffffffff, pairs.Data[2 * i + 1] & 0xffffffff);
+    }
+    std::vector<std::tuple<int64_t, int64_t>> expected = {{0, 0}, {0, 1}, {2, 0}, {2, 1}};
+    std::sort(got.begin(), got.end());
+    EXPECT_EQ(got, expected);
+
+    pairs.Count = 0;
+    kernels.DestroyTable(&left);
+    kernels.DestroyTable(&right);
+    THashTable left2{}, right2{};
+    ASSERT_TRUE(kernels.Init(&left2, 8));
+    ASSERT_TRUE(kernels.Init(&right2, 8));
+    ASSERT_TRUE(kernels.ProcessRight(&right2, &left2, &rbatch, 0, &pairs, &lbatch, &rbatch));
+    ASSERT_EQ(pairs.Count, 0);
+    ASSERT_TRUE(kernels.ProbeLeftStream(&right2, &lbatch, 9, &pairs, &lbatch, &rbatch));
+    EXPECT_EQ(left2.Size, 0);
+
+    got.clear();
+    for (int64_t i = 0; i < pairs.Count; ++i) {
+        got.emplace_back(pairs.Data[2 * i] & 0xffffffff, pairs.Data[2 * i + 1] & 0xffffffff);
+    }
+    std::sort(got.begin(), got.end());
+    EXPECT_EQ(got, expected);
+
+    kernels.DestroyPairs(&pairs);
+    kernels.DestroyTable(&left2);
+    kernels.DestroyTable(&right2);
+}
+
 TEST(CompileJoin, RejectsStringKeyNonInnerAndIncompatible) {
     using namespace NQumir::NAst;
     auto i64 = [] { return std::make_shared<TIntegerType>(TIntegerType::I64); };
@@ -267,6 +328,10 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileGenericJoin(
         columnType, rowSetType, hashTableType, pairBufferType));
     program.push_back(NKernel::GenJoinProcessAst(keyDesc, false, "jt_process_right",
         columnType, rowSetType, hashTableType, pairBufferType));
+    program.push_back(NKernel::GenJoinProbeAst(keyDesc, true, "jt_probe_left_stream",
+        columnType, rowSetType, hashTableType, pairBufferType));
+    program.push_back(NKernel::GenJoinProbeAst(keyDesc, false, "jt_probe_right_stream",
+        columnType, rowSetType, hashTableType, pairBufferType));
 
     NQumir::TLLVMRunnerOptions options;
     options.CoreInput = true;
@@ -302,8 +367,8 @@ TEST(JoinKernelGeneric, Int32KeyMatchesNestedLoop) {
     auto jtInit = reinterpret_cast<bool(*)(void*, int64_t, int64_t)>(initFn);
     auto jtDestroy = reinterpret_cast<void(*)(void*)>(destroyFn);
     auto pbDestroy = reinterpret_cast<void(*)(void*)>(pbDestroyFn);
-    auto procLeft = reinterpret_cast<bool(*)(void*, void*, TRowSet*, int64_t, void*)>(leftFn);
-    auto procRight = reinterpret_cast<bool(*)(void*, void*, TRowSet*, int64_t, void*)>(rightFn);
+    auto procLeft = reinterpret_cast<bool(*)(void*, void*, TRowSet*, int64_t, void*, TRowSet*, TRowSet*)>(leftFn);
+    auto procRight = reinterpret_cast<bool(*)(void*, void*, TRowSet*, int64_t, void*, TRowSet*, TRowSet*)>(rightFn);
 
     // int32 keys, i64 values.
     std::vector<int32_t> lk = {1, 2, 1}; std::vector<int64_t> lv = {10, 20, 30};
@@ -323,8 +388,8 @@ TEST(JoinKernelGeneric, Int32KeyMatchesNestedLoop) {
     ASSERT_TRUE(jtInit(&left, 8, keySize));
     ASSERT_TRUE(jtInit(&right, 8, keySize));
     TPairBuffer pairs{};
-    ASSERT_TRUE(procLeft(&left, &right, &lbatch, 0, &pairs));
-    ASSERT_TRUE(procRight(&right, &left, &rbatch, 0, &pairs));
+    ASSERT_TRUE(procLeft(&left, &right, &lbatch, 0, &pairs, &lbatch, &rbatch));
+    ASSERT_TRUE(procRight(&right, &left, &rbatch, 0, &pairs, &lbatch, &rbatch));
 
     std::vector<std::tuple<int64_t, int64_t>> got;
     for (int64_t i = 0; i < pairs.Count; ++i) {
@@ -357,8 +422,8 @@ TEST(JoinKernelGeneric, Int32KeyTriggersRehash) {
     auto jtInit = reinterpret_cast<bool(*)(void*, int64_t, int64_t)>(initFn);
     auto jtDestroy = reinterpret_cast<void(*)(void*)>(destroyFn);
     auto pbDestroy = reinterpret_cast<void(*)(void*)>(pbDestroyFn);
-    auto procLeft = reinterpret_cast<bool(*)(void*, void*, TRowSet*, int64_t, void*)>(leftFn);
-    auto procRight = reinterpret_cast<bool(*)(void*, void*, TRowSet*, int64_t, void*)>(rightFn);
+    auto procLeft = reinterpret_cast<bool(*)(void*, void*, TRowSet*, int64_t, void*, TRowSet*, TRowSet*)>(leftFn);
+    auto procRight = reinterpret_cast<bool(*)(void*, void*, TRowSet*, int64_t, void*, TRowSet*, TRowSet*)>(rightFn);
 
     // ~25 distinct int32 keys over 60 rows/side forces rehashes from capacity 4.
     int seed = 12345;
@@ -380,8 +445,8 @@ TEST(JoinKernelGeneric, Int32KeyTriggersRehash) {
     ASSERT_TRUE(jtInit(&left, 4, keySize)); // tiny capacity -> forces rehash
     ASSERT_TRUE(jtInit(&right, 4, keySize));
     TPairBuffer pairs{};
-    ASSERT_TRUE(procLeft(&left, &right, &lbatch, 0, &pairs));
-    ASSERT_TRUE(procRight(&right, &left, &rbatch, 0, &pairs));
+    ASSERT_TRUE(procLeft(&left, &right, &lbatch, 0, &pairs, &lbatch, &rbatch));
+    ASSERT_TRUE(procRight(&right, &left, &rbatch, 0, &pairs, &lbatch, &rbatch));
 
     int64_t matched = 0;
     for (int64_t i = 0; i < pairs.Count; ++i) {

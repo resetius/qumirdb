@@ -90,6 +90,13 @@ struct TJoinKernels {
         void* pairs, TRowSet* leftStore, TRowSet* rightStore)> ProcessLeft;
     std::function<bool(void* own, void* opp, TRowSet* batch, int64_t batchIdx,
         void* pairs, TRowSet* leftStore, TRowSet* rightStore)> ProcessRight;
+    // Probe-only streaming variants used after one input side reaches EOF.
+    // ProbeLeftStream(build=right, batch=left) and ProbeRightStream(build=left,
+    // batch=right) emit pairs but never insert stream rows into a hash table.
+    std::function<bool(void* build, TRowSet* batch, int64_t batchIdx,
+        void* pairs, TRowSet* leftStore, TRowSet* rightStore)> ProbeLeftStream;
+    std::function<bool(void* build, TRowSet* batch, int64_t batchIdx,
+        void* pairs, TRowSet* leftStore, TRowSet* rightStore)> ProbeRightStream;
     std::function<void(void* table)> DestroyTable;
     std::function<void(void* pairs)> DestroyPairs;
 
