@@ -20,7 +20,7 @@
           (rel filter (rel source "__REGION__") (: (== r_name "__Q8_REGION__") u8))
           ((n_regionkey r_regionkey)) (inner))
         (rel source "__NATION__" "n2") ((s_nationkey n_nationkey)) (inner))
-      (o_year        (qdb_date_year o_orderdate))
+      (o_year        (call qdb_date_year o_orderdate))
       (volume        (* l_extendedprice (- (: 1.0 f64) l_discount)))
       (france_volume (if (== |n2.n_name| "__Q8_NATION__")
                        (* l_extendedprice (- (: 1.0 f64) l_discount))
