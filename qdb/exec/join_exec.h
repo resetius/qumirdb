@@ -222,6 +222,7 @@ private:
     void EnsureInit();
     void PullOneInputBatch();
     void PullOneInnerInputBatch();
+    EJoinSide ChooseSymmetricPullSide() const;
     void DrainKernelPairs();
     void DrainStreamingPairs(const TRowSet& streamBatch, EJoinSide streamSide);
     // Residual LeftSemi/LeftAnti: collect the (already filter-pruned) left row
@@ -245,7 +246,10 @@ private:
     bool RightDone_ = false;
     bool BothDone_ = false;
     EJoinStreamMode StreamMode_ = EJoinStreamMode::Symmetric;
-    EJoinSide NextPullSide_ = EJoinSide::Left;
+    int64_t StoredLeftRows_ = 0;
+    int64_t StoredRightRows_ = 0;
+    int64_t LastLeftBatchRows_ = 0;
+    int64_t LastRightBatchRows_ = 0;
     bool SemiAntiFinalized_ = false;
     bool OuterFinalized_ = false;
 
