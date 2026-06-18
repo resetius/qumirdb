@@ -18,6 +18,6 @@
     (rel filter
       (rel source "__LINEITEM__" "l3")
       (: (> l_receiptdate l_commitdate) u8))
-    ((l_orderkey l_orderkey)) (left_anti) (!= |l1.l_suppkey| |l3.l_suppkey|))
+    ((|l1.l_orderkey| |l3.l_orderkey|)) (left_anti) (!= |l1.l_suppkey| |l3.l_suppkey|))
   (keys s_name)
   (agg numwait count))
