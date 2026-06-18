@@ -463,6 +463,8 @@ void TRuntimeJoin::PullOneInputBatch() {
     TRowSet batch = {};
     if (!LeftDone_) {
         if (Left_->Next(batch)) {
+            StoredLeftRows_ += batch.RowCount;
+            LastLeftBatchRows_ = batch.RowCount;
             int32_t batchIdx = LeftRows_.PushBatch(batch);
             Kernels_.ProcessLeft(LeftTable_.data(), RightTable_.data(),
                 const_cast<TRowSet*>(&LeftRows_.Batch(batchIdx)),
@@ -476,6 +478,8 @@ void TRuntimeJoin::PullOneInputBatch() {
     }
     if (!RightDone_) {
         if (Right_->Next(batch)) {
+            StoredRightRows_ += batch.RowCount;
+            LastRightBatchRows_ = batch.RowCount;
             int32_t batchIdx = RightRows_.PushBatch(batch);
             Kernels_.ProcessRight(RightTable_.data(), LeftTable_.data(),
                 const_cast<TRowSet*>(&RightRows_.Batch(batchIdx)),
@@ -490,14 +494,29 @@ void TRuntimeJoin::PullOneInputBatch() {
     BothDone_ = LeftDone_ && RightDone_;
 }
 
+EJoinSide TRuntimeJoin::ChooseSymmetricPullSide() const {
+    if (StoredLeftRows_ == 0 && StoredRightRows_ == 0) {
+        return EJoinSide::Left;
+    }
+    if (StoredLeftRows_ <= StoredRightRows_) {
+        if (LastLeftBatchRows_ > 0 &&
+            StoredLeftRows_ + LastLeftBatchRows_ >= StoredRightRows_) {
+            return EJoinSide::Right;
+        }
+        return EJoinSide::Left;
+    }
+    if (LastRightBatchRows_ > 0 &&
+        StoredRightRows_ + LastRightBatchRows_ >= StoredLeftRows_) {
+        return EJoinSide::Left;
+    }
+    return EJoinSide::Right;
+}
+
 void TRuntimeJoin::PullOneInnerInputBatch() {
     TRowSet batch = {};
     for (;;) {
         if (StreamMode_ == EJoinStreamMode::Symmetric) {
-            const EJoinSide side = NextPullSide_;
-            NextPullSide_ = (NextPullSide_ == EJoinSide::Left)
-                ? EJoinSide::Right
-                : EJoinSide::Left;
+            const EJoinSide side = ChooseSymmetricPullSide();
 
             if (side == EJoinSide::Left) {
                 if (LeftDone_) {
@@ -509,6 +528,8 @@ void TRuntimeJoin::PullOneInnerInputBatch() {
                     continue;
                 }
                 if (Left_->Next(batch)) {
+                    StoredLeftRows_ += batch.RowCount;
+                    LastLeftBatchRows_ = batch.RowCount;
                     int32_t batchIdx = LeftRows_.PushBatch(batch);
                     Kernels_.ProcessLeft(LeftTable_.data(), RightTable_.data(),
                         const_cast<TRowSet*>(&LeftRows_.Batch(batchIdx)),
@@ -536,6 +557,8 @@ void TRuntimeJoin::PullOneInnerInputBatch() {
                 continue;
             }
             if (Right_->Next(batch)) {
+                StoredRightRows_ += batch.RowCount;
+                LastRightBatchRows_ = batch.RowCount;
                 int32_t batchIdx = RightRows_.PushBatch(batch);
                 Kernels_.ProcessRight(RightTable_.data(), LeftTable_.data(),
                     const_cast<TRowSet*>(&RightRows_.Batch(batchIdx)),
