@@ -534,10 +534,15 @@ NQumir::NAst::TExprPtr GenJoinBatchAst(
             ident("left_store"), ident("right_store"),
         });
     } else {
+        auto storeBatchRef = [&](const char* store) -> TExprPtr {
+            return std::make_shared<TIndexExpr>(loc, ident(store), numI64(0));
+        };
         emitCall = call("jt_probe_and_emit", {
             ident("build"), std::move(keyValue), std::move(ownRowId),
             numI64(isLeft ? 1 : 0), ident("pairs"),
             ident("left_store"), ident("right_store"),
+            isLeft ? ident("batch") : storeBatchRef("left_store"),
+            isLeft ? storeBatchRef("right_store") : ident("batch"),
         });
     }
 

@@ -18,7 +18,9 @@
                           (var is_left i64)
                           (var pairs <ref PairBuffer>)
                           (var left_store <ptr TRowSet>)
-                          (var right_store <ptr TRowSet>)) -> bool
+                          (var right_store <ptr TRowSet>)
+                          (var stream_left_batch <ref TRowSet>)
+                          (var stream_right_batch <ref TRowSet>)) -> bool
     (block
       (var build_keys =
         (cast (field build Keys) <ptr <named Key (template readable mutable)>>))
@@ -44,7 +46,8 @@
                 (block
                   (= flt_l build_row_id)
                   (= flt_r row_id)))
-              (if (call jt_residual_filter left_store right_store flt_l flt_r)
+              (if (call jt_residual_filter left_store right_store
+                    stream_left_batch stream_right_batch flt_l flt_r)
                 (block
                   (if (!= is_left (: 0 i64))
                     (block
@@ -69,7 +72,9 @@
                            (var right_store <ptr TRowSet>)) -> bool
     (block
       (if (! (call jt_probe_and_emit opp key own_row_id is_left pairs
-                    left_store right_store))
+                    left_store right_store
+                    (index left_store (: 0 i64))
+                    (index right_store (: 0 i64))))
         (block (return #f)))
       (var own_keys =
         (cast (field own Keys) <ptr <named Key (template readable mutable)>>))

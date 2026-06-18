@@ -82,11 +82,14 @@ NQumir::NAst::TExprPtr GenFilterKernelAst(
 // pair, replacing the always-true default (join/join_residual_default.oz) in the
 // kernel program. Signature:
 //   jt_residual_filter(left_store: <ptr TRowSet>, right_store: <ptr TRowSet>,
+//                      stream_left_batch: <ref TRowSet>,
+//                      stream_right_batch: <ref TRowSet>,
 //                      left_row_id: i64, right_row_id: i64) -> bool
 // innerType is the inner join schema (left fields ++ right fields);
 // leftFieldCount splits the two sides. Columns are read from the row stores by
-// decoding the packed row IDs. Reuses BuildColumnValueAst + the filter truth
-// helpers (same path as GenFilterKernelAst).
+// decoding the packed row IDs; batch index -1 reads from the corresponding
+// stream batch pointer. Reuses BuildColumnValueAst + the filter truth helpers
+// (same path as GenFilterKernelAst).
 NQumir::NAst::TExprPtr GenJoinResidualFilterAst(
     NQumir::NAst::TExprPtr predicate,
     const NQumir::NAst::TStructType& innerType,

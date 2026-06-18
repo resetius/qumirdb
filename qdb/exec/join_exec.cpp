@@ -556,7 +556,7 @@ void TRuntimeJoin::PullOneInnerInputBatch() {
 
         if (StreamMode_ == EJoinStreamMode::StreamRightAgainstLeft) {
             if (Right_->Next(batch)) {
-                Kernels_.ProbeRightStream(LeftTable_.data(), &batch, 0, &PairBuffer_,
+                Kernels_.ProbeRightStream(LeftTable_.data(), &batch, -1, &PairBuffer_,
                     const_cast<TRowSet*>(LeftRows_.Data()),
                     const_cast<TRowSet*>(RightRows_.Data()));
                 DrainStreamingPairs(batch, EJoinSide::Right);
@@ -569,7 +569,7 @@ void TRuntimeJoin::PullOneInnerInputBatch() {
         }
 
         if (Left_->Next(batch)) {
-            Kernels_.ProbeLeftStream(RightTable_.data(), &batch, 0, &PairBuffer_,
+            Kernels_.ProbeLeftStream(RightTable_.data(), &batch, -1, &PairBuffer_,
                 const_cast<TRowSet*>(LeftRows_.Data()),
                 const_cast<TRowSet*>(RightRows_.Data()));
             DrainStreamingPairs(batch, EJoinSide::Left);
@@ -714,11 +714,7 @@ bool TRuntimeJoin::Next(TRowSet& rowSet) {
         if (BothDone_) {
             return false;
         }
-        if (HasResidual_) {
-            PullOneInputBatch();
-        } else {
-            PullOneInnerInputBatch();
-        }
+        PullOneInnerInputBatch();
     }
 }
 

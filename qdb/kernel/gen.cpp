@@ -1035,9 +1035,13 @@ NQumir::NAst::TExprPtr GenJoinResidualFilterAst(
 
     auto rowSetPtrType = std::make_shared<TPointerType>(
         std::make_shared<TNamedType>("TRowSet", rowSetType));
+    auto rowSetRefType = std::make_shared<TReferenceType>(
+        std::make_shared<TNamedType>("TRowSet", rowSetType));
     std::vector<TParam> params = {
         std::make_shared<TVarStmt>(loc, "left_store", rowSetPtrType),
         std::make_shared<TVarStmt>(loc, "right_store", rowSetPtrType),
+        std::make_shared<TVarStmt>(loc, "stream_left_batch", rowSetRefType),
+        std::make_shared<TVarStmt>(loc, "stream_right_batch", rowSetRefType),
         std::make_shared<TVarStmt>(loc, "left_row_id", i64Type),
         std::make_shared<TVarStmt>(loc, "right_row_id", i64Type),
     };
@@ -1059,6 +1063,9 @@ NQumir::NAst::TExprPtr GenJoinResidualFilterAst(
     };
     auto assign = [&](const std::string& name, TExprPtr value) -> TExprPtr {
         return std::make_shared<TAssignExpr>(loc, name, std::move(value));
+    };
+    auto block = [&](std::vector<TExprPtr> stmts) -> TExprPtr {
+        return std::make_shared<TBlockExpr>(loc, std::move(stmts));
     };
 
     // Columns field type (pointer) and its pointee (one TColumn value).
@@ -1089,15 +1096,25 @@ NQumir::NAst::TExprPtr GenJoinResidualFilterAst(
     body.push_back(var("right_row", i64Type));
     body.push_back(assign("right_row", binary("&", ident("right_row_id"), numI64(0xffffffff))));
 
-    // Per-side Columns pointers: store[batch].Columns.
+    // Per-side Columns pointers. Batch index -1 means the side is the current
+    // stream batch and is not present in the row store.
     auto storeColumns = [&](const char* store, const char* batchVar) -> TExprPtr {
         auto rs = std::make_shared<TIndexExpr>(loc, ident(store), ident(batchVar));
         return std::make_shared<TFieldAccessExpr>(loc, rs, "Columns");
     };
+    auto streamColumns = [&](const char* streamBatch) -> TExprPtr {
+        return std::make_shared<TFieldAccessExpr>(loc, ident(streamBatch), "Columns");
+    };
     body.push_back(var("left_cols", ptrColumnType));
-    body.push_back(assign("left_cols", storeColumns("left_store", "left_batch")));
+    body.push_back(std::make_shared<TIfExpr>(loc,
+        binary("==", ident("left_batch"), numI64(-1)),
+        block({assign("left_cols", streamColumns("stream_left_batch"))}),
+        block({assign("left_cols", storeColumns("left_store", "left_batch"))})));
     body.push_back(var("right_cols", ptrColumnType));
-    body.push_back(assign("right_cols", storeColumns("right_store", "right_batch")));
+    body.push_back(std::make_shared<TIfExpr>(loc,
+        binary("==", ident("right_batch"), numI64(-1)),
+        block({assign("right_cols", streamColumns("stream_right_batch"))}),
+        block({assign("right_cols", storeColumns("right_store", "right_batch"))})));
 
     // Bind only the referenced columns through the shared materializer.
     std::unordered_map<std::string, std::string> validityNames;
