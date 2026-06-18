@@ -100,6 +100,38 @@ int64_t qdb_string_view_sql_like(qdb_string_view str, const char* pattern)
     return *p == '\0' ? 1 : 0;
 }
 
+int64_t qdb_string_view_cmp_cstr(const uint8_t* data, int64_t size, const char* cstr)
+{
+    if (!cstr) return size > 0 ? 1 : 0;
+    for (int64_t i = 0; i < size; ++i) {
+        if (cstr[i] == '\0') return 1;
+        int diff = static_cast<int>(static_cast<uint8_t>(data[i]))
+                 - static_cast<int>(static_cast<uint8_t>(cstr[i]));
+        if (diff != 0) return diff;
+    }
+    return cstr[size] == '\0' ? 0 : -1;
+}
+
+int64_t qdb_cstr_cmp_cstr(const char* a, const char* b)
+{
+    if (!a && !b) return 0;
+    if (!a) return -1;
+    if (!b) return 1;
+    return static_cast<int64_t>(std::strcmp(a, b));
+}
+
+// SQL SUBSTRING(str FROM start FOR length), 1-based start index.
+qdb_string_view qdb_substring(qdb_string_view str, int32_t start, int32_t length)
+{
+    int64_t offset = static_cast<int64_t>(start) - 1;
+    if (offset < 0) offset = 0;
+    if (offset >= str.Size) return {str.Data + str.Size, 0};
+    int64_t len = static_cast<int64_t>(length);
+    if (len < 0) len = 0;
+    if (offset + len > str.Size) len = str.Size - offset;
+    return {str.Data + offset, len};
+}
+
 // Howard Hinnant's date algorithm: https://howardhinnant.github.io/date_algorithms.html
 int32_t qdb_date_year(int32_t days) {
     // Shift epoch from 1970-01-01 to 0000-03-01 so leap-day falls at year end.

@@ -34,6 +34,15 @@ TExprPtr cast(TExprPtr expr, TTypePtr type) {
     return std::make_shared<TCastExpr>(expr->Location, std::move(expr), std::move(type));
 }
 
+TExprPtr field(TExprPtr obj, const std::string& name) {
+    return std::make_shared<TFieldAccessExpr>(obj->Location, std::move(obj), name);
+}
+
+TExprPtr call(const std::string& fn, std::vector<TExprPtr> args) {
+    TLocation loc{};
+    return std::make_shared<TCallExpr>(loc, ident(fn), std::move(args));
+}
+
 } // namespace
 
 QumirDbModule::QumirDbModule() {
@@ -294,6 +303,141 @@ QumirDbModule::QumirDbModule() {
             },
             .ArgTypes = {namedStringViewType, stringLiteralType},
             .ReturnType = i64Type,
+        },
+        {
+            .Name = "qdb_string_view_cmp_cstr",
+            .MangledName = "qdb_string_view_cmp_cstr",
+            .Ptr = reinterpret_cast<void*>(static_cast<int64_t(*)(
+                const uint8_t*, int64_t, const char*)>(qdb_string_view_cmp_cstr)),
+            .Packed = +[](const uint64_t* args, size_t) -> uint64_t {
+                return static_cast<uint64_t>(qdb_string_view_cmp_cstr(
+                    reinterpret_cast<const uint8_t*>(args[0]),
+                    static_cast<int64_t>(args[1]),
+                    reinterpret_cast<const char*>(args[2])));
+            },
+            .ArgTypes = {ptrU8Type, i64Type, stringLiteralType},
+            .ReturnType = i64Type,
+        },
+        {
+            .Name = "qdb_cstr_cmp_cstr",
+            .MangledName = "qdb_cstr_cmp_cstr",
+            .Ptr = reinterpret_cast<void*>(static_cast<int64_t(*)(
+                const char*, const char*)>(qdb_cstr_cmp_cstr)),
+            .Packed = +[](const uint64_t* args, size_t) -> uint64_t {
+                return static_cast<uint64_t>(qdb_cstr_cmp_cstr(
+                    reinterpret_cast<const char*>(args[0]),
+                    reinterpret_cast<const char*>(args[1])));
+            },
+            .ArgTypes = {stringLiteralType, stringLiteralType},
+            .ReturnType = i64Type,
+        },
+        // ── StringView comparison operators ──────────────────────────────────
+        // All inlines reduce to cmp(...) op 0 so the result is i1 (sext→u8 = 0xff/0x00).
+#define QDB_SV_SV_OP(opname, mangled, op) \
+        { \
+            .Name = opname, \
+            .MangledName = mangled, \
+            .ArgTypes = {namedStringViewType, namedStringViewType}, \
+            .ReturnType = i64Type, \
+            .IsOp = true, \
+            .Inline = [i64Type](std::vector<TExprPtr> args) -> TExprPtr { \
+                auto cmp = call("qdb_filter_string_compare", { \
+                    field(args[0], "Data"), field(args[0], "Size"), \
+                    field(args[1], "Data"), field(args[1], "Size"), \
+                }); \
+                return std::make_shared<TBinaryExpr>(TLocation{}, TOperator(op), \
+                    std::move(cmp), number(i64Type, 0)); \
+            }, \
+        },
+        QDB_SV_SV_OP("==", "qdb_sv_sv_eq", "==")
+        QDB_SV_SV_OP("!=", "qdb_sv_sv_ne", "!=")
+        QDB_SV_SV_OP("<",  "qdb_sv_sv_lt", "<")
+        QDB_SV_SV_OP("<=", "qdb_sv_sv_le", "<=")
+        QDB_SV_SV_OP(">",  "qdb_sv_sv_gt", ">")
+        QDB_SV_SV_OP(">=", "qdb_sv_sv_ge", ">=")
+#undef QDB_SV_SV_OP
+#define QDB_SV_LIT_OP(opname, mangled, op) \
+        { \
+            .Name = opname, \
+            .MangledName = mangled, \
+            .ArgTypes = {namedStringViewType, stringLiteralType}, \
+            .ReturnType = i64Type, \
+            .IsOp = true, \
+            .Inline = [i64Type](std::vector<TExprPtr> args) -> TExprPtr { \
+                auto cmp = call("qdb_string_view_cmp_cstr", { \
+                    field(args[0], "Data"), field(args[0], "Size"), args[1], \
+                }); \
+                return std::make_shared<TBinaryExpr>(TLocation{}, TOperator(op), \
+                    std::move(cmp), number(i64Type, 0)); \
+            }, \
+        },
+        QDB_SV_LIT_OP("==", "qdb_sv_lit_eq", "==")
+        QDB_SV_LIT_OP("!=", "qdb_sv_lit_ne", "!=")
+        QDB_SV_LIT_OP("<",  "qdb_sv_lit_lt", "<")
+        QDB_SV_LIT_OP("<=", "qdb_sv_lit_le", "<=")
+        QDB_SV_LIT_OP(">",  "qdb_sv_lit_gt", ">")
+        QDB_SV_LIT_OP(">=", "qdb_sv_lit_ge", ">=")
+#undef QDB_SV_LIT_OP
+#define QDB_LIT_SV_OP(opname, mangled, op) \
+        { \
+            .Name = opname, \
+            .MangledName = mangled, \
+            .ArgTypes = {stringLiteralType, namedStringViewType}, \
+            .ReturnType = i64Type, \
+            .IsOp = true, \
+            .Inline = [i64Type](std::vector<TExprPtr> args) -> TExprPtr { \
+                auto cmp = call("qdb_string_view_cmp_cstr", { \
+                    field(args[1], "Data"), field(args[1], "Size"), args[0], \
+                }); \
+                return std::make_shared<TBinaryExpr>(TLocation{}, TOperator(op), \
+                    number(i64Type, 0), std::move(cmp)); \
+            }, \
+        },
+        QDB_LIT_SV_OP("==", "qdb_lit_sv_eq", "==")
+        QDB_LIT_SV_OP("!=", "qdb_lit_sv_ne", "!=")
+        QDB_LIT_SV_OP("<",  "qdb_lit_sv_lt", "<")
+        QDB_LIT_SV_OP("<=", "qdb_lit_sv_le", "<=")
+        QDB_LIT_SV_OP(">",  "qdb_lit_sv_gt", ">")
+        QDB_LIT_SV_OP(">=", "qdb_lit_sv_ge", ">=")
+#undef QDB_LIT_SV_OP
+#define QDB_LIT_LIT_OP(opname, mangled, op) \
+        { \
+            .Name = opname, \
+            .MangledName = mangled, \
+            .ArgTypes = {stringLiteralType, stringLiteralType}, \
+            .ReturnType = i64Type, \
+            .IsOp = true, \
+            .Inline = [i64Type](std::vector<TExprPtr> args) -> TExprPtr { \
+                auto cmp = call("qdb_cstr_cmp_cstr", {args[0], args[1]}); \
+                return std::make_shared<TBinaryExpr>(TLocation{}, TOperator(op), \
+                    std::move(cmp), number(i64Type, 0)); \
+            }, \
+        },
+        QDB_LIT_LIT_OP("==", "qdb_lit_lit_eq", "==")
+        QDB_LIT_LIT_OP("!=", "qdb_lit_lit_ne", "!=")
+        QDB_LIT_LIT_OP("<",  "qdb_lit_lit_lt", "<")
+        QDB_LIT_LIT_OP("<=", "qdb_lit_lit_le", "<=")
+        QDB_LIT_LIT_OP(">",  "qdb_lit_lit_gt", ">")
+        QDB_LIT_LIT_OP(">=", "qdb_lit_lit_ge", ">=")
+#undef QDB_LIT_LIT_OP
+        {
+            .Name = "qdb_substring",
+            .MangledName = "qdb_substring",
+            .Ptr = reinterpret_cast<void*>(static_cast<qdb_string_view(*)(
+                qdb_string_view, int32_t, int32_t)>(qdb_substring)),
+            .Packed = +[](const uint64_t* args, size_t) -> uint64_t {
+                // args[0] = sret pointer (destination qdb_string_view)
+                // args[1] = pointer to source qdb_string_view
+                // args[2] = start (1-based), args[3] = length
+                auto* dst = reinterpret_cast<qdb_string_view*>(args[0]);
+                qdb_string_view str = *reinterpret_cast<const qdb_string_view*>(args[1]);
+                int32_t start  = static_cast<int32_t>(args[2]);
+                int32_t length = static_cast<int32_t>(args[3]);
+                *dst = qdb_substring(str, start, length);
+                return 0;
+            },
+            .ArgTypes = {namedStringViewType, i32Type, i32Type},
+            .ReturnType = namedStringViewType,
         },
         {
             .Name = "qdb_bitmap_set_valid",
