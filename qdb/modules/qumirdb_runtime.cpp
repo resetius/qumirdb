@@ -26,14 +26,6 @@ void qdb_free(void* ptr) {
     std::free(ptr);
 }
 
-double qdb_bits_f64(uint64_t bits) {
-    return std::bit_cast<double>(bits);
-}
-
-uint64_t qdb_f64_bits(double value) {
-    return std::bit_cast<uint64_t>(value);
-}
-
 int64_t qdb_filter_string_compare(
     const uint8_t* left, int64_t leftSize,
     const uint8_t* right, int64_t rightSize)
