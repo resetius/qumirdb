@@ -11,6 +11,7 @@
 #include <qdb/ops/project.h>
 
 #include <qdb/kernel/project_type.h>
+#include <qdb/modules/qumirdb.h>
 #include <qdb/types/nullable.h>
 
 #include <qumir/parser/type.h>
@@ -22,7 +23,9 @@ namespace NQqb {
 
 namespace {
 
-// Byte width of a computed project column's physical type.
+// Byte width of the kernel output buffer per row for a computed column.
+// For TStringType (string computed columns), the JIT kernel writes one
+// TStringView struct (16 bytes) per row; the executor post-converts those.
 size_t ProjectColumnWidth(const NQumir::NAst::TTypePtr& type) {
     using namespace NQumir::NAst;
     auto inner = UnwrapNamedType(UnwrapNullableType(type));
@@ -35,9 +38,30 @@ size_t ProjectColumnWidth(const NQumir::NAst::TTypePtr& type) {
     if (TMaybeType<TBoolType>(inner)) {
         return 1;
     }
+    if (TMaybeType<TStringType>(inner)) {
+        return 16; // sizeof(TStringView): ptr(8) + size(8)
+    }
     throw std::runtime_error(
         "project: unsupported computed column type " +
         (type ? type->ToString() : std::string("<null>")));
+}
+
+// Returns the LLVM-level type the project kernel should write for a computed
+// column. For TStringType outputs the kernel writes a raw TStringView struct
+// (Named("StringView") unwrapped to its inner struct).
+NQumir::NAst::TTypePtr ProjectJitType(const NQumir::NAst::TTypePtr& outType) {
+    using namespace NQumir::NAst;
+    if (TMaybeType<TStringType>(UnwrapNamedType(UnwrapNullableType(outType)))) {
+        static const auto sv = []() -> TTypePtr {
+            NQumir::NRegistry::QumirDbModule mod;
+            for (const auto& et : mod.ExternalTypes()) {
+                if (et.Name == "StringView") return et.Type;
+            }
+            return nullptr;
+        }();
+        return sv;
+    }
+    return outType;
 }
 
 } // namespace
@@ -158,8 +182,9 @@ std::unique_ptr<IRuntimeNode> TPhysicalPlanner::Build(const TOperatorPtr& root) 
         // through the project kernel into owned buffers.
         std::vector<TProjectColumn> columns;
         std::vector<NQumir::NAst::TExprPtr> computedExprs;
-        std::vector<NQumir::NAst::TTypePtr> computedTypes;
+        std::vector<NQumir::NAst::TTypePtr> computedJitTypes;
         std::vector<size_t> computedWidths;
+        std::vector<bool> computedIsString;
         std::vector<std::pair<std::string, NQumir::NAst::TTypePtr>> outFields;
         for (const auto& projection : project->Projections()) {
             if (auto identNode = NQumir::NAst::TMaybeNode<NQumir::NAst::TIdentExpr>(
@@ -175,26 +200,32 @@ std::unique_ptr<IRuntimeNode> TPhysicalPlanner::Build(const TOperatorPtr& root) 
                     .Index = static_cast<int32_t>(std::distance(inputType->Fields.begin(), it))});
                 outFields.emplace_back(projection.Name, it->second);
             } else {
-                auto type = NKernel::InferProjectExprType(projection.Expression, *inputType);
+                auto outType = NKernel::InferProjectExprType(projection.Expression, *inputType);
+                auto jitType = ProjectJitType(outType);
+                using namespace NQumir::NAst;
+                bool isStr = static_cast<bool>(TMaybeType<TStringType>(
+                    UnwrapNamedType(UnwrapNullableType(outType))));
                 columns.push_back({.Computed = true,
                     .Index = static_cast<int32_t>(computedExprs.size())});
                 computedExprs.push_back(projection.Expression);
-                computedTypes.push_back(type);
-                computedWidths.push_back(ProjectColumnWidth(type));
-                outFields.emplace_back(projection.Name, type);
+                computedJitTypes.push_back(jitType);
+                computedWidths.push_back(ProjectColumnWidth(outType));
+                computedIsString.push_back(isStr);
+                outFields.emplace_back(projection.Name, outType);
             }
         }
 
         TKernelCompiler::TProjectDispatch dispatch;
         if (!computedExprs.empty()) {
             TKernelCompiler compiler(Diagnostics_);
-            dispatch = compiler.CompileProject(*inputType, computedExprs, computedTypes);
+            dispatch = compiler.CompileProject(*inputType, computedExprs, computedJitTypes);
         }
 
         return std::make_unique<TRuntimeProject>(
             std::move(input),
             std::make_shared<NQumir::NAst::TStructType>(std::move(outFields)),
-            std::move(columns), std::move(dispatch), std::move(computedWidths));
+            std::move(columns), std::move(dispatch),
+            std::move(computedWidths), std::move(computedIsString));
     }
 
     if (auto maybe = TMaybeOp<TAggregateOperator>(root)) {

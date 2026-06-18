@@ -116,6 +116,13 @@ TTypePtr InferProjectExprType(const TExprPtr& expr, const TStructType& inputType
             const auto& retTypes = ExternalFuncReturnTypes();
             auto it = retTypes.find(callee.Cast()->Name);
             if (it != retTypes.end()) {
+                // Named("StringView") → TStringType so the output column is
+                // treated as a variable-length string column by the planner.
+                if (auto named = TMaybeType<TNamedType>(it->second)) {
+                    if (named.Cast()->Name == "StringView") {
+                        return std::make_shared<TStringType>();
+                    }
+                }
                 return UnwrapNamedType(UnwrapNullableType(it->second));
             }
         }
