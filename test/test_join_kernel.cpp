@@ -199,8 +199,10 @@ TEST(CompileJoin, ProducesWorkingInnerJoinKernels) {
     TPairBuffer pairs{};
     ASSERT_TRUE(kernels.Init(&left, 8));
     ASSERT_TRUE(kernels.Init(&right, 8));
-    ASSERT_TRUE(kernels.ProcessLeft(&left, &right, &lbatch, 0, &pairs));
-    ASSERT_TRUE(kernels.ProcessRight(&right, &left, &rbatch, 0, &pairs));
+    // left_store / right_store are single-batch arrays (batch_idx 0). The default
+    // (always-true) jt_residual_filter ignores them.
+    ASSERT_TRUE(kernels.ProcessLeft(&left, &right, &lbatch, 0, &pairs, &lbatch, &rbatch));
+    ASSERT_TRUE(kernels.ProcessRight(&right, &left, &rbatch, 0, &pairs, &lbatch, &rbatch));
 
     std::vector<std::tuple<int64_t, int64_t>> got;
     for (int64_t i = 0; i < pairs.Count; ++i) {

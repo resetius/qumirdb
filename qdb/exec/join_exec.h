@@ -63,6 +63,12 @@ public:
 
     int32_t BatchCount() const { return static_cast<int32_t>(Batches_.size()); }
 
+    // Contiguous base of the batch array, indexable by batch index. Passed to
+    // the join kernels so the injected jt_residual_filter can read columns of
+    // already-stored rows by decoding packed row IDs. The pointer may be
+    // invalidated by a later PushBatch (vector growth) — re-read it each call.
+    const TRowSet* Data() const { return Batches_.data(); }
+
     const TRowSet& Batch(int32_t batchIdx) const { return Batches_[batchIdx]; }
 
     const TColumn& Column(int32_t batchIdx, int32_t colIdx) const {
@@ -191,8 +197,7 @@ public:
         std::unique_ptr<IRuntimeNode> right,
         NQumir::NAst::TTypePtr outputType, TJoinKernels kernels,
         EJoinType joinType,
-        TKernelCompiler::TFilterDispatch residualFilter = {},
-        NQumir::NAst::TTypePtr innerOutputType = {});
+        bool hasResidual = false);
     ~TRuntimeJoin() override;
 
     NQumir::NAst::TTypePtr OutputType() const override { return OutputType_; }
@@ -210,7 +215,9 @@ private:
     void EnsureInit();
     void PullOneInputBatch();
     void DrainKernelPairs();
-    void DrainPairsToResidualVecs();
+    // Residual LeftSemi/LeftAnti: collect the (already filter-pruned) left row
+    // IDs from PairBuffer_ into MatchedLeftIds_, then reset the buffer.
+    void CollectMatchedLeftIds();
 
     std::unique_ptr<IRuntimeNode> Left_;
     std::unique_ptr<IRuntimeNode> Right_;
@@ -230,15 +237,12 @@ private:
     bool SemiAntiFinalized_ = false;
     bool OuterFinalized_ = false;
 
-    // Residual filter (null = no filter)
-    TKernelCompiler::TFilterDispatch ResidualFilter_;
-    // Reusable selection buffer for residual filter (1 byte per row, not bit-packed).
-    std::vector<uint8_t> ResidualSelBuf_;
-    // For LeftSemi/LeftAnti + residual: inner (left++right) builder + pair vecs
-    NQumir::NAst::TTypePtr InnerOutputType_;
-    std::optional<TJoinOutputBuilder> InnerBuilder_;
-    std::vector<TRowId> InnerLeftIds_;
-    std::vector<TRowId> InnerRightIds_;
+    // True when a residual filter is injected into the join kernels. The filter
+    // itself lives inside the kernel (jt_residual_filter); this flag only selects
+    // the LeftSemi/LeftAnti execution path (Inner pair generation + dedup).
+    bool HasResidual_ = false;
+    // LeftSemi/LeftAnti + residual: left row IDs that survived the in-kernel
+    // filter on at least one matched pair.
     std::unordered_set<TRowId> MatchedLeftIds_;
     bool ResidualSemiAntiDone_ = false;
 };

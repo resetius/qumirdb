@@ -78,6 +78,23 @@ NQumir::NAst::TExprPtr GenFilterKernelAst(
     NQumir::NAst::TTypePtr stringViewType,
     std::vector<std::shared_ptr<std::string>>& literalStorage);
 
+// Builds `jt_residual_filter` evaluating `predicate` on one (left,right) row
+// pair, replacing the always-true default (join/join_residual_default.oz) in the
+// kernel program. Signature:
+//   jt_residual_filter(left_store: <ptr TRowSet>, right_store: <ptr TRowSet>,
+//                      left_row_id: i64, right_row_id: i64) -> bool
+// innerType is the inner join schema (left fields ++ right fields);
+// leftFieldCount splits the two sides. Columns are read from the row stores by
+// decoding the packed row IDs. Reuses BuildColumnValueAst + the filter truth
+// helpers (same path as GenFilterKernelAst).
+NQumir::NAst::TExprPtr GenJoinResidualFilterAst(
+    NQumir::NAst::TExprPtr predicate,
+    const NQumir::NAst::TStructType& innerType,
+    size_t leftFieldCount,
+    NQumir::NAst::TTypePtr columnType,
+    NQumir::NAst::TTypePtr rowSetType,
+    NQumir::NAst::TTypePtr stringViewType);
+
 // Builds a vectorized project kernel for the COMPUTED columns only.
 // Signature: void <kernel>(rowSet: <ref TRowSet>, out: <ptr <ptr i8>>) — for each
 // row i and each computed projection k: out[k][i] = (cast) <expr_k>. Output

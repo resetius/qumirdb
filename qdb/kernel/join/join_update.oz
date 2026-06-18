@@ -16,7 +16,9 @@
                            (var key <named Key (template readable mutable)>)
                            (var own_row_id i64)
                            (var is_left i64)
-                           (var pairs <ref PairBuffer>)) -> bool
+                           (var pairs <ref PairBuffer>)
+                           (var left_store <ptr TRowSet>)
+                           (var right_store <ptr TRowSet>)) -> bool
     (block
       (var opp_keys =
         (cast (field opp Keys) <ptr <named Key (template readable mutable)>>))
@@ -34,13 +36,23 @@
           (while (< k bcount)
             (block
               (var opp_row_id = (index bdata k))
-              (if (!= is_left (: 0 i64))
+              (var flt_l i64)
+              (= flt_l own_row_id)
+              (var flt_r i64)
+              (= flt_r opp_row_id)
+              (if (== is_left (: 0 i64))
                 (block
-                  (if (! (call pb_push pairs own_row_id opp_row_id))
-                    (block (return #f))))
+                  (= flt_l opp_row_id)
+                  (= flt_r own_row_id)))
+              (if (call jt_residual_filter left_store right_store flt_l flt_r)
                 (block
-                  (if (! (call pb_push pairs opp_row_id own_row_id))
-                    (block (return #f)))))
+                  (if (!= is_left (: 0 i64))
+                    (block
+                      (if (! (call pb_push pairs own_row_id opp_row_id))
+                        (block (return #f))))
+                    (block
+                      (if (! (call pb_push pairs opp_row_id own_row_id))
+                        (block (return #f)))))))
               (= k (+ k (: 1 i64)))))))
       (var own_keys =
         (cast (field own Keys) <ptr <named Key (template readable mutable)>>))
