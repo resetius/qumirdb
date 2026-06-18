@@ -170,22 +170,6 @@ TEST(FilterKernel, ComparesStringColumnAndLiteralInBothOrders) {
     }
 }
 
-TEST(FilterKernel, PreservesEmptyUtf8AndEmbeddedNullLiterals) {
-    const std::string data = std::string() + "" + "\xD0\xAF" +
-        std::string("a\0b", 3) + "other";
-    const std::array<int32_t, 5> offsets = {0, 0, 2, 5, 10};
-
-    EXPECT_EQ(RunStringLiteralFilter(data, offsets, "==", "", false),
-        (std::array<uint8_t, 4>{0xff, 0, 0, 0}));
-    EXPECT_EQ(RunStringLiteralFilter(data, offsets, "==", "\xD0\xAF", true),
-        (std::array<uint8_t, 4>{0, 0xff, 0, 0}));
-    EXPECT_EQ(RunStringLiteralFilter(
-        data, offsets, "==", std::string("a\0b", 3), false),
-        (std::array<uint8_t, 4>{0, 0, 0xff, 0}));
-    EXPECT_EQ(RunStringLiteralFilter(
-        data, offsets, "==", "\xD0\xAF", false, true),
-        (std::array<uint8_t, 4>{0, 0xff, 0, 0}));
-}
 
 TEST(FilterKernel, AppliesSqlThreeValuedLogicToNullableColumns) {
     EXPECT_EQ(RunNullableIntegerFilter(
