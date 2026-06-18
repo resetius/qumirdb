@@ -1,10 +1,12 @@
 #include <qdb/kernel/project_type.h>
 
+#include <qdb/modules/qumirdb.h>
 #include <qdb/types/nullable.h>
 
 #include <qumir/error.h>
 
 #include <string>
+#include <unordered_map>
 
 namespace NQqb::NKernel {
 
@@ -27,6 +29,20 @@ bool IsComparison(const TOperator& op) {
 
 bool IsLogical(const TOperator& op) {
     return op == "&&" || op == "||";
+}
+
+const std::unordered_map<std::string, TTypePtr>& ExternalFuncReturnTypes() {
+    static const auto map = []() {
+        NQumir::NRegistry::QumirDbModule mod;
+        std::unordered_map<std::string, TTypePtr> m;
+        for (const auto& fn : mod.ExternalFunctions()) {
+            if (fn.ReturnType && !fn.IsOp) {
+                m.try_emplace(fn.Name, fn.ReturnType);
+            }
+        }
+        return m;
+    }();
+    return map;
 }
 
 } // namespace
@@ -92,6 +108,25 @@ TTypePtr InferProjectExprType(const TExprPtr& expr, const TStructType& inputType
     // (if cond then else) — infer from the then-branch.
     if (auto ifExpr = TMaybeNode<TIfExpr>(expr)) {
         return InferProjectExprType(ifExpr.Cast()->Then, inputType);
+    }
+
+    // (call fn arg...) — look up function return type from the module registry.
+    if (auto callExpr = TMaybeNode<TCallExpr>(expr)) {
+        if (auto callee = TMaybeNode<TIdentExpr>(callExpr.Cast()->Callee)) {
+            const auto& retTypes = ExternalFuncReturnTypes();
+            auto it = retTypes.find(callee.Cast()->Name);
+            if (it != retTypes.end()) {
+                return UnwrapNamedType(UnwrapNullableType(it->second));
+            }
+        }
+    }
+
+    // (block stmt... expr) — infer from the last statement.
+    if (auto blockExpr = TMaybeNode<TBlockExpr>(expr)) {
+        const auto& stmts = blockExpr.Cast()->Stmts;
+        if (!stmts.empty()) {
+            return InferProjectExprType(stmts.back(), inputType);
+        }
     }
 
     throw NQumir::TError(

@@ -13,6 +13,6 @@
       (rel source "__NATION__") ((s_nationkey n_nationkey)) (inner))
     (amount (- (* l_extendedprice (- (: 1.0 f64) l_discount)) (* ps_supplycost l_quantity)))
     (n_name n_name)
-    (o_year (qdb_date_year o_orderdate)))
+    (o_year (call qdb_date_year o_orderdate)))
   (keys n_name o_year)
   (agg sum_profit sum amount))
