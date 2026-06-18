@@ -422,6 +422,8 @@ NQumir::NAst::TExprPtr GenJoinProcessAst(
         std::make_shared<TNamedType>("HashTable", hashTableType));
     auto rowSetRefType = std::make_shared<TReferenceType>(
         std::make_shared<TNamedType>("TRowSet", rowSetType));
+    auto rowSetPtrType = std::make_shared<TPointerType>(
+        std::make_shared<TNamedType>("TRowSet", rowSetType));
     auto pairBufferRefType = std::make_shared<TReferenceType>(
         std::make_shared<TNamedType>("PairBuffer", pairBufferType));
     std::vector<TParam> params = {
@@ -430,6 +432,8 @@ NQumir::NAst::TExprPtr GenJoinProcessAst(
         std::make_shared<TVarStmt>(loc, "batch", rowSetRefType),
         std::make_shared<TVarStmt>(loc, "batch_idx", i64Type),
         std::make_shared<TVarStmt>(loc, "pairs", pairBufferRefType),
+        std::make_shared<TVarStmt>(loc, "left_store", rowSetPtrType),
+        std::make_shared<TVarStmt>(loc, "right_store", rowSetPtrType),
     };
 
     auto ptrColumnType = [&]() -> TTypePtr {
@@ -519,6 +523,7 @@ NQumir::NAst::TExprPtr GenJoinProcessAst(
     auto emitCall = call("jt_emit_and_insert", {
         ident("own"), ident("opp"), std::move(keyValue), std::move(ownRowId),
         numI64(isLeft ? 1 : 0), ident("pairs"),
+        ident("left_store"), ident("right_store"),
     });
 
     std::vector<TExprPtr> process;

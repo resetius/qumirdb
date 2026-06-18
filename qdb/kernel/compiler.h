@@ -78,11 +78,18 @@ struct TJoinKernels {
     // jt_init(table, capacity) — initializes one side's HashTable (key size is
     // captured). Returns false on allocation failure.
     std::function<bool(void* table, int64_t capacity)> Init;
-    // ProcessLeft(own=left, opp=right, batch, batchIdx, pairs): reads the left
-    // key columns, probes the right table, appends matching pairs, then inserts
-    // the batch's rows into the left table. ProcessRight is the mirror.
-    std::function<bool(void* own, void* opp, TRowSet* batch, int64_t batchIdx, void* pairs)> ProcessLeft;
-    std::function<bool(void* own, void* opp, TRowSet* batch, int64_t batchIdx, void* pairs)> ProcessRight;
+    // ProcessLeft(own=left, opp=right, batch, batchIdx, pairs, leftStore,
+    // rightStore): reads the left key columns, probes the right table, appends
+    // matching pairs (each gated by the injected jt_residual_filter, which reads
+    // columns from leftStore/rightStore — contiguous TRowSet arrays — by decoding
+    // the packed row IDs), then inserts the batch's rows into the left table.
+    // ProcessRight is the mirror. leftStore/rightStore are only dereferenced by a
+    // non-trivial residual filter; for the default always-true filter they are
+    // optimized away.
+    std::function<bool(void* own, void* opp, TRowSet* batch, int64_t batchIdx,
+        void* pairs, TRowSet* leftStore, TRowSet* rightStore)> ProcessLeft;
+    std::function<bool(void* own, void* opp, TRowSet* batch, int64_t batchIdx,
+        void* pairs, TRowSet* leftStore, TRowSet* rightStore)> ProcessRight;
     std::function<void(void* table)> DestroyTable;
     std::function<void(void* pairs)> DestroyPairs;
 
@@ -174,11 +181,21 @@ public:
     // Constraints (NQumir::TError if violated): type == Inner; key components
     // are fixed-width (integer/f64/composite) and type-compatible across sides.
     // String keys are not supported yet.
+    //
+    // Optional residual filter: when `residualPredicate` is set, it is compiled
+    // into the injected `jt_residual_filter` (evaluated per matched pair before
+    // emit), reading columns from the inner schema `innerType` (left fields ++
+    // right fields, split at `leftFieldCount`). For LeftSemi/LeftAnti with a
+    // residual predicate the process functions are generated as INNER (they emit
+    // pairs); the executor dedups matched left IDs.
     TJoinKernels CompileJoin(
         const NQumir::NAst::TStructType& leftType,
         const NQumir::NAst::TStructType& rightType,
         const std::vector<std::pair<std::string, std::string>>& keys,
-        EJoinType type);
+        EJoinType type,
+        const NQumir::NAst::TExprPtr& residualPredicate = nullptr,
+        const NQumir::NAst::TStructType* innerType = nullptr,
+        size_t leftFieldCount = 0);
 
 private:
     std::ostream* Diagnostics_ = nullptr;

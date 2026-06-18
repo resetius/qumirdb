@@ -277,9 +277,12 @@ std::unique_ptr<IRuntimeNode> TPhysicalPlanner::Build(const TOperatorPtr& root) 
             keys.emplace_back(key.Left, key.Right);
         }
 
-        // Residual filter: supported for Inner, LeftSemi, LeftAnti.
-        TKernelCompiler::TFilterDispatch residualDispatch;
-        TTypePtr innerOutputType;
+        // Residual filter: supported for Inner, LeftSemi, LeftAnti. The predicate
+        // is injected into the join kernels as jt_residual_filter (evaluated
+        // in-kernel before each emit) — see CompileJoin.
+        TTypePtr innerOutputType;  // keeps innerSt alive through CompileJoin
+        TStructType* innerSt = nullptr;
+        size_t leftFieldCount = 0;
         if (join->Filter()) {
             const auto jt = join->JoinType();
             if (jt != EJoinType::Inner &&
@@ -295,21 +298,22 @@ std::unique_ptr<IRuntimeNode> TPhysicalPlanner::Build(const TOperatorPtr& root) 
                     "residual filter: " + innerOut.error().ToString());
             }
             innerOutputType = *innerOut;
-            auto* innerSt = static_cast<TStructType*>(innerOutputType.get());
-            TKernelCompiler fc(Diagnostics_);
-            residualDispatch = fc.CompileFilter(*innerSt, join->Filter());
+            innerSt = static_cast<TStructType*>(innerOutputType.get());
+            leftFieldCount = leftType->Fields.size();
         }
 
-        // For LeftSemi/LeftAnti + residual: compile INNER kernels for pair gen.
+        // For LeftSemi/LeftAnti + residual: compile INNER process kernels (they
+        // emit pairs; the executor dedups matched left IDs).
         const EJoinType kernelType =
-            (residualDispatch &&
+            (join->Filter() &&
              (join->JoinType() == EJoinType::LeftSemi ||
               join->JoinType() == EJoinType::LeftAnti))
             ? EJoinType::Inner
             : join->JoinType();
 
         TKernelCompiler compiler(Diagnostics_);
-        auto kernels = compiler.CompileJoin(*leftType, *rightType, keys, kernelType);
+        auto kernels = compiler.CompileJoin(*leftType, *rightType, keys, kernelType,
+            join->Filter(), innerSt, leftFieldCount);
 
         // Output type from the physical (pruned) input types.
         auto outputType = ComputeJoinOutputType(
@@ -321,7 +325,7 @@ std::unique_ptr<IRuntimeNode> TPhysicalPlanner::Build(const TOperatorPtr& root) 
         return std::make_unique<TRuntimeJoin>(
             std::move(left), std::move(right), std::move(*outputType), std::move(kernels),
             join->JoinType(),
-            std::move(residualDispatch), std::move(innerOutputType));
+            /*hasResidual=*/join->Filter() != nullptr);
     }
 
     throw std::runtime_error("TPhysicalPlanner: unknown operator");

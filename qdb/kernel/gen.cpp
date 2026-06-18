@@ -919,6 +919,240 @@ NQumir::NAst::TExprPtr GenFilterKernelAst(
     return std::make_shared<TBlockExpr>(loc, std::vector<TExprPtr>{funDecl});
 }
 
+namespace {
+
+// Recursively collects all identifier names referenced in an expression.
+void CollectIdentNames(
+    const NQumir::NAst::TExprPtr& expr,
+    std::unordered_set<std::string>& out)
+{
+    using namespace NQumir::NAst;
+    if (!expr) {
+        return;
+    }
+    if (auto ident = TMaybeNode<TIdentExpr>(expr)) {
+        out.insert(ident.Cast()->Name);
+        return;
+    }
+    for (const auto& child : expr->Children()) {
+        CollectIdentNames(child, out);
+    }
+}
+
+// Deep-copies a filter predicate AST so the in-place rewrites
+// (SpecializeFilterPredicate / SubstFieldsInPlace) don't mutate a predicate
+// shared across multiple compilations (CompileJoin compiles each entry from a
+// fresh program). Covers the node kinds that appear in filter predicates.
+NQumir::NAst::TExprPtr CloneFilterExpr(const NQumir::NAst::TExprPtr& expr) {
+    using namespace NQumir::NAst;
+    if (!expr) {
+        return nullptr;
+    }
+    const NQumir::TLocation loc = expr->Location;
+    TExprPtr out;
+    if (auto n = TMaybeNode<TIdentExpr>(expr)) {
+        out = std::make_shared<TIdentExpr>(loc, n.Cast()->Name);
+    } else if (auto n = TMaybeNode<TNumberExpr>(expr)) {
+        out = n.Cast()->IsFloat()
+            ? std::make_shared<TNumberExpr>(loc, n.Cast()->FloatValue)
+            : std::make_shared<TNumberExpr>(loc, n.Cast()->IntValue);
+    } else if (auto n = TMaybeNode<TStringLiteralExpr>(expr)) {
+        out = std::make_shared<TStringLiteralExpr>(loc, n.Cast()->Value);
+    } else if (auto n = TMaybeNode<TUnaryExpr>(expr)) {
+        out = std::make_shared<TUnaryExpr>(loc, n.Cast()->Operator,
+            CloneFilterExpr(n.Cast()->Operand));
+    } else if (auto n = TMaybeNode<TBinaryExpr>(expr)) {
+        out = std::make_shared<TBinaryExpr>(loc, n.Cast()->Operator,
+            CloneFilterExpr(n.Cast()->Left), CloneFilterExpr(n.Cast()->Right));
+    } else if (auto n = TMaybeNode<TCallExpr>(expr)) {
+        std::vector<TExprPtr> args;
+        args.reserve(n.Cast()->Args.size());
+        for (const auto& a : n.Cast()->Args) {
+            args.push_back(CloneFilterExpr(a));
+        }
+        out = std::make_shared<TCallExpr>(loc,
+            CloneFilterExpr(n.Cast()->Callee), std::move(args));
+    } else if (auto n = TMaybeNode<TCastExpr>(expr)) {
+        out = std::make_shared<TCastExpr>(loc,
+            CloneFilterExpr(n.Cast()->Operand), n.Cast()->Type);
+    } else if (auto n = TMaybeNode<TIndexExpr>(expr)) {
+        out = std::make_shared<TIndexExpr>(loc,
+            CloneFilterExpr(n.Cast()->Collection), CloneFilterExpr(n.Cast()->Index));
+    } else {
+        throw std::runtime_error(
+            "residual filter: cannot clone predicate node '" +
+            std::string(expr->NodeName()) + "'");
+    }
+    out->Type = expr->Type;
+    return out;
+}
+
+} // namespace
+
+// Residual join filter: evaluates `predicate` on a single (left_row, right_row)
+// pair. Columns are read directly from the two row stores (contiguous TRowSet
+// arrays) by decoding the packed row IDs. Mirrors GenFilterKernelAst's column
+// binding, but with no loop and per-side store/row selection: inner-schema
+// fields with index < leftFieldCount come from left_store at left_row, the rest
+// from right_store at right_row.
+NQumir::NAst::TExprPtr GenJoinResidualFilterAst(
+    NQumir::NAst::TExprPtr predicate,
+    const NQumir::NAst::TStructType& innerType,
+    size_t leftFieldCount,
+    NQumir::NAst::TTypePtr columnType,
+    NQumir::NAst::TTypePtr rowSetType,
+    NQumir::NAst::TTypePtr stringViewType)
+{
+    using namespace NQumir::NAst;
+    NQumir::TLocation loc{};
+
+    auto i64Type = std::make_shared<TIntegerType>();
+    auto boolType = std::make_shared<TBoolType>();
+
+    // Work on a private copy — CompileJoin compiles each entry from a fresh
+    // program, so the shared predicate must not be mutated in place.
+    predicate = CloneFilterExpr(predicate);
+
+    // Per-field value-variable names (matching GenFilterKernelAst's scheme).
+    std::unordered_map<std::string, std::string> fixedValues;
+    std::unordered_set<std::string> stringFields;
+    std::unordered_map<std::string, std::string> stringValues;
+    for (const auto& [name, type] : innerType.Fields) {
+        if (TMaybeType<TStringType>(UnwrapNamedType(UnwrapNullableType(type)))) {
+            stringFields.insert(name);
+            stringValues.emplace(name, name + "_value");
+        } else {
+            fixedValues.emplace(name, name + "_value");
+        }
+    }
+
+    // Which columns the predicate actually touches (collect before renaming).
+    std::unordered_set<std::string> referenced;
+    CollectIdentNames(predicate, referenced);
+
+    SpecializeFilterPredicate(predicate, stringFields, stringValues);
+    SubstFieldsInPlace(predicate, fixedValues);
+
+    auto rowSetPtrType = std::make_shared<TPointerType>(
+        std::make_shared<TNamedType>("TRowSet", rowSetType));
+    std::vector<TParam> params = {
+        std::make_shared<TVarStmt>(loc, "left_store", rowSetPtrType),
+        std::make_shared<TVarStmt>(loc, "right_store", rowSetPtrType),
+        std::make_shared<TVarStmt>(loc, "left_row_id", i64Type),
+        std::make_shared<TVarStmt>(loc, "right_row_id", i64Type),
+    };
+
+    auto ident = [&](const std::string& name) -> TExprPtr {
+        return std::make_shared<TIdentExpr>(loc, name);
+    };
+    auto numI64 = [&](int64_t value) -> TExprPtr {
+        auto result = std::make_shared<TNumberExpr>(loc, value);
+        result->Type = i64Type;
+        return result;
+    };
+    auto binary = [&](const char* op, TExprPtr l, TExprPtr r) -> TExprPtr {
+        return std::make_shared<TBinaryExpr>(loc, TOperator(op),
+            std::move(l), std::move(r));
+    };
+    auto var = [&](const std::string& name, TTypePtr type) -> TExprPtr {
+        return std::make_shared<TVarStmt>(loc, name, std::move(type));
+    };
+    auto assign = [&](const std::string& name, TExprPtr value) -> TExprPtr {
+        return std::make_shared<TAssignExpr>(loc, name, std::move(value));
+    };
+
+    // Columns field type (pointer) and its pointee (one TColumn value).
+    auto ptrColumnType = [&]() -> TTypePtr {
+        auto* rs = static_cast<TStructType*>(rowSetType.get());
+        for (const auto& [name, type] : rs->Fields) {
+            if (name == "Columns") {
+                return type;
+            }
+        }
+        return std::make_shared<TPointerType>(columnType);
+    }();
+    auto columnValueType = [&]() -> TTypePtr {
+        if (auto pointer = TMaybeType<TPointerType>(ptrColumnType)) {
+            return pointer.Cast()->PointeeType;
+        }
+        return columnType;
+    }();
+
+    std::vector<TExprPtr> body;
+    // Decode packed row IDs: batch = id >> 32, row = id & 0xffffffff.
+    body.push_back(var("left_batch", i64Type));
+    body.push_back(assign("left_batch", binary(">>", ident("left_row_id"), numI64(32))));
+    body.push_back(var("left_row", i64Type));
+    body.push_back(assign("left_row", binary("&", ident("left_row_id"), numI64(0xffffffff))));
+    body.push_back(var("right_batch", i64Type));
+    body.push_back(assign("right_batch", binary(">>", ident("right_row_id"), numI64(32))));
+    body.push_back(var("right_row", i64Type));
+    body.push_back(assign("right_row", binary("&", ident("right_row_id"), numI64(0xffffffff))));
+
+    // Per-side Columns pointers: store[batch].Columns.
+    auto storeColumns = [&](const char* store, const char* batchVar) -> TExprPtr {
+        auto rs = std::make_shared<TIndexExpr>(loc, ident(store), ident(batchVar));
+        return std::make_shared<TFieldAccessExpr>(loc, rs, "Columns");
+    };
+    body.push_back(var("left_cols", ptrColumnType));
+    body.push_back(assign("left_cols", storeColumns("left_store", "left_batch")));
+    body.push_back(var("right_cols", ptrColumnType));
+    body.push_back(assign("right_cols", storeColumns("right_store", "right_batch")));
+
+    // Bind only the referenced columns through the shared materializer.
+    std::unordered_map<std::string, std::string> validityNames;
+    int32_t fieldIndex = 0;
+    for (const auto& [name, type] : innerType.Fields) {
+        const int32_t idx = fieldIndex++;
+        if (!referenced.contains(name)) {
+            continue;
+        }
+        const bool isLeft = static_cast<size_t>(idx) < leftFieldCount;
+        const char* colsVar = isLeft ? "left_cols" : "right_cols";
+        const char* rowVar = isLeft ? "left_row" : "right_row";
+        const int32_t colIdx = isLeft ? idx
+            : idx - static_cast<int32_t>(leftFieldCount);
+
+        auto colElem = std::make_shared<TIndexExpr>(loc,
+            ident(colsVar), numI64(colIdx));
+        body.push_back(var(name, columnValueType));
+        body.push_back(assign(name, colElem));
+
+        const std::string prefix = name + "_residual";
+        auto materialized = BuildColumnValueAst(name, rowVar, prefix, type, stringViewType);
+        body.insert(body.end(),
+            std::make_move_iterator(materialized.Setup.begin()),
+            std::make_move_iterator(materialized.Setup.end()));
+        const std::string valueName = TMaybeType<TStringType>(
+            UnwrapNamedType(UnwrapNullableType(type)))
+            ? stringValues.at(name)
+            : fixedValues.at(name);
+        if (IsNullableType(type)) {
+            validityNames.emplace(valueName, prefix + "_valid");
+        }
+        body.push_back(var(valueName, materialized.ValueType));
+        body.push_back(assign(valueName, std::move(materialized.Value)));
+    }
+
+    // Evaluate the predicate (with three-valued-logic truth when nullable).
+    TExprPtr result;
+    if (validityNames.empty() || !UsesNullableValue(predicate, validityNames)) {
+        result = std::move(predicate);
+    } else {
+        size_t nextTruthTemporary = 0;
+        auto truth = BuildFilterTruthAst(
+            std::move(predicate), validityNames, body, nextTruthTemporary);
+        result = std::make_shared<TBinaryExpr>(loc, TOperator("=="),
+            ident(truth.State), numI64(1));
+    }
+    auto castedResult = std::make_shared<TCastExpr>(loc, std::move(result), boolType);
+    body.push_back(std::make_shared<TReturnExpr>(loc, std::move(castedResult)));
+
+    return std::make_shared<TFunDecl>(loc, "jt_residual_filter",
+        std::move(params), std::make_shared<TBlockExpr>(loc, std::move(body)),
+        boolType);
+}
+
 // Project kernel for COMPUTED columns. Mirrors GenFilterKernelAst's column
 // binding/materialization (column refs in the exprs are rewritten to {name}_value
 // temps), but instead of writing a selection mask it writes each computed

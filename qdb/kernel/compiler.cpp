@@ -465,7 +465,10 @@ TJoinKernels TKernelCompiler::CompileJoin(
     const NQumir::NAst::TStructType& leftType,
     const NQumir::NAst::TStructType& rightType,
     const std::vector<std::pair<std::string, std::string>>& keys,
-    EJoinType type)
+    EJoinType type,
+    const NQumir::NAst::TExprPtr& residualPredicate,
+    const NQumir::NAst::TStructType* innerType,
+    size_t leftFieldCount)
 {
     using namespace NQumir::NAst;
 
@@ -483,7 +486,7 @@ TJoinKernels TKernelCompiler::CompileJoin(
     const int64_t keySize = static_cast<int64_t>(keyDesc.Size);
 
     auto dbModule = std::make_shared<NQumir::NRegistry::QumirDbModule>();
-    TTypePtr columnType, rowSetType, hashTableType, pairBufferType;
+    TTypePtr columnType, rowSetType, hashTableType, pairBufferType, stringViewType;
     for (const auto& et : dbModule->ExternalTypes()) {
         if (et.Name == "TColumn") {
             columnType = et.Type;
@@ -493,6 +496,8 @@ TJoinKernels TKernelCompiler::CompileJoin(
             hashTableType = et.Type;
         } else if (et.Name == "PairBuffer") {
             pairBufferType = et.Type;
+        } else if (et.Name == "StringView") {
+            stringViewType = et.Type;
         }
     }
 
@@ -503,6 +508,21 @@ TJoinKernels TKernelCompiler::CompileJoin(
         if (!library) {
             throw NQumir::TError("CompileJoin: " + library.error().ToString());
         }
+        // When a residual predicate is given, replace the library's default
+        // jt_residual_filter (join_residual_default.oz) with the generated one,
+        // keeping its position (before join_update.oz, which calls it).
+        if (residualPredicate && innerType) {
+            for (auto& f : *library) {
+                auto fun = NQumir::NAst::TMaybeNode<NQumir::NAst::TFunDecl>(f);
+                if (fun && fun.Cast()->Name == "jt_residual_filter") {
+                    f = NKernel::GenJoinResidualFilterAst(
+                        residualPredicate, *innerType, leftFieldCount,
+                        columnType, rowSetType, stringViewType);
+                    break;
+                }
+            }
+        }
+
         std::vector<TExprPtr> program;
         for (auto& f : NKernel::GenJoinKeyTypeDecls(keyDesc)) program.push_back(std::move(f));
         for (auto& f : NKernel::GenJoinKeyOpsFunDecls(keyDesc)) program.push_back(std::move(f));
@@ -558,7 +578,10 @@ TJoinKernels TKernelCompiler::CompileJoin(
     auto [destroyPairsFn, destroyPairsRunner] = compileEntry("pb_destroy");
 
     using TInitFn = bool(*)(void*, int64_t, int64_t);
-    using TProcessFn = bool(*)(void*, void*, TRowSet*, int64_t, void*);
+    // jt_process_left/right take the two row-store bases (for jt_residual_filter).
+    using TProcessFn = bool(*)(void*, void*, TRowSet*, int64_t, void*, TRowSet*, TRowSet*);
+    // jt_insert_key_only keeps the original 5-arg ABI (no residual filter).
+    using TInsertKeyOnlyFn = bool(*)(void*, void*, TRowSet*, int64_t, void*);
     using TDestroyFn = void(*)(void*);
 
     TJoinKernels kernels;
@@ -566,12 +589,14 @@ TJoinKernels TKernelCompiler::CompileJoin(
         return reinterpret_cast<TInitFn>(initFn)(table, capacity, keySize);
     };
     kernels.ProcessLeft = [leftFn, leftRunner](void* own, void* opp, TRowSet* batch,
-        int64_t batchIdx, void* pairs) {
-        return reinterpret_cast<TProcessFn>(leftFn)(own, opp, batch, batchIdx, pairs);
+        int64_t batchIdx, void* pairs, TRowSet* leftStore, TRowSet* rightStore) {
+        return reinterpret_cast<TProcessFn>(leftFn)(
+            own, opp, batch, batchIdx, pairs, leftStore, rightStore);
     };
     kernels.ProcessRight = [rightFn, rightRunner](void* own, void* opp, TRowSet* batch,
-        int64_t batchIdx, void* pairs) {
-        return reinterpret_cast<TProcessFn>(rightFn)(own, opp, batch, batchIdx, pairs);
+        int64_t batchIdx, void* pairs, TRowSet* leftStore, TRowSet* rightStore) {
+        return reinterpret_cast<TProcessFn>(rightFn)(
+            own, opp, batch, batchIdx, pairs, leftStore, rightStore);
     };
     kernels.DestroyTable = [destroyTableFn, destroyTableRunner](void* table) {
         reinterpret_cast<TDestroyFn>(destroyTableFn)(table);
@@ -588,7 +613,7 @@ TJoinKernels TKernelCompiler::CompileJoin(
         kernels.InsertKeyOnly =
             [insertKeyOnlyFn, insertKeyOnlyRunner](void* own, void* opp, TRowSet* batch,
                 int64_t batchIdx, void* pairs) {
-                return reinterpret_cast<TProcessFn>(insertKeyOnlyFn)(
+                return reinterpret_cast<TInsertKeyOnlyFn>(insertKeyOnlyFn)(
                     own, opp, batch, batchIdx, pairs);
             };
         kernels.FinalizeAntiSemi =

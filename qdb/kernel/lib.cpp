@@ -67,6 +67,12 @@ BuildJoinKernelLibrary() {
     if (auto e = add(ReadJoinKernel("join_table.oz"))) {
         return std::unexpected(*e);
     }
+    // Default always-true residual filter — must precede join_update.oz, whose
+    // jt_emit_and_insert calls jt_residual_filter. CompileJoin replaces this with
+    // a generated predicate when the query has a residual filter.
+    if (auto e = add(ReadJoinKernel("join_residual_default.oz"))) {
+        return std::unexpected(*e);
+    }
     if (auto e = add(ReadJoinKernel("join_update.oz"))) {
         return std::unexpected(*e);
     }
