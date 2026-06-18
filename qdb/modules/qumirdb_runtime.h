@@ -13,11 +13,6 @@ void* qdb_alloc(int64_t size);
 void* qdb_realloc(void* ptr, int64_t size);
 void qdb_free(void* ptr);
 
-// Temporary core-language bitcast primitives. See
-// docs/issues/qumir_missing_scalar_bitcast.md.
-uint64_t qdb_f64_bits(double value);
-double qdb_bits_f64(uint64_t bits);
-
 int64_t qdb_filter_string_compare(
     const uint8_t* left, int64_t leftSize,
     const uint8_t* right, int64_t rightSize);

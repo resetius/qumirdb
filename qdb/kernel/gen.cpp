@@ -76,17 +76,6 @@ NQumir::NAst::TExprPtr KeyValueExpr(
     return result;
 }
 
-NQumir::NAst::TExprPtr FloatBitsCall(
-    const std::string& root,
-    const std::vector<std::string>& path)
-{
-    using namespace NQumir::NAst;
-    NQumir::TLocation loc{};
-    return std::make_shared<TCallExpr>(loc,
-        std::make_shared<TIdentExpr>(loc, "qdb_f64_bits"),
-        std::vector<TExprPtr>{KeyValueExpr(root, path)});
-}
-
 NQumir::NAst::TExprPtr CanonicalFloatBits(
     const std::string& root,
     const std::vector<std::string>& path)
@@ -103,8 +92,13 @@ NQumir::NAst::TExprPtr CanonicalFloatBits(
         return std::make_shared<TBinaryExpr>(
             loc, TOperator(op), std::move(left), std::move(right));
     };
+    auto bitcast = [&](TExprPtr e, TTypePtr type) -> TExprPtr {
+        return std::make_shared<TBitcastExpr>(loc,
+            std::move(e),
+            std::move(type));
+    };
     auto masked = [&](int64_t mask) -> TExprPtr {
-        return binary("&", FloatBitsCall(root, path), number(mask));
+        return binary("&", bitcast(KeyValueExpr(root, path), u64Type), number(mask));
     };
     auto isZero = binary("==", masked(0x7fffffffffffffffLL), number(0));
     auto isNaN = binary("&&",
@@ -113,7 +107,7 @@ NQumir::NAst::TExprPtr CanonicalFloatBits(
         binary("!=", masked(0x000fffffffffffffLL), number(0)));
     return std::make_shared<TIfExpr>(loc, std::move(isZero), number(0),
         std::make_shared<TIfExpr>(loc, std::move(isNaN),
-            number(0x7ff8000000000000LL), FloatBitsCall(root, path)));
+            number(0x7ff8000000000000LL), bitcast(KeyValueExpr(root, path), u64Type)));
 }
 
 NQumir::NAst::TExprPtr HashKeyValue(
@@ -739,6 +733,9 @@ TFilterTruthAst BuildFilterTruthAst(
     auto call = [&](const char* name, std::vector<TExprPtr> args) -> TExprPtr {
         return std::make_shared<TCallExpr>(loc,
             std::make_shared<TIdentExpr>(loc, name), std::move(args));
+    };
+    auto bitcast = [&](TExprPtr value, TTypePtr type) -> TExprPtr {
+        return std::make_shared<TBitcastExpr>(loc, std::move(value), std::move(type));
     };
     auto binaryExpr = TMaybeNode<TBinaryExpr>(expr);
     if (binaryExpr && (binaryExpr.Cast()->Operator == "&&" ||
@@ -1384,6 +1381,9 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
     auto cast = [&](TExprPtr expr, TTypePtr type) -> TExprPtr {
         return std::make_shared<TCastExpr>(loc, std::move(expr), std::move(type));
     };
+    auto bitcast = [&](TExprPtr expr, TTypePtr type) -> TExprPtr {
+        return std::make_shared<TBitcastExpr>(loc, std::move(expr), std::move(type));
+    };
     auto assign = [&](const std::string& name, TExprPtr value) -> TExprPtr {
         return std::make_shared<TAssignExpr>(loc, name, std::move(value));
     };
@@ -1573,7 +1573,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
             auto cell = std::make_shared<TIndexExpr>(loc,
                 ident("values_" + std::to_string(idx)), ident("i"));
             valExpr = ac.Float
-                ? cast(call("qdb_f64_bits", {std::move(cell)}), i64Type)
+                ? bitcast(std::move(cell), i64Type)
                 : cast(std::move(cell), i64Type);
         }
         materialize.push_back(var(vname, i64Type));
@@ -2024,6 +2024,8 @@ std::vector<NQumir::NAst::TExprPtr> GenReducerFunDecls(
     NQumir::TLocation loc{};
 
     auto i64Type = std::make_shared<TIntegerType>();
+    auto u64Type = std::make_shared<TIntegerType>(TIntegerType::U64);
+    auto f64Type = std::make_shared<TFloatType>();
     auto boolType = std::make_shared<TBoolType>();
     auto voidType = std::make_shared<TVoidType>();
     auto ptrI64Type = std::make_shared<TPointerType>(i64Type);
@@ -2051,6 +2053,11 @@ std::vector<NQumir::NAst::TExprPtr> GenReducerFunDecls(
         return std::make_shared<TArrayAssignExpr>(loc, buf,
             std::vector<TExprPtr>{ident("dense_slot")}, std::move(value));
     };
+    auto bitcast = [&](TExprPtr e, TTypePtr type) -> TExprPtr {
+        return std::make_shared<TBitcastExpr>(loc,
+            std::move(e),
+            type);
+    };
 
     std::vector<TExprPtr> result;
     result.reserve(layout.Reducers.size());
@@ -2072,31 +2079,20 @@ std::vector<NQumir::NAst::TExprPtr> GenReducerFunDecls(
             if (r.IsFloat) {
                 // f64 reducer: states/values are carried as i64 bits, so we
                 // bitcast to f64, run f64 arithmetic, and bitcast back to i64.
-                auto u64Type = std::make_shared<TIntegerType>(TIntegerType::U64);
-                auto bitsToF64 = [&](const std::string& v) -> TExprPtr {
-                    return std::make_shared<TCallExpr>(loc, ident("qdb_bits_f64"),
-                        std::vector<TExprPtr>{std::make_shared<TCastExpr>(loc, ident(v), u64Type)});
-                };
-                auto f64ToBits = [&](TExprPtr e) -> TExprPtr {
-                    return std::make_shared<TCastExpr>(loc,
-                        std::make_shared<TCallExpr>(loc, ident("qdb_f64_bits"),
-                            std::vector<TExprPtr>{std::move(e)}),
-                        i64Type);
-                };
-                auto prevF = bitsToF64("prev");
-                auto valueF = bitsToF64("value");
+                auto prevF = bitcast(ident("prev"), f64Type);
+                auto valueF = bitcast(ident("value"), f64Type);
                 if (func == "sum") {
-                    resultExpr = f64ToBits(binary("+", prevF, valueF));
+                    resultExpr = bitcast(binary("+", prevF, valueF), i64Type);
                 } else if (func == "min") {
-                    resultExpr = f64ToBits(std::make_shared<TIfExpr>(loc, ident("is_new"),
-                        bitsToF64("value"),
+                    resultExpr = bitcast(std::make_shared<TIfExpr>(loc, ident("is_new"),
+                        valueF,
                         std::make_shared<TIfExpr>(loc, binary("<", valueF, prevF),
-                            bitsToF64("value"), bitsToF64("prev"))));
+                            valueF, prevF)), i64Type);
                 } else if (func == "max") {
-                    resultExpr = f64ToBits(std::make_shared<TIfExpr>(loc, ident("is_new"),
-                        bitsToF64("value"),
+                    resultExpr = bitcast(std::make_shared<TIfExpr>(loc, ident("is_new"),
+                        valueF,
                         std::make_shared<TIfExpr>(loc, binary(">", valueF, prevF),
-                            bitsToF64("value"), bitsToF64("prev"))));
+                            valueF, prevF)), i64Type);
                 } else {
                     throw std::invalid_argument(
                         "GenReducerFunDecls: unsupported float aggregate: " + func);
