@@ -265,7 +265,27 @@ TEST(SexpParser, JoinPrintRoundtrip) {
     EXPECT_EQ(printed, input);
 }
 
-TEST(SexpParser, JoinRejectsMissingKeys) {
+TEST(SexpParser, CrossJoinAcceptsEmptyKeyList) {
+    TStubSource leftSrc({"a", "b"});
+    TStubSource rightSrc({"c", "d"});
+
+    TRelParserOptions opts;
+    opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
+        if (path == "left.parquet") {
+            return std::make_shared<TSourceOperator>(leftSrc, std::string(path));
+        }
+        return std::make_shared<TSourceOperator>(rightSrc, std::string(path));
+    };
+    auto p = MakeParser(std::move(opts));
+
+    // Empty key list + inner → cross join, must parse successfully.
+    std::istringstream in(
+        "(rel join (rel source \"left.parquet\") (rel source \"right.parquet\") () (inner))");
+    TTokenStream ts(in);
+    EXPECT_TRUE(p.Parse(ts).has_value());
+}
+
+TEST(SexpParser, JoinRejectsEmptyKeysWithNonInnerType) {
     TStubSource leftSrc({"a", "b"});
     TStubSource rightSrc({"c", "d"});
 
@@ -279,7 +299,7 @@ TEST(SexpParser, JoinRejectsMissingKeys) {
     auto p = MakeParser(std::move(opts));
 
     std::istringstream in(
-        "(rel join (rel source \"left.parquet\") (rel source \"right.parquet\") () (inner))");
+        "(rel join (rel source \"left.parquet\") (rel source \"right.parquet\") () (left_semi))");
     TTokenStream ts(in);
     EXPECT_FALSE(p.Parse(ts).has_value());
 }

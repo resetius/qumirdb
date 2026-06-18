@@ -232,6 +232,17 @@ std::unique_ptr<IRuntimeNode> TPhysicalPlanner::Build(const TOperatorPtr& root) 
             throw std::runtime_error("join inputs must have TStructType");
         }
 
+        // Cross join: no key columns → Cartesian product executor.
+        if (join->Keys().empty()) {
+            auto outputType = ComputeJoinOutputType(
+                left->OutputType(), right->OutputType(), join->JoinType());
+            if (!outputType) {
+                throw std::runtime_error("cross join: " + outputType.error().ToString());
+            }
+            return std::make_unique<TRuntimeCrossJoin>(
+                std::move(left), std::move(right), std::move(*outputType));
+        }
+
         std::vector<std::pair<std::string, std::string>> keys;
         keys.reserve(join->Keys().size());
         for (const auto& key : join->Keys()) {

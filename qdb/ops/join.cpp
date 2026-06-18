@@ -200,8 +200,8 @@ MakeJoin(TOperatorPtr left, TOperatorPtr right,
     std::vector<std::pair<std::string, std::string>> keys,
     EJoinType type, const std::string& filter)
 {
-    if (keys.empty()) {
-        return std::unexpected(NQumir::TError("join requires at least one key pair"));
+    if (keys.empty() && type != EJoinType::Inner) {
+        return std::unexpected(NQumir::TError("cross join (empty keys) only supports inner type"));
     }
     std::vector<TJoinKey> joinKeys;
     joinKeys.reserve(keys.size());

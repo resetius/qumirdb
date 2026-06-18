@@ -153,6 +153,32 @@ private:
     size_t Cursor_ = 0;
 };
 
+// Cartesian product join (no key columns, inner only).
+// Buffers the entire right side, then streams left batches.
+class TRuntimeCrossJoin : public IRuntimeNode {
+public:
+    TRuntimeCrossJoin(std::unique_ptr<IRuntimeNode> left,
+        std::unique_ptr<IRuntimeNode> right,
+        NQumir::NAst::TTypePtr outputType);
+
+    NQumir::NAst::TTypePtr OutputType() const override { return OutputType_; }
+    bool Next(TRowSet& rowSet) override;
+
+private:
+    void EnsureRightDrained();
+    bool FillNextLeftBatch();
+
+    std::unique_ptr<IRuntimeNode> Left_;
+    std::unique_ptr<IRuntimeNode> Right_;
+    NQumir::NAst::TTypePtr OutputType_;
+    TRowStore LeftRows_;
+    TRowStore RightRows_;
+    std::optional<TJoinOutputBuilder> Builder_;
+    bool RightDrained_ = false;
+    bool LeftDone_ = false;
+    int64_t RightTotalRows_ = 0;
+};
+
 // Symmetric (pipelined) hash join executor.
 // - Inner: streams matched pairs as both inputs arrive (pipelined).
 // - LeftSemi/LeftAnti: blocking — consumes all inputs first, then does a final

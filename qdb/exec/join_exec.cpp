@@ -185,6 +185,69 @@ bool TJoinOutputBuilder::NextBatch(TRowSet& out) {
     return true;
 }
 
+TRuntimeCrossJoin::TRuntimeCrossJoin(std::unique_ptr<IRuntimeNode> left,
+    std::unique_ptr<IRuntimeNode> right,
+    TTypePtr outputType)
+    : Left_(std::move(left))
+    , Right_(std::move(right))
+    , OutputType_(std::move(outputType))
+{
+    std::vector<TJoinColumnRef> columns;
+    auto* leftStruct = static_cast<TStructType*>(Left_->OutputType().get());
+    auto* rightStruct = static_cast<TStructType*>(Right_->OutputType().get());
+    if (leftStruct) {
+        for (int32_t i = 0; i < static_cast<int32_t>(leftStruct->Fields.size()); ++i) {
+            columns.push_back({EJoinSide::Left, i, leftStruct->Fields[i].second});
+        }
+    }
+    if (rightStruct) {
+        for (int32_t j = 0; j < static_cast<int32_t>(rightStruct->Fields.size()); ++j) {
+            columns.push_back({EJoinSide::Right, j, rightStruct->Fields[j].second});
+        }
+    }
+    Builder_.emplace(&LeftRows_, &RightRows_, std::move(columns));
+}
+
+void TRuntimeCrossJoin::EnsureRightDrained() {
+    if (RightDrained_) return;
+    TRowSet batch{};
+    while (Right_->Next(batch)) {
+        RightTotalRows_ += batch.RowCount;
+        RightRows_.PushBatch(batch);
+    }
+    RightDrained_ = true;
+}
+
+bool TRuntimeCrossJoin::FillNextLeftBatch() {
+    if (LeftDone_ || RightTotalRows_ == 0) return false;
+    TRowSet batch{};
+    if (!Left_->Next(batch)) {
+        LeftDone_ = true;
+        return false;
+    }
+    int32_t leftBatchIdx = LeftRows_.PushBatch(batch);
+    int32_t leftCount = LeftRows_.Batch(leftBatchIdx).RowCount;
+    for (int32_t li = 0; li < leftCount; ++li) {
+        TRowId leftId = MakeRowId(leftBatchIdx, li);
+        for (int32_t rb = 0; rb < RightRows_.BatchCount(); ++rb) {
+            int32_t rightCount = RightRows_.Batch(rb).RowCount;
+            for (int32_t ri = 0; ri < rightCount; ++ri) {
+                Builder_->AddPair(leftId, MakeRowId(rb, ri));
+            }
+        }
+    }
+    return true;
+}
+
+bool TRuntimeCrossJoin::Next(TRowSet& rowSet) {
+    EnsureRightDrained();
+    for (;;) {
+        if (Builder_->NextBatch(rowSet)) return true;
+        Builder_->ClearPairs();
+        if (!FillNextLeftBatch()) return false;
+    }
+}
+
 namespace {
 
 constexpr int64_t kJoinInitialCapacity = 256;
