@@ -149,6 +149,75 @@ void TakeColumn(const TRowStore& store, const std::vector<TRowId>& rowIds,
     }
 }
 
+void TakeColumnFromBatch(const TRowSet& batch, const std::vector<int32_t>& rows,
+    int32_t srcColIdx, const TTypePtr& type, TGatheredColumn& out)
+{
+    const size_t n = rows.size();
+    const size_t width = JoinColumnFixedWidth(type);
+    const TColumn& col = batch.Columns[srcColIdx];
+
+    out.Data.clear();
+    out.Offsets.clear();
+    out.Mask.assign((n + 7) / 8, 0xff);
+    bool anyNull = false;
+
+    auto markNull = [&](size_t j) {
+        ClearBit(out.Mask, j);
+        anyNull = true;
+    };
+
+    if (width == 0) {
+        out.Offsets.resize(n + 1);
+        out.Offsets[0] = 0;
+        for (size_t j = 0; j < n; ++j) {
+            const int32_t row = rows[j];
+            int64_t len = 0;
+            if (!SourceValid(col, row)) {
+                markNull(j);
+            } else {
+                len = OffsetAt(col, row + 1) - OffsetAt(col, row);
+            }
+            out.Offsets[j + 1] = out.Offsets[j] + len;
+        }
+        out.Data.resize(static_cast<size_t>(out.Offsets[n]));
+        for (size_t j = 0; j < n; ++j) {
+            const int32_t row = rows[j];
+            if (!SourceValid(col, row)) {
+                continue;
+            }
+            const int64_t start = OffsetAt(col, row);
+            const int64_t len = OffsetAt(col, row + 1) - start;
+            if (len > 0) {
+                std::memcpy(out.Data.data() + out.Offsets[j], col.Data + start, len);
+            }
+        }
+        out.Column = TColumn{
+            .Data = out.Data.data(),
+            .Mask = anyNull ? out.Mask.data() : nullptr,
+            .Offsets = out.Offsets.data(),
+            .OffsetWidth = 8,
+        };
+    } else {
+        out.Data.assign(n * width, 0);
+        for (size_t j = 0; j < n; ++j) {
+            const int32_t row = rows[j];
+            if (!SourceValid(col, row)) {
+                markNull(j);
+                continue;
+            }
+            std::memcpy(out.Data.data() + j * width, col.Data + row * width, width);
+        }
+        out.Column = TColumn{
+            .Data = out.Data.data(),
+            .Mask = anyNull ? out.Mask.data() : nullptr,
+        };
+    }
+
+    if (!anyNull) {
+        out.Mask.clear();
+    }
+}
+
 bool TJoinOutputBuilder::NextBatch(TRowSet& out) {
     if (Cursor_ >= LeftIds_.size()) {
         return false;
@@ -287,6 +356,10 @@ TRuntimeJoin::TRuntimeJoin(std::unique_ptr<IRuntimeNode> left,
 }
 
 TRuntimeJoin::~TRuntimeJoin() {
+    while (!ReadyOutput_.empty()) {
+        Release(&ReadyOutput_.front());
+        ReadyOutput_.pop_front();
+    }
     if (Initialized_) {
         Kernels_.DestroyTable(LeftTable_.data());
         Kernels_.DestroyTable(RightTable_.data());
@@ -314,6 +387,74 @@ void TRuntimeJoin::DrainKernelPairs() {
 void TRuntimeJoin::CollectMatchedLeftIds() {
     for (int64_t i = 0; i < PairBuffer_.Count; ++i) {
         MatchedLeftIds_.insert(PairBuffer_.Data[2 * i]);
+    }
+    PairBuffer_.Count = 0;
+}
+
+void TRuntimeJoin::DrainStreamingPairs(const TRowSet& streamBatch, EJoinSide streamSide) {
+    int64_t cursor = 0;
+    while (cursor < PairBuffer_.Count) {
+        const size_t n = std::min<size_t>(
+            static_cast<size_t>(kJoinOutputBatchRows),
+            static_cast<size_t>(PairBuffer_.Count - cursor));
+
+        auto* data = new TJoinedRowSetData;
+
+        std::vector<TJoinColumnRef> columns;
+        auto* leftStruct = static_cast<TStructType*>(Left_->OutputType().get());
+        auto* rightStruct = static_cast<TStructType*>(Right_->OutputType().get());
+        if (leftStruct) {
+            for (int32_t i = 0; i < static_cast<int32_t>(leftStruct->Fields.size()); ++i) {
+                columns.push_back({EJoinSide::Left, i, leftStruct->Fields[i].second});
+            }
+        }
+        if (rightStruct) {
+            for (int32_t j = 0; j < static_cast<int32_t>(rightStruct->Fields.size()); ++j) {
+                columns.push_back({EJoinSide::Right, j, rightStruct->Fields[j].second});
+            }
+        }
+
+        data->Gathered.resize(columns.size());
+        data->Columns.resize(columns.size());
+        for (size_t c = 0; c < columns.size(); ++c) {
+            const auto& ref = columns[c];
+            if (ref.Side == streamSide) {
+                std::vector<int32_t> rows;
+                rows.reserve(n);
+                for (size_t i = 0; i < n; ++i) {
+                    const int64_t pairIdx = cursor + static_cast<int64_t>(i);
+                    const TRowId id = (streamSide == EJoinSide::Left)
+                        ? PairBuffer_.Data[2 * pairIdx]
+                        : PairBuffer_.Data[2 * pairIdx + 1];
+                    rows.push_back(RowIndex(id));
+                }
+                TakeColumnFromBatch(streamBatch, rows, ref.SrcColIdx, ref.Type,
+                    data->Gathered[c]);
+            } else {
+                std::vector<TRowId> ids;
+                ids.reserve(n);
+                for (size_t i = 0; i < n; ++i) {
+                    const int64_t pairIdx = cursor + static_cast<int64_t>(i);
+                    ids.push_back((ref.Side == EJoinSide::Left)
+                        ? PairBuffer_.Data[2 * pairIdx]
+                        : PairBuffer_.Data[2 * pairIdx + 1]);
+                }
+                const TRowStore& store = (ref.Side == EJoinSide::Left) ? LeftRows_ : RightRows_;
+                TakeColumn(store, ids, ref.SrcColIdx, ref.Type, data->Gathered[c]);
+            }
+            data->Columns[c] = data->Gathered[c].Column;
+        }
+
+        ReadyOutput_.push_back(TRowSet{
+            .Columns = data->Columns.data(),
+            .ColumnCount = static_cast<int64_t>(columns.size()),
+            .RowCount = static_cast<int64_t>(n),
+            .Selection = nullptr,
+            .Destroy = DestroyJoinedRowSet,
+            .Private = data,
+            .RefCount = 1,
+        });
+        cursor += static_cast<int64_t>(n);
     }
     PairBuffer_.Count = 0;
 }
@@ -349,8 +490,106 @@ void TRuntimeJoin::PullOneInputBatch() {
     BothDone_ = LeftDone_ && RightDone_;
 }
 
+void TRuntimeJoin::PullOneInnerInputBatch() {
+    TRowSet batch = {};
+    for (;;) {
+        if (StreamMode_ == EJoinStreamMode::Symmetric) {
+            const EJoinSide side = NextPullSide_;
+            NextPullSide_ = (NextPullSide_ == EJoinSide::Left)
+                ? EJoinSide::Right
+                : EJoinSide::Left;
+
+            if (side == EJoinSide::Left) {
+                if (LeftDone_) {
+                    if (RightDone_) {
+                        BothDone_ = true;
+                        return;
+                    }
+                    StreamMode_ = EJoinStreamMode::StreamRightAgainstLeft;
+                    continue;
+                }
+                if (Left_->Next(batch)) {
+                    int32_t batchIdx = LeftRows_.PushBatch(batch);
+                    Kernels_.ProcessLeft(LeftTable_.data(), RightTable_.data(),
+                        const_cast<TRowSet*>(&LeftRows_.Batch(batchIdx)),
+                        batchIdx, &PairBuffer_,
+                        const_cast<TRowSet*>(LeftRows_.Data()),
+                        const_cast<TRowSet*>(RightRows_.Data()));
+                    DrainKernelPairs();
+                    return;
+                }
+                LeftDone_ = true;
+                if (RightDone_) {
+                    BothDone_ = true;
+                    return;
+                }
+                StreamMode_ = EJoinStreamMode::StreamRightAgainstLeft;
+                continue;
+            }
+
+            if (RightDone_) {
+                if (LeftDone_) {
+                    BothDone_ = true;
+                    return;
+                }
+                StreamMode_ = EJoinStreamMode::StreamLeftAgainstRight;
+                continue;
+            }
+            if (Right_->Next(batch)) {
+                int32_t batchIdx = RightRows_.PushBatch(batch);
+                Kernels_.ProcessRight(RightTable_.data(), LeftTable_.data(),
+                    const_cast<TRowSet*>(&RightRows_.Batch(batchIdx)),
+                    batchIdx, &PairBuffer_,
+                    const_cast<TRowSet*>(LeftRows_.Data()),
+                    const_cast<TRowSet*>(RightRows_.Data()));
+                DrainKernelPairs();
+                return;
+            }
+            RightDone_ = true;
+            if (LeftDone_) {
+                BothDone_ = true;
+                return;
+            }
+            StreamMode_ = EJoinStreamMode::StreamLeftAgainstRight;
+            continue;
+        }
+
+        if (StreamMode_ == EJoinStreamMode::StreamRightAgainstLeft) {
+            if (Right_->Next(batch)) {
+                Kernels_.ProbeRightStream(LeftTable_.data(), &batch, 0, &PairBuffer_,
+                    const_cast<TRowSet*>(LeftRows_.Data()),
+                    const_cast<TRowSet*>(RightRows_.Data()));
+                DrainStreamingPairs(batch, EJoinSide::Right);
+                Release(&batch);
+                return;
+            }
+            RightDone_ = true;
+            BothDone_ = true;
+            return;
+        }
+
+        if (Left_->Next(batch)) {
+            Kernels_.ProbeLeftStream(RightTable_.data(), &batch, 0, &PairBuffer_,
+                const_cast<TRowSet*>(LeftRows_.Data()),
+                const_cast<TRowSet*>(RightRows_.Data()));
+            DrainStreamingPairs(batch, EJoinSide::Left);
+            Release(&batch);
+            return;
+        }
+        LeftDone_ = true;
+        BothDone_ = true;
+        return;
+    }
+}
+
 bool TRuntimeJoin::Next(TRowSet& rowSet) {
     EnsureInit();
+
+    if (!ReadyOutput_.empty()) {
+        rowSet = ReadyOutput_.front();
+        ReadyOutput_.pop_front();
+        return true;
+    }
 
     // ── LeftSemi / LeftAnti + residual filter ────────────────────────────────
     // The join kernels are compiled as INNER (they emit pairs), and the injected
@@ -463,6 +702,11 @@ bool TRuntimeJoin::Next(TRowSet& rowSet) {
     // INNER join: pipelined — pull one batch per iteration. Residual filtering
     // (if any) already happened in-kernel, so emitted pairs are final.
     for (;;) {
+        if (!ReadyOutput_.empty()) {
+            rowSet = ReadyOutput_.front();
+            ReadyOutput_.pop_front();
+            return true;
+        }
         if (Builder_->NextBatch(rowSet)) {
             return true;
         }
@@ -470,7 +714,11 @@ bool TRuntimeJoin::Next(TRowSet& rowSet) {
         if (BothDone_) {
             return false;
         }
-        PullOneInputBatch();
+        if (HasResidual_) {
+            PullOneInputBatch();
+        } else {
+            PullOneInnerInputBatch();
+        }
     }
 }
 

@@ -8,6 +8,7 @@
 
 #include <array>
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <optional>
 #include <unordered_set>
@@ -107,6 +108,12 @@ void TakeColumn(const TRowStore& store, const std::vector<TRowId>& rowIds,
 inline constexpr int64_t kJoinOutputBatchRows = 1024;
 
 enum class EJoinSide { Left, Right };
+
+enum class EJoinStreamMode {
+    Symmetric,
+    StreamLeftAgainstRight,
+    StreamRightAgainstLeft,
+};
 
 // One output column: which side it comes from, the source column index in that
 // side's batches, and its physical type. Order follows ComputeJoinOutputType
@@ -214,7 +221,9 @@ private:
 
     void EnsureInit();
     void PullOneInputBatch();
+    void PullOneInnerInputBatch();
     void DrainKernelPairs();
+    void DrainStreamingPairs(const TRowSet& streamBatch, EJoinSide streamSide);
     // Residual LeftSemi/LeftAnti: collect the (already filter-pruned) left row
     // IDs from PairBuffer_ into MatchedLeftIds_, then reset the buffer.
     void CollectMatchedLeftIds();
@@ -230,10 +239,13 @@ private:
     std::array<uint8_t, TKernelCompiler::kHashTableSize> RightTable_{};
     TPairBufferState PairBuffer_;
     std::optional<TJoinOutputBuilder> Builder_;
+    std::deque<TRowSet> ReadyOutput_;
     bool Initialized_ = false;
     bool LeftDone_ = false;
     bool RightDone_ = false;
     bool BothDone_ = false;
+    EJoinStreamMode StreamMode_ = EJoinStreamMode::Symmetric;
+    EJoinSide NextPullSide_ = EJoinSide::Left;
     bool SemiAntiFinalized_ = false;
     bool OuterFinalized_ = false;
 
