@@ -531,6 +531,10 @@ TJoinKernels TKernelCompiler::CompileJoin(
             "jt_process_left", columnType, rowSetType, hashTableType, pairBufferType));
         program.push_back(NKernel::GenJoinProcessAst(keyDesc, /*isLeft=*/false,
             "jt_process_right", columnType, rowSetType, hashTableType, pairBufferType));
+        program.push_back(NKernel::GenJoinProbeAst(keyDesc, /*isLeft=*/true,
+            "jt_probe_left_stream", columnType, rowSetType, hashTableType, pairBufferType));
+        program.push_back(NKernel::GenJoinProbeAst(keyDesc, /*isLeft=*/false,
+            "jt_probe_right_stream", columnType, rowSetType, hashTableType, pairBufferType));
         if (isSemiAnti) {
             program.push_back(NKernel::GenJoinInsertKeyOnlyAst(
                 keyDesc, "jt_insert_key_only",
@@ -574,12 +578,15 @@ TJoinKernels TKernelCompiler::CompileJoin(
     auto [initFn, initRunner] = compileEntry("jt_init");
     auto [leftFn, leftRunner] = compileEntry("jt_process_left");
     auto [rightFn, rightRunner] = compileEntry("jt_process_right");
+    auto [probeLeftFn, probeLeftRunner] = compileEntry("jt_probe_left_stream");
+    auto [probeRightFn, probeRightRunner] = compileEntry("jt_probe_right_stream");
     auto [destroyTableFn, destroyTableRunner] = compileEntry("jt_destroy");
     auto [destroyPairsFn, destroyPairsRunner] = compileEntry("pb_destroy");
 
     using TInitFn = bool(*)(void*, int64_t, int64_t);
     // jt_process_left/right take the two row-store bases (for jt_residual_filter).
     using TProcessFn = bool(*)(void*, void*, TRowSet*, int64_t, void*, TRowSet*, TRowSet*);
+    using TProbeFn = bool(*)(void*, TRowSet*, int64_t, void*, TRowSet*, TRowSet*);
     // jt_insert_key_only keeps the original 5-arg ABI (no residual filter).
     using TInsertKeyOnlyFn = bool(*)(void*, void*, TRowSet*, int64_t, void*);
     using TDestroyFn = void(*)(void*);
@@ -597,6 +604,16 @@ TJoinKernels TKernelCompiler::CompileJoin(
         int64_t batchIdx, void* pairs, TRowSet* leftStore, TRowSet* rightStore) {
         return reinterpret_cast<TProcessFn>(rightFn)(
             own, opp, batch, batchIdx, pairs, leftStore, rightStore);
+    };
+    kernels.ProbeLeftStream = [probeLeftFn, probeLeftRunner](void* build, TRowSet* batch,
+        int64_t batchIdx, void* pairs, TRowSet* leftStore, TRowSet* rightStore) {
+        return reinterpret_cast<TProbeFn>(probeLeftFn)(
+            build, batch, batchIdx, pairs, leftStore, rightStore);
+    };
+    kernels.ProbeRightStream = [probeRightFn, probeRightRunner](void* build, TRowSet* batch,
+        int64_t batchIdx, void* pairs, TRowSet* leftStore, TRowSet* rightStore) {
+        return reinterpret_cast<TProbeFn>(probeRightFn)(
+            build, batch, batchIdx, pairs, leftStore, rightStore);
     };
     kernels.DestroyTable = [destroyTableFn, destroyTableRunner](void* table) {
         reinterpret_cast<TDestroyFn>(destroyTableFn)(table);

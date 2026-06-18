@@ -365,20 +365,23 @@ NQumir::NAst::TExprPtr GenJoinFinalizeSemiAntiAst(
         std::make_shared<TBlockExpr>(loc, std::move(body)), boolType);
 }
 
-NQumir::NAst::TExprPtr GenJoinProcessAst(
+namespace {
+
+NQumir::NAst::TExprPtr GenJoinBatchAst(
     const TJoinKeyDescriptor& key,
     bool isLeft,
     const std::string& funcName,
     NQumir::NAst::TTypePtr columnType,
     NQumir::NAst::TTypePtr rowSetType,
     NQumir::NAst::TTypePtr hashTableType,
-    NQumir::NAst::TTypePtr pairBufferType)
+    NQumir::NAst::TTypePtr pairBufferType,
+    bool insertRows)
 {
     NQumir::TLocation loc{};
 
     if (key.HasDistinctLookupType()) {
         throw NQumir::TError(
-            "GenJoinProcessAst: string keys are not supported yet (Stage 4 fixed-key scope)");
+            "GenJoinBatchAst: string keys are not supported yet (Stage 4 fixed-key scope)");
     }
 
     auto i64Type = std::make_shared<TIntegerType>();
@@ -426,15 +429,18 @@ NQumir::NAst::TExprPtr GenJoinProcessAst(
         std::make_shared<TNamedType>("TRowSet", rowSetType));
     auto pairBufferRefType = std::make_shared<TReferenceType>(
         std::make_shared<TNamedType>("PairBuffer", pairBufferType));
-    std::vector<TParam> params = {
-        std::make_shared<TVarStmt>(loc, "own", hashTableRefType),
-        std::make_shared<TVarStmt>(loc, "opp", hashTableRefType),
-        std::make_shared<TVarStmt>(loc, "batch", rowSetRefType),
-        std::make_shared<TVarStmt>(loc, "batch_idx", i64Type),
-        std::make_shared<TVarStmt>(loc, "pairs", pairBufferRefType),
-        std::make_shared<TVarStmt>(loc, "left_store", rowSetPtrType),
-        std::make_shared<TVarStmt>(loc, "right_store", rowSetPtrType),
-    };
+    std::vector<TParam> params;
+    if (insertRows) {
+        params.push_back(std::make_shared<TVarStmt>(loc, "own", hashTableRefType));
+        params.push_back(std::make_shared<TVarStmt>(loc, "opp", hashTableRefType));
+    } else {
+        params.push_back(std::make_shared<TVarStmt>(loc, "build", hashTableRefType));
+    }
+    params.push_back(std::make_shared<TVarStmt>(loc, "batch", rowSetRefType));
+    params.push_back(std::make_shared<TVarStmt>(loc, "batch_idx", i64Type));
+    params.push_back(std::make_shared<TVarStmt>(loc, "pairs", pairBufferRefType));
+    params.push_back(std::make_shared<TVarStmt>(loc, "left_store", rowSetPtrType));
+    params.push_back(std::make_shared<TVarStmt>(loc, "right_store", rowSetPtrType));
 
     auto ptrColumnType = [&]() -> TTypePtr {
         auto* rowSet = static_cast<TStructType*>(rowSetType.get());
@@ -496,7 +502,7 @@ NQumir::NAst::TExprPtr GenJoinProcessAst(
         ? TMaybeType<TStructType>(namedKey.Cast()->UnderlyingType)
         : TMaybeType<TStructType>(key.KeyType);
     if (!keyStruct) {
-        throw NQumir::TError("GenJoinProcessAst: key must be a struct");
+        throw NQumir::TError("GenJoinBatchAst: key must be a struct");
     }
     std::vector<TExprPtr> structFields;
     structFields.reserve(keyStruct.Cast()->Fields.size());
@@ -520,11 +526,20 @@ NQumir::NAst::TExprPtr GenJoinProcessAst(
         binary("<<", ident("batch_idx"), numI64(32)),
         binary("&", ident("i"), numI64(0xffffffff)));
 
-    auto emitCall = call("jt_emit_and_insert", {
-        ident("own"), ident("opp"), std::move(keyValue), std::move(ownRowId),
-        numI64(isLeft ? 1 : 0), ident("pairs"),
-        ident("left_store"), ident("right_store"),
-    });
+    TExprPtr emitCall;
+    if (insertRows) {
+        emitCall = call("jt_emit_and_insert", {
+            ident("own"), ident("opp"), std::move(keyValue), std::move(ownRowId),
+            numI64(isLeft ? 1 : 0), ident("pairs"),
+            ident("left_store"), ident("right_store"),
+        });
+    } else {
+        emitCall = call("jt_probe_and_emit", {
+            ident("build"), std::move(keyValue), std::move(ownRowId),
+            numI64(isLeft ? 1 : 0), ident("pairs"),
+            ident("left_store"), ident("right_store"),
+        });
+    }
 
     std::vector<TExprPtr> process;
     for (auto& keyField : keyFields) {
@@ -552,6 +567,36 @@ NQumir::NAst::TExprPtr GenJoinProcessAst(
         loc, funcName, std::move(params),
         std::make_shared<TBlockExpr>(loc, std::move(body)), boolType);
     return function;
+}
+
+} // namespace
+
+NQumir::NAst::TExprPtr GenJoinProcessAst(
+    const TJoinKeyDescriptor& key,
+    bool isLeft,
+    const std::string& funcName,
+    NQumir::NAst::TTypePtr columnType,
+    NQumir::NAst::TTypePtr rowSetType,
+    NQumir::NAst::TTypePtr hashTableType,
+    NQumir::NAst::TTypePtr pairBufferType)
+{
+    return GenJoinBatchAst(key, isLeft, funcName, std::move(columnType),
+        std::move(rowSetType), std::move(hashTableType), std::move(pairBufferType),
+        /*insertRows=*/true);
+}
+
+NQumir::NAst::TExprPtr GenJoinProbeAst(
+    const TJoinKeyDescriptor& key,
+    bool isLeft,
+    const std::string& funcName,
+    NQumir::NAst::TTypePtr columnType,
+    NQumir::NAst::TTypePtr rowSetType,
+    NQumir::NAst::TTypePtr hashTableType,
+    NQumir::NAst::TTypePtr pairBufferType)
+{
+    return GenJoinBatchAst(key, isLeft, funcName, std::move(columnType),
+        std::move(rowSetType), std::move(hashTableType), std::move(pairBufferType),
+        /*insertRows=*/false);
 }
 
 } // namespace NQqb::NKernel
