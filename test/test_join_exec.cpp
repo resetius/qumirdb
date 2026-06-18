@@ -487,6 +487,65 @@ TEST(RuntimeJoin, InnerJoinStreamsLeftAfterRightEof) {
     EXPECT_EQ(got, expected);
 }
 
+TEST(RuntimeJoin, InnerJoinResidualReadsStreamBatchAfterEof) {
+    std::vector<int64_t> lk = {1, 1}, lv = {10, 20};
+    std::vector<int64_t> rk0 = {1}, rv0 = {10};
+    std::vector<int64_t> rk1 = {1}, rv1 = {20};
+    std::vector<TColumn> lcols, rcols0, rcols1;
+
+    auto leftType = KeyValSchema("lk", "lv");
+    auto rightType = KeyValSchema("rk", "rv");
+    std::vector<TRowSet> lbatches = {KeyValBatch(lk.data(), lv.data(), 2, lcols)};
+    std::vector<TRowSet> rbatches = {
+        KeyValBatch(rk0.data(), rv0.data(), 1, rcols0),
+        KeyValBatch(rk1.data(), rv1.data(), 1, rcols1),
+    };
+
+    auto left = std::make_unique<TVectorRuntimeSource>(leftType, std::move(lbatches));
+    auto right = std::make_unique<TVectorRuntimeSource>(rightType, std::move(rbatches));
+
+    auto residual = std::make_shared<TBinaryExpr>(
+        NQumir::TLocation{}, TOperator("!="),
+        std::make_shared<TIdentExpr>(NQumir::TLocation{}, "lv"),
+        std::make_shared<TIdentExpr>(NQumir::TLocation{}, "rv"));
+    TStructType innerType({
+        {"lk", I64Type()}, {"lv", I64Type()},
+        {"rk", I64Type()}, {"rv", I64Type()},
+    });
+
+    TKernelCompiler compiler;
+    auto kernels = compiler.CompileJoin(
+        static_cast<TStructType&>(*leftType), static_cast<TStructType&>(*rightType),
+        {{"lk", "rk"}}, EJoinType::Inner, residual, &innerType, 2);
+    auto outputType = ComputeJoinOutputType(leftType, rightType, EJoinType::Inner);
+    ASSERT_TRUE(outputType);
+
+    TRuntimeJoin join(std::move(left), std::move(right), *outputType,
+        std::move(kernels), EJoinType::Inner, /*hasResidual=*/true);
+
+    std::vector<TOut4> got;
+    TRowSet out{};
+    while (join.Next(out)) {
+        ASSERT_EQ(out.ColumnCount, 4);
+        const auto* c0 = reinterpret_cast<const int64_t*>(out.Columns[0].Data);
+        const auto* c1 = reinterpret_cast<const int64_t*>(out.Columns[1].Data);
+        const auto* c2 = reinterpret_cast<const int64_t*>(out.Columns[2].Data);
+        const auto* c3 = reinterpret_cast<const int64_t*>(out.Columns[3].Data);
+        for (int64_t i = 0; i < out.RowCount; ++i) {
+            got.push_back({c0[i], c1[i], c2[i], c3[i]});
+        }
+        Release(&out);
+    }
+
+    std::vector<TOut4> expected = {
+        {1, 20, 1, 10},
+        {1, 10, 1, 20},
+    };
+    std::sort(got.begin(), got.end());
+    std::sort(expected.begin(), expected.end());
+    EXPECT_EQ(got, expected);
+}
+
 TEST(RuntimeJoin, MultipleBatchesMatchNestedLoop) {
     int seed = 777;
     auto rnd = [&]() { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed; };
