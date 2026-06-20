@@ -18,6 +18,7 @@ add_library(qumirdb
     sexp/parser.cpp
     sql/ast.cpp
     sql/lexer.cpp
+    sql/parser.cpp
     pipeline/unbound_vars.cpp
     pipeline/typing.cpp
     pipeline/column_pruning.cpp

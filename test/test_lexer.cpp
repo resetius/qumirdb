@@ -6,7 +6,7 @@
 #include <vector>
 #include <string>
 
-using namespace NQqb::NSql;
+using namespace NQdb::NSql;
 using namespace NQumir::NAst;
 
 namespace {
