@@ -324,11 +324,11 @@ void TTokenStream::Read() {
             name += take();
             name += take();
             emitOperator(TOperator(name), name, tokenLocation);
+        } else if (isNumberStart(next)) {
+            readNumber(tokenLocation);
         } else if (SingleCharOperators.count(next)) {
             auto ch = take();
             emitOperator(TOperator((uint64_t)ch), std::string(1, ch), tokenLocation);
-        } else if (isNumberStart(next)) {
-            readNumber(tokenLocation);
         } else if (next == '"') {
             take();
             auto [value, rawValue] = readSqlQuotedIdentifier();
