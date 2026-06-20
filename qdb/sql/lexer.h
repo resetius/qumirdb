@@ -1,6 +1,6 @@
 #include <qumir/parser/lexer_base.h>
 
-namespace NQqb {
+namespace NQdb {
 namespace NSql {
 
 class TTokenStream : public NQumir::NAst::ITokenStream {

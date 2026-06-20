@@ -4,7 +4,7 @@
 
 #include <qumir/parser/operator.h>
 
-namespace NQqb {
+namespace NQdb {
 namespace NSql {
 
 using namespace NQumir;

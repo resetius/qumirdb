@@ -1,6 +1,6 @@
 #include <qumir/parser/ast.h>
 
-namespace NQqb {
+namespace NQdb {
 namespace NSql {
 
 struct TSqlNode {
@@ -30,6 +30,10 @@ struct TSqlOrderItem : TSqlNode {
         Last
     };
     ENullOrder NullOrder = ENullOrder::Default;
+};
+
+struct TSqlOrder : TSqlNode {
+    std::vector<TSqlPtr<TSqlOrderItem>> Items;
 };
 
 struct TSqlSelectItem : TSqlNode {
@@ -77,7 +81,7 @@ struct TSqlQuery : TSqlNode {
 
     TSqlNodePtr Body; // TSqlSelect / TSqlSetOp later
 
-    std::vector<TSqlPtr<TSqlOrderItem>> OrderBy;
+    TSqlPtr<TSqlOrder> OrderBy;
 
     NQumir::NAst::TExprPtr Limit;
     NQumir::NAst::TExprPtr Offset;
