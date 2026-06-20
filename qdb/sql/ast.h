@@ -17,7 +17,13 @@ enum ESetQuantifier {
     Distinct,
 };
 
+struct TSqlCte : TSqlNode {
+
+};
+
 struct TSqlWithClause : TSqlNode {
+    bool Recursive = false;
+    std::vector<TSqlPtr<TSqlCte>> Ctes;
 };
 
 struct TSqlOrderItem : TSqlNode {
