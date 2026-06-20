@@ -131,13 +131,57 @@ void TTokenStream::Read() {
         throw std::runtime_error("unterminated literal");
     };
 
+    auto readSqlQuotedIdentifier = [&]() {
+        std::string value;
+        std::string rawValue;
+
+        while (In.peek() != -1) {
+            char ch = take();
+
+            if (ch == '"') {
+                if (In.peek() == '"') {
+                    take();
+                    value += '"';
+                    rawValue += "\"\"";
+                    continue;
+                }
+                return std::make_pair(value, rawValue);
+            }
+
+            value += ch;
+            rawValue += ch;
+        }
+
+        throw std::runtime_error("unterminated quoted identifier");
+    };
+
+    auto readSqlString = [&]() {
+        std::string value;
+        std::string rawValue;
+
+        while (In.peek() != -1) {
+            char ch = take();
+
+            if (ch == '\'') {
+                if (In.peek() == '\'') {
+                    take();
+                    value += '\'';
+                    rawValue += "''";
+                    continue;
+                }
+                return std::make_pair(value, rawValue);
+            }
+
+            value += ch;
+            rawValue += ch;
+        }
+
+        throw std::runtime_error("unterminated string literal");
+    };
+
     auto readNumber = [&](TLocation location) {
         std::string rawValue;
         bool isFloat = false;
-
-        if (In.peek() == '-') {
-            rawValue += take();
-        }
 
         if (In.peek() == '.') {
             isFloat = true;
@@ -201,7 +245,7 @@ void TTokenStream::Read() {
     };
 
     auto isNumberStart = [&](int next) -> bool {
-        if (isdigit(next)) {
+        if (std::isdigit(next)) {
             return true;
         }
         if (next == '.') {
@@ -213,6 +257,37 @@ void TTokenStream::Read() {
         return false;
     };
 
+    auto skipLineComment = [&]() {
+        take(); // -
+        take(); // -
+        while (In.peek() != -1 && In.peek() != '\n') {
+            take();
+        }
+    };
+
+    auto skipBlockComment = [&]() {
+        take(); // /
+        take(); // *
+
+        while (In.peek() != -1) {
+            char ch = take();
+            if (ch == '*' && In.peek() == '/') {
+                take();
+                return;
+            }
+        }
+
+        throw std::runtime_error("unterminated block comment at " + CurrentLocation.ToString());
+    };
+
+    auto isIdentStart = [](int ch) {
+        return std::isalpha(ch) || ch == '_';
+    };
+
+    auto isIdentChar = [](int ch) {
+        return std::isalnum(ch) || ch == '_';
+    };
+
     while (Tokens.empty() && In.peek() != -1) {
         auto next = In.peek();
         if (std::isspace(next)) {
@@ -221,6 +296,28 @@ void TTokenStream::Read() {
         }
 
         TLocation tokenLocation = CurrentLocation;
+
+        if (next == '-') {
+            In.get();
+            auto second = In.peek();
+            In.unget();
+
+            if (second == '-') {
+                skipLineComment();
+                continue;
+            }
+        }
+
+        if (next == '/') {
+            In.get();
+            auto second = In.peek();
+            In.unget();
+
+            if (second == '*') {
+                skipBlockComment();
+                continue;
+            }
+        }
 
         if (isTwoCharOperator(next)) {
             std::string name;
@@ -232,9 +329,18 @@ void TTokenStream::Read() {
             emitOperator(TOperator((uint64_t)ch), std::string(1, ch), tokenLocation);
         } else if (isNumberStart(next)) {
             readNumber(tokenLocation);
-        } else if (next == '"' || next == '\'') {
+        } else if (next == '"') {
             take();
-            auto [value, rawValue] = readQuoted(next);
+            auto [value, rawValue] = readSqlQuotedIdentifier();
+            Tokens.emplace_back(TToken {
+                .Name = value,
+                .RawValue = rawValue,
+                .Type = TToken::Identifier,
+                .Location = tokenLocation,
+            });
+        } else if (next == '\'') {
+            take();
+            auto [value, rawValue] = readSqlString();
             Tokens.emplace_back(TToken {
                 .Name = value,
                 .RawValue = rawValue,
@@ -251,12 +357,12 @@ void TTokenStream::Read() {
                 .Location = tokenLocation,
             });
         } else {
+            if (!isIdentStart(next)) {
+                throw std::runtime_error("unexpected character at " + CurrentLocation.ToString());
+            }
+
             std::string name;
-            while (In.peek() != -1
-                && !std::isspace(In.peek())
-                && !SingleCharOperators.count(In.peek())
-                && !TwoCharOperatorFirstChars.count(In.peek()))
-            {
+            while (In.peek() != -1 && isIdentChar(In.peek())) {
                 name += take();
             }
 
