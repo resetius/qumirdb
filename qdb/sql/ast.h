@@ -93,16 +93,24 @@ struct TSqlQuery : TSqlNode {
     NQumir::NAst::TExprPtr Offset;
 };
 
+struct TSqlSelectList : TSqlNode {
+    std::vector<TSqlPtr<TSqlSelectItem>> Items;
+};
+
+struct TSqlGroupBy : TSqlNode {
+    std::vector<NQumir::NAst::TExprPtr> Items;
+};
+
 struct TSqlSelect : TSqlNode {
     ESetQuantifier Quantifier = ESetQuantifier::All;
 
-    std::vector<TSqlPtr<TSqlSelectItem>> SelectList;
+    TSqlPtr<TSqlSelectList> SelectList;
 
     TSqlPtr<TSqlTableRef> From;
 
     NQumir::NAst::TExprPtr Where;
 
-    std::vector<NQumir::NAst::TExprPtr> GroupBy;
+    TSqlPtr<TSqlGroupBy> GroupBy;
 
     NQumir::NAst::TExprPtr Having;
 };
