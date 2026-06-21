@@ -1235,7 +1235,7 @@ TAstExprTask function_call(TParserContext& ctx) {
     co_return call(loc, fname, std::move(args));
 }
 
-// <function_args> ::= "*" | <expr> { "," <expr> }
+// <function_args> ::= "*" | [ "DISTINCT" ] <expr> { "," <expr> }
 TAstExprTask function_args(TParserContext& ctx) {
     auto token = ctx.Stream.Next();
     if (IsOp(token, '*')) {
@@ -1243,6 +1243,16 @@ TAstExprTask function_args(TParserContext& ctx) {
         co_return list(token.Location,
             { std::make_shared<NQumir::NAst::TIdentExpr>(token.Location, "*") });
     }
+
+    if (IsKeyword(token, "DISTINCT")) {
+        // there is no DISTINCT aggregate; mark the arguments with a synthetic
+        // `distinct(...)` call for the planner to expand via double aggregation
+        auto block = co_await expr_list(ctx);
+        auto args = std::static_pointer_cast<NQumir::NAst::TBlockExpr>(block)->Stmts;
+        co_return list(token.Location,
+            { call(token.Location, "distinct", std::move(args)) });
+    }
+
     ctx.Stream.Unget(token);
     co_return co_await expr_list(ctx);
 }
