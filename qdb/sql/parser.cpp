@@ -2,6 +2,8 @@
 
 #include <qumir/optional.h>
 
+#include <set>
+
 /*
 
 <query> ::= <select_stmt> [ ";" ]
@@ -255,8 +257,11 @@ TAstTask<TSqlSelectList> select_list(TParserContext& ctx);
 TAstTask<TSqlOrder> order_by_clause(TParserContext& ctx);
 TAstTask<TSqlWithClause> with_clause(TParserContext& ctx);
 TAstTask<TSqlCte> cte_def(TParserContext& ctx);
-TAstTask<TSqlTableRef> from_clause(TParserContext& ctx);
+TAstTask<TSqlFrom> from_clause(TParserContext& ctx);
 TAstTask<TSqlGroupBy> group_by_clause(TParserContext& ctx);
+TAstTask<TSqlTableRef> table_ref(TParserContext& ctx);
+TAstTask<TSqlTableRef> table_factor(TParserContext& ctx);
+TAstTask<TJoinCondition> join_condition(TParserContext& ctx);
 TAstExprTask limit_clause(TParserContext& ctx);
 TAstExprTask offset_clause(TParserContext& ctx);
 TAstExprTask having_clause(TParserContext& ctx);
@@ -327,18 +332,107 @@ TAstTask<TSqlNode> select_core(TParserContext& ctx) {
     select->GroupBy = co_await TryKeywords(group_by_clause, ctx, {"GROUP BY"});
     select->Having = co_await TryKeywords(having_clause, ctx, {"HAVING"});
 
-    co_return nullptr;
+    co_return select;
 }
 
 TAstTask<TSqlSelectList> select_list(TParserContext& ctx) {
     co_return nullptr;
 }
 
-TAstTask<TSqlTableRef> from_clause(TParserContext& ctx) {
-    co_return nullptr;
+TAstTask<TSqlFrom> from_clause(TParserContext& ctx) {
+    auto from = std::make_shared<TSqlFrom>();
+    TToken token;
+    do {
+        auto table = co_await table_ref(ctx);
+        from->Items.emplace_back(std::move(table));
+        token = ctx.Stream.Next();
+    } while (IsOp(token, ','));
+    ctx.Stream.Unget(token);
+    co_return from;
 }
 
 TAstTask<TSqlGroupBy> group_by_clause(TParserContext& ctx) {
+    co_return nullptr;
+}
+
+TAstTask<TSqlTableRef> table_ref(TParserContext& ctx) {
+    auto left = co_await table_factor(ctx);
+    const std::vector<std::pair<std::string, ESqlJoinType>> joinStart = {
+        {"INNER", ESqlJoinType::Inner},
+        {"LEFT", ESqlJoinType::Left},
+        {"RIGHT", ESqlJoinType::Right},
+        {"FULL", ESqlJoinType::Full},
+        {"CROSS", ESqlJoinType::Cross},
+    };
+
+    const std::set<ESqlJoinType> outerJoins = {
+        ESqlJoinType::Left,
+        ESqlJoinType::Right
+    };
+
+    const std::set<ESqlJoinType> semiJoins = {
+        ESqlJoinType::Left,
+        ESqlJoinType::Right
+    };
+
+    ESqlJoinType joinType = ESqlJoinType::Inner;
+    auto isJoinStart = [&]() -> NQumir::TExpectedTask<bool, TError, TLocation> {
+        auto first = ctx.Stream.Next();
+        joinType = ESqlJoinType::Inner;
+
+        for (const auto& [kw, type] : joinStart) {
+            if (IsKeyword(first, kw)) {
+                joinType = type;
+
+                auto next = ctx.Stream.Next();
+                if (IsKeyword(next, "OUTER")) {
+                    if (outerJoins.count(joinType) == 0) {
+                        co_return Error(first, "Unknown `OUTER' join type");
+                    }
+                    co_return true;
+                }
+
+                if (IsKeyword(next, "SEMI")) {
+                    if (semiJoins.count(joinType) == 0) {
+                        co_return Error(first, "Unknown `SEMI' join type");
+                    }
+                    co_return true;
+                }
+
+                ctx.Stream.Unget(next);
+
+                break;
+            }
+        }
+
+        auto ret = IsKeyword(first, "JOIN");
+        ctx.Stream.Unget(first);
+        co_return ret;
+    };
+
+    while (co_await isJoinStart()) {
+        auto next = ctx.Stream.Next();
+        if (!IsKeyword(next, "JOIN")) {
+            co_return Error(next, "`JOIN' keyword expected");
+        }
+
+        auto join = std::make_shared<TSqlJoin>();
+        join->Type = joinType;
+
+        join->Left = left;
+        join->Right = co_await table_factor(ctx);
+        join->Condition = co_await join_condition(ctx);
+
+        left = join;
+    }
+    co_return left;
+}
+
+TAstTask<TJoinCondition> join_condition(TParserContext& ctx) {
+    co_return nullptr;
+}
+
+TAstTask<TSqlTableRef> table_factor(TParserContext& ctx) {
     co_return nullptr;
 }
 
