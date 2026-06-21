@@ -71,6 +71,7 @@ struct TSqlQuery;
 
 struct TSqlSubqueryTable : TSqlTableRef {
     TSqlPtr<TSqlQuery> Query;
+    TSqlPtr<TIdentList> ColumnAliases; // optional column rename list
 };
 
 enum class ESqlJoinType {

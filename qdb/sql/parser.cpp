@@ -680,6 +680,18 @@ TAstTask<TSqlTableRef> table_factor(TParserContext& ctx) {
                 co_return Error(rparen, "expected ')' after subquery");
             }
             sub->Alias = co_await opt_alias(ctx);
+
+            // optional column rename list: ( <ident_list> )
+            auto cols = ctx.Stream.Next();
+            if (IsOp(cols, '(')) {
+                sub->ColumnAliases = co_await ident_list(ctx);
+                auto rp = ctx.Stream.Next();
+                if (!IsOp(rp, ')')) {
+                    co_return Error(rp, "expected ')' after column alias list");
+                }
+            } else {
+                ctx.Stream.Unget(cols);
+            }
             co_return sub;
         }
 
