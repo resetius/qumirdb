@@ -127,4 +127,4 @@ struct TSqlSelect : TSqlNode {
 };
 
 } // namespace NSql
-} // namespace NQqb
+} // namespace NQdb

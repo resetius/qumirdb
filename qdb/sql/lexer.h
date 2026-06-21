@@ -12,4 +12,4 @@ private:
 };
 
 } // namespace NSql
-} // namespace NQqb
+} // namespace NQdb

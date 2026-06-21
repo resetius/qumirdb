@@ -2,6 +2,7 @@
 
 #include <qumir/optional.h>
 
+#include <map>
 #include <set>
 
 /*
@@ -241,10 +242,17 @@ using TTask = std::invoke_result_t<F&, TParserContext&>;
 
 template<typename T>
 TTask<T> TryKeywords(T&& lambda, TParserContext& ctx, const std::vector<std::string>& kws) {
+    using TResult = typename decltype(lambda(ctx).result())::value_type;
+
+    std::vector<TToken> consumed;
     for (const auto& kw : kws) {
         auto token = ctx.Stream.Next();
+        consumed.push_back(token);
         if (!IsKeyword(token, kw)) {
-            co_return {};
+            for (auto it = consumed.rbegin(); it != consumed.rend(); ++it) {
+                ctx.Stream.Unget(*it);
+            }
+            co_return TResult{};
         }
     }
 
@@ -285,7 +293,6 @@ TAstTask<TSqlQuery> query(TParserContext& ctx) {
 
 TAstTask<TSqlQuery> select_stmt(TParserContext& ctx) {
     TSqlPtr<TSqlQuery> q = std::make_shared<TSqlQuery>();
-    auto token = ctx.Stream.Next();
 
     q->WithClause = co_await TryKeywords(with_clause, ctx, {"WITH"});
 
@@ -333,7 +340,7 @@ TAstTask<TSqlNode> select_core(TParserContext& ctx) {
     select->SelectList = co_await select_list(ctx);
 
     select->From = co_await TryKeywords(from_clause, ctx, {"FROM"});
-    select->GroupBy = co_await TryKeywords(group_by_clause, ctx, {"GROUP BY"});
+    select->GroupBy = co_await TryKeywords(group_by_clause, ctx, {"GROUP", "BY"});
     select->Having = co_await TryKeywords(having_clause, ctx, {"HAVING"});
 
     co_return select;
@@ -371,12 +378,13 @@ TAstTask<TSqlTableRef> table_ref(TParserContext& ctx) {
 
     const std::set<ESqlJoinType> outerJoins = {
         ESqlJoinType::Left,
-        ESqlJoinType::Right
+        ESqlJoinType::Right,
+        ESqlJoinType::Full
     };
 
-    const std::set<ESqlJoinType> semiJoins = {
-        ESqlJoinType::Left,
-        ESqlJoinType::Right
+    const std::map<ESqlJoinType, ESqlJoinType> semiJoins = {
+        {ESqlJoinType::Left, ESqlJoinType::LeftSemi},
+        {ESqlJoinType::Right, ESqlJoinType::RightSemi}
     };
 
     ESqlJoinType joinType = ESqlJoinType::Inner;
@@ -397,9 +405,11 @@ TAstTask<TSqlTableRef> table_ref(TParserContext& ctx) {
                 }
 
                 if (IsKeyword(next, "SEMI")) {
-                    if (semiJoins.count(joinType) == 0) {
+                    auto it = semiJoins.find(joinType);
+                    if (it == semiJoins.end()) {
                         co_return Error(first, "Unknown `SEMI' join type");
                     }
+                    joinType = it->second;
                     co_return true;
                 }
 
@@ -452,6 +462,14 @@ TAstTask<TSqlTableRef> table_factor(TParserContext& ctx) {
     co_return nullptr;
 }
 
+TAstTask<TIdentList> ident_list(TParserContext& ctx) {
+    co_return nullptr;
+}
+
+TAstExprTask expr(TParserContext& ctx) {
+    co_return nullptr;
+}
+
 TAstExprTask having_clause(TParserContext& ctx) {
     co_return nullptr;
 }
@@ -474,11 +492,16 @@ TAstTask<TSqlCte> cte_def(TParserContext& ctx) {
 
 } // namespace
 
-std::expected<TSqlNodePtr, NQumir::TError> Parse(TTokenStream& stream)
+std::expected<TSqlNodePtr, NQumir::TError> TParser::Parse(TTokenStream& stream)
 {
-    TWrappedTokenStream wrappedStream(stream, /*windowSize*/ 10);
+    TWrappedTokenStream wrappedStream(stream, /*windowSize = */ 10);
     TParserContext context(wrappedStream);
-    return nullptr;
+    auto task = query(context);
+    auto result = task.result();
+    if (!result) {
+        return std::unexpected(result.error());
+    }
+    return TSqlNodePtr(result.value());
 }
 
 } // namespace NSql
