@@ -1,2 +1,72 @@
-Error: ')' expected @ Line: 11, Byte: 16, Column: 16
-
+(query
+  (select
+    (select-list
+      (item
+        supp_nation
+      )
+      (item
+        cust_nation
+      )
+      (item
+        l_year
+      )
+      (item as revenue
+        (call sum volume)
+      )
+    )
+    (from
+      (subquery-table as shipping
+        (query
+          (select
+            (select-list
+              (item as supp_nation
+                (field n1 n_name)
+              )
+              (item as cust_nation
+                (field n2 n_name)
+              )
+              (item as l_year
+                (call qdb_date_year l_shipdate)
+              )
+              (item as volume
+                (* l_extendedprice (- 1 l_discount))
+              )
+            )
+            (from
+              (table supplier)
+              (table lineitem)
+              (table orders)
+              (table customer)
+              (table nation as n1)
+              (table nation as n2)
+            )
+            (where
+              (&& (&& (&& (&& (&& (&& (== s_suppkey l_suppkey) (== o_orderkey l_orderkey)) (== c_custkey o_custkey))
+                      (== s_nationkey (field n1 n_nationkey)))
+                    (== c_nationkey (field n2 n_nationkey)))
+                  (|| (&& (== (field n1 n_name) "FRANCE") (== (field n2 n_name) "UNITED KINGDOM"))
+                    (&& (== (field n1 n_name) "UNITED KINGDOM") (== (field n2 n_name) "FRANCE"))))
+                (&& (<= (call qdb_sql_date "1995-01-01") l_shipdate) (<= l_shipdate (call qdb_sql_date "1996-12-31"))))
+            )
+          )
+        )
+      )
+    )
+    (group-by
+      supp_nation
+      cust_nation
+      l_year
+    )
+  )
+  (order-by
+    (order asc
+      supp_nation
+    )
+    (order asc
+      cust_nation
+    )
+    (order asc
+      l_year
+    )
+  )
+)

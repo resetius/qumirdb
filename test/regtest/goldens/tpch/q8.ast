@@ -1,2 +1,59 @@
-Error: ')' expected @ Line: 10, Byte: 16, Column: 16
-
+(query
+  (select
+    (select-list
+      (item
+        o_year
+      )
+      (item as mkt_share
+        (/ (call sum (if (== nation "FRANCE") volume 0)) (call sum volume))
+      )
+    )
+    (from
+      (subquery-table as all_nations
+        (query
+          (select
+            (select-list
+              (item as o_year
+                (call qdb_date_year o_orderdate)
+              )
+              (item as volume
+                (* l_extendedprice (- 1 l_discount))
+              )
+              (item as nation
+                (field n2 n_name)
+              )
+            )
+            (from
+              (table part)
+              (table supplier)
+              (table lineitem)
+              (table orders)
+              (table customer)
+              (table nation as n1)
+              (table nation as n2)
+              (table region)
+            )
+            (where
+              (&& (&& (&& (&& (&& (&& (&& (&& (&& (== p_partkey l_partkey) (== s_suppkey l_suppkey)) (== l_orderkey o_orderkey))
+                            (== o_custkey c_custkey))
+                          (== c_nationkey (field n1 n_nationkey)))
+                        (== (field n1 n_regionkey) r_regionkey))
+                      (== r_name "EUROPE"))
+                    (== s_nationkey (field n2 n_nationkey)))
+                  (&& (<= (call qdb_sql_date "1995-01-01") o_orderdate) (<= o_orderdate (call qdb_sql_date "1996-12-31"))))
+                (== p_type "PROMO POLISHED BRASS"))
+            )
+          )
+        )
+      )
+    )
+    (group-by
+      o_year
+    )
+  )
+  (order-by
+    (order asc
+      o_year
+    )
+  )
+)

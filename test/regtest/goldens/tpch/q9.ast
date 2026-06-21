@@ -1,2 +1,61 @@
-Error: ')' expected @ Line: 9, Byte: 16, Column: 16
-
+(query
+  (select
+    (select-list
+      (item
+        nation
+      )
+      (item
+        o_year
+      )
+      (item as sum_profit
+        (call sum amount)
+      )
+    )
+    (from
+      (subquery-table as profit
+        (query
+          (select
+            (select-list
+              (item as nation
+                n_name
+              )
+              (item as o_year
+                (call qdb_date_year o_orderdate)
+              )
+              (item as amount
+                (- (* l_extendedprice (- 1 l_discount)) (* ps_supplycost l_quantity))
+              )
+            )
+            (from
+              (table part)
+              (table supplier)
+              (table lineitem)
+              (table partsupp)
+              (table orders)
+              (table nation)
+            )
+            (where
+              (&& (&& (&& (&& (&& (&& (== s_suppkey l_suppkey) (== ps_suppkey l_suppkey)) (== ps_partkey l_partkey))
+                      (== p_partkey l_partkey))
+                    (== o_orderkey l_orderkey))
+                  (== s_nationkey n_nationkey))
+                (call qdb_string_view_sql_like p_name "%turquoise%"))
+            )
+          )
+        )
+      )
+    )
+    (group-by
+      nation
+      o_year
+    )
+  )
+  (order-by
+    (order asc
+      nation
+    )
+    (order desc
+      o_year
+    )
+  )
+)
