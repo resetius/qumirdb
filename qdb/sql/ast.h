@@ -1,3 +1,5 @@
+#pragma once
+
 #include <qumir/parser/ast.h>
 
 namespace NQdb {

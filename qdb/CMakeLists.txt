@@ -19,6 +19,7 @@ add_library(qumirdb
     sql/ast.cpp
     sql/lexer.cpp
     sql/parser.cpp
+    sql/printer.cpp
     pipeline/unbound_vars.cpp
     pipeline/typing.cpp
     pipeline/column_pruning.cpp

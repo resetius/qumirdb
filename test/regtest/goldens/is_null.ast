@@ -1,0 +1,15 @@
+(query
+  (select
+    (select-list
+      (item
+        a
+      )
+    )
+    (from
+      (table t)
+    )
+    (where
+      (&& (! (call qdb_sql_is_null a)) (call qdb_sql_is_null b))
+    )
+  )
+)

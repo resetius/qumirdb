@@ -1,0 +1,16 @@
+(query
+  (select
+    (select-list
+      (item
+        a
+      )
+    )
+    (from
+      (join left
+        (table t)
+        (table s)
+        (using id)
+      )
+    )
+  )
+)

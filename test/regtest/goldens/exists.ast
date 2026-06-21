@@ -1,0 +1,30 @@
+(query
+  (select
+    (select-list
+      (item
+        a
+      )
+    )
+    (from
+      (table t)
+    )
+    (where
+      (subquery exists (query
+        (select
+          (select-list
+            (item
+              1
+            )
+          )
+          (from
+            (table s)
+          )
+          (where
+            (== (field s id) (field t id))
+          )
+        )
+      )
+      )
+    )
+  )
+)

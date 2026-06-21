@@ -1,0 +1,28 @@
+(query
+  (with
+    (cte x
+      (query
+        (select
+          (select-list
+            (item
+              a
+            )
+          )
+          (from
+            (table t)
+          )
+        )
+      )
+    )
+  )
+  (select
+    (select-list
+      (item
+        a
+      )
+    )
+    (from
+      (table x)
+    )
+  )
+)
