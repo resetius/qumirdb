@@ -863,7 +863,6 @@ TAstExprTask not_expr(TParserContext& ctx) {
 TAstExprTask comparison_expr(TParserContext& ctx) {
     auto ret = co_await add_expr(ctx);
     auto token = ctx.Stream.Next();
-    auto loc = token.Location;
     static std::vector<std::pair<TOperator, TOperator>> sql2qumir = {
         {"="_op, "=="_op},
         {"<>"_op, "!="_op},
@@ -876,7 +875,7 @@ TAstExprTask comparison_expr(TParserContext& ctx) {
 
     for (auto [from, to] : sql2qumir) {
         if (IsOp(token, from)) {
-            co_return binary(loc, to, ret, co_await add_expr(ctx));
+            co_return binary(token.Location, to, ret, co_await add_expr(ctx));
         }
     }
 
@@ -892,19 +891,19 @@ TAstExprTask comparison_expr(TParserContext& ctx) {
         co_return nullptr;
     }
 
+    // optional NOT before IN / BETWEEN / LIKE
     bool negative = false;
+    auto opToken = token;
     if (IsKeyword(token, "NOT")) {
         negative = true;
-        token = ctx.Stream.Next();
-    } else {
-        ctx.Stream.Unget(token);
+        opToken = ctx.Stream.Next();
     }
 
-    if (IsKeyword(token, "IN")) {
+    auto loc = opToken.Location;
+    if (IsKeyword(opToken, "IN")) {
         // TODO: need TInExpr
         co_return nullptr;
-    } else if (IsKeyword(token, "BETWEEN")) {
-        // co_return binary(loc, )
+    } else if (IsKeyword(opToken, "BETWEEN")) {
         auto left = co_await add_expr(ctx);
         auto next = ctx.Stream.Next();
         if (!IsKeyword(next, "AND")) {
@@ -915,16 +914,21 @@ TAstExprTask comparison_expr(TParserContext& ctx) {
         ret = binary(loc, "&&"_op,
             binary(loc, "<="_op, left, ret),
             binary(loc, "<="_op, ret, right));
-    } else if (IsKeyword(token, "LIKE")) {
+    } else if (IsKeyword(opToken, "LIKE")) {
         ret = call(loc, "qdb_string_view_sql_like",
             {ret, co_await add_expr(ctx)});
+    } else {
+        // nothing matched: restore the consumed token(s) in reverse order
+        if (negative) {
+            ctx.Stream.Unget(opToken);
+        }
+        ctx.Stream.Unget(token);
+        co_return ret;
     }
 
     if (negative) {
         ret = unary(loc, "!"_op, ret);
     }
-
-    ctx.Stream.Unget(token);
     co_return ret;
 }
 
@@ -1026,7 +1030,7 @@ TAstExprTask primary_expr(TParserContext& ctx) {
             co_return Error(next, "'(' expected");
         }
 
-        auto select = select_stmt(ctx);
+        auto select = co_await select_stmt(ctx);
 
         next = ctx.Stream.Next();
         if (!IsOp(next, ')')) {
@@ -1048,6 +1052,7 @@ TAstExprTask primary_expr(TParserContext& ctx) {
         if (!IsOp(next, ')')) {
             co_return Error(next, "')' expected");
         }
+        co_return ret;
     }
 
     co_return Error(token, "Unsupported expression");
