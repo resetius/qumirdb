@@ -1,0 +1,12 @@
+(query
+  (select
+    (select-list
+      (item as x
+        (+ a (* b c))
+      )
+    )
+    (from
+      (table t)
+    )
+  )
+)

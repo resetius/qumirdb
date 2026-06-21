@@ -1,0 +1,18 @@
+(query
+  (select
+    (select-list
+      (item
+        a
+      )
+      (item
+        b
+      )
+    )
+    (from
+      (table t)
+    )
+    (where
+      (> a 5)
+    )
+  )
+)

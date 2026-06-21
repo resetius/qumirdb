@@ -1,0 +1,12 @@
+(query
+  (select
+    (select-list
+      (item as s
+        (if (> a 0) 1 0)
+      )
+    )
+    (from
+      (table t)
+    )
+  )
+)

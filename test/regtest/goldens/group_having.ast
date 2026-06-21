@@ -1,0 +1,21 @@
+(query
+  (select
+    (select-list
+      (item
+        a
+      )
+      (item
+        (call count *)
+      )
+    )
+    (from
+      (table t)
+    )
+    (group-by
+      a
+    )
+    (having
+      (> (call count *) 1)
+    )
+  )
+)

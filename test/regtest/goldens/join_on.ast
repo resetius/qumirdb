@@ -1,0 +1,21 @@
+(query
+  (select
+    (select-list
+      (item
+        (field t a)
+      )
+      (item
+        (field s b)
+      )
+    )
+    (from
+      (join inner
+        (table t)
+        (table s)
+        (on
+          (== (field t id) (field s id))
+        )
+      )
+    )
+  )
+)

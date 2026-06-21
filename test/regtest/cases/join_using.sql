@@ -1,0 +1,1 @@
+SELECT a FROM t LEFT JOIN s USING (id);

@@ -1,0 +1,23 @@
+(query
+  (select
+    (select-list
+      (item
+        a
+      )
+    )
+    (from
+      (table t)
+    )
+  )
+  (order-by
+    (order desc nulls-last
+      a
+    )
+  )
+  (limit
+    10
+  )
+  (offset
+    5
+  )
+)

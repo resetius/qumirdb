@@ -608,7 +608,7 @@ TAstTask<TSqlTableRef> table_ref(TParserContext& ctx) {
 
                 ctx.Stream.Unget(next);
 
-                break;
+                co_return true;
             }
         }
 
@@ -988,6 +988,7 @@ TAstExprTask unary_expr(TParserContext& ctx) {
         co_return unary(token.Location, "-"_op, co_await unary_expr(ctx));
     }
 
+    ctx.Stream.Unget(token);
     co_return co_await postfix_expr(ctx);
 }
 

@@ -1,0 +1,10 @@
+(query
+  (select
+    (select-list
+      (star *)
+    )
+    (from
+      (table t)
+    )
+  )
+)

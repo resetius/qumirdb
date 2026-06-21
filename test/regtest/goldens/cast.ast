@@ -1,0 +1,15 @@
+(query
+  (select
+    (select-list
+      (item
+        (cast a i32)
+      )
+      (item
+        (cast b f64)
+      )
+    )
+    (from
+      (table t)
+    )
+  )
+)

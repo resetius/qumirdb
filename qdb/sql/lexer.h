@@ -1,3 +1,5 @@
+#pragma once
+
 #include <qumir/parser/lexer_base.h>
 
 namespace NQdb {

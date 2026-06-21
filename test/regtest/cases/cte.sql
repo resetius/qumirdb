@@ -1,0 +1,1 @@
+WITH x AS (SELECT a FROM t) SELECT a FROM x;
