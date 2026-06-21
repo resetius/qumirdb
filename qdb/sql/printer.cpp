@@ -221,6 +221,9 @@ struct TSqlPrinter {
             if (sub->Alias) {
                 head += " as " + *sub->Alias;
             }
+            if (sub->ColumnAliases) {
+                head += " cols: " + Join(sub->ColumnAliases->Items, ' ');
+            }
             Line(ind, head);
             Query(ind + 2, sub->Query);
             Line(ind, ")");

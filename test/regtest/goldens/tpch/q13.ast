@@ -1,2 +1,51 @@
-Error: expected ';' or end of file @ Line: 15, Byte: 15, Column: 15
-
+(query
+  (select
+    (select-list
+      (item
+        c_count
+      )
+      (item as custdist
+        (call count *)
+      )
+    )
+    (from
+      (subquery-table as c_orders cols: c_custkey c_count
+        (query
+          (select
+            (select-list
+              (item
+                c_custkey
+              )
+              (item
+                (call count o_orderkey)
+              )
+            )
+            (from
+              (join left
+                (table customer)
+                (table orders)
+                (on
+                  (&& (== c_custkey o_custkey) (! (call qdb_string_view_sql_like o_comment "%special%packages%")))
+                )
+              )
+            )
+            (group-by
+              c_custkey
+            )
+          )
+        )
+      )
+    )
+    (group-by
+      c_count
+    )
+  )
+  (order-by
+    (order desc
+      custdist
+    )
+    (order desc
+      c_count
+    )
+  )
+)
