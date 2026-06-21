@@ -1,2 +1,87 @@
-Error: ')' expected @ Line: 8, Byte: 21, Column: 21
-
+(query
+  (select
+    (select-list
+      (item
+        cntrycode
+      )
+      (item as numcust
+        (call count *)
+      )
+      (item as totacctbal
+        (call sum c_acctbal)
+      )
+    )
+    (from
+      (subquery-table as custsale
+        (query
+          (select
+            (select-list
+              (item as cntrycode
+                (call qdb_substring c_phone 1 2)
+              )
+              (item
+                c_acctbal
+              )
+            )
+            (from
+              (table customer)
+            )
+            (where
+              (&& (&& (|| (|| (|| (|| (|| (|| (== (call qdb_substring c_phone 1 2) "27") (== (call qdb_substring c_phone 1 2) "20"))
+                            (== (call qdb_substring c_phone 1 2) "22"))
+                          (== (call qdb_substring c_phone 1 2) "34"))
+                        (== (call qdb_substring c_phone 1 2) "29"))
+                      (== (call qdb_substring c_phone 1 2) "23"))
+                    (== (call qdb_substring c_phone 1 2) "17"))
+                  (> c_acctbal
+                    (subquery scalar (query
+                (select
+                  (select-list
+                    (item
+                      (call avg c_acctbal)
+                    )
+                  )
+                  (from
+                    (table customer)
+                  )
+                  (where
+                    (&& (> c_acctbal 0)
+                      (|| (|| (|| (|| (|| (|| (== (call qdb_substring c_phone 1 2) "27") (== (call qdb_substring c_phone 1 2) "20"))
+                                (== (call qdb_substring c_phone 1 2) "22"))
+                              (== (call qdb_substring c_phone 1 2) "34"))
+                            (== (call qdb_substring c_phone 1 2) "29"))
+                          (== (call qdb_substring c_phone 1 2) "23"))
+                        (== (call qdb_substring c_phone 1 2) "17")))
+                  )
+                )
+              )
+              )))
+                (! (subquery exists (query
+                (select
+                  (select-list
+                    (star *)
+                  )
+                  (from
+                    (table orders)
+                  )
+                  (where
+                    (== o_custkey c_custkey)
+                  )
+                )
+              )
+              )))
+            )
+          )
+        )
+      )
+    )
+    (group-by
+      cntrycode
+    )
+  )
+  (order-by
+    (order asc
+      cntrycode
+    )
+  )
+)

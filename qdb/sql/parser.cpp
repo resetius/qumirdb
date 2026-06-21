@@ -1097,6 +1097,70 @@ TAstExprTask primary_expr(TParserContext& ctx) {
         co_return cast(loc, std::move(operand), std::move(type));
     }
 
+    // <extract> ::= "EXTRACT" "(" <field> "FROM" <expr> ")"
+    if (IsKeyword(token, "EXTRACT")) {
+        auto next = ctx.Stream.Next();
+        if (!IsOp(next, '(')) {
+            co_return Error(next, "'(' expected");
+        }
+
+        auto field = ctx.Stream.Next();
+        if (field.Type != TToken::Identifier && field.Type != TToken::Keyword) {
+            co_return Error(field, "extract field expected (e.g. year)");
+        }
+        std::string fieldName;
+        for (char c : field.Name) {
+            fieldName += std::toupper(static_cast<unsigned char>(c));
+        }
+
+        next = ctx.Stream.Next();
+        if (!IsKeyword(next, "FROM")) {
+            co_return Error(next, "`FROM' expected in EXTRACT");
+        }
+
+        auto operand = co_await expr(ctx);
+
+        next = ctx.Stream.Next();
+        if (!IsOp(next, ')')) {
+            co_return Error(next, "')' expected");
+        }
+
+        if (fieldName == "YEAR") {
+            co_return call(loc, "qdb_date_year", { std::move(operand) });
+        }
+        co_return Error(field, "unsupported extract field `" + fieldName + "'");
+    }
+
+    // <substring> ::= "SUBSTRING" "(" <expr> "FROM" <expr> "FOR" <expr> ")"
+    if (IsKeyword(token, "SUBSTRING")) {
+        auto next = ctx.Stream.Next();
+        if (!IsOp(next, '(')) {
+            co_return Error(next, "'(' expected");
+        }
+
+        auto str = co_await expr(ctx);
+
+        next = ctx.Stream.Next();
+        if (!IsKeyword(next, "FROM")) {
+            co_return Error(next, "`FROM' expected in SUBSTRING");
+        }
+        auto start = co_await expr(ctx);
+
+        next = ctx.Stream.Next();
+        if (!IsKeyword(next, "FOR")) {
+            co_return Error(next, "`FOR' expected in SUBSTRING");
+        }
+        auto length = co_await expr(ctx);
+
+        next = ctx.Stream.Next();
+        if (!IsOp(next, ')')) {
+            co_return Error(next, "')' expected");
+        }
+
+        co_return call(loc, "qdb_substring",
+            { std::move(str), std::move(start), std::move(length) });
+    }
+
     if (IsKeyword(token, "EXISTS")) {
         auto next = ctx.Stream.Next();
         if (!IsOp(next, '(')) {

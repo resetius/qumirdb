@@ -83,6 +83,10 @@ static const std::unordered_set<std::string> Keywords = {
 
     "CAST",
 
+    "EXTRACT",
+    "SUBSTRING",
+    "FOR",
+
     "TRUE",
     "FALSE",
 
