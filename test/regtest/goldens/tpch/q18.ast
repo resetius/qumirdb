@@ -1,0 +1,70 @@
+(query
+  (select
+    (select-list
+      (item
+        c_name
+      )
+      (item
+        c_custkey
+      )
+      (item
+        o_orderkey
+      )
+      (item
+        o_orderdate
+      )
+      (item
+        o_totalprice
+      )
+      (item
+        (call sum l_quantity)
+      )
+    )
+    (from
+      (table customer)
+      (table orders)
+      (table lineitem)
+    )
+    (where
+      (&& (&& (subquery in o_orderkey (query
+        (select
+          (select-list
+            (item
+              l_orderkey
+            )
+          )
+          (from
+            (table lineitem)
+          )
+          (group-by
+            l_orderkey
+          )
+          (having
+            (> (call sum l_quantity) 315)
+          )
+        )
+      )
+      )
+          (== c_custkey o_custkey))
+        (== o_orderkey l_orderkey))
+    )
+    (group-by
+      c_name
+      c_custkey
+      o_orderkey
+      o_orderdate
+      o_totalprice
+    )
+  )
+  (order-by
+    (order desc
+      o_totalprice
+    )
+    (order asc
+      o_orderdate
+    )
+  )
+  (limit
+    100
+  )
+)

@@ -1,0 +1,74 @@
+(query
+  (select
+    (select-list
+      (item
+        s_name
+      )
+      (item
+        s_address
+      )
+    )
+    (from
+      (table supplier)
+      (table nation)
+    )
+    (where
+      (&& (&& (subquery in s_suppkey (query
+        (select
+          (select-list
+            (item
+              ps_suppkey
+            )
+          )
+          (from
+            (table partsupp)
+          )
+          (where
+            (&& (subquery in ps_partkey (query
+              (select
+                (select-list
+                  (item
+                    p_partkey
+                  )
+                )
+                (from
+                  (table part)
+                )
+                (where
+                  (call qdb_string_view_sql_like p_name "thistle%")
+                )
+              )
+            )
+            )
+              (> ps_availqty
+                (subquery scalar (query
+              (select
+                (select-list
+                  (item
+                    (* 0.5 (call sum l_quantity))
+                  )
+                )
+                (from
+                  (table lineitem)
+                )
+                (where
+                  (&& (&& (&& (== l_partkey ps_partkey) (== l_suppkey ps_suppkey)) (>= l_shipdate (call qdb_sql_date "1995-01-01")))
+                    (< l_shipdate (+ (call qdb_sql_date "1995-01-01") (call qdb_sql_interval "1" "year"))))
+                )
+              )
+            )
+            )))
+          )
+        )
+      )
+      )
+          (== s_nationkey n_nationkey))
+        (== n_name "PERU"))
+    )
+  )
+  (order-by
+    (order asc
+      s_name
+    )
+  )
+)

@@ -1,0 +1,44 @@
+(query
+  (select
+    (select-list
+      (item
+        l_orderkey
+      )
+      (item as revenue
+        (call sum (* l_extendedprice (- 1 l_discount)))
+      )
+      (item
+        o_orderdate
+      )
+      (item
+        o_shippriority
+      )
+    )
+    (from
+      (table customer)
+      (table orders)
+      (table lineitem)
+    )
+    (where
+      (&& (&& (&& (&& (== c_mktsegment "FURNITURE") (== c_custkey o_custkey)) (== l_orderkey o_orderkey))
+          (< o_orderdate (call qdb_sql_date "1995-03-20")))
+        (> l_shipdate (call qdb_sql_date "1995-03-20")))
+    )
+    (group-by
+      l_orderkey
+      o_orderdate
+      o_shippriority
+    )
+  )
+  (order-by
+    (order desc
+      revenue
+    )
+    (order asc
+      o_orderdate
+    )
+  )
+  (limit
+    10
+  )
+)

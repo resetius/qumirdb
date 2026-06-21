@@ -1,0 +1,54 @@
+(query
+  (select
+    (select-list
+      (item
+        l_returnflag
+      )
+      (item
+        l_linestatus
+      )
+      (item as sum_qty
+        (call sum l_quantity)
+      )
+      (item as sum_base_price
+        (call sum l_extendedprice)
+      )
+      (item as sum_disc_price
+        (call sum (* l_extendedprice (- 1 l_discount)))
+      )
+      (item as sum_charge
+        (call sum (* (* l_extendedprice (- 1 l_discount)) (+ 1 l_tax)))
+      )
+      (item as avg_qty
+        (call avg l_quantity)
+      )
+      (item as avg_price
+        (call avg l_extendedprice)
+      )
+      (item as avg_disc
+        (call avg l_discount)
+      )
+      (item as count_order
+        (call count *)
+      )
+    )
+    (from
+      (table lineitem)
+    )
+    (where
+      (<= l_shipdate (- (call qdb_sql_date "1998-12-01") (call qdb_sql_interval "81" "day")))
+    )
+    (group-by
+      l_returnflag
+      l_linestatus
+    )
+  )
+  (order-by
+    (order asc
+      l_returnflag
+    )
+    (order asc
+      l_linestatus
+    )
+  )
+)

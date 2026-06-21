@@ -1,0 +1,18 @@
+(query
+  (select
+    (select-list
+      (item as promo_revenue
+        (/ (* 100 (call sum (if (call qdb_string_view_sql_like p_type "PROMO%") (* l_extendedprice (- 1 l_discount)) 0)))
+          (call sum (* l_extendedprice (- 1 l_discount))))
+      )
+    )
+    (from
+      (table lineitem)
+      (table part)
+    )
+    (where
+      (&& (&& (== l_partkey p_partkey) (>= l_shipdate (call qdb_sql_date "1993-03-01")))
+        (< l_shipdate (+ (call qdb_sql_date "1993-03-01") (call qdb_sql_interval "1" "month"))))
+    )
+  )
+)

@@ -1,0 +1,49 @@
+(query
+  (select
+    (select-list
+      (item
+        ps_partkey
+      )
+      (item as value
+        (call sum (* ps_supplycost ps_availqty))
+      )
+    )
+    (from
+      (table partsupp)
+      (table supplier)
+      (table nation)
+    )
+    (where
+      (&& (&& (== ps_suppkey s_suppkey) (== s_nationkey n_nationkey)) (== n_name "JAPAN"))
+    )
+    (group-by
+      ps_partkey
+    )
+    (having
+      (> (call sum (* ps_supplycost ps_availqty))
+        (subquery scalar (query
+        (select
+          (select-list
+            (item
+              (* (call sum (* ps_supplycost ps_availqty)) 0.0001)
+            )
+          )
+          (from
+            (table partsupp)
+            (table supplier)
+            (table nation)
+          )
+          (where
+            (&& (&& (== ps_suppkey s_suppkey) (== s_nationkey n_nationkey)) (== n_name "JAPAN"))
+          )
+        )
+      )
+      ))
+    )
+  )
+  (order-by
+    (order desc
+      value
+    )
+  )
+)

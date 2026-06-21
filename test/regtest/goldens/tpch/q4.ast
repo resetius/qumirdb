@@ -1,0 +1,41 @@
+(query
+  (select
+    (select-list
+      (item
+        o_orderpriority
+      )
+      (item as order_count
+        (call count *)
+      )
+    )
+    (from
+      (table orders)
+    )
+    (where
+      (&& (&& (>= o_orderdate (call qdb_sql_date "1995-12-01"))
+          (< o_orderdate (+ (call qdb_sql_date "1995-12-01") (call qdb_sql_interval "3" "month"))))
+        (subquery exists (query
+        (select
+          (select-list
+            (star *)
+          )
+          (from
+            (table lineitem)
+          )
+          (where
+            (&& (== l_orderkey o_orderkey) (< l_commitdate l_receiptdate))
+          )
+        )
+      )
+      ))
+    )
+    (group-by
+      o_orderpriority
+    )
+  )
+  (order-by
+    (order asc
+      o_orderpriority
+    )
+  )
+)

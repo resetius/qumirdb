@@ -1039,6 +1039,32 @@ TAstExprTask primary_expr(TParserContext& ctx) {
         co_return call(loc, "qdb_sql_null", {});
     }
 
+    // <date_literal> ::= "DATE" <string_literal>
+    if (IsKeyword(token, "DATE")) {
+        auto value = ctx.Stream.Next();
+        if (value.Type != TToken::String) {
+            co_return Error(value, "string literal expected after `DATE'");
+        }
+        co_return call(loc, "qdb_sql_date",
+            { std::make_shared<NQumir::NAst::TStringLiteralExpr>(value.Location, value.Name) });
+    }
+
+    // <interval_literal> ::= "INTERVAL" <string_literal> <unit>
+    if (IsKeyword(token, "INTERVAL")) {
+        auto value = ctx.Stream.Next();
+        if (value.Type != TToken::String) {
+            co_return Error(value, "string literal expected after `INTERVAL'");
+        }
+        auto unit = ctx.Stream.Next();
+        if (unit.Type != TToken::Identifier) {
+            co_return Error(unit, "interval unit expected (e.g. day, month, year)");
+        }
+        co_return call(loc, "qdb_sql_interval", {
+            std::make_shared<NQumir::NAst::TStringLiteralExpr>(value.Location, value.Name),
+            std::make_shared<NQumir::NAst::TStringLiteralExpr>(unit.Location, unit.Name),
+        });
+    }
+
     if (token.Type == TToken::Identifier) {
         ctx.Stream.Unget(token);
         co_return co_await function_call(ctx);

@@ -1,0 +1,67 @@
+(query
+  (select
+    (select-list
+      (item
+        s_name
+      )
+      (item as numwait
+        (call count *)
+      )
+    )
+    (from
+      (table supplier)
+      (table lineitem as l1)
+      (table orders)
+      (table nation)
+    )
+    (where
+      (&& (&& (&& (&& (&& (&& (&& (== s_suppkey (field l1 l_suppkey)) (== o_orderkey (field l1 l_orderkey))) (== o_orderstatus "F"))
+                (> (field l1 l_receiptdate) (field l1 l_commitdate)))
+              (subquery exists (query
+        (select
+          (select-list
+            (star *)
+          )
+          (from
+            (table lineitem as l2)
+          )
+          (where
+            (&& (== (field l2 l_orderkey) (field l1 l_orderkey)) (!= (field l2 l_suppkey) (field l1 l_suppkey)))
+          )
+        )
+      )
+      ))
+            (! (subquery exists (query
+        (select
+          (select-list
+            (star *)
+          )
+          (from
+            (table lineitem as l3)
+          )
+          (where
+            (&& (&& (== (field l3 l_orderkey) (field l1 l_orderkey)) (!= (field l3 l_suppkey) (field l1 l_suppkey)))
+              (> (field l3 l_receiptdate) (field l3 l_commitdate)))
+          )
+        )
+      )
+      )))
+          (== s_nationkey n_nationkey))
+        (== n_name "IRAQ"))
+    )
+    (group-by
+      s_name
+    )
+  )
+  (order-by
+    (order desc
+      numwait
+    )
+    (order asc
+      s_name
+    )
+  )
+  (limit
+    100
+  )
+)
