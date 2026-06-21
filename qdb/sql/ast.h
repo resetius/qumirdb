@@ -71,15 +71,18 @@ enum class ESqlJoinType {
     Cross,
 };
 
+struct TJoinCondition : TSqlTableRef {
+    NQumir::NAst::TExprPtr On;
+    std::vector<std::string> UsingColumns;
+};
+
 struct TSqlJoin : TSqlTableRef {
     TSqlPtr<TSqlTableRef> Left;
     TSqlPtr<TSqlTableRef> Right;
 
     ESqlJoinType Type = ESqlJoinType::Inner;
 
-    NQumir::NAst::TExprPtr On;
-
-    std::vector<std::string> UsingColumns;
+    TSqlPtr<TJoinCondition> Condition;
 };
 
 struct TSqlQuery : TSqlNode {
@@ -101,12 +104,16 @@ struct TSqlGroupBy : TSqlNode {
     std::vector<NQumir::NAst::TExprPtr> Items;
 };
 
+struct TSqlFrom : TSqlNode {
+    std::vector<TSqlPtr<TSqlTableRef>> Items;
+};
+
 struct TSqlSelect : TSqlNode {
     ESetQuantifier Quantifier = ESetQuantifier::All;
 
     TSqlPtr<TSqlSelectList> SelectList;
 
-    TSqlPtr<TSqlTableRef> From;
+    TSqlPtr<TSqlFrom> From;
 
     NQumir::NAst::TExprPtr Where;
 
