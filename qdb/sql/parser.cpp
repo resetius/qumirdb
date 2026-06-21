@@ -894,15 +894,17 @@ TAstExprTask comparison_expr(TParserContext& ctx) {
     }
 
     if (IsKeyword(token, "IS")) {
+        bool notNull = false;
         auto next = ctx.Stream.Next();
         if (IsKeyword(next, "NOT")) {
-            // TODO: need expr for null comparison
-            co_return nullptr;
-        } else {
-            ctx.Stream.Unget(next);
+            notNull = true;
+            next = ctx.Stream.Next();
         }
-        // TODO: need expr for null comparison
-        co_return nullptr;
+        if (!IsKeyword(next, "NULL")) {
+            co_return Error(next, "`NULL' expected after `IS'");
+        }
+        auto isNull = call(token.Location, "qdb_sql_is_null", { ret });
+        co_return notNull ? unary(token.Location, "!"_op, isNull) : isNull;
     }
 
     // optional NOT before IN / BETWEEN / LIKE
@@ -924,18 +926,21 @@ TAstExprTask comparison_expr(TParserContext& ctx) {
         if (!IsOp(next, ')')) {
             co_return Error(next, "')' expected");
         }
-        if (!items) {
-            // TODO: subquery form of IN
-            co_return nullptr;
+        if (auto sub = NQumir::NAst::TMaybeNode<TSubqueryExpr>(items)) {
+            // ret IN ( <select> )
+            auto node = sub.Cast();
+            node->Operand = ret;
+            ret = node;
+        } else {
+            // ret IN (a, b, c) -> ret == a || ret == b || ret == c
+            auto block = std::static_pointer_cast<NQumir::NAst::TBlockExpr>(items);
+            NQumir::NAst::TExprPtr disjunction = nullptr;
+            for (auto& item : block->Stmts) {
+                auto eq = binary(loc, "=="_op, ret, item);
+                disjunction = disjunction ? binary(loc, "||"_op, disjunction, eq) : eq;
+            }
+            ret = disjunction;
         }
-        // ret IN (a, b, c) -> ret == a || ret == b || ret == c
-        auto block = std::static_pointer_cast<NQumir::NAst::TBlockExpr>(items);
-        NQumir::NAst::TExprPtr disjunction = nullptr;
-        for (auto& item : block->Stmts) {
-            auto eq = binary(loc, "=="_op, ret, item);
-            disjunction = disjunction ? binary(loc, "||"_op, disjunction, eq) : eq;
-        }
-        ret = disjunction;
     } else if (IsKeyword(opToken, "BETWEEN")) {
         auto left = co_await add_expr(ctx);
         auto next = ctx.Stream.Next();
@@ -1024,6 +1029,15 @@ TAstExprTask primary_expr(TParserContext& ctx) {
         co_return std::make_shared<NQumir::NAst::TNumberExpr>(loc, (bool)token.Value.i64);
     }
 
+    // keyword literals
+    if (IsKeyword(token, "TRUE")) {
+        co_return std::make_shared<NQumir::NAst::TNumberExpr>(loc, true);
+    } else if (IsKeyword(token, "FALSE")) {
+        co_return std::make_shared<NQumir::NAst::TNumberExpr>(loc, false);
+    } else if (IsKeyword(token, "NULL")) {
+        co_return call(loc, "qdb_sql_null", {});
+    }
+
     if (token.Type == TToken::Identifier) {
         ctx.Stream.Unget(token);
         co_return co_await function_call(ctx);
@@ -1057,27 +1071,29 @@ TAstExprTask primary_expr(TParserContext& ctx) {
     }
 
     if (IsKeyword(token, "EXISTS")) {
-        // TODO: exists expr?
         auto next = ctx.Stream.Next();
         if (!IsOp(next, '(')) {
             co_return Error(next, "'(' expected");
         }
 
-        auto select = co_await select_stmt(ctx);
+        auto query = co_await select_stmt(ctx);
 
         next = ctx.Stream.Next();
         if (!IsOp(next, ')')) {
             co_return Error(next, "')' expected");
         }
 
-        co_return nullptr;
+        co_return std::make_shared<TSubqueryExpr>(
+            loc, TSubqueryExpr::EKind::Exists, query);
     }
 
     if (IsOp(token, '(')) {
         auto next = ctx.Stream.Next(); ctx.Stream.Unget(next);
         NQumir::NAst::TExprPtr ret = nullptr;
         if (IsKeyword(next, "WITH") || IsKeyword(next, "SELECT")) {
-            // TODO: wrapped subquery
+            auto query = co_await select_stmt(ctx);
+            ret = std::make_shared<TSubqueryExpr>(
+                loc, TSubqueryExpr::EKind::Scalar, query);
         } else {
             ret = co_await expr(ctx);
         }
@@ -1205,9 +1221,9 @@ TAstExprTask expr_list_or_subquery(TParserContext& ctx) {
     ctx.Stream.Unget(token);
 
     if (subquery) {
-        // TODO: subquery expression node
-        co_await select_stmt(ctx);
-        co_return nullptr;
+        auto query = co_await select_stmt(ctx);
+        co_return std::make_shared<TSubqueryExpr>(
+            token.Location, TSubqueryExpr::EKind::In, query);
     }
     co_return co_await expr_list(ctx);
 }
