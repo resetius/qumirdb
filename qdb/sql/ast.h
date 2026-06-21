@@ -17,8 +17,13 @@ enum ESetQuantifier {
     Distinct,
 };
 
-struct TSqlCte : TSqlNode {
+struct TIdentList;
+struct TSqlQuery;
 
+struct TSqlCte : TSqlNode {
+    std::string Name;
+    TSqlPtr<TIdentList> Columns; // optional column name list
+    TSqlPtr<TSqlQuery> Query;
 };
 
 struct TSqlWithClause : TSqlNode {
@@ -45,6 +50,11 @@ struct TSqlOrder : TSqlNode {
 struct TSqlSelectItem : TSqlNode {
     NQumir::NAst::TExprPtr Expr;
     std::optional<std::string> Alias;
+
+    // For "*" and "<qualified_name>.*". When Star is set, Expr/Alias are unused
+    // and StarPrefix holds the optional qualifier (empty for a bare "*").
+    bool Star = false;
+    std::vector<std::string> StarPrefix;
 };
 
 struct TSqlTableRef : TSqlNode {
