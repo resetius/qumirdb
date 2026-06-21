@@ -266,6 +266,20 @@ NQumir::NAst::TExprPtr cast(TLocation loc, NQumir::NAst::TExprPtr expr, NQumir::
     return std::make_shared<NQumir::NAst::TCastExpr>(loc, std::move(expr), std::move(type));
 }
 
+NQumir::NAst::TExprPtr list(TLocation loc, std::vector<NQumir::NAst::TExprPtr> items) {
+    return std::make_shared<NQumir::NAst::TBlockExpr>(loc, std::move(items));
+}
+
+// builds a column reference: <ident> for a single name, a chain of field
+// accesses for a qualified one (a.b.c -> ((a).b).c)
+NQumir::NAst::TExprPtr qualified_ref(TLocation loc, const std::vector<std::string>& parts) {
+    NQumir::NAst::TExprPtr ret = std::make_shared<NQumir::NAst::TIdentExpr>(loc, parts.front());
+    for (size_t i = 1; i < parts.size(); ++i) {
+        ret = std::make_shared<NQumir::NAst::TFieldAccessExpr>(loc, ret, parts[i]);
+    }
+    return ret;
+}
+
 // <ident> ::= <regular_ident> | <quoted_ident>
 std::expected<std::string, TError> ident(TParserContext& ctx) {
     auto token = ctx.Stream.Next();
@@ -901,8 +915,27 @@ TAstExprTask comparison_expr(TParserContext& ctx) {
 
     auto loc = opToken.Location;
     if (IsKeyword(opToken, "IN")) {
-        // TODO: need TInExpr
-        co_return nullptr;
+        auto next = ctx.Stream.Next();
+        if (!IsOp(next, '(')) {
+            co_return Error(next, "'(' expected after `IN'");
+        }
+        auto items = co_await expr_list_or_subquery(ctx);
+        next = ctx.Stream.Next();
+        if (!IsOp(next, ')')) {
+            co_return Error(next, "')' expected");
+        }
+        if (!items) {
+            // TODO: subquery form of IN
+            co_return nullptr;
+        }
+        // ret IN (a, b, c) -> ret == a || ret == b || ret == c
+        auto block = std::static_pointer_cast<NQumir::NAst::TBlockExpr>(items);
+        NQumir::NAst::TExprPtr disjunction = nullptr;
+        for (auto& item : block->Stmts) {
+            auto eq = binary(loc, "=="_op, ret, item);
+            disjunction = disjunction ? binary(loc, "||"_op, disjunction, eq) : eq;
+        }
+        ret = disjunction;
     } else if (IsKeyword(opToken, "BETWEEN")) {
         auto left = co_await add_expr(ctx);
         auto next = ctx.Stream.Next();
@@ -992,8 +1025,8 @@ TAstExprTask primary_expr(TParserContext& ctx) {
     }
 
     if (token.Type == TToken::Identifier) {
-        // TODO: function call
-        co_return std::make_shared<NQumir::NAst::TIdentExpr>(loc, token.Name);
+        ctx.Stream.Unget(token);
+        co_return co_await function_call(ctx);
     }
 
     if (IsKeyword(token, "CASE")) {
@@ -1058,11 +1091,182 @@ TAstExprTask primary_expr(TParserContext& ctx) {
     co_return Error(token, "Unsupported expression");
 }
 
-TAstExprTask function_call(TParserContext& ctx);
-TAstExprTask function_args(TParserContext& ctx);
-TAstExprTask case_expr(TParserContext& ctx);
-TAstExprTask expr_list_or_subquery(TParserContext& ctx);
-TAstExprTask expr_list(TParserContext& ctx);
+// <function_call> ::= <qualified_name> "(" [ <function_args> ] ")"
+// Falls back to a plain <qualified_name> reference when no "(" follows.
+TAstExprTask function_call(TParserContext& ctx) {
+    auto head = ctx.Stream.Next();
+    auto loc = head.Location;
+    ctx.Stream.Unget(head);
+
+    auto name = co_await qualified_name(ctx);
+
+    auto token = ctx.Stream.Next();
+    if (!IsOp(token, '(')) {
+        ctx.Stream.Unget(token);
+        co_return qualified_ref(loc, name);
+    }
+
+    std::vector<NQumir::NAst::TExprPtr> args;
+    auto next = ctx.Stream.Next();
+    if (!IsOp(next, ')')) {
+        ctx.Stream.Unget(next);
+        auto block = co_await function_args(ctx);
+        args = std::static_pointer_cast<NQumir::NAst::TBlockExpr>(block)->Stmts;
+        next = ctx.Stream.Next();
+        if (!IsOp(next, ')')) {
+            co_return Error(next, "')' expected");
+        }
+    }
+
+    std::string fname;
+    for (size_t i = 0; i < name.size(); ++i) {
+        if (i) {
+            fname += '.';
+        }
+        fname += name[i];
+    }
+    co_return call(loc, fname, std::move(args));
+}
+
+// <function_args> ::= "*" | <expr> { "," <expr> }
+TAstExprTask function_args(TParserContext& ctx) {
+    auto token = ctx.Stream.Next();
+    if (IsOp(token, '*')) {
+        // represent star argument as a synthetic identifier "*"
+        co_return list(token.Location,
+            { std::make_shared<NQumir::NAst::TIdentExpr>(token.Location, "*") });
+    }
+    ctx.Stream.Unget(token);
+    co_return co_await expr_list(ctx);
+}
+
+// <case_expr> ::= "CASE" { "WHEN" <expr> "THEN" <expr> } [ "ELSE" <expr> ] "END"
+// (the leading "CASE" is consumed by <primary_expr>)
+// Desugars to a chain of if-expressions.
+TAstExprTask case_expr(TParserContext& ctx) {
+    std::vector<std::pair<NQumir::NAst::TExprPtr, NQumir::NAst::TExprPtr>> branches;
+
+    auto token = ctx.Stream.Next();
+    auto loc = token.Location;
+    while (IsKeyword(token, "WHEN")) {
+        auto cond = co_await expr(ctx);
+
+        auto then = ctx.Stream.Next();
+        if (!IsKeyword(then, "THEN")) {
+            co_return Error(then, "`THEN' expected");
+        }
+        auto result = co_await expr(ctx);
+        branches.emplace_back(std::move(cond), std::move(result));
+
+        token = ctx.Stream.Next();
+    }
+
+    if (branches.empty()) {
+        co_return Error(token, "`WHEN' expected in CASE");
+    }
+
+    NQumir::NAst::TExprPtr ret = nullptr;
+    if (IsKeyword(token, "ELSE")) {
+        ret = co_await expr(ctx);
+        token = ctx.Stream.Next();
+    }
+
+    if (!IsKeyword(token, "END")) {
+        co_return Error(token, "`END' expected");
+    }
+
+    for (auto it = branches.rbegin(); it != branches.rend(); ++it) {
+        ret = std::make_shared<NQumir::NAst::TIfExpr>(loc, it->first, it->second, ret);
+    }
+    co_return ret;
+}
+
+// <expr_list> ::= <expr> { "," <expr> }
+TAstExprTask expr_list(TParserContext& ctx) {
+    std::vector<NQumir::NAst::TExprPtr> items;
+    TToken token;
+    TLocation loc;
+    do {
+        auto item = co_await expr(ctx);
+        if (items.empty()) {
+            loc = item->Location;
+        }
+        items.emplace_back(std::move(item));
+        token = ctx.Stream.Next();
+    } while (IsOp(token, ','));
+    ctx.Stream.Unget(token);
+    co_return list(loc, std::move(items));
+}
+
+// <expr_list_or_subquery> ::= <select_stmt> | <expr> { "," <expr> }
+TAstExprTask expr_list_or_subquery(TParserContext& ctx) {
+    auto token = ctx.Stream.Next();
+    bool subquery = IsKeyword(token, "SELECT") || IsKeyword(token, "WITH");
+    ctx.Stream.Unget(token);
+
+    if (subquery) {
+        // TODO: subquery expression node
+        co_await select_stmt(ctx);
+        co_return nullptr;
+    }
+    co_return co_await expr_list(ctx);
+}
+
+// <type_name> ::= "BOOL" | "BOOLEAN" | "INT" | "INTEGER" | "BIGINT"
+//   | "FLOAT" | "DOUBLE" | "TEXT" | "VARCHAR" | "DATE" | "TIMESTAMP"
+//   | "DECIMAL" [ "(" <integer> [ "," <integer> ] ")" ]
+TAstTypeTask type_name(TParserContext& ctx) {
+    using namespace NQumir::NAst;
+
+    auto token = ctx.Stream.Next();
+    if (token.Type != TToken::Identifier && token.Type != TToken::Keyword) {
+        co_return Error(token, "type name expected");
+    }
+
+    // type names are case-insensitive; keywords already arrive upper-cased
+    std::string name;
+    for (char c : token.Name) {
+        name += std::toupper(static_cast<unsigned char>(c));
+    }
+
+    if (name == "BOOL" || name == "BOOLEAN") {
+        co_return std::make_shared<TBoolType>();
+    } else if (name == "INT" || name == "INTEGER") {
+        co_return std::make_shared<TIntegerType>(TIntegerType::I32);
+    } else if (name == "BIGINT") {
+        co_return std::make_shared<TIntegerType>(TIntegerType::I64);
+    } else if (name == "FLOAT" || name == "DOUBLE") {
+        co_return std::make_shared<TFloatType>();
+    } else if (name == "TEXT" || name == "VARCHAR") {
+        co_return std::make_shared<TStringType>();
+    } else if (name == "DATE" || name == "TIMESTAMP") {
+        co_return std::make_shared<TNamedType>(name, nullptr);
+    } else if (name == "DECIMAL") {
+        auto next = ctx.Stream.Next();
+        if (IsOp(next, '(')) {
+            auto precision = ctx.Stream.Next();
+            if (precision.Type != TToken::Integer) {
+                co_return Error(precision, "integer expected in DECIMAL");
+            }
+            next = ctx.Stream.Next();
+            if (IsOp(next, ',')) {
+                auto scale = ctx.Stream.Next();
+                if (scale.Type != TToken::Integer) {
+                    co_return Error(scale, "integer expected in DECIMAL");
+                }
+                next = ctx.Stream.Next();
+            }
+            if (!IsOp(next, ')')) {
+                co_return Error(next, "')' expected");
+            }
+        } else {
+            ctx.Stream.Unget(next);
+        }
+        co_return std::make_shared<TNamedType>(name, nullptr);
+    }
+
+    co_return Error(token, "unknown type name `" + name + "'");
+}
 
 
 } // namespace
