@@ -237,6 +237,58 @@ bool IsKeyword(const TToken& tok, const std::string& kw) {
     return tok.Type == TToken::Keyword && tok.Name == kw;
 }
 
+// <ident> ::= <regular_ident> | <quoted_ident>
+std::expected<std::string, TError> ident(TParserContext& ctx) {
+    auto token = ctx.Stream.Next();
+    if (token.Type == TToken::Identifier) {
+        return token.Name;
+    }
+    return std::unexpected(Error(token, "identifier expected"));
+}
+
+// <qualified_name> ::= <ident> { "." <ident> }
+std::expected<std::vector<std::string>, TError> qualified_name(TParserContext& ctx) {
+    std::vector<std::string> parts;
+
+    auto first = ident(ctx);
+    if (!first) {
+        return std::unexpected(first.error());
+    }
+    parts.push_back(std::move(*first));
+
+    while (true) {
+        auto dot = ctx.Stream.Next();
+        if (!IsOp(dot, '.')) {
+            ctx.Stream.Unget(dot);
+            break;
+        }
+        auto next = ident(ctx);
+        if (!next) {
+            return std::unexpected(next.error());
+        }
+        parts.push_back(std::move(*next));
+    }
+
+    return parts;
+}
+
+// [ [ "AS" ] <ident> ]
+std::expected<std::optional<std::string>, TError> opt_alias(TParserContext& ctx) {
+    auto token = ctx.Stream.Next();
+    if (IsKeyword(token, "AS")) {
+        auto name = ident(ctx);
+        if (!name) {
+            return std::unexpected(name.error());
+        }
+        return std::optional<std::string>(std::move(*name));
+    }
+    if (token.Type == TToken::Identifier) {
+        return std::optional<std::string>(token.Name);
+    }
+    ctx.Stream.Unget(token);
+    return std::optional<std::string>{};
+}
+
 template<class F>
 using TTask = std::invoke_result_t<F&, TParserContext&>;
 
@@ -262,7 +314,9 @@ TTask<T> TryKeywords(T&& lambda, TParserContext& ctx, const std::vector<std::str
 TAstTask<TSqlQuery> select_stmt(TParserContext& ctx);
 TAstTask<TSqlNode> select_core(TParserContext& ctx);
 TAstTask<TSqlSelectList> select_list(TParserContext& ctx);
+TAstTask<TSqlSelectItem> select_item(TParserContext& ctx);
 TAstTask<TSqlOrder> order_by_clause(TParserContext& ctx);
+TAstTask<TSqlOrderItem> order_item(TParserContext& ctx);
 TAstTask<TSqlWithClause> with_clause(TParserContext& ctx);
 TAstTask<TSqlCte> cte_def(TParserContext& ctx);
 TAstTask<TSqlFrom> from_clause(TParserContext& ctx);
@@ -273,6 +327,7 @@ TAstTask<TJoinCondition> join_condition(TParserContext& ctx);
 TAstTask<TIdentList> ident_list(TParserContext& ctx);
 TAstExprTask limit_clause(TParserContext& ctx);
 TAstExprTask offset_clause(TParserContext& ctx);
+TAstExprTask where_clause(TParserContext& ctx);
 TAstExprTask having_clause(TParserContext& ctx);
 
 
@@ -316,6 +371,7 @@ TAstTask<TSqlWithClause> with_clause(TParserContext& ctx) {
 
     do {
         auto cte = co_await cte_def(ctx);
+        with->Ctes.emplace_back(std::move(cte));
         token = ctx.Stream.Next();
     } while (IsOp(token, ','));
     ctx.Stream.Unget(token);
@@ -340,14 +396,82 @@ TAstTask<TSqlNode> select_core(TParserContext& ctx) {
     select->SelectList = co_await select_list(ctx);
 
     select->From = co_await TryKeywords(from_clause, ctx, {"FROM"});
+    select->Where = co_await TryKeywords(where_clause, ctx, {"WHERE"});
     select->GroupBy = co_await TryKeywords(group_by_clause, ctx, {"GROUP", "BY"});
     select->Having = co_await TryKeywords(having_clause, ctx, {"HAVING"});
 
     co_return select;
 }
 
+// <select_list> ::= "*" | <select_item> { "," <select_item> }
 TAstTask<TSqlSelectList> select_list(TParserContext& ctx) {
-    co_return nullptr;
+    auto list = std::make_shared<TSqlSelectList>();
+    TToken token;
+    do {
+        auto item = co_await select_item(ctx);
+        list->Items.emplace_back(std::move(item));
+        token = ctx.Stream.Next();
+    } while (IsOp(token, ','));
+    ctx.Stream.Unget(token);
+    co_return list;
+}
+
+// <select_item> ::= <expr> [ [ "AS" ] <ident> ] | <qualified_name> "." "*"
+TAstTask<TSqlSelectItem> select_item(TParserContext& ctx) {
+    auto item = std::make_shared<TSqlSelectItem>();
+
+    auto first = ctx.Stream.Next();
+
+    // bare "*"
+    if (IsOp(first, '*')) {
+        item->Star = true;
+        co_return item;
+    }
+
+    // try <qualified_name> "." "*", buffering tokens so we can fall back to <expr>
+    if (first.Type == TToken::Identifier) {
+        std::vector<TToken> buffer{first};
+        std::vector<std::string> prefix{first.Name};
+        bool isStar = false;
+
+        while (true) {
+            auto dot = ctx.Stream.Next();
+            if (!IsOp(dot, '.')) {
+                ctx.Stream.Unget(dot);
+                break;
+            }
+            buffer.push_back(dot);
+
+            auto next = ctx.Stream.Next();
+            buffer.push_back(next);
+            if (IsOp(next, '*')) {
+                isStar = true;
+                break;
+            }
+            if (next.Type == TToken::Identifier) {
+                prefix.push_back(next.Name);
+                continue;
+            }
+            break;
+        }
+
+        if (isStar) {
+            item->Star = true;
+            item->StarPrefix = std::move(prefix);
+            co_return item;
+        }
+
+        // not a star item: restore tokens and parse as a general expression
+        for (auto it = buffer.rbegin(); it != buffer.rend(); ++it) {
+            ctx.Stream.Unget(*it);
+        }
+    } else {
+        ctx.Stream.Unget(first);
+    }
+
+    item->Expr = co_await expr(ctx);
+    item->Alias = co_await opt_alias(ctx);
+    co_return item;
 }
 
 TAstTask<TSqlFrom> from_clause(TParserContext& ctx) {
@@ -362,8 +486,18 @@ TAstTask<TSqlFrom> from_clause(TParserContext& ctx) {
     co_return from;
 }
 
+// <group_by_clause> ::= "GROUP" "BY" <group_item> { "," <group_item> }
+// <group_item> ::= <expr>
 TAstTask<TSqlGroupBy> group_by_clause(TParserContext& ctx) {
-    co_return nullptr;
+    auto group = std::make_shared<TSqlGroupBy>();
+    TToken token;
+    do {
+        auto item = co_await expr(ctx);
+        group->Items.emplace_back(std::move(item));
+        token = ctx.Stream.Next();
+    } while (IsOp(token, ','));
+    ctx.Stream.Unget(token);
+    co_return group;
 }
 
 TAstTask<TSqlTableRef> table_ref(TParserContext& ctx) {
@@ -450,7 +584,15 @@ TAstTask<TJoinCondition> join_condition(TParserContext& ctx) {
         co_return join_cond;
     }
     if (IsKeyword(next, "USING")) {
+        auto lparen = ctx.Stream.Next();
+        if (!IsOp(lparen, '(')) {
+            co_return Error(lparen, "expected '(' after USING");
+        }
         join_cond->UsingColumns = co_await ident_list(ctx);
+        auto rparen = ctx.Stream.Next();
+        if (!IsOp(rparen, ')')) {
+            co_return Error(rparen, "expected ')' after USING column list");
+        }
         co_return join_cond;
     }
 
@@ -458,36 +600,156 @@ TAstTask<TJoinCondition> join_condition(TParserContext& ctx) {
     co_return join_cond;
 }
 
+// <table_factor> ::=
+//       <qualified_name> [ [ "AS" ] <ident> ]
+//     | "(" <select_stmt> ")" [ [ "AS" ] <ident> ]
+//     | "(" <table_ref> ")"
 TAstTask<TSqlTableRef> table_factor(TParserContext& ctx) {
-    co_return nullptr;
+    auto token = ctx.Stream.Next();
+
+    if (IsOp(token, '(')) {
+        auto peek = ctx.Stream.Next();
+        bool isSubquery = IsKeyword(peek, "SELECT") || IsKeyword(peek, "WITH");
+        ctx.Stream.Unget(peek);
+
+        if (isSubquery) {
+            auto sub = std::make_shared<TSqlSubqueryTable>();
+            sub->Query = co_await select_stmt(ctx);
+
+            auto rparen = ctx.Stream.Next();
+            if (!IsOp(rparen, ')')) {
+                co_return Error(rparen, "expected ')' after subquery");
+            }
+            sub->Alias = co_await opt_alias(ctx);
+            co_return sub;
+        }
+
+        auto inner = co_await table_ref(ctx);
+        auto rparen = ctx.Stream.Next();
+        if (!IsOp(rparen, ')')) {
+            co_return Error(rparen, "expected ')' after table reference");
+        }
+        co_return inner;
+    }
+
+    ctx.Stream.Unget(token);
+
+    auto table = std::make_shared<TSqlTableName>();
+    table->Name = co_await qualified_name(ctx);
+    table->Alias = co_await opt_alias(ctx);
+    co_return table;
 }
 
+// <ident_list> ::= <ident> { "," <ident> }
 TAstTask<TIdentList> ident_list(TParserContext& ctx) {
-    co_return nullptr;
+    auto list = std::make_shared<TIdentList>();
+    TToken token;
+    do {
+        auto name = co_await ident(ctx);
+        list->Items.emplace_back(std::move(name));
+        token = ctx.Stream.Next();
+    } while (IsOp(token, ','));
+    ctx.Stream.Unget(token);
+    co_return list;
 }
 
 TAstExprTask expr(TParserContext& ctx) {
     co_return nullptr;
 }
 
+// <where_clause> ::= "WHERE" <expr>
+TAstExprTask where_clause(TParserContext& ctx) {
+    co_return co_await expr(ctx);
+}
+
+// <having_clause> ::= "HAVING" <expr>
 TAstExprTask having_clause(TParserContext& ctx) {
-    co_return nullptr;
+    co_return co_await expr(ctx);
 }
 
+// <order_by_clause> ::= "ORDER" "BY" <order_item> { "," <order_item> }
 TAstTask<TSqlOrder> order_by_clause(TParserContext& ctx) {
-    co_return nullptr;
+    auto order = std::make_shared<TSqlOrder>();
+    TToken token;
+    do {
+        auto item = co_await order_item(ctx);
+        order->Items.emplace_back(std::move(item));
+        token = ctx.Stream.Next();
+    } while (IsOp(token, ','));
+    ctx.Stream.Unget(token);
+    co_return order;
 }
 
+// <order_item> ::= <expr> [ "ASC" | "DESC" ] [ "NULLS" ( "FIRST" | "LAST" ) ]
+TAstTask<TSqlOrderItem> order_item(TParserContext& ctx) {
+    auto item = std::make_shared<TSqlOrderItem>();
+    item->Expr = co_await expr(ctx);
+
+    auto token = ctx.Stream.Next();
+    if (IsKeyword(token, "ASC")) {
+        item->Desc = false;
+    } else if (IsKeyword(token, "DESC")) {
+        item->Desc = true;
+    } else {
+        ctx.Stream.Unget(token);
+    }
+
+    token = ctx.Stream.Next();
+    if (IsKeyword(token, "NULLS")) {
+        auto dir = ctx.Stream.Next();
+        if (IsKeyword(dir, "FIRST")) {
+            item->NullOrder = TSqlOrderItem::ENullOrder::First;
+        } else if (IsKeyword(dir, "LAST")) {
+            item->NullOrder = TSqlOrderItem::ENullOrder::Last;
+        } else {
+            co_return Error(dir, "expected FIRST or LAST after NULLS");
+        }
+    } else {
+        ctx.Stream.Unget(token);
+    }
+
+    co_return item;
+}
+
+// <limit_clause> ::= "LIMIT" <expr>
 TAstExprTask limit_clause(TParserContext& ctx) {
-    co_return nullptr;
+    co_return co_await expr(ctx);
 }
 
+// <offset_clause> ::= "OFFSET" <expr>
 TAstExprTask offset_clause(TParserContext& ctx) {
-    co_return nullptr;
+    co_return co_await expr(ctx);
 }
 
+// <cte_def> ::= <ident> [ "(" <ident_list> ")" ] "AS" "(" <select_stmt> ")"
 TAstTask<TSqlCte> cte_def(TParserContext& ctx) {
-    co_return nullptr;
+    auto cte = std::make_shared<TSqlCte>();
+    cte->Name = co_await ident(ctx);
+
+    auto token = ctx.Stream.Next();
+    if (IsOp(token, '(')) {
+        cte->Columns = co_await ident_list(ctx);
+        auto rparen = ctx.Stream.Next();
+        if (!IsOp(rparen, ')')) {
+            co_return Error(rparen, "expected ')' after CTE column list");
+        }
+        token = ctx.Stream.Next();
+    }
+
+    if (!IsKeyword(token, "AS")) {
+        co_return Error(token, "expected `AS' in CTE definition");
+    }
+
+    auto lparen = ctx.Stream.Next();
+    if (!IsOp(lparen, '(')) {
+        co_return Error(lparen, "expected '(' before CTE query");
+    }
+    cte->Query = co_await select_stmt(ctx);
+    auto rparen = ctx.Stream.Next();
+    if (!IsOp(rparen, ')')) {
+        co_return Error(rparen, "expected ')' after CTE query");
+    }
+    co_return cte;
 }
 
 } // namespace
