@@ -202,8 +202,11 @@ namespace NSql {
 
 using NQumir::TError;
 using NQumir::TLocation;
+using NQumir::NAst::TOperator;
 using NQumir::NAst::TToken;
 using NQumir::NAst::TWrappedTokenStream;
+
+using namespace NQumir::NAst::NLiterals;
 
 namespace {
 
@@ -235,6 +238,23 @@ bool IsOp(const TToken& token, char op) {
 
 bool IsKeyword(const TToken& tok, const std::string& kw) {
     return tok.Type == TToken::Keyword && tok.Name == kw;
+}
+
+NQumir::NAst::TExprPtr binary(TLocation loc, TOperator op, NQumir::NAst::TExprPtr left, NQumir::NAst::TExprPtr right)
+{
+    return std::make_shared<NQumir::NAst::TBinaryExpr>(loc, op, left, right);
+}
+
+NQumir::NAst::TExprPtr unary(TLocation loc, TOperator op, NQumir::NAst::TExprPtr expr)
+{
+    return std::make_shared<NQumir::NAst::TUnaryExpr>(loc, op, expr);
+}
+
+NQumir::NAst::TExprPtr call(TLocation loc, const std::string& name, std::vector<NQumir::NAst::TExprPtr> args) {
+    return std::make_shared<NQumir::NAst::TCallExpr>(loc,
+        std::make_shared<NQumir::NAst::TIdentExpr>(loc, name),
+        std::move(args)
+    );
 }
 
 // <ident> ::= <regular_ident> | <quoted_ident>
@@ -332,6 +352,20 @@ TAstExprTask having_clause(TParserContext& ctx);
 
 
 TAstExprTask expr(TParserContext& ctx);
+TAstExprTask or_expr(TParserContext& ctx);
+TAstExprTask and_expr(TParserContext& ctx);
+TAstExprTask not_expr(TParserContext& ctx);
+TAstExprTask comparison_expr(TParserContext& ctx);
+TAstExprTask add_expr(TParserContext& ctx);
+TAstExprTask mul_expr(TParserContext& ctx);
+TAstExprTask unary_expr(TParserContext& ctx);
+TAstExprTask postfix_expr(TParserContext& ctx);
+TAstExprTask primary_expr(TParserContext& ctx);
+TAstExprTask function_call(TParserContext& ctx);
+TAstExprTask function_args(TParserContext& ctx);
+TAstExprTask case_expr(TParserContext& ctx);
+TAstExprTask expr_list_or_subquery(TParserContext& ctx);
+TAstExprTask expr_list(TParserContext& ctx);
 
 TAstTask<TSqlQuery> query(TParserContext& ctx) {
     TSqlPtr<TSqlQuery> q;
@@ -653,10 +687,6 @@ TAstTask<TIdentList> ident_list(TParserContext& ctx) {
     co_return list;
 }
 
-TAstExprTask expr(TParserContext& ctx) {
-    co_return nullptr;
-}
-
 // <where_clause> ::= "WHERE" <expr>
 TAstExprTask where_clause(TParserContext& ctx) {
     co_return co_await expr(ctx);
@@ -751,6 +781,171 @@ TAstTask<TSqlCte> cte_def(TParserContext& ctx) {
     }
     co_return cte;
 }
+
+/* exprs */
+
+TAstExprTask expr(TParserContext& ctx) {
+    co_return co_await or_expr(ctx);
+}
+
+template<typename Func>
+TAstExprTask binary_op_kw_helper(TParserContext& ctx, Func prev_parser, const std::string& kw, TOperator op) {
+    auto ret = co_await prev_parser(ctx);
+    TLocation loc = ret->Location;
+    auto isKw = [&] () {
+        auto next = ctx.Stream.Next();
+        loc = next.Location;
+        if (IsKeyword(next, kw)) {
+            return true;
+        }
+        ctx.Stream.Unget(next);
+        return false;
+    };
+    while (isKw()) {
+        auto next_expr = co_await prev_parser(ctx);
+        ret = binary(loc, op, ret, next_expr);
+    }
+    co_return ret;
+}
+
+template<typename Func, typename... TOps>
+TAstExprTask binary_op_helper(TParserContext& ctx, Func prev_parser, TOps... ops)
+{
+    auto ret = co_await prev_parser(ctx);
+    auto loc = ret->Location;
+    auto isOp = [&] -> std::optional<uint64_t> {
+        auto token = ctx.Stream.Next();
+        if (token.Type == TToken::Operator
+            && ((token.Value.i64 == (uint64_t)ops) || ...))
+        {
+            return token.Value.i64;
+        } else {
+            ctx.Stream.Unget(token);
+            return std::nullopt;
+        }
+    };
+
+    while (auto op = isOp()) {
+        auto next_expr = co_await prev_parser(ctx);
+        ret = binary(loc, *op, ret, next_expr);
+    }
+    co_return ret;
+}
+
+TAstExprTask or_expr(TParserContext& ctx) {
+    co_return co_await binary_op_kw_helper(ctx, and_expr, "OR", "||"_op);
+}
+
+TAstExprTask and_expr(TParserContext& ctx) {
+    co_return co_await binary_op_kw_helper(ctx, not_expr, "AND", "&&"_op);
+}
+
+TAstExprTask not_expr(TParserContext& ctx) {
+    auto token = ctx.Stream.Next();
+    if (IsKeyword(token, "NOT")) {
+        co_return unary(token.Location, "!"_op, co_await not_expr(ctx));
+    }
+    ctx.Stream.Unget(token);
+    co_return co_await comparison_expr(ctx);
+}
+
+TAstExprTask comparison_expr(TParserContext& ctx) {
+    auto ret = co_await add_expr(ctx);
+    auto token = ctx.Stream.Next();
+    auto loc = token.Location;
+    static std::vector<std::pair<TOperator, TOperator>> sql2qumir = {
+        {"="_op, "=="_op},
+        {"<>"_op, "!="_op},
+        {"!="_op, "!="_op},
+        {"<"_op, "<"_op},
+        {"<="_op, "<="_op},
+        {">"_op, ">"_op},
+        {">="_op, ">="_op},
+    };
+
+    for (auto [from, to] : sql2qumir) {
+        if (IsOp(token, from)) {
+            co_return binary(loc, to, ret, co_await add_expr(ctx));
+        }
+    }
+
+    if (IsKeyword(token, "IS")) {
+        auto next = ctx.Stream.Next();
+        if (IsKeyword(next, "NOT")) {
+            // TODO: need expr for null comparison
+            co_return nullptr;
+        } else {
+            ctx.Stream.Unget(next);
+        }
+        // TODO: need expr for null comparison
+        co_return nullptr;
+    }
+
+    bool negative = false;
+    if (IsKeyword(token, "NOT")) {
+        negative = true;
+        token = ctx.Stream.Next();
+    } else {
+        ctx.Stream.Unget(token);
+    }
+
+    if (IsKeyword(token, "IN")) {
+        // TODO: need TInExpr
+        co_return nullptr;
+    } else if (IsKeyword(token, "BETWEEN")) {
+        // co_return binary(loc, )
+        auto left = co_await add_expr(ctx);
+        auto next = ctx.Stream.Next();
+        if (!IsKeyword(next, "AND")) {
+            co_return Error(next, "`AND' expected");
+        }
+        auto right = co_await add_expr(ctx);
+        // left <= ret && ret <= right
+        ret = binary(loc, "&&"_op,
+            binary(loc, "<="_op, left, ret),
+            binary(loc, "<="_op, ret, right));
+    } else if (IsKeyword(token, "LIKE")) {
+        ret = call(loc, "qdb_string_view_sql_like",
+            {ret, co_await add_expr(ctx)});
+    }
+
+    if (negative) {
+        ret = unary(loc, "!"_op, ret);
+    }
+
+    ctx.Stream.Unget(token);
+    co_return ret;
+}
+
+TAstExprTask add_expr(TParserContext& ctx) {
+    co_return co_await binary_op_helper(ctx, mul_expr, "+"_op, "-"_op);
+}
+
+TAstExprTask mul_expr(TParserContext& ctx) {
+    co_return co_await binary_op_helper(ctx, unary_expr, "*"_op, "/"_op, "%"_op);
+}
+
+TAstExprTask unary_expr(TParserContext& ctx) {
+    auto token = ctx.Stream.Next();
+    if (IsOp(token, '+')) {
+        co_return co_await unary_expr(ctx);
+    }
+
+    if (IsOp(token, '-')) {
+        co_return unary(token.Location, "-"_op, co_await unary_expr(ctx));
+    }
+
+    co_return co_await postfix_expr(ctx);
+}
+
+TAstExprTask postfix_expr(TParserContext& ctx);
+TAstExprTask primary_expr(TParserContext& ctx);
+TAstExprTask function_call(TParserContext& ctx);
+TAstExprTask function_args(TParserContext& ctx);
+TAstExprTask case_expr(TParserContext& ctx);
+TAstExprTask expr_list_or_subquery(TParserContext& ctx);
+TAstExprTask expr_list(TParserContext& ctx);
+
 
 } // namespace
 
