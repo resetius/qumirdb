@@ -262,9 +262,13 @@ TAstTask<TSqlGroupBy> group_by_clause(TParserContext& ctx);
 TAstTask<TSqlTableRef> table_ref(TParserContext& ctx);
 TAstTask<TSqlTableRef> table_factor(TParserContext& ctx);
 TAstTask<TJoinCondition> join_condition(TParserContext& ctx);
+TAstTask<TIdentList> ident_list(TParserContext& ctx);
 TAstExprTask limit_clause(TParserContext& ctx);
 TAstExprTask offset_clause(TParserContext& ctx);
 TAstExprTask having_clause(TParserContext& ctx);
+
+
+TAstExprTask expr(TParserContext& ctx);
 
 TAstTask<TSqlQuery> query(TParserContext& ctx) {
     TSqlPtr<TSqlQuery> q;
@@ -429,7 +433,19 @@ TAstTask<TSqlTableRef> table_ref(TParserContext& ctx) {
 }
 
 TAstTask<TJoinCondition> join_condition(TParserContext& ctx) {
-    co_return nullptr;
+    auto join_cond = std::make_shared<TJoinCondition>();
+    auto next = ctx.Stream.Next();
+    if (IsKeyword(next, "ON")) {
+        join_cond->On = co_await expr(ctx);
+        co_return join_cond;
+    }
+    if (IsKeyword(next, "USING")) {
+        join_cond->UsingColumns = co_await ident_list(ctx);
+        co_return join_cond;
+    }
+
+    ctx.Stream.Unget(next);
+    co_return join_cond;
 }
 
 TAstTask<TSqlTableRef> table_factor(TParserContext& ctx) {
