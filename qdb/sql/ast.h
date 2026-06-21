@@ -136,5 +136,49 @@ struct TSqlSelect : TSqlNode {
     NQumir::NAst::TExprPtr Having;
 };
 
+// A subquery used inside an expression. Bridges a SQL query into the Qumir
+// expression tree; visitors handle it through IVisitor::VisitOtherwise.
+struct TSubqueryExpr : NQumir::NAst::TExpr {
+    static constexpr const char* NodeId = "SqlSubquery";
+
+    enum class EKind {
+        Scalar, // ( <select> )
+        Exists, // EXISTS ( <select> )
+        In,     // <operand> IN ( <select> )
+    };
+
+    EKind Kind = EKind::Scalar;
+    TSqlPtr<TSqlQuery> Query;
+    NQumir::NAst::TExprPtr Operand; // left-hand side, used by the IN form
+
+    TSubqueryExpr(NQumir::TLocation loc, EKind kind, TSqlPtr<TSqlQuery> query)
+        : NQumir::NAst::TExpr(std::move(loc))
+        , Kind(kind)
+        , Query(std::move(query))
+    { }
+
+    std::vector<NQumir::NAst::TExprPtr> Children() const override {
+        if (Operand) {
+            return { Operand };
+        }
+        return {};
+    }
+
+    std::vector<NQumir::NAst::TExprPtr*> MutableChildren() override {
+        if (Operand) {
+            return { &Operand };
+        }
+        return {};
+    }
+
+    const std::string_view NodeName() const override {
+        return NodeId;
+    }
+
+    void Accept(NQumir::NAst::IVisitor& visitor) override {
+        visitor.VisitOtherwise(*this);
+    }
+};
+
 } // namespace NSql
 } // namespace NQdb
