@@ -71,9 +71,13 @@ enum class ESqlJoinType {
     Cross,
 };
 
-struct TJoinCondition : TSqlTableRef {
+struct TIdentList : TSqlNode {
+    std::vector<std::string> Items;
+};
+
+struct TJoinCondition : TSqlNode {
     NQumir::NAst::TExprPtr On;
-    std::vector<std::string> UsingColumns;
+    TSqlPtr<TIdentList> UsingColumns;
 };
 
 struct TSqlJoin : TSqlTableRef {
