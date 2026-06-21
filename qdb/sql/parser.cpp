@@ -2,6 +2,198 @@
 
 #include <qumir/optional.h>
 
+/*
+
+<query> ::= <select_stmt> [ ";" ]
+
+<select_stmt> ::=
+    [ <with_clause> ]
+    <select_core>
+    [ <order_by_clause> ]
+    [ <limit_clause> ]
+    [ <offset_clause> ]
+
+<with_clause> ::=
+    "WITH" [ "RECURSIVE" ] <cte_def> { "," <cte_def> }
+
+<cte_def> ::=
+    <ident> [ "(" <ident_list> ")" ] "AS" "(" <select_stmt> ")"
+
+<select_core> ::=
+    "SELECT" [ <set_quantifier> ] <select_list>
+    [ <from_clause> ]
+    [ <where_clause> ]
+    [ <group_by_clause> ]
+    [ <having_clause> ]
+
+<set_quantifier> ::= "ALL" | "DISTINCT"
+
+<select_list> ::=
+      "*"
+    | <select_item> { "," <select_item> }
+
+<select_item> ::=
+      <expr> [ [ "AS" ] <ident> ]
+    | <qualified_name> "." "*"
+
+<from_clause> ::=
+    "FROM" <table_ref> { "," <table_ref> }
+
+<table_ref> ::=
+    <table_factor> { <join_clause> }
+
+<table_factor> ::=
+      <qualified_name> [ [ "AS" ] <ident> ]
+    | "(" <select_stmt> ")" [ [ "AS" ] <ident> ]
+    | "(" <table_ref> ")"
+
+<join_clause> ::=
+    [ <join_type> ] "JOIN" <table_factor> <join_condition>
+
+<join_type> ::=
+      "INNER"
+    | "LEFT" [ "OUTER" ]
+    | "RIGHT" [ "OUTER" ]
+    | "FULL" [ "OUTER" ]
+    | "CROSS"
+
+<join_condition> ::=
+      "ON" <expr>
+    | "USING" "(" <ident_list> ")"
+    | ε
+
+<where_clause> ::= "WHERE" <expr>
+
+<group_by_clause> ::=
+    "GROUP" "BY" <group_item> { "," <group_item> }
+
+<group_item> ::= <expr>
+
+<having_clause> ::= "HAVING" <expr>
+
+<order_by_clause> ::=
+    "ORDER" "BY" <order_item> { "," <order_item> }
+
+<order_item> ::=
+    <expr> [ "ASC" | "DESC" ] [ "NULLS" ( "FIRST" | "LAST" ) ]
+
+<limit_clause> ::= "LIMIT" <expr>
+
+<offset_clause> ::= "OFFSET" <expr>
+
+// exprs:
+<expr> ::= <or_expr>
+
+<or_expr> ::=
+    <and_expr> { "OR" <and_expr> }
+
+<and_expr> ::=
+    <not_expr> { "AND" <not_expr> }
+
+<not_expr> ::=
+      "NOT" <not_expr>
+    | <comparison_expr>
+
+<comparison_expr> ::=
+    <add_expr>
+    [
+        <comparison_op> <add_expr>
+      | "IS" [ "NOT" ] "NULL"
+      | [ "NOT" ] "IN" "(" <expr_list_or_subquery> ")"
+      | [ "NOT" ] "BETWEEN" <add_expr> "AND" <add_expr>
+      | [ "NOT" ] "LIKE" <add_expr>
+    ]
+
+<comparison_op> ::=
+      "=" | "<>" | "!="
+    | "<" | "<=" | ">" | ">="
+
+<add_expr> ::=
+    <mul_expr> { ( "+" | "-" ) <mul_expr> }
+
+<mul_expr> ::=
+    <unary_expr> { ( "*" | "/" | "%" ) <unary_expr> }
+
+<unary_expr> ::=
+      ( "+" | "-" ) <unary_expr>
+    | <postfix_expr>
+
+<postfix_expr> ::=
+    <primary_expr>
+    {
+        "::" <type_name>
+    }
+
+<primary_expr> ::=
+      <literal>
+    | <qualified_name>
+    | <function_call>
+    | <case_expr>
+    | "CAST" "(" <expr> "AS" <type_name> ")"
+    | "EXISTS" "(" <select_stmt> ")"
+    | "(" <expr> ")"
+    | "(" <select_stmt> ")"
+
+<function_call> ::=
+    <qualified_name> "(" [ <function_args> ] ")"
+
+<function_args> ::=
+      "*"
+    | <expr> { "," <expr> }
+
+<case_expr> ::=
+    "CASE"
+        { "WHEN" <expr> "THEN" <expr> }
+        [ "ELSE" <expr> ]
+    "END"
+
+<expr_list_or_subquery> ::=
+      <select_stmt>
+    | <expr> { "," <expr> }
+
+<expr_list> ::= <expr> { "," <expr> }
+
+// literals:
+<qualified_name> ::= <ident> { "." <ident> }
+
+<ident_list> ::= <ident> { "," <ident> }
+
+<ident> ::= <regular_ident> | <quoted_ident>
+
+<regular_ident> ::= /[A-Za-z_][A-Za-z0-9_]*/
+
+/*
+<quoted_ident> ::= '"' { any_char_except_quote | '""' } '"'
+
+<literal> ::=
+      <number_literal>
+    | <string_literal>
+    | "NULL"
+    | "TRUE"
+    | "FALSE"
+
+<number_literal> ::= /[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?/
+
+<string_literal> ::= "'" { any_char_except_quote | "''" } "'"
+
+<type_name> ::=
+      "BOOL"
+    | "BOOLEAN"
+    | "INT"
+    | "INTEGER"
+    | "BIGINT"
+    | "FLOAT"
+    | "DOUBLE"
+    | "TEXT"
+    | "VARCHAR"
+    | "DATE"
+    | "TIMESTAMP"
+    | "DECIMAL" [ "(" <integer> [ "," <integer> ] ")" ]
+
+<integer> ::= /[0-9]+/
+
+*/
+
 namespace NQdb {
 namespace NSql {
 
@@ -59,11 +251,15 @@ TTask<T> TryKeywords(T&& lambda, TParserContext& ctx, const std::vector<std::str
 
 TAstTask<TSqlQuery> select_stmt(TParserContext& ctx);
 TAstTask<TSqlNode> select_core(TParserContext& ctx);
+TAstTask<TSqlSelectList> select_list(TParserContext& ctx);
 TAstTask<TSqlOrder> order_by_clause(TParserContext& ctx);
 TAstTask<TSqlWithClause> with_clause(TParserContext& ctx);
 TAstTask<TSqlCte> cte_def(TParserContext& ctx);
+TAstTask<TSqlTableRef> from_clause(TParserContext& ctx);
+TAstTask<TSqlGroupBy> group_by_clause(TParserContext& ctx);
 TAstExprTask limit_clause(TParserContext& ctx);
 TAstExprTask offset_clause(TParserContext& ctx);
+TAstExprTask having_clause(TParserContext& ctx);
 
 TAstTask<TSqlQuery> query(TParserContext& ctx) {
     TSqlPtr<TSqlQuery> q;
@@ -112,6 +308,41 @@ TAstTask<TSqlWithClause> with_clause(TParserContext& ctx) {
 }
 
 TAstTask<TSqlNode> select_core(TParserContext& ctx) {
+    auto select = std::make_shared<TSqlSelect>();
+    auto token = ctx.Stream.Next();
+    if (!IsKeyword(token, "SELECT")) {
+        co_return Error(token, "`SELECT' required");
+    }
+    token = ctx.Stream.Next();
+    if (IsKeyword(token, "DISTINCT")) {
+        select->Quantifier = ESetQuantifier::Distinct;
+    } else if (IsKeyword(token, "ALL")) {
+        select->Quantifier = ESetQuantifier::All;
+    } else {
+        ctx.Stream.Unget(token);
+    }
+    select->SelectList = co_await select_list(ctx);
+
+    select->From = co_await TryKeywords(from_clause, ctx, {"FROM"});
+    select->GroupBy = co_await TryKeywords(group_by_clause, ctx, {"GROUP BY"});
+    select->Having = co_await TryKeywords(having_clause, ctx, {"HAVING"});
+
+    co_return nullptr;
+}
+
+TAstTask<TSqlSelectList> select_list(TParserContext& ctx) {
+    co_return nullptr;
+}
+
+TAstTask<TSqlTableRef> from_clause(TParserContext& ctx) {
+    co_return nullptr;
+}
+
+TAstTask<TSqlGroupBy> group_by_clause(TParserContext& ctx) {
+    co_return nullptr;
+}
+
+TAstExprTask having_clause(TParserContext& ctx) {
     co_return nullptr;
 }
 
