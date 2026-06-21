@@ -1,0 +1,73 @@
+(query
+  (with
+    (cte revenue0 cols: supplier_no total_revenue
+      (query
+        (select
+          (select-list
+            (item
+              l_suppkey
+            )
+            (item
+              (call sum (* l_extendedprice (- 1 l_discount)))
+            )
+          )
+          (from
+            (table lineitem)
+          )
+          (where
+            (&& (>= l_shipdate (call qdb_sql_date "1995-03-01"))
+              (< l_shipdate (+ (call qdb_sql_date "1995-03-01") (call qdb_sql_interval "3" "month"))))
+          )
+          (group-by
+            l_suppkey
+          )
+        )
+      )
+    )
+  )
+  (select
+    (select-list
+      (item
+        s_suppkey
+      )
+      (item
+        s_name
+      )
+      (item
+        s_address
+      )
+      (item
+        s_phone
+      )
+      (item
+        total_revenue
+      )
+    )
+    (from
+      (table supplier)
+      (table revenue0)
+    )
+    (where
+      (&& (== s_suppkey supplier_no)
+        (== total_revenue
+          (subquery scalar (query
+        (select
+          (select-list
+            (item
+              (call max total_revenue)
+            )
+          )
+          (from
+            (table revenue0)
+          )
+        )
+      )
+      )))
+    )
+  )
+  (order-by
+    (order asc
+      s_suppkey
+    )
+  )
+)

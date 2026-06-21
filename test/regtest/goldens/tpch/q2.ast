@@ -1,0 +1,83 @@
+(query
+  (select
+    (select-list
+      (item
+        s_acctbal
+      )
+      (item
+        s_name
+      )
+      (item
+        n_name
+      )
+      (item
+        p_partkey
+      )
+      (item
+        p_mfgr
+      )
+      (item
+        s_address
+      )
+      (item
+        s_phone
+      )
+      (item
+        s_comment
+      )
+    )
+    (from
+      (table part)
+      (table supplier)
+      (table partsupp)
+      (table nation)
+      (table region)
+    )
+    (where
+      (&& (&& (&& (&& (&& (&& (&& (== p_partkey ps_partkey) (== s_suppkey ps_suppkey)) (== p_size 37))
+                (call qdb_string_view_sql_like p_type "%BRASS"))
+              (== s_nationkey n_nationkey))
+            (== n_regionkey r_regionkey))
+          (== r_name "EUROPE"))
+        (== ps_supplycost
+          (subquery scalar (query
+        (select
+          (select-list
+            (item
+              (call min ps_supplycost)
+            )
+          )
+          (from
+            (table partsupp)
+            (table supplier)
+            (table nation)
+            (table region)
+          )
+          (where
+            (&& (&& (&& (&& (== p_partkey ps_partkey) (== s_suppkey ps_suppkey)) (== s_nationkey n_nationkey))
+                (== n_regionkey r_regionkey))
+              (== r_name "EUROPE"))
+          )
+        )
+      )
+      )))
+    )
+  )
+  (order-by
+    (order desc
+      s_acctbal
+    )
+    (order asc
+      n_name
+    )
+    (order asc
+      s_name
+    )
+    (order asc
+      p_partkey
+    )
+  )
+  (limit
+    100
+  )
+)

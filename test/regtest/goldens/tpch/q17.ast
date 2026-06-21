@@ -1,0 +1,33 @@
+(query
+  (select
+    (select-list
+      (item as avg_yearly
+        (/ (call sum l_extendedprice) 7)
+      )
+    )
+    (from
+      (table lineitem)
+      (table part)
+    )
+    (where
+      (&& (&& (&& (== p_partkey l_partkey) (== p_brand "Brand#45")) (== p_container "MED BAG"))
+        (< l_quantity
+          (subquery scalar (query
+        (select
+          (select-list
+            (item
+              (* 0.20000000000000001 (call avg l_quantity))
+            )
+          )
+          (from
+            (table lineitem)
+          )
+          (where
+            (== l_partkey p_partkey)
+          )
+        )
+      )
+      )))
+    )
+  )
+)
