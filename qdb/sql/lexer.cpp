@@ -42,12 +42,19 @@ static const std::unordered_set<std::string> Keywords = {
     "RIGHT",
     "FULL",
     "CROSS",
+    "OUTER",
+    "SEMI",
     "ON",
     "USING",
 
     "AS",
 
     "WITH",
+    "RECURSIVE",
+
+    "NULLS",
+    "FIRST",
+    "LAST",
 
     "UNION",
     "ALL",
@@ -390,4 +397,4 @@ void TTokenStream::Read() {
 }
 
 } // namespace NSql
-} // namespace NQqb
+} // namespace NQdb
