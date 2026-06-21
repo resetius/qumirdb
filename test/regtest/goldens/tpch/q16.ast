@@ -1,2 +1,65 @@
-Error: Unsupported expression @ Line: 5, Byte: 7, Column: 7
-
+(query
+  (select
+    (select-list
+      (item
+        p_brand
+      )
+      (item
+        p_type
+      )
+      (item
+        p_size
+      )
+      (item as supplier_cnt
+        (call count (call distinct ps_suppkey))
+      )
+    )
+    (from
+      (table partsupp)
+      (table part)
+    )
+    (where
+      (&& (&& (&& (&& (== p_partkey ps_partkey) (!= p_brand "Brand#54"))
+            (! (call qdb_string_view_sql_like p_type "PROMO ANODIZED%")))
+          (|| (|| (|| (|| (|| (|| (|| (== p_size 24) (== p_size 47)) (== p_size 25)) (== p_size 36)) (== p_size 22))
+                (== p_size 26))
+              (== p_size 49))
+            (== p_size 40)))
+        (! (subquery in ps_suppkey (query
+        (select
+          (select-list
+            (item
+              s_suppkey
+            )
+          )
+          (from
+            (table supplier)
+          )
+          (where
+            (call qdb_string_view_sql_like s_comment "%Customer%Complaints%")
+          )
+        )
+      )
+      )))
+    )
+    (group-by
+      p_brand
+      p_type
+      p_size
+    )
+  )
+  (order-by
+    (order desc
+      supplier_cnt
+    )
+    (order asc
+      p_brand
+    )
+    (order asc
+      p_type
+    )
+    (order asc
+      p_size
+    )
+  )
+)
