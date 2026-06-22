@@ -2,17 +2,38 @@
 
 #include <qumir/parser/ast.h>
 
+#include <string_view>
+
 namespace NQdb {
 namespace NSql {
 
 struct TSqlNode {
     virtual ~TSqlNode() = default;
+    // Identifies the concrete node for TMaybeNode; defaults to "" for nodes
+    // that are never downcast to.
+    virtual std::string_view NodeName() const { return {}; }
 };
 
 using TSqlNodePtr = std::shared_ptr<TSqlNode>;
 
 template <class T>
 using TSqlPtr = std::shared_ptr<T>;
+
+// Checked downcast in the style of NAst::TMaybeNode: succeeds only when the
+// node's NodeName() matches T::NodeId.
+template <class T>
+struct TMaybeNode {
+    explicit TMaybeNode(const TSqlNodePtr& node)
+        : Node(node && std::string_view(T::NodeId) == node->NodeName()
+            ? std::static_pointer_cast<T>(node)
+            : nullptr)
+    {}
+
+    const std::shared_ptr<T>& Cast() const { return Node; }
+    operator bool() const { return Node != nullptr; }
+
+    std::shared_ptr<T> Node;
+};
 
 enum ESetQuantifier {
     All,
@@ -64,12 +85,18 @@ struct TSqlTableRef : TSqlNode {
 };
 
 struct TSqlTableName : TSqlTableRef {
+    static constexpr const char* NodeId = "TableName";
+    std::string_view NodeName() const override { return NodeId; }
+
     std::vector<std::string> Name; // schema.table
 };
 
 struct TSqlQuery;
 
 struct TSqlSubqueryTable : TSqlTableRef {
+    static constexpr const char* NodeId = "SubqueryTable";
+    std::string_view NodeName() const override { return NodeId; }
+
     TSqlPtr<TSqlQuery> Query;
     TSqlPtr<TIdentList> ColumnAliases; // optional column rename list
 };
@@ -94,6 +121,9 @@ struct TJoinCondition : TSqlNode {
 };
 
 struct TSqlJoin : TSqlTableRef {
+    static constexpr const char* NodeId = "Join";
+    std::string_view NodeName() const override { return NodeId; }
+
     TSqlPtr<TSqlTableRef> Left;
     TSqlPtr<TSqlTableRef> Right;
 
@@ -103,6 +133,9 @@ struct TSqlJoin : TSqlTableRef {
 };
 
 struct TSqlQuery : TSqlNode {
+    static constexpr const char* NodeId = "Query";
+    std::string_view NodeName() const override { return NodeId; }
+
     TSqlPtr<TSqlWithClause> WithClause;
 
     TSqlNodePtr Body; // TSqlSelect / TSqlSetOp later
@@ -126,6 +159,9 @@ struct TSqlFrom : TSqlNode {
 };
 
 struct TSqlSelect : TSqlNode {
+    static constexpr const char* NodeId = "Select";
+    std::string_view NodeName() const override { return NodeId; }
+
     ESetQuantifier Quantifier = ESetQuantifier::All;
 
     TSqlPtr<TSqlSelectList> SelectList;

@@ -146,8 +146,8 @@ struct TSqlPrinter {
     }
 
     void Body(int ind, const TSqlNodePtr& body) {
-        if (auto select = std::dynamic_pointer_cast<TSqlSelect>(body)) {
-            Select(ind, select);
+        if (auto select = TMaybeNode<TSqlSelect>(body)) {
+            Select(ind, select.Cast());
             return;
         }
         Line(ind, "(unknown-body)");
@@ -207,7 +207,8 @@ struct TSqlPrinter {
     }
 
     void TableRef(int ind, const TSqlPtr<TSqlTableRef>& ref) {
-        if (auto name = std::dynamic_pointer_cast<TSqlTableName>(ref)) {
+        if (auto table = TMaybeNode<TSqlTableName>(ref)) {
+            auto name = table.Cast();
             std::string head = "(table " + Join(name->Name, '.');
             if (name->Alias) {
                 head += " as " + *name->Alias;
@@ -216,7 +217,8 @@ struct TSqlPrinter {
             Line(ind, head);
             return;
         }
-        if (auto sub = std::dynamic_pointer_cast<TSqlSubqueryTable>(ref)) {
+        if (auto maybeSub = TMaybeNode<TSqlSubqueryTable>(ref)) {
+            auto sub = maybeSub.Cast();
             std::string head = "(subquery-table";
             if (sub->Alias) {
                 head += " as " + *sub->Alias;
@@ -229,8 +231,8 @@ struct TSqlPrinter {
             Line(ind, ")");
             return;
         }
-        if (auto join = std::dynamic_pointer_cast<TSqlJoin>(ref)) {
-            JoinNode(ind, join);
+        if (auto join = TMaybeNode<TSqlJoin>(ref)) {
+            JoinNode(ind, join.Cast());
             return;
         }
         Line(ind, "(unknown-table)");
@@ -283,8 +285,8 @@ std::string PrintAst(const TSqlNodePtr& node) {
     std::ostringstream out;
     TSqlPrinter printer{out};
 
-    if (auto query = std::dynamic_pointer_cast<TSqlQuery>(node)) {
-        printer.Query(0, query);
+    if (auto query = TMaybeNode<TSqlQuery>(node)) {
+        printer.Query(0, query.Cast());
     } else if (node) {
         printer.Body(0, node);
     } else {

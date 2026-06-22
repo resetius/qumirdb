@@ -220,27 +220,30 @@ std::expected<TOperatorPtr, TError> BuildTableRef(
     const NSql::TSqlPtr<NSql::TSqlTableRef>& ref,
     const TTableSourceFactory& sources)
 {
-    if (auto table = std::dynamic_pointer_cast<NSql::TSqlTableName>(ref)) {
-        auto source = sources(TableName(table->Name));
+    if (auto table = NSql::TMaybeNode<NSql::TSqlTableName>(ref)) {
+        auto node = table.Cast();
+        auto source = sources(TableName(node->Name));
         if (!source) {
             return std::unexpected(source.error());
         }
-        if (table->Alias) {
-            if (auto* op = dynamic_cast<TSourceOperator*>(source->get())) {
-                op->SetAlias(*table->Alias);
+        if (node->Alias) {
+            if (auto sourceOp = TMaybeOp<TSourceOperator>(*source)) {
+                sourceOp.Cast()->SetAlias(*node->Alias);
             }
         }
         return *source;
     }
 
-    if (auto sub = std::dynamic_pointer_cast<NSql::TSqlSubqueryTable>(ref)) {
-        if (sub->ColumnAliases) {
+    if (auto sub = NSql::TMaybeNode<NSql::TSqlSubqueryTable>(ref)) {
+        auto node = sub.Cast();
+        if (node->ColumnAliases) {
             return std::unexpected(TError("column aliases on derived tables are not supported yet"));
         }
-        return BuildQuery(*sub->Query, sources);
+        return BuildQuery(*node->Query, sources);
     }
 
-    if (auto join = std::dynamic_pointer_cast<NSql::TSqlJoin>(ref)) {
+    if (auto maybeJoin = NSql::TMaybeNode<NSql::TSqlJoin>(ref)) {
+        auto join = maybeJoin.Cast();
         auto left = BuildTableRef(join->Left, sources);
         if (!left) {
             return std::unexpected(left.error());
@@ -363,10 +366,11 @@ std::expected<TOperatorPtr, TError> DecorrelateExists(
     EJoinType type,
     const TTableSourceFactory& sources)
 {
-    auto select = std::dynamic_pointer_cast<NSql::TSqlSelect>(subquery.Query->Body);
-    if (!select) {
+    auto maybeSelect = NSql::TMaybeNode<NSql::TSqlSelect>(subquery.Query->Body);
+    if (!maybeSelect) {
         return std::unexpected(TError("expected a SELECT in EXISTS subquery"));
     }
+    auto select = maybeSelect.Cast();
     if (subquery.Query->WithClause || select->GroupBy || select->Having) {
         return std::unexpected(TError("aggregated/CTE EXISTS subquery is not supported yet"));
     }
@@ -398,11 +402,11 @@ std::expected<TOperatorPtr, TError> DecorrelateIn(
     if (!right) {
         return std::unexpected(right.error());
     }
-    auto project = std::dynamic_pointer_cast<TProjectOperator>(*right);
-    if (!project || project->Projections().size() != 1) {
+    auto project = TMaybeOp<TProjectOperator>(*right);
+    if (!project || project.Cast()->Projections().size() != 1) {
         return std::unexpected(TError("IN subquery must return exactly one column"));
     }
-    auto column = Ident(subquery.Operand->Location, project->Projections()[0].Name);
+    auto column = Ident(subquery.Operand->Location, project.Cast()->Projections()[0].Name);
     auto residual = std::make_shared<NAst::TBinaryExpr>(
         subquery.Operand->Location, NAst::TOperator("=="), subquery.Operand, std::move(column));
     return std::make_shared<TJoinOperator>(
@@ -514,12 +518,12 @@ std::expected<TOperatorPtr, TError> BuildQuery(
     if (query.WithClause) {
         return std::unexpected(TError("WITH is not supported yet"));
     }
-    auto select = std::dynamic_pointer_cast<NSql::TSqlSelect>(query.Body);
+    auto select = NSql::TMaybeNode<NSql::TSqlSelect>(query.Body);
     if (!select) {
         return std::unexpected(TError("expected a SELECT statement"));
     }
     // TODO: ORDER BY / LIMIT / OFFSET require sort/limit operators.
-    return BuildSelect(*select, sources);
+    return BuildSelect(*select.Cast(), sources);
 }
 
 } // namespace
@@ -528,11 +532,11 @@ std::expected<TOperatorPtr, TError> BuildPlan(
     const NQdb::NSql::TSqlNodePtr& query,
     const TTableSourceFactory& sources)
 {
-    auto root = std::dynamic_pointer_cast<NSql::TSqlQuery>(query);
+    auto root = NSql::TMaybeNode<NSql::TSqlQuery>(query);
     if (!root) {
         return std::unexpected(TError("expected a query"));
     }
-    return BuildQuery(*root, sources);
+    return BuildQuery(*root.Cast(), sources);
 }
 
 } // namespace NQqb
