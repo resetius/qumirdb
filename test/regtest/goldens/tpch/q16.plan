@@ -1,2 +1,2 @@
-Error: subqueries are not supported yet
+Error: count(distinct) is not supported yet @ Line: 5, Byte: 1, Column: 1
 
