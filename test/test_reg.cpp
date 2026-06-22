@@ -5,12 +5,19 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <vector>
 
+#include <qdb/io/schema.h>
+#include <qdb/plan/build.h>
+#include <qdb/plan/ops/source.h>
+#include <qdb/sexp/printer.h>
 #include <qdb/sql/parser.h>
 #include <qdb/sql/printer.h>
+
+#include <qumir/parser/core/printer.h>
 
 namespace fs = std::filesystem;
 
@@ -79,32 +86,75 @@ std::string BuildAst(std::istream& in) {
     return NSql::PrintAst(parsed.value());
 }
 
-} // namespace
+// Schema-less source used for plan-shape goldens; never executed.
+struct TStubSource : NQqb::ISource {
+    const NQqb::TSchema& Schema() const override { return Schema_; }
+    bool Next(NQqb::TRowSet&) override { return false; }
 
-class RegAst : public ::testing::TestWithParam<ProgCase> {};
+    NQqb::TSchema Schema_;
+};
 
-TEST_P(RegAst, Ast) {
-    const fs::path src = fs::path(CasesDir / GetParam().base).replace_extension(".sql");
-    const fs::path golden = fs::path(GoldensDir / GetParam().base).replace_extension(".ast");
+std::string BuildPlan(std::istream& in) {
+    NSql::TTokenStream ts(in);
+    NSql::TParser parser;
 
-    std::istringstream input(ReadAll(src));
-    std::string got = BuildAst(input);
-
-    if (printOutput) {
-        std::cout << "=== Output AST for " << src << " ===\n";
-        std::cout << got << "\n";
-        std::cout << "=== End of output ===\n";
+    auto parsed = parser.Parse(ts);
+    if (!parsed) {
+        return parsed.error().ToString() + "\n";
     }
 
+    std::vector<std::unique_ptr<TStubSource>> sources;
+    auto factory = [&](std::string_view table)
+        -> std::expected<NQqb::TOperatorPtr, NQumir::TError>
+    {
+        auto& source = sources.emplace_back(std::make_unique<TStubSource>());
+        return std::make_shared<NQqb::TSourceOperator>(*source, std::string(table));
+    };
+
+    auto plan = NQqb::BuildPlan(parsed.value(), factory);
+    if (!plan) {
+        return plan.error().ToString() + "\n";
+    }
+
+    std::ostringstream out;
+    NQumir::NAst::NCore::PrintAst(
+        out,
+        plan.value(),
+        NQumir::NAst::NCore::TPrintOptions{ .NodePrinters = NQqb::NSexp::MakeRelPrinters() });
+    out << "\n";
+    return out.str();
+}
+
+void CheckGolden(const fs::path& base, std::string_view extension, const std::string& got) {
+    const fs::path src = fs::path(CasesDir / base).replace_extension(".sql");
+    const fs::path golden = fs::path(GoldensDir / base).replace_extension(extension);
+
+    if (printOutput) {
+        std::cout << "=== " << src << " (" << extension << ") ===\n" << got << "\n";
+    }
     if (updateGoldens) {
         WriteAll(golden, got);
     }
     if (!fs::exists(golden)) {
-        std::cerr << "Missing golden AST file: " << golden << "\n";
+        std::cerr << "Missing golden file: " << golden << "\n";
         FAIL();
     }
-    const auto exp = ReadAll(golden);
-    EXPECT_EQ(got, exp);
+    EXPECT_EQ(got, ReadAll(golden));
+}
+
+} // namespace
+
+class RegAst : public ::testing::TestWithParam<ProgCase> {};
+class RegPlan : public ::testing::TestWithParam<ProgCase> {};
+
+TEST_P(RegAst, Ast) {
+    std::istringstream input(ReadAll(fs::path(CasesDir / GetParam().base).replace_extension(".sql")));
+    CheckGolden(GetParam().base, ".ast", BuildAst(input));
+}
+
+TEST_P(RegPlan, Plan) {
+    std::istringstream input(ReadAll(fs::path(CasesDir / GetParam().base).replace_extension(".sql")));
+    CheckGolden(GetParam().base, ".plan", BuildPlan(input));
 }
 
 INSTANTIATE_TEST_SUITE_P(
@@ -112,6 +162,12 @@ INSTANTIATE_TEST_SUITE_P(
     RegAst,
     ::testing::ValuesIn(Collect(CasesDir)),
     [](const ::testing::TestParamInfo<ProgCase>& i){ return "AST_" + NameFromPath(i.param.base); });
+
+INSTANTIATE_TEST_SUITE_P(
+    RegProgPlan,
+    RegPlan,
+    ::testing::ValuesIn(Collect(CasesDir)),
+    [](const ::testing::TestParamInfo<ProgCase>& i){ return "PLAN_" + NameFromPath(i.param.base); });
 
 int main(int argc, char** argv) {
     if (argc > 1 && argv[1][0] != '-') {
