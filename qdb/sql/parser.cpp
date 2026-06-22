@@ -1145,6 +1145,8 @@ TAstExprTask primary_expr(TParserContext& ctx) {
 
     // <substring> ::= "SUBSTRING" "(" <expr> "FROM" <expr> "FOR" <expr> ")"
     if (IsKeyword(token, "SUBSTRING")) {
+        auto i32type = std::make_shared<NQumir::NAst::TIntegerType>(NQumir::NAst::TIntegerType::I32);
+
         auto next = ctx.Stream.Next();
         if (!IsOp(next, '(')) {
             co_return Error(next, "'(' expected");
@@ -1157,12 +1159,14 @@ TAstExprTask primary_expr(TParserContext& ctx) {
             co_return Error(next, "`FROM' expected in SUBSTRING");
         }
         auto start = co_await expr(ctx);
+        start = cast(next.Location, start, i32type);
 
         next = ctx.Stream.Next();
         if (!IsKeyword(next, "FOR")) {
             co_return Error(next, "`FOR' expected in SUBSTRING");
         }
         auto length = co_await expr(ctx);
+        length = cast(next.Location, length, i32type);
 
         next = ctx.Stream.Next();
         if (!IsOp(next, ')')) {
