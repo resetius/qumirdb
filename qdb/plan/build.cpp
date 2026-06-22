@@ -300,6 +300,115 @@ std::expected<TOperatorPtr, TError> BuildFrom(
     return result;
 }
 
+void FlattenConjuncts(const NAst::TExprPtr& expr, std::vector<NAst::TExprPtr>& out) {
+    auto binary = NAst::TMaybeNode<NAst::TBinaryExpr>(expr);
+    if (binary && binary.Cast()->Operator == "&&") {
+        FlattenConjuncts(binary.Cast()->Left, out);
+        FlattenConjuncts(binary.Cast()->Right, out);
+    } else {
+        out.push_back(expr);
+    }
+}
+
+NAst::TExprPtr Conjoin(const std::vector<NAst::TExprPtr>& parts) {
+    NAst::TExprPtr result;
+    for (const auto& part : parts) {
+        result = result
+            ? std::make_shared<NAst::TBinaryExpr>(part->Location, NAst::TOperator("&&"), result, part)
+            : part;
+    }
+    return result;
+}
+
+struct TDecorrelation {
+    EJoinType Type;
+    bool IsIn;
+    std::shared_ptr<NSql::TSubqueryExpr> Subquery;
+};
+
+// Recognizes a WHERE conjunct that decorrelates into a semi/anti join:
+// EXISTS / IN -> semi, NOT EXISTS / NOT IN -> anti.
+std::optional<TDecorrelation> AsDecorrelation(const NAst::TExprPtr& conjunct) {
+    NAst::TExprPtr inner = conjunct;
+    bool negated = false;
+    if (auto unary = NAst::TMaybeNode<NAst::TUnaryExpr>(inner); unary && unary.Cast()->Operator == "!") {
+        negated = true;
+        inner = unary.Cast()->Operand;
+    }
+    auto sub = NAst::TMaybeNode<NSql::TSubqueryExpr>(inner);
+    if (!sub) {
+        return std::nullopt;
+    }
+    using EKind = NSql::TSubqueryExpr::EKind;
+    EKind kind = sub.Cast()->Kind;
+    if (kind != EKind::Exists && kind != EKind::In) {
+        return std::nullopt;
+    }
+    return TDecorrelation{
+        .Type = negated ? EJoinType::LeftAnti : EJoinType::LeftSemi,
+        .IsIn = kind == EKind::In,
+        .Subquery = sub.Cast(),
+    };
+}
+
+std::expected<TOperatorPtr, TError> BuildQuery(
+    const NSql::TSqlQuery& query,
+    const TTableSourceFactory& sources);
+
+// EXISTS: the subquery's FROM becomes the right side and its WHERE (correlation
+// plus local predicates) becomes the join residual.
+std::expected<TOperatorPtr, TError> DecorrelateExists(
+    TOperatorPtr left,
+    const NSql::TSubqueryExpr& subquery,
+    EJoinType type,
+    const TTableSourceFactory& sources)
+{
+    auto select = std::dynamic_pointer_cast<NSql::TSqlSelect>(subquery.Query->Body);
+    if (!select) {
+        return std::unexpected(TError("expected a SELECT in EXISTS subquery"));
+    }
+    if (subquery.Query->WithClause || select->GroupBy || select->Having) {
+        return std::unexpected(TError("aggregated/CTE EXISTS subquery is not supported yet"));
+    }
+    if (!select->From) {
+        return std::unexpected(TError("EXISTS subquery requires FROM"));
+    }
+    auto right = BuildFrom(*select->From, sources);
+    if (!right) {
+        return std::unexpected(right.error());
+    }
+    if (select->Where && HasSubquery(select->Where)) {
+        return std::unexpected(TError("nested subqueries are not supported yet"));
+    }
+    return std::make_shared<TJoinOperator>(
+        std::move(left), *right, std::vector<TJoinKey>{}, type, select->Where);
+}
+
+// IN: build the subquery as a full plan and join on `operand == <its only column>`.
+std::expected<TOperatorPtr, TError> DecorrelateIn(
+    TOperatorPtr left,
+    const NSql::TSubqueryExpr& subquery,
+    EJoinType type,
+    const TTableSourceFactory& sources)
+{
+    if (!subquery.Operand || HasSubquery(subquery.Operand)) {
+        return std::unexpected(TError("unsupported IN operand"));
+    }
+    auto right = BuildQuery(*subquery.Query, sources);
+    if (!right) {
+        return std::unexpected(right.error());
+    }
+    auto project = std::dynamic_pointer_cast<TProjectOperator>(*right);
+    if (!project || project->Projections().size() != 1) {
+        return std::unexpected(TError("IN subquery must return exactly one column"));
+    }
+    auto column = Ident(subquery.Operand->Location, project->Projections()[0].Name);
+    auto residual = std::make_shared<NAst::TBinaryExpr>(
+        subquery.Operand->Location, NAst::TOperator("=="), subquery.Operand, std::move(column));
+    return std::make_shared<TJoinOperator>(
+        std::move(left), *right, std::vector<TJoinKey>{}, type, std::move(residual));
+}
+
 std::expected<TOperatorPtr, TError> BuildSelect(
     const NSql::TSqlSelect& select,
     const TTableSourceFactory& sources)
@@ -314,10 +423,29 @@ std::expected<TOperatorPtr, TError> BuildSelect(
     TOperatorPtr node = *base;
 
     if (select.Where) {
-        if (HasSubquery(select.Where)) {
-            return std::unexpected(TError("subqueries are not supported yet"));
+        std::vector<NAst::TExprPtr> conjuncts;
+        FlattenConjuncts(select.Where, conjuncts);
+
+        std::vector<NAst::TExprPtr> residual;
+        for (const auto& conjunct : conjuncts) {
+            if (auto decorrelation = AsDecorrelation(conjunct)) {
+                auto joined = decorrelation->IsIn
+                    ? DecorrelateIn(node, *decorrelation->Subquery, decorrelation->Type, sources)
+                    : DecorrelateExists(node, *decorrelation->Subquery, decorrelation->Type, sources);
+                if (!joined) {
+                    return std::unexpected(joined.error());
+                }
+                node = std::move(*joined);
+            } else if (HasSubquery(conjunct)) {
+                return std::unexpected(TError("subquery is not supported in this position"));
+            } else {
+                residual.push_back(conjunct);
+            }
         }
-        node = std::make_shared<TFilterOperator>(std::move(node), select.Where);
+
+        if (!residual.empty()) {
+            node = std::make_shared<TFilterOperator>(std::move(node), Conjoin(residual));
+        }
     }
 
     if (!select.SelectList) {
