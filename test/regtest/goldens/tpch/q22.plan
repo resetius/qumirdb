@@ -1,2 +1,2 @@
-Error: only a base table is supported in FROM
+Error: subqueries are not supported yet
 

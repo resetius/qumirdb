@@ -1,2 +1,27 @@
-Error: joins are not supported yet
-
+(rel project
+  (rel aggregate
+    (rel filter
+      (rel join
+        (rel join
+          (rel join (rel source "customer") (rel source "orders") () (inner))
+          (rel source "lineitem")
+          ()
+          (inner))
+        (rel source "nation")
+        ()
+        (inner))
+      (&& (&& (&& (&& (&& (== c_custkey o_custkey) (== l_orderkey o_orderkey))
+              (>= o_orderdate (call qdb_sql_date "1994-06-01")))
+            (< o_orderdate (+ (call qdb_sql_date "1994-06-01") (call qdb_sql_interval "3" "month"))))
+          (== l_returnflag "R"))
+        (== c_nationkey n_nationkey)))
+    (keys c_custkey c_name c_acctbal c_phone n_name c_address c_comment)
+    (agg sum_0 sum (* l_extendedprice (- 1 l_discount))))
+  (c_custkey c_custkey)
+  (c_name c_name)
+  (revenue sum_0)
+  (c_acctbal c_acctbal)
+  (n_name n_name)
+  (c_address c_address)
+  (c_phone c_phone)
+  (c_comment c_comment))

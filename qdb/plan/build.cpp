@@ -2,6 +2,7 @@
 
 #include <qdb/plan/ops/aggregate.h>
 #include <qdb/plan/ops/filter.h>
+#include <qdb/plan/ops/join.h>
 #include <qdb/plan/ops/project.h>
 #include <qdb/plan/ops/source.h>
 
@@ -198,27 +199,105 @@ std::expected<std::vector<std::string>, TError> GroupKeys(const NSql::TSqlGroupB
     return keys;
 }
 
-std::expected<TOperatorPtr, TError> BuildSource(
+EJoinType MapJoinType(NSql::ESqlJoinType type) {
+    switch (type) {
+        case NSql::ESqlJoinType::Inner: return EJoinType::Inner;
+        case NSql::ESqlJoinType::Left: return EJoinType::Left;
+        case NSql::ESqlJoinType::Right: return EJoinType::Right;
+        case NSql::ESqlJoinType::Full: return EJoinType::Full;
+        case NSql::ESqlJoinType::LeftSemi: return EJoinType::LeftSemi;
+        case NSql::ESqlJoinType::RightSemi: return EJoinType::RightSemi;
+        case NSql::ESqlJoinType::Cross: return EJoinType::Inner;
+    }
+    return EJoinType::Inner;
+}
+
+std::expected<TOperatorPtr, TError> BuildQuery(
+    const NSql::TSqlQuery& query,
+    const TTableSourceFactory& sources);
+
+std::expected<TOperatorPtr, TError> BuildTableRef(
+    const NSql::TSqlPtr<NSql::TSqlTableRef>& ref,
+    const TTableSourceFactory& sources)
+{
+    if (auto table = std::dynamic_pointer_cast<NSql::TSqlTableName>(ref)) {
+        auto source = sources(TableName(table->Name));
+        if (!source) {
+            return std::unexpected(source.error());
+        }
+        if (table->Alias) {
+            if (auto* op = dynamic_cast<TSourceOperator*>(source->get())) {
+                op->SetAlias(*table->Alias);
+            }
+        }
+        return *source;
+    }
+
+    if (auto sub = std::dynamic_pointer_cast<NSql::TSqlSubqueryTable>(ref)) {
+        if (sub->ColumnAliases) {
+            return std::unexpected(TError("column aliases on derived tables are not supported yet"));
+        }
+        return BuildQuery(*sub->Query, sources);
+    }
+
+    if (auto join = std::dynamic_pointer_cast<NSql::TSqlJoin>(ref)) {
+        auto left = BuildTableRef(join->Left, sources);
+        if (!left) {
+            return std::unexpected(left.error());
+        }
+        auto right = BuildTableRef(join->Right, sources);
+        if (!right) {
+            return std::unexpected(right.error());
+        }
+
+        // The builder does not extract equi-keys from ON; the whole predicate
+        // becomes a residual that the optimizer later turns into join keys.
+        std::vector<TJoinKey> keys;
+        NAst::TExprPtr residual;
+        if (join->Condition) {
+            if (join->Condition->On) {
+                if (HasSubquery(join->Condition->On)) {
+                    return std::unexpected(TError("subqueries are not supported yet"));
+                }
+                residual = join->Condition->On;
+            } else if (join->Condition->UsingColumns) {
+                for (const auto& column : join->Condition->UsingColumns->Items) {
+                    keys.push_back({ .Left = column, .Right = column });
+                }
+            }
+        }
+        return std::make_shared<TJoinOperator>(
+            *left, *right, std::move(keys), MapJoinType(join->Type), std::move(residual));
+    }
+
+    return std::unexpected(TError("unsupported table reference"));
+}
+
+std::expected<TOperatorPtr, TError> BuildFrom(
     const NSql::TSqlFrom& from,
     const TTableSourceFactory& sources)
 {
-    if (from.Items.size() != 1) {
-        return std::unexpected(TError("joins are not supported yet"));
+    if (from.Items.empty()) {
+        return std::unexpected(TError("empty FROM"));
     }
-    auto table = std::dynamic_pointer_cast<NSql::TSqlTableName>(from.Items[0]);
-    if (!table) {
-        return std::unexpected(TError("only a base table is supported in FROM"));
+    auto node = BuildTableRef(from.Items[0], sources);
+    if (!node) {
+        return std::unexpected(node.error());
     }
-    auto source = sources(TableName(table->Name));
-    if (!source) {
-        return std::unexpected(source.error());
-    }
-    if (table->Alias) {
-        if (auto* op = dynamic_cast<TSourceOperator*>(source->get())) {
-            op->SetAlias(*table->Alias);
+    TOperatorPtr result = *node;
+
+    // Comma-separated tables become a left-deep cross-join tree; the WHERE
+    // predicate stays a single top-level filter (equi-join extraction is an
+    // optimizer pass).
+    for (size_t i = 1; i < from.Items.size(); ++i) {
+        auto right = BuildTableRef(from.Items[i], sources);
+        if (!right) {
+            return std::unexpected(right.error());
         }
+        result = std::make_shared<TJoinOperator>(
+            std::move(result), *right, std::vector<TJoinKey>{}, EJoinType::Inner, nullptr);
     }
-    return *source;
+    return result;
 }
 
 std::expected<TOperatorPtr, TError> BuildSelect(
@@ -228,7 +307,7 @@ std::expected<TOperatorPtr, TError> BuildSelect(
     if (!select.From) {
         return std::unexpected(TError("SELECT without FROM is not supported yet"));
     }
-    auto base = BuildSource(*select.From, sources);
+    auto base = BuildFrom(*select.From, sources);
     if (!base) {
         return std::unexpected(base.error());
     }
@@ -300,6 +379,21 @@ std::expected<TOperatorPtr, TError> BuildSelect(
     return std::make_shared<TProjectOperator>(std::move(node), std::move(projections));
 }
 
+std::expected<TOperatorPtr, TError> BuildQuery(
+    const NSql::TSqlQuery& query,
+    const TTableSourceFactory& sources)
+{
+    if (query.WithClause) {
+        return std::unexpected(TError("WITH is not supported yet"));
+    }
+    auto select = std::dynamic_pointer_cast<NSql::TSqlSelect>(query.Body);
+    if (!select) {
+        return std::unexpected(TError("expected a SELECT statement"));
+    }
+    // TODO: ORDER BY / LIMIT / OFFSET require sort/limit operators.
+    return BuildSelect(*select, sources);
+}
+
 } // namespace
 
 std::expected<TOperatorPtr, TError> BuildPlan(
@@ -310,15 +404,7 @@ std::expected<TOperatorPtr, TError> BuildPlan(
     if (!root) {
         return std::unexpected(TError("expected a query"));
     }
-    if (root->WithClause) {
-        return std::unexpected(TError("WITH is not supported yet"));
-    }
-    auto select = std::dynamic_pointer_cast<NSql::TSqlSelect>(root->Body);
-    if (!select) {
-        return std::unexpected(TError("expected a SELECT statement"));
-    }
-    // TODO: ORDER BY / LIMIT / OFFSET require sort/limit operators.
-    return BuildSelect(*select, sources);
+    return BuildQuery(*root, sources);
 }
 
 } // namespace NQqb

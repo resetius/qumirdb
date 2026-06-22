@@ -1,2 +1,2 @@
-Error: only a base table is supported in FROM
+Error: column aliases on derived tables are not supported yet
 

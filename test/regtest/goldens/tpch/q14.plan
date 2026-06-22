@@ -1,2 +1,10 @@
-Error: joins are not supported yet
-
+(rel project
+  (rel aggregate
+    (rel filter
+      (rel join (rel source "lineitem") (rel source "part") () (inner))
+      (&& (&& (== l_partkey p_partkey) (>= l_shipdate (call qdb_sql_date "1993-03-01")))
+        (< l_shipdate (+ (call qdb_sql_date "1993-03-01") (call qdb_sql_interval "1" "month")))))
+    (keys)
+    (agg sum_0 sum (if (call qdb_string_view_sql_like p_type "PROMO%") (* l_extendedprice (- 1 l_discount)) 0))
+    (agg sum_1 sum (* l_extendedprice (- 1 l_discount))))
+  (promo_revenue (/ (* 100 sum_0) sum_1)))
