@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
 
-#include <qdb/ops/join.h>
-#include <qdb/types/nullable.h>
+#include <qdb/plan/ops/join.h>
+#include <qdb/plan/types/nullable.h>
 
 #include <qumir/parser/type.h>
 

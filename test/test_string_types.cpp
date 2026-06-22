@@ -4,7 +4,7 @@
 #include <qdb/modules/qumirdb_types.h>
 #include <qdb/io/io.h>
 #include <qdb/kernel/column_value.h>
-#include <qdb/types/nullable.h>
+#include <qdb/plan/types/nullable.h>
 
 #include <qumir/codegen/llvm/llvm_initializer.h>
 #include <qumir/parser/type.h>

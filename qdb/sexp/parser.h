@@ -4,7 +4,7 @@
 
 #include <qumir/parser/core/parser.h>
 
-#include <qdb/ops/operator.h>
+#include <qdb/plan/ops/operator.h>
 
 namespace NQqb {
 namespace NSexp {

@@ -1,6 +1,6 @@
-#include <qdb/ops/filter.h>
+#include <qdb/plan/ops/filter.h>
 
-#include <qdb/pipeline/unbound_vars.h>
+#include <qdb/plan/passes/unbound_vars.h>
 
 #include <qumir/parser/core/lexer.h>
 #include <qumir/parser/core/parser.h>

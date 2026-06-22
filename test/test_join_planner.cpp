@@ -8,9 +8,9 @@
 #include <qdb/exec/executor.h>
 #include <qdb/exec/planner.h>
 #include <qdb/io/io.h>
-#include <qdb/ops/source.h>
-#include <qdb/pipeline/column_pruning.h>
-#include <qdb/pipeline/typing.h>
+#include <qdb/plan/ops/source.h>
+#include <qdb/plan/passes/column_pruning.h>
+#include <qdb/plan/passes/typing.h>
 #include <qdb/sexp/parser.h>
 
 #include <algorithm>

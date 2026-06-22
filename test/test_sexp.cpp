@@ -1,10 +1,10 @@
 #include <gtest/gtest.h>
 
-#include <qdb/ops/aggregate.h>
-#include <qdb/ops/filter.h>
-#include <qdb/ops/join.h>
-#include <qdb/ops/project.h>
-#include <qdb/ops/source.h>
+#include <qdb/plan/ops/aggregate.h>
+#include <qdb/plan/ops/filter.h>
+#include <qdb/plan/ops/join.h>
+#include <qdb/plan/ops/project.h>
+#include <qdb/plan/ops/source.h>
 #include <qdb/sexp/parser.h>
 #include <qdb/sexp/printer.h>
 

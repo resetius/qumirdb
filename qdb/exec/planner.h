@@ -1,7 +1,7 @@
 #pragma once
 
 #include <qdb/exec/executor.h>
-#include <qdb/ops/operator.h>
+#include <qdb/plan/ops/operator.h>
 
 #include <memory>
 #include <ostream>

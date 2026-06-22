@@ -1,5 +1,5 @@
 #include <qdb/kernel/aggregate_key.h>
-#include <qdb/types/nullable.h>
+#include <qdb/plan/types/nullable.h>
 
 #include <qumir/error.h>
 

@@ -1,5 +1,5 @@
 #include <qdb/kernel/column_value.h>
-#include <qdb/types/nullable.h>
+#include <qdb/plan/types/nullable.h>
 
 #include <qumir/location.h>
 #include <qumir/parser/operator.h>

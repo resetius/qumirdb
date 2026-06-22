@@ -1,4 +1,4 @@
-#include <qdb/pipeline/unbound_vars.h>
+#include <qdb/plan/passes/unbound_vars.h>
 
 namespace NQqb {
 

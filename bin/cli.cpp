@@ -1,10 +1,10 @@
 #include <qdb/exec/planner.h>
 #include <qdb/io/parquet/source.h>
 #include <qdb/io/text/sink.h>
-#include <qdb/ops/source.h>
-#include <qdb/pipeline/column_pruning.h>
-#include <qdb/pipeline/qualify_columns.h>
-#include <qdb/pipeline/typing.h>
+#include <qdb/plan/ops/source.h>
+#include <qdb/plan/passes/column_pruning.h>
+#include <qdb/plan/passes/qualify_columns.h>
+#include <qdb/plan/passes/typing.h>
 #include <qdb/sexp/parser.h>
 #include <qdb/sexp/printer.h>
 

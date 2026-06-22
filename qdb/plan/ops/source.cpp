@@ -1,7 +1,7 @@
-#include <qdb/ops/source.h>
-#include <qdb/ops/filter.h>
-#include <qdb/ops/project.h>
-#include <qdb/pipeline/unbound_vars.h>
+#include <qdb/plan/ops/source.h>
+#include <qdb/plan/ops/filter.h>
+#include <qdb/plan/ops/project.h>
+#include <qdb/plan/passes/unbound_vars.h>
 
 #include <qumir/parser/type.h>
 

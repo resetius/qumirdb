@@ -3,7 +3,7 @@
 #include <qdb/kernel/aggregate_key.h>
 #include <qdb/kernel/gen.h>
 #include <qdb/kernel/lib.h>
-#include <qdb/types/nullable.h>
+#include <qdb/plan/types/nullable.h>
 #include <qdb/modules/qumirdb.h>
 #include <qdb/modules/qumirdb_types.h>
 

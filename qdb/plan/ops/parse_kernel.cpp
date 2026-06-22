@@ -1,4 +1,4 @@
-#include <qdb/ops/parse_kernel.h>
+#include <qdb/plan/ops/parse_kernel.h>
 
 #include <qumir/parser/ast.h>
 #include <qumir/parser/core/lexer.h>

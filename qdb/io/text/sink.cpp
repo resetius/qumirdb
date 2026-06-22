@@ -1,5 +1,5 @@
 #include <qdb/io/text/sink.h>
-#include <qdb/types/nullable.h>
+#include <qdb/plan/types/nullable.h>
 
 #include <charconv>
 #include <iomanip>

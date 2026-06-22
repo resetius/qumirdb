@@ -1,5 +1,5 @@
 #include <qdb/kernel/compiler.h>
-#include <qdb/types/nullable.h>
+#include <qdb/plan/types/nullable.h>
 #include <qdb/kernel/aggregate_key.h>
 #include <qdb/kernel/gen.h>
 #include <qdb/kernel/join_gen.h>
