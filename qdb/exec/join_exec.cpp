@@ -1,6 +1,6 @@
 #include <qdb/exec/join_exec.h>
 
-#include <qdb/types/nullable.h>
+#include <qdb/plan/types/nullable.h>
 
 #include <qumir/error.h>
 

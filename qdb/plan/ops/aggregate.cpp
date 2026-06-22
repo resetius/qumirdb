@@ -1,6 +1,6 @@
-#include <qdb/ops/aggregate.h>
+#include <qdb/plan/ops/aggregate.h>
 
-#include <qdb/pipeline/unbound_vars.h>
+#include <qdb/plan/passes/unbound_vars.h>
 
 #include <qumir/parser/ast.h>
 #include <qumir/parser/core/lexer.h>

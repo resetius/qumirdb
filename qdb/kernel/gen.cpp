@@ -1,5 +1,5 @@
 #include <qdb/kernel/gen.h>
-#include <qdb/types/nullable.h>
+#include <qdb/plan/types/nullable.h>
 
 #include <qdb/kernel/column_value.h>
 

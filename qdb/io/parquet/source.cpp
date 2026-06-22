@@ -1,5 +1,5 @@
 #include <qdb/io/parquet/source.h>
-#include <qdb/types/nullable.h>
+#include <qdb/plan/types/nullable.h>
 
 #include <stdexcept>
 #include <cstdlib>

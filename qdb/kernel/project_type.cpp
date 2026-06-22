@@ -1,7 +1,7 @@
 #include <qdb/kernel/project_type.h>
 
 #include <qdb/modules/qumirdb.h>
-#include <qdb/types/nullable.h>
+#include <qdb/plan/types/nullable.h>
 
 #include <qumir/error.h>
 

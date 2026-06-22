@@ -2,8 +2,8 @@
 
 #include <qdb/io/parquet/source.h>
 #include <qdb/io/text/sink.h>
-#include <qdb/ops/source.h>
-#include <qdb/types/nullable.h>
+#include <qdb/plan/ops/source.h>
+#include <qdb/plan/types/nullable.h>
 
 #include <sstream>
 #include <vector>

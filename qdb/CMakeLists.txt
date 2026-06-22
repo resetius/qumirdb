@@ -8,22 +8,22 @@ add_library(qumirdb
     modules/qumirdb_runtime.cpp
     io/parquet/source.cpp
     io/text/sink.cpp
-    ops/source.cpp
-    ops/filter.cpp
-    ops/project.cpp
-    ops/aggregate.cpp
-    ops/join.cpp
-    ops/parse_kernel.cpp
+    plan/ops/source.cpp
+    plan/ops/filter.cpp
+    plan/ops/project.cpp
+    plan/ops/aggregate.cpp
+    plan/ops/join.cpp
+    plan/ops/parse_kernel.cpp
     sexp/printer.cpp
     sexp/parser.cpp
     sql/ast.cpp
     sql/lexer.cpp
     sql/parser.cpp
     sql/printer.cpp
-    pipeline/unbound_vars.cpp
-    pipeline/typing.cpp
-    pipeline/column_pruning.cpp
-    pipeline/qualify_columns.cpp
+    plan/passes/unbound_vars.cpp
+    plan/passes/typing.cpp
+    plan/passes/column_pruning.cpp
+    plan/passes/qualify_columns.cpp
     kernel/column_value.cpp
     kernel/gen.cpp
     kernel/aggregate_key.cpp

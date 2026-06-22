@@ -1,9 +1,9 @@
 #include <gtest/gtest.h>
 
-#include <qdb/ops/join.h>
-#include <qdb/ops/source.h>
-#include <qdb/pipeline/column_pruning.h>
-#include <qdb/pipeline/typing.h>
+#include <qdb/plan/ops/join.h>
+#include <qdb/plan/ops/source.h>
+#include <qdb/plan/passes/column_pruning.h>
+#include <qdb/plan/passes/typing.h>
 #include <qdb/sexp/parser.h>
 
 #include <qumir/parser/core/lexer.h>

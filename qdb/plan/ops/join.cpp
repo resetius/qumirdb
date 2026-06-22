@@ -1,7 +1,7 @@
-#include <qdb/ops/join.h>
+#include <qdb/plan/ops/join.h>
 
-#include <qdb/pipeline/unbound_vars.h>
-#include <qdb/types/nullable.h>
+#include <qdb/plan/passes/unbound_vars.h>
+#include <qdb/plan/types/nullable.h>
 
 #include <qumir/parser/core/lexer.h>
 #include <qumir/parser/core/parser.h>

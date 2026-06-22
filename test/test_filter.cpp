@@ -2,7 +2,7 @@
 
 #include <qdb/io/io.h>
 #include <qdb/kernel/compiler.h>
-#include <qdb/types/nullable.h>
+#include <qdb/plan/types/nullable.h>
 
 #include <qumir/codegen/llvm/llvm_initializer.h>
 #include <qumir/parser/core/lexer.h>

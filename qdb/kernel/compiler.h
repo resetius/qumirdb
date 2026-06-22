@@ -1,8 +1,8 @@
 #pragma once
 
 #include <qdb/io/io.h>
-#include <qdb/ops/aggregate.h>
-#include <qdb/ops/join.h>
+#include <qdb/plan/ops/aggregate.h>
+#include <qdb/plan/ops/join.h>
 
 #include <qumir/parser/type.h>
 #include <qumir/runner/runner_llvm.h>

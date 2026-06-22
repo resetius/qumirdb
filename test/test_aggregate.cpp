@@ -9,13 +9,13 @@
 #include <qdb/exec/planner.h>
 #include <qdb/io/io.h>
 #include <qdb/kernel/compiler.h>
-#include <qdb/ops/aggregate.h>
-#include <qdb/ops/operator.h>
-#include <qdb/ops/source.h>
-#include <qdb/pipeline/column_pruning.h>
-#include <qdb/pipeline/typing.h>
+#include <qdb/plan/ops/aggregate.h>
+#include <qdb/plan/ops/operator.h>
+#include <qdb/plan/ops/source.h>
+#include <qdb/plan/passes/column_pruning.h>
+#include <qdb/plan/passes/typing.h>
 #include <qdb/sexp/parser.h>
-#include <qdb/types/nullable.h>
+#include <qdb/plan/types/nullable.h>
 
 #include <algorithm>
 #include <memory>
