@@ -1,0 +1,11 @@
+(rel project
+  (rel aggregate
+    (rel filter
+      (rel source "lineitem")
+      (&& (&& (&& (>= l_shipdate (call qdb_sql_date "1995-01-01"))
+            (< l_shipdate (+ (call qdb_sql_date "1995-01-01") (call qdb_sql_interval "1" "year"))))
+          (&& (<= (- 0.040000000000000001 0.01) l_discount) (<= l_discount (+ 0.040000000000000001 0.01))))
+        (< l_quantity 24)))
+    (keys)
+    (agg sum_0 sum (* l_extendedprice l_discount)))
+  (revenue sum_0))

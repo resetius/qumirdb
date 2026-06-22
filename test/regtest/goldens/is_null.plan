@@ -1,0 +1,1 @@
+(rel project (rel filter (rel source "t") (&& (! (call qdb_sql_is_null a)) (call qdb_sql_is_null b))) (a a))
