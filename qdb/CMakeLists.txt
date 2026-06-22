@@ -24,6 +24,7 @@ add_library(qumirdb
     plan/passes/typing.cpp
     plan/passes/column_pruning.cpp
     plan/passes/qualify_columns.cpp
+    plan/passes/equijoin.cpp
     plan/build.cpp
     kernel/column_value.cpp
     kernel/gen.cpp
