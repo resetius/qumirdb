@@ -17,7 +17,7 @@
           (select
             (select-list
               (item as cntrycode
-                (call qdb_substring c_phone 1 2)
+                (call qdb_substring c_phone (cast 1 i32) (cast 2 i32))
               )
               (item
                 c_acctbal
@@ -27,12 +27,13 @@
               (table customer)
             )
             (where
-              (&& (&& (|| (|| (|| (|| (|| (|| (== (call qdb_substring c_phone 1 2) "27") (== (call qdb_substring c_phone 1 2) "20"))
-                            (== (call qdb_substring c_phone 1 2) "22"))
-                          (== (call qdb_substring c_phone 1 2) "34"))
-                        (== (call qdb_substring c_phone 1 2) "29"))
-                      (== (call qdb_substring c_phone 1 2) "23"))
-                    (== (call qdb_substring c_phone 1 2) "17"))
+              (&& (&& (|| (|| (|| (|| (|| (|| (== (call qdb_substring c_phone (cast 1 i32) (cast 2 i32)) "27")
+                              (== (call qdb_substring c_phone (cast 1 i32) (cast 2 i32)) "20"))
+                            (== (call qdb_substring c_phone (cast 1 i32) (cast 2 i32)) "22"))
+                          (== (call qdb_substring c_phone (cast 1 i32) (cast 2 i32)) "34"))
+                        (== (call qdb_substring c_phone (cast 1 i32) (cast 2 i32)) "29"))
+                      (== (call qdb_substring c_phone (cast 1 i32) (cast 2 i32)) "23"))
+                    (== (call qdb_substring c_phone (cast 1 i32) (cast 2 i32)) "17"))
                   (> c_acctbal
                     (subquery scalar (query
                 (select
@@ -46,12 +47,13 @@
                   )
                   (where
                     (&& (> c_acctbal 0)
-                      (|| (|| (|| (|| (|| (|| (== (call qdb_substring c_phone 1 2) "27") (== (call qdb_substring c_phone 1 2) "20"))
-                                (== (call qdb_substring c_phone 1 2) "22"))
-                              (== (call qdb_substring c_phone 1 2) "34"))
-                            (== (call qdb_substring c_phone 1 2) "29"))
-                          (== (call qdb_substring c_phone 1 2) "23"))
-                        (== (call qdb_substring c_phone 1 2) "17")))
+                      (|| (|| (|| (|| (|| (|| (== (call qdb_substring c_phone (cast 1 i32) (cast 2 i32)) "27")
+                                  (== (call qdb_substring c_phone (cast 1 i32) (cast 2 i32)) "20"))
+                                (== (call qdb_substring c_phone (cast 1 i32) (cast 2 i32)) "22"))
+                              (== (call qdb_substring c_phone (cast 1 i32) (cast 2 i32)) "34"))
+                            (== (call qdb_substring c_phone (cast 1 i32) (cast 2 i32)) "29"))
+                          (== (call qdb_substring c_phone (cast 1 i32) (cast 2 i32)) "23"))
+                        (== (call qdb_substring c_phone (cast 1 i32) (cast 2 i32)) "17")))
                   )
                 )
               )

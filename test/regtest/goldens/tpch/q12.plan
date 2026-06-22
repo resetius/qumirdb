@@ -1,2 +1,15 @@
-Error: joins are not supported yet
-
+(rel project
+  (rel aggregate
+    (rel filter
+      (rel join (rel source "orders") (rel source "lineitem") () (inner))
+      (&& (&& (&& (&& (&& (== o_orderkey l_orderkey) (|| (== l_shipmode "TRUCK") (== l_shipmode "AIR")))
+              (< l_commitdate l_receiptdate))
+            (< l_shipdate l_commitdate))
+          (>= l_receiptdate (call qdb_sql_date "1993-01-01")))
+        (< l_receiptdate (+ (call qdb_sql_date "1993-01-01") (call qdb_sql_interval "1" "year")))))
+    (keys l_shipmode)
+    (agg sum_0 sum (if (|| (== o_orderpriority "1-URGENT") (== o_orderpriority "2-HIGH")) 1 0))
+    (agg sum_1 sum (if (&& (!= o_orderpriority "1-URGENT") (!= o_orderpriority "2-HIGH")) 1 0)))
+  (l_shipmode l_shipmode)
+  (high_line_count sum_0)
+  (low_line_count sum_1))

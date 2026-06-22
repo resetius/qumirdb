@@ -1,2 +1,45 @@
-Error: only a base table is supported in FROM
-
+(rel project
+  (rel aggregate
+    (rel project
+      (rel filter
+        (rel join
+          (rel join
+            (rel join
+              (rel join
+                (rel join
+                  (rel join
+                    (rel join (rel source "part") (rel source "supplier") () (inner))
+                    (rel source "lineitem")
+                    ()
+                    (inner))
+                  (rel source "orders")
+                  ()
+                  (inner))
+                (rel source "customer")
+                ()
+                (inner))
+              (rel source "nation" "n1")
+              ()
+              (inner))
+            (rel source "nation" "n2")
+            ()
+            (inner))
+          (rel source "region")
+          ()
+          (inner))
+        (&& (&& (&& (&& (&& (&& (&& (&& (&& (== p_partkey l_partkey) (== s_suppkey l_suppkey)) (== l_orderkey o_orderkey))
+                      (== o_custkey c_custkey))
+                    (== c_nationkey (field n1 n_nationkey)))
+                  (== (field n1 n_regionkey) r_regionkey))
+                (== r_name "EUROPE"))
+              (== s_nationkey (field n2 n_nationkey)))
+            (&& (<= (call qdb_sql_date "1995-01-01") o_orderdate) (<= o_orderdate (call qdb_sql_date "1996-12-31"))))
+          (== p_type "PROMO POLISHED BRASS")))
+      (o_year (call qdb_date_year o_orderdate))
+      (volume (* l_extendedprice (- 1 l_discount)))
+      (nation (field n2 n_name)))
+    (keys o_year)
+    (agg sum_0 sum (if (== nation "FRANCE") volume 0))
+    (agg sum_1 sum volume))
+  (o_year o_year)
+  (mkt_share (/ sum_0 sum_1)))

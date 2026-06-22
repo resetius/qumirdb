@@ -1,2 +1,4 @@
-Error: only a base table is supported in FROM
-
+(rel project
+  (rel join (rel source "t") (rel source "s") () (inner) (== (field t id) (field s id)))
+  (col0 (field t a))
+  (col1 (field s b)))
