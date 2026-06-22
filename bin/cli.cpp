@@ -1,28 +1,40 @@
 #include <qdb/exec/planner.h>
 #include <qdb/io/parquet/source.h>
 #include <qdb/io/text/sink.h>
+#include <qdb/plan/build.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/passes/column_pruning.h>
 #include <qdb/plan/passes/qualify_columns.h>
 #include <qdb/plan/passes/typing.h>
 #include <qdb/sexp/parser.h>
 #include <qdb/sexp/printer.h>
+#include <qdb/sql/parser.h>
 
 #include <qumir/codegen/llvm/llvm_initializer.h>
 #include <qumir/parser/core/lexer.h>
 #include <qumir/parser/core/parser.h>
 
+#include <readline/history.h>
+#include <readline/readline.h>
+
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
+#include <expected>
 #include <fstream>
 #include <iostream>
 #include <memory>
-#include <sstream> // used in ParseFormat
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <vector>
 
 namespace {
+
+enum class ESyntax {
+    Sexpr,
+    Sql,
+};
 
 struct TFormatSpec {
     std::string Name = "console";
@@ -109,76 +121,250 @@ NQqb::TSchema SchemaFromType(
     return NQqb::TSchema{std::span<const NQqb::TColumnSchema>(columns)};
 }
 
+struct TConfig {
+    ESyntax Syntax = ESyntax::Sexpr;
+    std::string DataDir = ".";
+    TFormatSpec Format;
+    int MaxRowSets = -1;
+    bool Verbose = false;
+};
+
+std::string ResolveTablePath(const std::string& dataDir, std::string_view table) {
+    if (table.ends_with(".parquet")) {
+        return std::string(table);
+    }
+    return dataDir + "/" + std::string(table) + ".parquet";
+}
+
+std::expected<NQqb::TOperatorPtr, NQumir::TError> ParseSexpr(
+    std::istream& in,
+    const std::function<NQqb::TOperatorPtr(const std::string&)>& makeSource)
+{
+    NQqb::NSexp::TRelParserOptions opts;
+    opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) {
+        return makeSource(std::string(path));
+    };
+
+    NQumir::NAst::NCore::TParser parser;
+    for (auto& [key, value] : NQqb::NSexp::MakeRelParsers(std::move(opts))) {
+        parser.NodeParsers[key] = std::move(value);
+    }
+
+    NQumir::NAst::NCore::TTokenStream tokens(in);
+    auto parsed = parser.Parse(tokens);
+    if (!parsed) {
+        return std::unexpected(parsed.error());
+    }
+    auto plan = std::dynamic_pointer_cast<NQqb::IOperator>(*parsed);
+    if (!plan) {
+        return std::unexpected(NQumir::TError("input must be a relational plan (rel ...)"));
+    }
+    return plan;
+}
+
+std::expected<NQqb::TOperatorPtr, NQumir::TError> ParseSql(
+    std::istream& in,
+    const NQqb::TTableSourceFactory& sources)
+{
+    NQdb::NSql::TTokenStream tokens(in);
+    NQdb::NSql::TParser parser;
+    auto parsed = parser.Parse(tokens);
+    if (!parsed) {
+        return std::unexpected(parsed.error());
+    }
+    return NQqb::BuildPlan(*parsed, sources);
+}
+
+int RunQuery(ESyntax syntax, std::istream& in, const TConfig& config) {
+    std::vector<std::unique_ptr<NQqb::TParquetSource>> sources;
+    auto makeSource = [&](const std::string& path) -> NQqb::TOperatorPtr {
+        auto source = std::make_unique<NQqb::TParquetSource>(path);
+        auto op = std::make_shared<NQqb::TSourceOperator>(*source, path);
+        sources.push_back(std::move(source));
+        return op;
+    };
+
+    std::expected<NQqb::TOperatorPtr, NQumir::TError> plan;
+    if (syntax == ESyntax::Sql) {
+        auto factory = [&](std::string_view table)
+            -> std::expected<NQqb::TOperatorPtr, NQumir::TError>
+        {
+            try {
+                return makeSource(ResolveTablePath(config.DataDir, table));
+            } catch (const std::exception& e) {
+                return std::unexpected(NQumir::TError(
+                    "cannot open table '" + std::string(table) + "': " + e.what()));
+            }
+        };
+        plan = ParseSql(in, factory);
+    } else {
+        plan = ParseSexpr(in, makeSource);
+    }
+
+    if (!plan) {
+        std::cerr << plan.error().ToString() << "\n";
+        return 1;
+    }
+
+    NQqb::AssignSourceAliases(*plan);
+    NQqb::QualifyColumns(*plan);
+    NQqb::AnnotateTypes(*plan);
+    NQqb::ApplyColumnPruning(*plan);
+
+    if (config.Verbose) {
+        std::cerr << "========== LOGICAL PLAN ==========\n";
+        NQumir::NAst::NCore::PrintAst(
+            std::cerr,
+            *plan,
+            NQumir::NAst::NCore::TPrintOptions{
+                .NodePrinters = NQqb::NSexp::MakeRelPrinters(),
+            });
+        std::cerr << "\n==================================\n";
+    }
+
+    NQqb::TPhysicalPlanner planner(config.Verbose ? &std::cerr : nullptr);
+    planner.PrintRuntimePlan(*plan);
+    auto executor = planner.Build(*plan);
+
+    std::vector<std::string> outputNames;
+    std::vector<NQqb::TColumnSchema> outputColumns;
+    auto schema = SchemaFromType(executor->OutputType(), outputNames, outputColumns);
+
+    std::unique_ptr<NQqb::ISink> sink;
+    if (config.Format.Name == "csv") {
+        sink = std::make_unique<NQqb::TCsvSink>(
+            schema, std::cout, config.Format.Separator, config.Format.NoEscape);
+    } else if (config.Format.Name == "null") {
+        sink = std::make_unique<NQqb::TNullSink>(schema);
+    } else {
+        sink = std::make_unique<NQqb::TConsoleSink>(schema, std::cout);
+    }
+
+    NQqb::TRowSet rowSet = {};
+    int count = 0;
+    auto start = std::chrono::steady_clock::now();
+    while ((config.MaxRowSets < 0 || count < config.MaxRowSets) && executor->Next(rowSet)) {
+        sink->Write(rowSet);
+        NQqb::Release(&rowSet);
+        ++count;
+    }
+    sink->Flush();
+    auto elapsed = std::chrono::steady_clock::now() - start;
+    std::cerr << "Processed " << count << " rowsets in "
+              << std::chrono::duration<double>(elapsed).count() << " seconds\n";
+    return 0;
+}
+
+// Reads SQL statements from readline and runs each as it is terminated by ';'.
+int RunInteractive(const TConfig& config) {
+    std::string buffer;
+    while (true) {
+        char* line = readline(buffer.empty() ? "qdb> " : "  ..> ");
+        if (!line) {
+            std::cout << "\n";
+            break;
+        }
+        std::string input(line);
+        std::free(line);
+
+        if (buffer.empty()) {
+            if (input == "exit" || input == "quit" || input == ".quit") {
+                break;
+            }
+            if (input.empty()) {
+                continue;
+            }
+        }
+
+        buffer += input;
+        buffer += '\n';
+        if (buffer.find(';') == std::string::npos) {
+            continue;
+        }
+
+        add_history(buffer.c_str());
+        try {
+            std::istringstream in(buffer);
+            RunQuery(ESyntax::Sql, in, config);
+        } catch (const std::exception& e) {
+            std::cerr << e.what() << "\n";
+        }
+        buffer.clear();
+    }
+    return 0;
+}
+
+void PrintHelp() {
+    std::cout <<
+        "qdb [options]\n"
+        "Options:\n"
+        "  -i <file>                    Input query file; without it, interactive mode\n"
+        "  --sexpr                      Input file is an s-expression plan (default)\n"
+        "  --sql                        Input file is SQL (built into a plan)\n"
+        "  --data <dir>                 Directory of <table>.parquet files for SQL (default: .)\n"
+        "  --format <spec>              Output format (default: console)\n"
+        "    console                    Aligned table (PostgreSQL style)\n"
+        "    csv                        CSV without escaping\n"
+        "    <escape>csv                CSV with quoting/escaping\n"
+        "    <separator=X>csv           CSV with custom separator X\n"
+        "    null                       Consume rows without output\n"
+        "  --rowsets <n>                Stop after n rowsets\n"
+        "  --verbose                    Print the logical and runtime plans\n"
+        "  --help|-h                    Show this help message\n"
+        "\n"
+        "Without -i, qdb starts an interactive SQL prompt (statements end with ';').\n";
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
     NQumir::NCodeGen::TLLVMInitializer llvmInit;
 
+    TConfig config;
     std::string queryFile;
-    TFormatSpec formatSpec;
-    int maxRowSets = -1;
-    bool verbose = false;
 
     for (int i = 1; i < argc; ++i) {
         if (!std::strcmp(argv[i], "-i")) {
-            if (i + 1 < argc) {
-                queryFile = argv[++i];
-            } else {
+            if (i + 1 >= argc) {
                 std::cerr << "-i requires a filename argument\n";
                 return 1;
             }
+            queryFile = argv[++i];
+        } else if (!std::strcmp(argv[i], "--sexpr")) {
+            config.Syntax = ESyntax::Sexpr;
+        } else if (!std::strcmp(argv[i], "--sql")) {
+            config.Syntax = ESyntax::Sql;
+        } else if (!std::strcmp(argv[i], "--data")) {
+            if (i + 1 >= argc) {
+                std::cerr << "--data requires a directory argument\n";
+                return 1;
+            }
+            config.DataDir = argv[++i];
         } else if (!std::strcmp(argv[i], "--format")) {
-            if (i + 1 < argc) {
-                try {
-                    formatSpec = ParseFormat(argv[++i]);
-                } catch (const std::invalid_argument& e) {
-                    std::cerr << "Invalid format spec: " << e.what() << "\n";
-                    return 1;
-                }
-            } else {
+            if (i + 1 >= argc) {
                 std::cerr << "--format requires an argument\n";
                 return 1;
             }
+            try {
+                config.Format = ParseFormat(argv[++i]);
+            } catch (const std::invalid_argument& e) {
+                std::cerr << "Invalid format spec: " << e.what() << "\n";
+                return 1;
+            }
         } else if (!std::strcmp(argv[i], "--rowsets")) {
-            if (i + 1 < argc) {
-                maxRowSets = std::atoi(argv[++i]);
-                if (maxRowSets <= 0) {
-                    std::cerr << "--rowsets requires a positive integer\n";
-                    return 1;
-                }
-            } else {
+            if (i + 1 >= argc) {
                 std::cerr << "--rowsets requires an argument\n";
                 return 1;
             }
+            config.MaxRowSets = std::atoi(argv[++i]);
+            if (config.MaxRowSets <= 0) {
+                std::cerr << "--rowsets requires a positive integer\n";
+                return 1;
+            }
         } else if (!std::strcmp(argv[i], "--verbose")) {
-            verbose = true;
+            config.Verbose = true;
         } else if (!std::strcmp(argv[i], "--help") || !std::strcmp(argv[i], "-h")) {
-            std::cout <<
-                "qdb [options]\n"
-                "Options:\n"
-                "  -i <file.sexp>               Query plan file (s-expression format)\n"
-                "  --format <spec>              Output format (default: console)\n"
-                "    console                    Aligned table (PostgreSQL style)\n"
-                "    csv                        CSV without escaping\n"
-                "    <escape>csv                CSV with quoting/escaping\n"
-                "    <separator=X>csv           CSV with custom separator X\n"
-                "    <separator=X,escape>csv    CSV with custom separator + escaping\n"
-                "    null                       Consume rows without output\n"
-                "  --rowsets <n>                Stop after n rowsets\n"
-                "  --verbose                    Print debug information\n"
-                "  --help|-h                    Show this help message\n"
-                "\n"
-                "Query file format (s-expression):\n"
-                "  (rel source \"path/to/file.parquet\")\n"
-                "  (rel filter <input> <predicate>)\n"
-                "  (rel project <input> (out_col expr) ...)\n"
-                "\n"
-                "Example:\n"
-                "  (rel project\n"
-                "    (rel filter\n"
-                "      (rel source \"orders.parquet\")\n"
-                "      (> o_totalprice (: 400000.0 f64)))\n"
-                "    (o_orderkey o_orderkey) (o_totalprice o_totalprice))\n";
+            PrintHelp();
             return 0;
         } else {
             std::cerr << "Unknown option: " << argv[i] << "\n";
@@ -186,94 +372,19 @@ int main(int argc, char** argv) {
         }
     }
 
-    if (queryFile.empty()) {
-        std::cerr << "No query file specified. Use -i <file.sexp>\n";
-        return 1;
-    }
-
     try {
+        if (queryFile.empty()) {
+            return RunInteractive(config);
+        }
+
         std::ifstream ifs(queryFile);
         if (!ifs) {
             std::cerr << "Cannot open query file: " << queryFile << "\n";
             return 1;
         }
-
-        // Sources must outlive the plan
-        std::vector<std::unique_ptr<NQqb::TParquetSource>> sources;
-
-        NQqb::NSexp::TRelParserOptions parserOpts;
-        parserOpts.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> NQqb::TOperatorPtr {
-            auto src = std::make_unique<NQqb::TParquetSource>(std::string(path));
-            auto op = std::make_shared<NQqb::TSourceOperator>(*src, std::string(path));
-            sources.push_back(std::move(src));
-            return op;
-        };
-
-        NQumir::NAst::NCore::TParser parser;
-        for (auto& [k, v] : NQqb::NSexp::MakeRelParsers(std::move(parserOpts))) {
-            parser.NodeParsers[k] = std::move(v);
-        }
-
-        NQumir::NAst::NCore::TTokenStream tokens(ifs);
-        auto parsed = parser.Parse(tokens);
-        if (!parsed) {
-            std::cerr << "Parse error: " << parsed.error().ToString() << "\n";
-            return 1;
-        }
-
-        auto plan = std::dynamic_pointer_cast<NQqb::IOperator>(*parsed);
-        if (!plan) {
-            std::cerr << "Query file must contain a relational plan (rel ...)\n";
-            return 1;
-        }
-
-        NQqb::AssignSourceAliases(plan);
-        NQqb::QualifyColumns(plan);
-        NQqb::AnnotateTypes(plan);
-        NQqb::ApplyColumnPruning(plan);
-
-        std::cerr << "========== LOGICAL PLAN ==========\n";
-        NQumir::NAst::NCore::PrintAst(
-            std::cerr,
-            plan,
-            NQumir::NAst::NCore::TPrintOptions{
-                .NodePrinters = NQqb::NSexp::MakeRelPrinters(),
-            });
-        std::cerr << "\n==================================\n";
-
-        NQqb::TPhysicalPlanner planner(verbose ? &std::cerr : nullptr);
-        planner.PrintRuntimePlan(plan);
-        auto executor = planner.Build(plan);
-
-        std::vector<std::string> outputNames;
-        std::vector<NQqb::TColumnSchema> outputColumns;
-        auto schema = SchemaFromType(executor->OutputType(), outputNames, outputColumns);
-
-        std::unique_ptr<NQqb::ISink> sink;
-        if (formatSpec.Name == "csv") {
-            sink = std::make_unique<NQqb::TCsvSink>(schema, std::cout, formatSpec.Separator, formatSpec.NoEscape);
-        } else if (formatSpec.Name == "null") {
-            sink = std::make_unique<NQqb::TNullSink>(schema);
-        } else {
-            sink = std::make_unique<NQqb::TConsoleSink>(schema, std::cout);
-        }
-
-        NQqb::TRowSet rowSet = {};
-        int count = 0;
-        auto start = std::chrono::steady_clock::now();
-        while ((maxRowSets < 0 || count < maxRowSets) && executor->Next(rowSet)) {
-            sink->Write(rowSet);
-            NQqb::Release(&rowSet);
-            ++count;
-        }
-        sink->Flush();
-        auto elapsed = std::chrono::steady_clock::now() - start;
-        std::cerr << "Processed " << count << " rowsets in "
-                  << std::chrono::duration<double>(elapsed).count() << " seconds\n";
+        return RunQuery(config.Syntax, ifs, config);
     } catch (const std::exception& e) {
         std::cerr << e.what() << "\n";
         return 1;
     }
-
-    return 0;
 }
