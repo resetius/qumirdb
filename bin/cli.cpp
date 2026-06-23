@@ -18,12 +18,14 @@
 #include <readline/history.h>
 #include <readline/readline.h>
 
+#include <cctype>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <expected>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -176,6 +178,30 @@ std::expected<NQdb::TOperatorPtr, NQumir::TError> ParseSql(
     return NQdb::BuildPlan(*parsed, sources);
 }
 
+// If `text` begins with the word "explain" (case-insensitive), strip it and
+// return true.
+bool StripExplain(std::string& text) {
+    size_t start = text.find_first_not_of(" \t\r\n");
+    if (start == std::string::npos) {
+        return false;
+    }
+    static const std::string keyword = "explain";
+    if (text.size() - start < keyword.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < keyword.size(); ++i) {
+        if (std::tolower(text[start + i]) != keyword[i]) {
+            return false;
+        }
+    }
+    size_t after = start + keyword.size();
+    if (after < text.size() && !std::isspace(text[after])) {
+        return false; // e.g. "explained"
+    }
+    text = text.substr(after);
+    return true;
+}
+
 int RunQuery(ESyntax syntax, std::istream& in, const TConfig& config) {
     std::vector<std::unique_ptr<NQdb::TParquetSource>> sources;
     auto makeSource = [&](const std::string& path) -> NQdb::TOperatorPtr {
@@ -184,6 +210,10 @@ int RunQuery(ESyntax syntax, std::istream& in, const TConfig& config) {
         sources.push_back(std::move(source));
         return op;
     };
+
+    std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    bool explain = StripExplain(text);
+    std::istringstream stream(text);
 
     std::expected<NQdb::TOperatorPtr, NQumir::TError> plan;
     if (syntax == ESyntax::Sql) {
@@ -197,9 +227,9 @@ int RunQuery(ESyntax syntax, std::istream& in, const TConfig& config) {
                     "cannot open table '" + std::string(table) + "': " + e.what()));
             }
         };
-        plan = ParseSql(in, factory);
+        plan = ParseSql(stream, factory);
     } else {
-        plan = ParseSexpr(in, makeSource);
+        plan = ParseSexpr(stream, makeSource);
     }
 
     if (!plan) {
@@ -223,6 +253,17 @@ int RunQuery(ESyntax syntax, std::istream& in, const TConfig& config) {
                 .NodePrinters = NQdb::NSexp::MakeRelPrinters(),
             });
         std::cerr << "\n==================================\n";
+    }
+
+    if (explain) {
+        NQumir::NAst::NCore::PrintAst(
+            std::cout,
+            *plan,
+            NQumir::NAst::NCore::TPrintOptions{
+                .NodePrinters = NQdb::NSexp::MakeRelPrinters(),
+            });
+        std::cout << "\n";
+        return 0;
     }
 
     NQdb::TPhysicalPlanner planner(config.Verbose ? &std::cerr : nullptr);
