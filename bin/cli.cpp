@@ -263,6 +263,37 @@ std::string HistoryPath() {
     return home ? std::string(home) + "/.qdb_history" : std::string();
 }
 
+std::string_view Trim(std::string_view s) {
+    auto isSpace = [](char c) { return c == ' ' || c == '\t' || c == ';'; };
+    while (!s.empty() && isSpace(s.front())) {
+        s.remove_prefix(1);
+    }
+    while (!s.empty() && isSpace(s.back())) {
+        s.remove_suffix(1);
+    }
+    return s;
+}
+
+// `\d <table>`: open the table and print its column names and types.
+void DescribeTable(std::string_view table, const TConfig& config) {
+    if (table.empty()) {
+        std::cerr << "usage: \\d <table>\n";
+        return;
+    }
+    const std::string path = ResolveTablePath(config.DataDir, table);
+    try {
+        NQdb::TParquetSource source(path);
+        const auto& schema = source.Schema();
+        std::cout << "Table \"" << table << "\" (" << path << ")\n";
+        for (const auto& column : schema.Columns) {
+            std::cout << "  " << column.Name << "  "
+                      << NQumir::NAst::NCore::PrintType(column.Type) << "\n";
+        }
+    } catch (const std::exception& e) {
+        std::cerr << e.what() << "\n";
+    }
+}
+
 // Reads SQL statements from readline and runs each as it is terminated by ';'.
 int RunInteractive(const TConfig& config) {
     const std::string historyPath = HistoryPath();
@@ -292,6 +323,10 @@ int RunInteractive(const TConfig& config) {
                 break;
             }
             if (input.empty()) {
+                continue;
+            }
+            if (input.starts_with("\\d")) {
+                DescribeTable(Trim(std::string_view(input).substr(2)), config);
                 continue;
             }
         }
