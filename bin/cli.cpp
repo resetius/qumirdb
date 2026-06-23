@@ -270,6 +270,13 @@ int RunInteractive(const TConfig& config) {
         read_history(historyPath.c_str());
     }
 
+    auto trim = [&](std::string buffer) {
+        for (auto it = buffer.rbegin(); *it == '\n' && it != buffer.rend(); ++it) {
+            *it = 0;
+        }
+        return buffer;
+    };
+
     std::string buffer;
     while (true) {
         char* line = readline(buffer.empty() ? "qdb> " : "  ..> ");
@@ -295,7 +302,7 @@ int RunInteractive(const TConfig& config) {
             continue;
         }
 
-        add_history(buffer.c_str());
+        add_history(trim(buffer).c_str());
         if (!historyPath.empty()) {
             write_history(historyPath.c_str());
         }
