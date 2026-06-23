@@ -280,6 +280,37 @@ TOperatorPtr ProcessOuterJoin(std::shared_ptr<TJoinOperator> join, TContext ctx)
     auto leftCols = JoinColumns(0, join);
     auto rightCols = JoinColumns(1, join);
 
+    // Pull equi keys out of the ON residual only (keys + residual together stay
+    // equal to the original ON); WHERE conjuncts from above must not be folded in.
+    if (join->Filter()) {
+        std::vector<TConjuct> on;
+        ExtractConjucts(on, join->Filter());
+
+        TUnionFind<std::string> unionFind;
+        for (const auto& conj : on) {
+            if (conj.equiv) {
+                unionFind.Union(conj.left, conj.right);
+            }
+        }
+
+        std::unordered_set<std::string> used;
+        auto& keys = join->MutableKeys();
+        for (auto& key : ExtractJoinKeys(leftCols, rightCols, unionFind)) {
+            used.insert(key.Left);
+            used.insert(key.Right);
+            keys.push_back(std::move(key));
+        }
+
+        std::vector<TConjuct> rest;
+        for (const auto& conj : on) {
+            if (conj.equiv && used.count(conj.left) && used.count(conj.right)) {
+                continue;
+            }
+            rest.push_back(conj);
+        }
+        join->MutableFilter() = rest.empty() ? nullptr : Conjoin(rest);
+    }
+
     std::vector<TConjuct> leftConjucts;
     std::vector<TConjuct> rightConjucts;
     std::vector<TConjuct> keep;
