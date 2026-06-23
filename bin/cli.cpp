@@ -258,8 +258,18 @@ int RunQuery(ESyntax syntax, std::istream& in, const TConfig& config) {
     return 0;
 }
 
+std::string HistoryPath() {
+    const char* home = std::getenv("HOME");
+    return home ? std::string(home) + "/.qdb_history" : std::string();
+}
+
 // Reads SQL statements from readline and runs each as it is terminated by ';'.
 int RunInteractive(const TConfig& config) {
+    const std::string historyPath = HistoryPath();
+    if (!historyPath.empty()) {
+        read_history(historyPath.c_str());
+    }
+
     std::string buffer;
     while (true) {
         char* line = readline(buffer.empty() ? "qdb> " : "  ..> ");
@@ -286,6 +296,9 @@ int RunInteractive(const TConfig& config) {
         }
 
         add_history(buffer.c_str());
+        if (!historyPath.empty()) {
+            write_history(historyPath.c_str());
+        }
         try {
             std::istringstream in(buffer);
             RunQuery(ESyntax::Sql, in, config);
