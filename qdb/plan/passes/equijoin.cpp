@@ -10,6 +10,9 @@
 #include "flatten_conjucts.h"
 #include "flatten_disjuncts.h"
 
+#include <unordered_map>
+#include <unordered_set>
+
 namespace NQdb {
 
 using namespace NQumir::NAst;
@@ -214,31 +217,71 @@ TOperatorPtr ProcessJoin(std::shared_ptr<TJoinOperator> join, TContext ctx)
     auto leftCols = JoinColumns(0, join);
     auto rightCols = JoinColumns(1, join);
 
-    std::unordered_set<std::string> used;
-    auto& keys = join->MutableKeys();
-    for (auto& key : ExtractJoinKeys(leftCols, rightCols, unionFind)) {
-        used.insert(key.Left);
-        used.insert(key.Right);
-        keys.push_back(std::move(key));
-    }
+    auto addEquivConjuct = [](std::vector<TConjuct>& out, const std::string& left, const std::string& right) {
+        if (left != right) {
+            out.emplace_back(TConjuct{nullptr, true, left, right});
+        }
+    };
 
-    std::unordered_set<std::string> unused;
     std::vector<TConjuct> newConjucts;
+    std::vector<std::string> equivCols;
+    std::unordered_set<std::string> seenEquivCols;
     for (const auto& conj : pool) {
-        if (conj.equiv) {
-            if (used.count(conj.left) == 0) {
-                unused.insert(conj.left);
-            }
-            if (used.count(conj.right) == 0) {
-                unused.insert(conj.right);
-            }
-        } else {
+        if (!conj.equiv) {
             newConjucts.emplace_back(conj);
+            continue;
+        }
+        if (seenEquivCols.insert(conj.left).second) {
+            equivCols.push_back(conj.left);
+        }
+        if (seenEquivCols.insert(conj.right).second) {
+            equivCols.push_back(conj.right);
         }
     }
 
-    for (auto& key : ExtractJoinKeys(unused, unused, unionFind)) {
-        newConjucts.emplace_back(TConjuct{nullptr, true, key.Left, key.Right});
+    auto& keys = join->MutableKeys();
+    std::unordered_set<std::string> assignedEquivCols;
+    for (const auto& root : equivCols) {
+        if (assignedEquivCols.count(root)) {
+            continue;
+        }
+
+        std::vector<std::string> cls;
+        for (const auto& col : equivCols) {
+            if (unionFind.Connected(root, col)) {
+                cls.push_back(col);
+                assignedEquivCols.insert(col);
+            }
+        }
+
+        std::vector<std::string> left;
+        std::vector<std::string> right;
+        for (const auto& col : cls) {
+            if (leftCols.count(col)) {
+                left.push_back(col);
+            } else if (rightCols.count(col)) {
+                right.push_back(col);
+            }
+        }
+
+        if (!left.empty() && !right.empty()) {
+            keys.emplace_back(left.front(), right.front());
+
+            for (size_t i = 1; i < left.size(); ++i) {
+                addEquivConjuct(newConjucts, left.front(), left[i]);
+            }
+            for (size_t i = 1; i < right.size(); ++i) {
+                addEquivConjuct(newConjucts, right.front(), right[i]);
+            }
+        } else if (left.size() > 1) {
+            for (size_t i = 1; i < left.size(); ++i) {
+                addEquivConjuct(newConjucts, left.front(), left[i]);
+            }
+        } else if (right.size() > 1) {
+            for (size_t i = 1; i < right.size(); ++i) {
+                addEquivConjuct(newConjucts, right.front(), right[i]);
+            }
+        }
     }
 
     std::vector<TConjuct> leftConjucts;
