@@ -23,6 +23,14 @@ void Collect(
         return;
     }
 
+    // A call's callee is a function name, not a column reference.
+    if (auto node = TMaybeNode<TCallExpr>(expr)) {
+        for (const auto& arg : node.Cast()->Args) {
+            Collect(arg, bound, out);
+        }
+        return;
+    }
+
     if (auto node = TMaybeNode<TFunDecl>(expr)) {
         auto fun = node.Cast();
         auto innerBound = bound;

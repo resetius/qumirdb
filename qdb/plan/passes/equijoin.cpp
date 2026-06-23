@@ -316,16 +316,21 @@ TOperatorPtr ProcessJoin(std::shared_ptr<TJoinOperator> join, TContext ctx)
     return join;
 }
 
-// Outer join: only predicates over the preserved side may be pushed down
-// (pushing onto the null-extended side would change the result). Left keeps the
-// left side, Right the right, Full neither.
+// Outer join. WHERE predicates from above may only be pushed onto the preserved
+// side (Left keeps left, Right keeps right, Full neither). The ON residual is
+// different: a non-key ON conjunct constraining only the null-extended side can
+// be filtered on that side before the join — equivalent for an outer join, and
+// what the executor needs (it has no join-residual support for outer joins).
 TOperatorPtr ProcessOuterJoin(std::shared_ptr<TJoinOperator> join, TContext ctx) {
     EJoinType type = join->JoinType();
     auto leftCols = JoinColumns(0, join);
     auto rightCols = JoinColumns(1, join);
 
-    // Pull equi keys out of the ON residual only (keys + residual together stay
-    // equal to the original ON); WHERE conjuncts from above must not be folded in.
+    std::vector<TConjuct> leftConjucts;
+    std::vector<TConjuct> rightConjucts;
+
+    // Pull equi keys out of the ON residual (keys + residual together stay equal
+    // to the original ON); push the null-extended side's own conjuncts down to it.
     if (join->Filter()) {
         std::vector<TConjuct> on;
         ExtractConjucts(on, join->Filter());
@@ -345,18 +350,23 @@ TOperatorPtr ProcessOuterJoin(std::shared_ptr<TJoinOperator> join, TContext ctx)
             keys.push_back(std::move(key));
         }
 
-        std::vector<TConjuct> rest;
+        std::vector<TConjuct> residual;
         for (const auto& conj : on) {
             if (conj.equiv && used.count(conj.left) && used.count(conj.right)) {
                 continue;
             }
-            rest.push_back(conj);
+            auto cols = ColumnsOf(conj);
+            if (type == EJoinType::Left && Covers(cols, rightCols)) {
+                rightConjucts.emplace_back(conj);
+            } else if (type == EJoinType::Right && Covers(cols, leftCols)) {
+                leftConjucts.emplace_back(conj);
+            } else {
+                residual.emplace_back(conj);
+            }
         }
-        join->MutableFilter() = rest.empty() ? nullptr : Conjoin(rest);
+        join->MutableFilter() = residual.empty() ? nullptr : Conjoin(residual);
     }
 
-    std::vector<TConjuct> leftConjucts;
-    std::vector<TConjuct> rightConjucts;
     std::vector<TConjuct> keep;
     for (const auto& conj : ctx.Conjucts) {
         auto cols = ColumnsOf(conj);
