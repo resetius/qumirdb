@@ -138,6 +138,45 @@ int32_t qdb_date_year(int32_t days) {
     return y;
 }
 
+static int32_t DaysFromCivil(int y, int m, int d) {
+    y -= m <= 2;
+    int era = (y >= 0 ? y : y - 399) / 400;
+    int yoe = y - era * 400;
+    int doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+    int doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return static_cast<int32_t>(era * 146097 + doe - 719468);
+}
+
+int32_t qdb_sql_date(const char* date) {
+    if (!date) {
+        return 0;
+    }
+    int parts[3] = {0, 0, 0};
+    int idx = 0;
+    for (const char* p = date; *p && idx < 3; ++p) {
+        if (*p == '-') {
+            ++idx;
+        } else if (*p >= '0' && *p <= '9') {
+            parts[idx] = parts[idx] * 10 + (*p - '0');
+        }
+    }
+    return DaysFromCivil(parts[0], parts[1], parts[2]);
+}
+
+// year/month are approximate (365/30): the base date is not available here for
+// calendar-exact arithmetic.
+int32_t qdb_sql_interval(const char* amount, const char* unit) {
+    int n = amount ? std::atoi(amount) : 0;
+    std::string_view u = unit ? unit : "";
+    if (u == "year" || u == "years") {
+        return n * 365;
+    }
+    if (u == "month" || u == "months") {
+        return n * 30;
+    }
+    return n;
+}
+
 void qdb_bitmap_set_valid(uint8_t* bitmap, int64_t index, bool valid) {
     const auto byteIndex = static_cast<size_t>(index >> 3);
     const auto bit = static_cast<uint8_t>(1u << (index & 7));
