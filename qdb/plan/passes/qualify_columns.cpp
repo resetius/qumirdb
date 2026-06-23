@@ -144,10 +144,25 @@ std::shared_ptr<TStructType> QualifyColumnsImpl(const TOperatorPtr& op) {
             QualifyExpr(join->MutableFilter(), mergedStruct);
         }
 
-        // Build the qualified output schema (concatenation, no duplicates after qualification).
+        // Build the qualified output schema by join type: semi/anti joins expose
+        // only their surviving side (matching ComputeJoinOutputType), so an outer
+        // predicate cannot accidentally bind to the eliminated side's columns.
         if (!leftSchema || !rightSchema) return nullptr;
-        auto outFields = leftSchema->Fields;
-        for (auto& f : rightSchema->Fields) outFields.push_back(f);
+        std::vector<std::pair<std::string, TTypePtr>> outFields;
+        switch (join->JoinType()) {
+            case EJoinType::LeftSemi:
+            case EJoinType::LeftAnti:
+                outFields = leftSchema->Fields;
+                break;
+            case EJoinType::RightSemi:
+            case EJoinType::RightAnti:
+                outFields = rightSchema->Fields;
+                break;
+            default:
+                outFields = leftSchema->Fields;
+                for (auto& f : rightSchema->Fields) outFields.push_back(f);
+                break;
+        }
         auto outSchema = std::make_shared<TStructType>(std::move(outFields));
 
         // Update the join's TFunctionType::ReturnType so AnnotateTypes can skip it if needed.

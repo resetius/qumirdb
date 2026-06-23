@@ -409,6 +409,56 @@ std::string HistoryPath() {
     return home ? std::string(home) + "/.qdb_history" : std::string();
 }
 
+// Multi-line statements are kept multi-line in the in-memory history (for proper
+// recall), but persisted one escaped line per entry: '\n' -> "\\n", '\' -> "\\\\".
+std::string EscapeHistory(std::string_view s) {
+    std::string out;
+    out.reserve(s.size());
+    for (char c : s) {
+        if (c == '\\') {
+            out += "\\\\";
+        } else if (c == '\n') {
+            out += "\\n";
+        } else {
+            out += c;
+        }
+    }
+    return out;
+}
+
+std::string UnescapeHistory(std::string_view s) {
+    std::string out;
+    out.reserve(s.size());
+    for (size_t i = 0; i < s.size(); ++i) {
+        if (s[i] == '\\' && i + 1 < s.size()) {
+            char next = s[++i];
+            out += (next == 'n') ? '\n' : next;
+        } else {
+            out += s[i];
+        }
+    }
+    return out;
+}
+
+void LoadHistory(const std::string& path) {
+    std::ifstream in(path);
+    std::string line;
+    while (std::getline(in, line)) {
+        if (!line.empty()) {
+            add_history(UnescapeHistory(line).c_str());
+        }
+    }
+}
+
+void SaveHistory(const std::string& path) {
+    std::ofstream out(path);
+    if (HIST_ENTRY** list = history_list()) {
+        for (size_t i = 0; list[i]; ++i) {
+            out << EscapeHistory(list[i]->line) << '\n';
+        }
+    }
+}
+
 std::string_view Trim(std::string_view s) {
     auto isSpace = [](char c) { return c == ' ' || c == '\t' || c == ';'; };
     while (!s.empty() && isSpace(s.front())) {
@@ -444,12 +494,13 @@ void DescribeTable(std::string_view table, const TConfig& config) {
 int RunInteractive(const TConfig& config) {
     const std::string historyPath = HistoryPath();
     if (!historyPath.empty()) {
-        read_history(historyPath.c_str());
+        LoadHistory(historyPath);
     }
 
-    auto trim = [&](std::string buffer) {
-        for (auto it = buffer.rbegin(); *it == '\n' && it != buffer.rend(); ++it) {
-            *it = 0;
+    // Strip trailing newlines but keep the statement multi-line for recall.
+    auto trim = [](std::string buffer) {
+        while (!buffer.empty() && (buffer.back() == '\n' || buffer.back() == '\r')) {
+            buffer.pop_back();
         }
         return buffer;
     };
@@ -485,7 +536,7 @@ int RunInteractive(const TConfig& config) {
 
         add_history(trim(buffer).c_str());
         if (!historyPath.empty()) {
-            write_history(historyPath.c_str());
+            SaveHistory(historyPath);
         }
         try {
             std::istringstream in(buffer);
