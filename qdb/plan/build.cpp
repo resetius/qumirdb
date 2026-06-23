@@ -6,12 +6,14 @@
 #include <qdb/plan/ops/project.h>
 #include <qdb/plan/ops/source.h>
 
+#include <qdb/plan/clone_expr.h>
 #include <qdb/plan/passes/flatten_conjucts.h>
 
 #include <qumir/parser/ast.h>
 #include <qumir/parser/type.h>
 
 #include <cctype>
+#include <map>
 #include <memory>
 #include <optional>
 #include <set>
@@ -405,6 +407,48 @@ std::expected<TOperatorPtr, TError> DecorrelateIn(
         std::move(left), *right, std::vector<TJoinKey>{}, type, std::move(residual));
 }
 
+// Replaces each uncorrelated scalar subquery in `expr` with a reference to a
+// fresh column produced by cross-joining the (single-row) subquery plan onto
+// `node`. The subquery must project exactly one column. Correlated scalar
+// subqueries are not handled here.
+std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
+    NAst::TExprPtr expr,
+    TOperatorPtr& node,
+    const TTableSourceFactory& sources,
+    int& counter)
+{
+    if (!expr) {
+        return expr;
+    }
+    if (auto sub = NAst::TMaybeNode<NSql::TSubqueryExpr>(expr)) {
+        if (sub.Cast()->Kind != NSql::TSubqueryExpr::EKind::Scalar) {
+            return std::unexpected(TError("subquery is not supported in this position"));
+        }
+        auto plan = BuildQuery(*sub.Cast()->Query, sources);
+        if (!plan) {
+            return std::unexpected(plan.error());
+        }
+        auto project = TMaybeOp<TProjectOperator>(*plan);
+        if (!project || project.Cast()->Projections().size() != 1) {
+            return std::unexpected(TError("scalar subquery must return exactly one column"));
+        }
+        std::string name = "__scalar_" + std::to_string(counter++) + "__";
+        project.Cast()->MutableProjections()[0].Name = name;
+        // The subquery yields one row, so a cross join just broadcasts its value.
+        node = std::make_shared<TJoinOperator>(
+            std::move(node), *plan, std::vector<TJoinKey>{}, EJoinType::Inner, nullptr);
+        return Ident(expr->Location, std::move(name));
+    }
+    for (NAst::TExprPtr* child : expr->MutableChildren()) {
+        auto rewritten = ExtractScalarSubqueries(*child, node, sources, counter);
+        if (!rewritten) {
+            return std::unexpected(rewritten.error());
+        }
+        *child = std::move(*rewritten);
+    }
+    return expr;
+}
+
 std::expected<TOperatorPtr, TError> BuildSelect(
     const NSql::TSqlSelect& select,
     const TTableSourceFactory& sources)
@@ -417,6 +461,7 @@ std::expected<TOperatorPtr, TError> BuildSelect(
         return std::unexpected(base.error());
     }
     TOperatorPtr node = *base;
+    int scalarCounter = 0;
 
     if (select.Where) {
         std::vector<NAst::TExprPtr> conjuncts;
@@ -432,10 +477,12 @@ std::expected<TOperatorPtr, TError> BuildSelect(
                     return std::unexpected(joined.error());
                 }
                 node = std::move(*joined);
-            } else if (HasSubquery(conjunct)) {
-                return std::unexpected(TError("subquery is not supported in this position"));
             } else {
-                residual.push_back(conjunct);
+                auto rewritten = ExtractScalarSubqueries(conjunct, node, sources, scalarCounter);
+                if (!rewritten) {
+                    return std::unexpected(rewritten.error());
+                }
+                residual.push_back(std::move(*rewritten));
             }
         }
 
@@ -466,11 +513,10 @@ std::expected<TOperatorPtr, TError> BuildSelect(
         projections.push_back({ .Name = std::move(name), .Expression = std::move(*expr) });
     }
 
+    // A scalar subquery in HAVING is left intact by the aggregate collector
+    // (it is opaque) and decorrelated below, once the aggregate node exists.
     NAst::TExprPtr having;
     if (select.Having) {
-        if (HasSubquery(select.Having)) {
-            return std::unexpected(TError("subqueries are not supported yet"));
-        }
         auto rewritten = collector.Rewrite(select.Having);
         if (!rewritten) {
             return std::unexpected(rewritten.error());
@@ -547,24 +593,99 @@ std::expected<TOperatorPtr, TError> BuildSelect(
     node = std::make_shared<TAggregateOperator>(
         std::move(node), std::move(keys), std::move(specs));
     if (having) {
-        node = std::make_shared<TFilterOperator>(std::move(node), std::move(having));
+        auto rewritten = ExtractScalarSubqueries(having, node, sources, scalarCounter);
+        if (!rewritten) {
+            return std::unexpected(rewritten.error());
+        }
+        node = std::make_shared<TFilterOperator>(std::move(node), std::move(*rewritten));
     }
     return std::make_shared<TProjectOperator>(std::move(node), std::move(projections));
+}
+
+// Deep-clones the expressions embedded in an operator subtree, so a sub-plan
+// inlined more than once (a CTE) does not share mutable expression nodes between
+// copies — QualifyColumns rewrites idents in place.
+void CloneOperatorExprs(const TOperatorPtr& op) {
+    if (!op) {
+        return;
+    }
+    for (const auto& child : op->Children()) {
+        if (auto childOp = NAst::TMaybeNode<IOperator>(child)) {
+            CloneOperatorExprs(childOp.Cast());
+        }
+    }
+    if (auto filter = TMaybeOp<TFilterOperator>(op)) {
+        filter.Cast()->MutablePredicate() = CloneExpr(filter.Cast()->Predicate());
+    } else if (auto project = TMaybeOp<TProjectOperator>(op)) {
+        for (auto& spec : project.Cast()->MutableProjections()) {
+            spec.Expression = CloneExpr(spec.Expression);
+        }
+    } else if (auto aggregate = TMaybeOp<TAggregateOperator>(op)) {
+        for (auto& spec : aggregate.Cast()->MutableAggs()) {
+            if (spec.Arg) {
+                spec.Arg = CloneExpr(spec.Arg);
+            }
+        }
+    } else if (auto join = TMaybeOp<TJoinOperator>(op)) {
+        if (join.Cast()->Filter()) {
+            join.Cast()->MutableFilter() = CloneExpr(join.Cast()->Filter());
+        }
+    }
 }
 
 std::expected<TOperatorPtr, TError> BuildQuery(
     const NSql::TSqlQuery& query,
     const TTableSourceFactory& sources)
 {
-    if (query.WithClause) {
-        return std::unexpected(TError("WITH is not supported yet"));
-    }
     auto select = NSql::TMaybeNode<NSql::TSqlSelect>(query.Body);
     if (!select) {
         return std::unexpected(TError("expected a SELECT statement"));
     }
     // TODO: ORDER BY / LIMIT / OFFSET require sort/limit operators.
-    return BuildSelect(*select.Cast(), sources);
+
+    if (!query.WithClause) {
+        return BuildSelect(*select.Cast(), sources);
+    }
+    if (query.WithClause->Recursive) {
+        return std::unexpected(TError("WITH RECURSIVE is not supported yet"));
+    }
+
+    std::map<std::string, NSql::TSqlPtr<NSql::TSqlCte>> ctes;
+    for (const auto& cte : query.WithClause->Ctes) {
+        ctes[ToLower(cte->Name)] = cte;
+    }
+
+    // CTE-aware factory: a CTE name builds a fresh inlined copy of its query
+    // (applying the optional column-alias list); other names fall back to the
+    // base sources. Stack-local, so the recursive self-reference stays valid for
+    // the duration of the BuildSelect call below.
+    TTableSourceFactory factory =
+        [&](std::string_view name) -> std::expected<TOperatorPtr, TError> {
+        auto it = ctes.find(ToLower(std::string(name)));
+        if (it == ctes.end()) {
+            return sources(name);
+        }
+        auto plan = BuildQuery(*it->second->Query, factory);
+        if (!plan) {
+            return plan;
+        }
+        // Each inlined copy must own independent expression nodes.
+        CloneOperatorExprs(*plan);
+        if (it->second->Columns) {
+            const auto& aliases = it->second->Columns->Items;
+            auto project = TMaybeOp<TProjectOperator>(*plan);
+            if (!project || project.Cast()->Projections().size() != aliases.size()) {
+                return std::unexpected(TError("CTE column alias count mismatch"));
+            }
+            auto& projections = project.Cast()->MutableProjections();
+            for (size_t i = 0; i < projections.size(); ++i) {
+                projections[i].Name = aliases[i];
+            }
+        }
+        return plan;
+    };
+
+    return BuildSelect(*select.Cast(), factory);
 }
 
 } // namespace

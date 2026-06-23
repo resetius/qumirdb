@@ -29,6 +29,7 @@ add_library(qumirdb
     plan/passes/flatten_conjucts.cpp
     plan/passes/flatten_disjuncts.cpp
     plan/passes/factor_conjuncts.cpp
+    plan/clone_expr.cpp
     plan/build.cpp
     kernel/column_value.cpp
     kernel/gen.cpp
