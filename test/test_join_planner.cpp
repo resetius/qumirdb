@@ -20,8 +20,8 @@
 #include <tuple>
 #include <vector>
 
-using namespace NQqb;
-using namespace NQqb::NSexp;
+using namespace NQdb;
+using namespace NQdb::NSexp;
 using namespace NQumir::NAst::NCore;
 using namespace NQumir::NAst;
 

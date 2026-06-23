@@ -18,7 +18,7 @@
 #include <tuple>
 #include <vector>
 
-using namespace NQqb;
+using namespace NQdb;
 
 namespace {
 

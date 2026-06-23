@@ -7,7 +7,7 @@
 
 #include <string>
 
-namespace NQqb::NKernel {
+namespace NQdb::NKernel {
 
 // Generates jt_insert_key_only: iterates a batch, extracts the key, and
 // inserts only the key into the own table (no row-ID storage via jb_append).
@@ -73,4 +73,4 @@ std::vector<NQumir::NAst::TExprPtr> GenJoinKeyOpsFunDecls(const TJoinKeyDescript
 // the compiler. Must be prepended to the program before any use of the Key.
 std::vector<NQumir::NAst::TExprPtr> GenJoinKeyTypeDecls(const TJoinKeyDescriptor& key);
 
-} // namespace NQqb::NKernel
+} // namespace NQdb::NKernel

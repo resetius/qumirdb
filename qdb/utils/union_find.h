@@ -3,7 +3,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace NQqb {
+namespace NQdb {
 
 template<typename T, typename Hash = std::hash<T>, typename Equal = std::equal_to<T>>
 class TUnionFind {
@@ -62,4 +62,4 @@ private:
     std::vector<int> Rank_;
 };
 
-} // namespace NQqb
+} // namespace NQdb

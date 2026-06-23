@@ -4,7 +4,7 @@
 #include <cstdint>
 #include <type_traits>
 
-namespace NQqb {
+namespace NQdb {
 
 struct TStringView {
     uint8_t* Data = nullptr;
@@ -30,4 +30,4 @@ static_assert(alignof(TOwnedString) == 8);
 static_assert(offsetof(TOwnedString, Data) == 0);
 static_assert(offsetof(TOwnedString, Size) == 8);
 
-} // namespace NQqb
+} // namespace NQdb

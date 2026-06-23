@@ -7,7 +7,7 @@
 #include <memory>
 #include <vector>
 
-namespace NQqb {
+namespace NQdb {
 
 // One output column: either a zero-copy reference to an input column (ident
 // projection) or a computed column filled by the project kernel.
@@ -43,4 +43,4 @@ private:
     std::vector<bool> ComputedIsString_;
 };
 
-} // namespace NQqb
+} // namespace NQdb

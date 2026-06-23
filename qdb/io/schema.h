@@ -5,7 +5,7 @@
 
 #include <qumir/parser/type.h>
 
-namespace NQqb {
+namespace NQdb {
 
 struct TColumnSchema {
     std::string_view Name;
@@ -16,4 +16,4 @@ struct TSchema {
     std::span<const TColumnSchema> Columns;
 };
 
-} // namespace NQqb
+} // namespace NQdb

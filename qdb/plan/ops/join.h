@@ -11,7 +11,7 @@
 #include <utility>
 #include <vector>
 
-namespace NQqb {
+namespace NQdb {
 
 enum class EJoinType {
     Inner,
@@ -93,4 +93,4 @@ MakeJoin(TOperatorPtr left, TOperatorPtr right,
     EJoinType type,
     const std::string& filter = "");
 
-} // namespace NQqb
+} // namespace NQdb

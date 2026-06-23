@@ -9,7 +9,7 @@
 #include <string>
 #include <vector>
 
-using namespace NQqb::NKernel;
+using namespace NQdb::NKernel;
 using namespace NQumir::NAst;
 
 namespace {

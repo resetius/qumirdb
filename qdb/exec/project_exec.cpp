@@ -4,7 +4,7 @@
 #include <cstring>
 #include <utility>
 
-namespace NQqb {
+namespace NQdb {
 
 namespace {
 
@@ -119,4 +119,4 @@ bool TRuntimeProject::Next(TRowSet& rowSet) {
     return true;
 }
 
-} // namespace NQqb
+} // namespace NQdb

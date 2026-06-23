@@ -19,7 +19,7 @@
 #include <algorithm>
 #include <stdexcept>
 
-namespace NQqb {
+namespace NQdb {
 
 namespace {
 
@@ -331,4 +331,4 @@ std::unique_ptr<IRuntimeNode> TPhysicalPlanner::Build(const TOperatorPtr& root) 
     throw std::runtime_error("TPhysicalPlanner: unknown operator");
 }
 
-} // namespace NQqb
+} // namespace NQdb

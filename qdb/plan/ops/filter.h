@@ -7,7 +7,7 @@
 #include <expected>
 #include <string>
 
-namespace NQqb {
+namespace NQdb {
 
 class TFilterOperator : public IOperator {
 public:
@@ -32,4 +32,4 @@ private:
 std::expected<TOperatorPtr, NQumir::TError>
 MakeFilter(TOperatorPtr input, const std::string& predicate);
 
-} // namespace NQqb
+} // namespace NQdb

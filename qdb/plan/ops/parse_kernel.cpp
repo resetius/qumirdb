@@ -8,7 +8,7 @@
 
 #include <sstream>
 
-namespace NQqb {
+namespace NQdb {
 namespace NInternal {
 
 std::string TypeToCoreStr(const NQumir::NAst::TTypePtr& type) {
@@ -85,4 +85,4 @@ ParseAndAnnotate(
 }
 
 } // namespace NInternal
-} // namespace NQqb
+} // namespace NQdb

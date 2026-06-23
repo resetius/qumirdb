@@ -19,8 +19,8 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileStringOperation(
     const std::string& entryName,
     void*& entry)
 {
-    auto library = NQqb::NKernel::ParseFunctionLibrary(
-        NQqb::NKernel::ReadAggregationKernel("string_ops.oz"));
+    auto library = NQdb::NKernel::ParseFunctionLibrary(
+        NQdb::NKernel::ReadAggregationKernel("string_ops.oz"));
     if (!library) {
         ADD_FAILURE() << library.error().ToString();
         return {};
@@ -41,7 +41,7 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileStringOperation(
     return runner;
 }
 
-NQqb::TStringView View(const std::string& value) {
+NQdb::TStringView View(const std::string& value) {
     return {
         .Data = reinterpret_cast<uint8_t*>(const_cast<char*>(value.data())),
         .Size = static_cast<int64_t>(value.size()),
@@ -149,22 +149,22 @@ TEST(QumirDbStringOps, ViewAndOwnedOverloadsShareContract) {
 
     const std::string value("same\0bytes", 10);
     auto view = View(value);
-    NQqb::TOwnedString owned{.Data = view.Data, .Size = view.Size};
-    auto hashView = reinterpret_cast<int64_t(*)(NQqb::TStringView)>(hashViewEntry);
+    NQdb::TOwnedString owned{.Data = view.Data, .Size = view.Size};
+    auto hashView = reinterpret_cast<int64_t(*)(NQdb::TStringView)>(hashViewEntry);
     const int64_t viewHash = hashView(view);
 
     void* hashOwnedEntry = nullptr;
     auto hashOwnedRunner = CompileStringOperation(
         "aggregation_string_hash_owned", hashOwnedEntry);
     ASSERT_NE(hashOwnedEntry, nullptr);
-    auto hashOwned = reinterpret_cast<int64_t(*)(NQqb::TOwnedString)>(hashOwnedEntry);
+    auto hashOwned = reinterpret_cast<int64_t(*)(NQdb::TOwnedString)>(hashOwnedEntry);
     EXPECT_EQ(hashOwned(owned), viewHash);
 
     void* equalEntry = nullptr;
     auto equalRunner = CompileStringOperation(
         "aggregation_string_equal_view_owned", equalEntry);
     ASSERT_NE(equalEntry, nullptr);
-    auto equal = reinterpret_cast<bool(*)(NQqb::TStringView, NQqb::TOwnedString)>(
+    auto equal = reinterpret_cast<bool(*)(NQdb::TStringView, NQdb::TOwnedString)>(
         equalEntry);
     EXPECT_TRUE(equal(view, owned));
 }
@@ -173,7 +173,7 @@ TEST(QumirDbStringOps, SqlLikeMatchesSqlWildcards) {
     void* likeEntry = (void*)qdb_string_view_sql_like;
     ASSERT_NE(likeEntry, nullptr);
 
-    auto like = reinterpret_cast<int64_t(*)(NQqb::TStringView, const char*)>(
+    auto like = reinterpret_cast<int64_t(*)(NQdb::TStringView, const char*)>(
         likeEntry);
 
     const std::string value("same\0bytes", 10);
@@ -194,7 +194,7 @@ TEST(QumirDbStringOps, SqlLikeHandlesEmptyAndPercentOnlyPatterns) {
     void* likeEntry = (void*)qdb_string_view_sql_like;
     ASSERT_NE(likeEntry, nullptr);
 
-    auto like = reinterpret_cast<int64_t(*)(NQqb::TStringView, const char*)>(
+    auto like = reinterpret_cast<int64_t(*)(NQdb::TStringView, const char*)>(
         likeEntry);
 
     EXPECT_EQ(like(View(""), ""), 1);
@@ -208,7 +208,7 @@ TEST(QumirDbStringOps, SqlLikeBacktracksOverPercent) {
     void* likeEntry = (void*)qdb_string_view_sql_like;
     ASSERT_NE(likeEntry, nullptr);
 
-    auto like = reinterpret_cast<int64_t(*)(NQqb::TStringView, const char*)>(
+    auto like = reinterpret_cast<int64_t(*)(NQdb::TStringView, const char*)>(
         likeEntry);
 
     EXPECT_EQ(like(View("abbbc"), "a%c"), 1);

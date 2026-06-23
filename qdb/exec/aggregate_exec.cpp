@@ -6,7 +6,7 @@
 #include <utility>
 #include <vector>
 
-namespace NQqb {
+namespace NQdb {
 
 namespace {
 
@@ -172,4 +172,4 @@ bool TRuntimeAggregate::Next(TRowSet& rowSet) {
     return true;
 }
 
-} // namespace NQqb
+} // namespace NQdb

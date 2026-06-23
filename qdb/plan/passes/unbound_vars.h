@@ -5,7 +5,7 @@
 #include <string>
 #include <unordered_set>
 
-namespace NQqb {
+namespace NQdb {
 
 // Returns the set of free (unbound) variable names in expr.
 // Names introduced by let-bindings, fun params, var declarations, and for-loop
@@ -13,4 +13,4 @@ namespace NQqb {
 // Unbound names in a kernel expression correspond to input column references.
 std::unordered_set<std::string> FindUnboundVars(const NQumir::NAst::TExprPtr& expr);
 
-} // namespace NQqb
+} // namespace NQdb

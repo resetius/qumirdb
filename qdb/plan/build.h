@@ -9,7 +9,7 @@
 #include <functional>
 #include <string_view>
 
-namespace NQqb {
+namespace NQdb {
 
 using TTableSourceFactory =
     std::function<std::expected<TOperatorPtr, NQumir::TError>(std::string_view table)>;
@@ -18,4 +18,4 @@ using TTableSourceFactory =
 std::expected<TOperatorPtr, NQumir::TError>
 BuildPlan(const NQdb::NSql::TSqlNodePtr& query, const TTableSourceFactory& sources);
 
-} // namespace NQqb
+} // namespace NQdb

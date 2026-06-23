@@ -99,10 +99,10 @@ TFormatSpec ParseFormat(const std::string& spec) {
     return result;
 }
 
-NQqb::TSchema SchemaFromType(
+NQdb::TSchema SchemaFromType(
     const NQumir::NAst::TTypePtr& type,
     std::vector<std::string>& names,
-    std::vector<NQqb::TColumnSchema>& columns)
+    std::vector<NQdb::TColumnSchema>& columns)
 {
     auto* structType = static_cast<NQumir::NAst::TStructType*>(type.get());
     if (!structType) {
@@ -118,7 +118,7 @@ NQqb::TSchema SchemaFromType(
     for (size_t i = 0; i < structType->Fields.size(); ++i) {
         columns.push_back({.Name = names[i], .Type = structType->Fields[i].second});
     }
-    return NQqb::TSchema{std::span<const NQqb::TColumnSchema>(columns)};
+    return NQdb::TSchema{std::span<const NQdb::TColumnSchema>(columns)};
 }
 
 struct TConfig {
@@ -136,17 +136,17 @@ std::string ResolveTablePath(const std::string& dataDir, std::string_view table)
     return dataDir + "/" + std::string(table) + ".parquet";
 }
 
-std::expected<NQqb::TOperatorPtr, NQumir::TError> ParseSexpr(
+std::expected<NQdb::TOperatorPtr, NQumir::TError> ParseSexpr(
     std::istream& in,
-    const std::function<NQqb::TOperatorPtr(const std::string&)>& makeSource)
+    const std::function<NQdb::TOperatorPtr(const std::string&)>& makeSource)
 {
-    NQqb::NSexp::TRelParserOptions opts;
+    NQdb::NSexp::TRelParserOptions opts;
     opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) {
         return makeSource(std::string(path));
     };
 
     NQumir::NAst::NCore::TParser parser;
-    for (auto& [key, value] : NQqb::NSexp::MakeRelParsers(std::move(opts))) {
+    for (auto& [key, value] : NQdb::NSexp::MakeRelParsers(std::move(opts))) {
         parser.NodeParsers[key] = std::move(value);
     }
 
@@ -155,16 +155,16 @@ std::expected<NQqb::TOperatorPtr, NQumir::TError> ParseSexpr(
     if (!parsed) {
         return std::unexpected(parsed.error());
     }
-    auto plan = std::dynamic_pointer_cast<NQqb::IOperator>(*parsed);
+    auto plan = std::dynamic_pointer_cast<NQdb::IOperator>(*parsed);
     if (!plan) {
         return std::unexpected(NQumir::TError("input must be a relational plan (rel ...)"));
     }
     return plan;
 }
 
-std::expected<NQqb::TOperatorPtr, NQumir::TError> ParseSql(
+std::expected<NQdb::TOperatorPtr, NQumir::TError> ParseSql(
     std::istream& in,
-    const NQqb::TTableSourceFactory& sources)
+    const NQdb::TTableSourceFactory& sources)
 {
     NQdb::NSql::TTokenStream tokens(in);
     NQdb::NSql::TParser parser;
@@ -172,22 +172,22 @@ std::expected<NQqb::TOperatorPtr, NQumir::TError> ParseSql(
     if (!parsed) {
         return std::unexpected(parsed.error());
     }
-    return NQqb::BuildPlan(*parsed, sources);
+    return NQdb::BuildPlan(*parsed, sources);
 }
 
 int RunQuery(ESyntax syntax, std::istream& in, const TConfig& config) {
-    std::vector<std::unique_ptr<NQqb::TParquetSource>> sources;
-    auto makeSource = [&](const std::string& path) -> NQqb::TOperatorPtr {
-        auto source = std::make_unique<NQqb::TParquetSource>(path);
-        auto op = std::make_shared<NQqb::TSourceOperator>(*source, path);
+    std::vector<std::unique_ptr<NQdb::TParquetSource>> sources;
+    auto makeSource = [&](const std::string& path) -> NQdb::TOperatorPtr {
+        auto source = std::make_unique<NQdb::TParquetSource>(path);
+        auto op = std::make_shared<NQdb::TSourceOperator>(*source, path);
         sources.push_back(std::move(source));
         return op;
     };
 
-    std::expected<NQqb::TOperatorPtr, NQumir::TError> plan;
+    std::expected<NQdb::TOperatorPtr, NQumir::TError> plan;
     if (syntax == ESyntax::Sql) {
         auto factory = [&](std::string_view table)
-            -> std::expected<NQqb::TOperatorPtr, NQumir::TError>
+            -> std::expected<NQdb::TOperatorPtr, NQumir::TError>
         {
             try {
                 return makeSource(ResolveTablePath(config.DataDir, table));
@@ -206,10 +206,10 @@ int RunQuery(ESyntax syntax, std::istream& in, const TConfig& config) {
         return 1;
     }
 
-    NQqb::AssignSourceAliases(*plan);
-    NQqb::QualifyColumns(*plan);
-    NQqb::AnnotateTypes(*plan);
-    NQqb::ApplyColumnPruning(*plan);
+    NQdb::AssignSourceAliases(*plan);
+    NQdb::QualifyColumns(*plan);
+    NQdb::AnnotateTypes(*plan);
+    NQdb::ApplyColumnPruning(*plan);
 
     if (config.Verbose) {
         std::cerr << "========== LOGICAL PLAN ==========\n";
@@ -217,35 +217,35 @@ int RunQuery(ESyntax syntax, std::istream& in, const TConfig& config) {
             std::cerr,
             *plan,
             NQumir::NAst::NCore::TPrintOptions{
-                .NodePrinters = NQqb::NSexp::MakeRelPrinters(),
+                .NodePrinters = NQdb::NSexp::MakeRelPrinters(),
             });
         std::cerr << "\n==================================\n";
     }
 
-    NQqb::TPhysicalPlanner planner(config.Verbose ? &std::cerr : nullptr);
+    NQdb::TPhysicalPlanner planner(config.Verbose ? &std::cerr : nullptr);
     planner.PrintRuntimePlan(*plan);
     auto executor = planner.Build(*plan);
 
     std::vector<std::string> outputNames;
-    std::vector<NQqb::TColumnSchema> outputColumns;
+    std::vector<NQdb::TColumnSchema> outputColumns;
     auto schema = SchemaFromType(executor->OutputType(), outputNames, outputColumns);
 
-    std::unique_ptr<NQqb::ISink> sink;
+    std::unique_ptr<NQdb::ISink> sink;
     if (config.Format.Name == "csv") {
-        sink = std::make_unique<NQqb::TCsvSink>(
+        sink = std::make_unique<NQdb::TCsvSink>(
             schema, std::cout, config.Format.Separator, config.Format.NoEscape);
     } else if (config.Format.Name == "null") {
-        sink = std::make_unique<NQqb::TNullSink>(schema);
+        sink = std::make_unique<NQdb::TNullSink>(schema);
     } else {
-        sink = std::make_unique<NQqb::TConsoleSink>(schema, std::cout);
+        sink = std::make_unique<NQdb::TConsoleSink>(schema, std::cout);
     }
 
-    NQqb::TRowSet rowSet = {};
+    NQdb::TRowSet rowSet = {};
     int count = 0;
     auto start = std::chrono::steady_clock::now();
     while ((config.MaxRowSets < 0 || count < config.MaxRowSets) && executor->Next(rowSet)) {
         sink->Write(rowSet);
-        NQqb::Release(&rowSet);
+        NQdb::Release(&rowSet);
         ++count;
     }
     sink->Flush();

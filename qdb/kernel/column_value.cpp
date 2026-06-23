@@ -8,7 +8,7 @@
 #include <utility>
 #include <vector>
 
-namespace NQqb::NKernel {
+namespace NQdb::NKernel {
 
 TColumnValueAst BuildColumnValueAst(
     const std::string& columnName,
@@ -219,4 +219,4 @@ TColumnValueAst BuildColumnValueAst(
         (logicalType ? logicalType->ToString() : std::string("<null>")));
 }
 
-} // namespace NQqb::NKernel
+} // namespace NQdb::NKernel

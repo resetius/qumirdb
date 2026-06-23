@@ -15,7 +15,7 @@
 #include <string>
 #include <vector>
 
-namespace NQqb {
+namespace NQdb {
 
 // agg_dispatch(ref HashTable ht, ref TRowSet batch, i64 arg, i64 op) -> i64
 //   op == 0: init(ht, capacity = arg)
@@ -209,4 +209,4 @@ private:
     NQumir::TLLVMRunnerOptions Opts_;
 };
 
-} // namespace NQqb
+} // namespace NQdb

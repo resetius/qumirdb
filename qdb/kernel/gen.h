@@ -12,7 +12,7 @@
 #include <unordered_map>
 #include <unordered_set>
 
-namespace NQqb {
+namespace NQdb {
 namespace NKernel {
 
 // Per-reducer layout for the generic aggregation kernel. One TAggReducerInfo
@@ -171,4 +171,4 @@ std::vector<NQumir::NAst::TExprPtr> GenReducerFunDecls(
 NQumir::NAst::TExprPtr GenApplyReducersFunDecl(const TAggReducerLayout& layout);
 
 } // namespace NKernel
-} // namespace NQqb
+} // namespace NQdb

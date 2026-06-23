@@ -2,7 +2,7 @@
 
 #include <qdb/plan/ops/operator.h>
 
-namespace NQqb {
+namespace NQdb {
 
 // Pre-order: set TSourceOperator::Alias_ based on file path stem.
 // Sources with the same stem get numeric suffixes: nation_0, nation_1, …
@@ -16,4 +16,4 @@ void AssignSourceAliases(const TOperatorPtr& root);
 //   join residual predicates, and aggregate group keys / agg args
 void QualifyColumns(const TOperatorPtr& root);
 
-} // namespace NQqb
+} // namespace NQdb

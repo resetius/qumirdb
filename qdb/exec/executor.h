@@ -4,7 +4,7 @@
 
 #include <qumir/parser/type.h>
 
-namespace NQqb {
+namespace NQdb {
 
 struct IRuntimeNode {
     virtual ~IRuntimeNode() = default;
@@ -12,4 +12,4 @@ struct IRuntimeNode {
     virtual bool Next(TRowSet& rowSet) = 0;
 };
 
-} // namespace NQqb
+} // namespace NQdb

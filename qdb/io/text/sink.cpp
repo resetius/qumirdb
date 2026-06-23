@@ -9,7 +9,7 @@
 
 #include <qumir/parser/type.h>
 
-namespace NQqb {
+namespace NQdb {
 
 namespace {
 
@@ -365,4 +365,4 @@ void TNullSink::Write(const TRowSet& rowSet) {
     Rows_ += rowSet.RowCount;
 }
 
-} // namespace NQqb
+} // namespace NQdb

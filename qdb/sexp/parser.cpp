@@ -6,7 +6,7 @@
 #include <qdb/plan/ops/project.h>
 #include <qdb/plan/ops/source.h>
 
-namespace NQqb {
+namespace NQdb {
 namespace NSexp {
 
 using namespace NQumir::NAst::NCore;
@@ -188,4 +188,4 @@ TNodeParserMap MakeRelParsers(TRelParserOptions options) {
 }
 
 } // namespace NSexp
-} // namespace NQqb
+} // namespace NQdb

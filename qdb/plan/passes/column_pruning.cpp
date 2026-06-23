@@ -10,7 +10,7 @@
 #include <functional>
 #include <unordered_set>
 
-namespace NQqb {
+namespace NQdb {
 
 using namespace NQumir::NAst;
 
@@ -71,4 +71,4 @@ void ApplyColumnPruning(const TOperatorPtr& root) {
     walk(root, initial);
 }
 
-} // namespace NQqb
+} // namespace NQdb

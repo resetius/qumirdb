@@ -11,7 +11,7 @@
 #include <sstream>
 #include <unordered_set>
 
-namespace NQqb {
+namespace NQdb {
 
 using namespace NQumir::NAst;
 
@@ -232,4 +232,4 @@ MakeJoin(TOperatorPtr left, TOperatorPtr right,
         std::move(joinKeys), type, std::move(filterExpr));
 }
 
-} // namespace NQqb
+} // namespace NQdb

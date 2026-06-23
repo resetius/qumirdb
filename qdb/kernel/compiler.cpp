@@ -15,7 +15,7 @@
 #include <stdexcept>
 #include <unordered_map>
 
-namespace NQqb {
+namespace NQdb {
 
 namespace {
 
@@ -650,4 +650,4 @@ TJoinKernels TKernelCompiler::CompileJoin(
     return kernels;
 }
 
-} // namespace NQqb
+} // namespace NQdb

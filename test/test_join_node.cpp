@@ -12,7 +12,7 @@
 
 namespace {
 
-using namespace NQqb;
+using namespace NQdb;
 using namespace NQumir::NAst;
 
 // Minimal operator carrying a fixed output schema, used to wire join inputs

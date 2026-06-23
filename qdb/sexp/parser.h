@@ -6,7 +6,7 @@
 
 #include <qdb/plan/ops/operator.h>
 
-namespace NQqb {
+namespace NQdb {
 namespace NSexp {
 
 struct TRelParserOptions {
@@ -17,4 +17,4 @@ struct TRelParserOptions {
 NQumir::NAst::NCore::TNodeParserMap MakeRelParsers(TRelParserOptions options = {});
 
 } // namespace NSexp
-} // namespace NQqb
+} // namespace NQdb

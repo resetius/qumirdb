@@ -5,7 +5,7 @@
 #include <algorithm>
 #include <cctype>
 
-namespace NQqb::NKernel {
+namespace NQdb::NKernel {
 
 using namespace NQumir::NAst;
 
@@ -143,4 +143,4 @@ TJoinKeyDescriptor BuildJoinKeyDescriptor(
     return result;
 }
 
-} // namespace NQqb::NKernel
+} // namespace NQdb::NKernel

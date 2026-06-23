@@ -6,7 +6,7 @@
 #include <string>
 #include <utility>
 
-namespace NQqb {
+namespace NQdb {
 
 struct TNullable : NQumir::NAst::TType {
     static constexpr const char* TypeId = "Nullable";
@@ -41,4 +41,4 @@ inline NQumir::NAst::TTypePtr UnwrapNullableType(
     return type;
 }
 
-} // namespace NQqb
+} // namespace NQdb

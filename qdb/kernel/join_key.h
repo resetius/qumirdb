@@ -10,7 +10,7 @@
 #include <utility>
 #include <vector>
 
-namespace NQqb::NKernel {
+namespace NQdb::NKernel {
 
 // One component of a join equi-key. Unlike the aggregation key field, it tracks
 // the column on BOTH sides (different names/positions, identical represented
@@ -55,4 +55,4 @@ TJoinKeyDescriptor BuildJoinKeyDescriptor(
     const NQumir::NAst::TStructType& rightType,
     const std::vector<std::pair<std::string, std::string>>& keys);
 
-} // namespace NQqb::NKernel
+} // namespace NQdb::NKernel

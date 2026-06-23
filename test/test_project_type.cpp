@@ -12,7 +12,7 @@
 #include <stdexcept>
 #include <string>
 
-using namespace NQqb::NKernel;
+using namespace NQdb::NKernel;
 using namespace NQumir::NAst;
 
 namespace {

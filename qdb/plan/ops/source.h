@@ -5,7 +5,7 @@
 #include <unordered_set>
 #include <string>
 
-namespace NQqb {
+namespace NQdb {
 
 class TSourceOperator : public IOperator {
 public:
@@ -30,4 +30,4 @@ private:
 
 NQumir::NAst::TTypePtr StructTypeFromSchema(const TSchema& schema);
 
-} // namespace NQqb
+} // namespace NQdb

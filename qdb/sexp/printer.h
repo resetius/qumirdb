@@ -2,10 +2,10 @@
 
 #include <qumir/parser/core/printer.h>
 
-namespace NQqb {
+namespace NQdb {
 namespace NSexp {
 
 NQumir::NAst::NCore::TPrintExprFactory MakeRelPrinters();
 
 } // namespace NSexp
-} // namespace NQqb
+} // namespace NQdb

@@ -6,7 +6,7 @@
 #include <string>
 #include <vector>
 
-namespace NQqb::NKernel {
+namespace NQdb::NKernel {
 
 struct TColumnValueAst {
     std::vector<NQumir::NAst::TExprPtr> Setup;
@@ -22,4 +22,4 @@ TColumnValueAst BuildColumnValueAst(
     const NQumir::NAst::TTypePtr& logicalType,
     const NQumir::NAst::TTypePtr& stringViewType);
 
-} // namespace NQqb::NKernel
+} // namespace NQdb::NKernel
