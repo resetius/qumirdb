@@ -9,7 +9,7 @@
 namespace arrow { class RecordBatchReader; }
 namespace parquet { namespace arrow { class FileReader; } }
 
-namespace NQqb {
+namespace NQdb {
 
 class TParquetSource : public ISource {
 public:
@@ -28,4 +28,4 @@ private:
     TSchema Schema_;
 };
 
-} // namespace NQqb
+} // namespace NQdb

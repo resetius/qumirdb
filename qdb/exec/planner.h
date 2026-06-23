@@ -6,7 +6,7 @@
 #include <memory>
 #include <ostream>
 
-namespace NQqb {
+namespace NQdb {
 
 // Builds a physical execution tree from a logical operator tree.
 // Compiles kernels (filter/project) to LLVM function pointers.
@@ -31,4 +31,4 @@ private:
     std::ostream* Diagnostics_ = nullptr;
 };
 
-} // namespace NQqb
+} // namespace NQdb

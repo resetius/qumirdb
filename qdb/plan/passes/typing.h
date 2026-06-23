@@ -2,7 +2,7 @@
 
 #include <qdb/plan/ops/operator.h>
 
-namespace NQqb {
+namespace NQdb {
 
 // Bottom-up pass: assigns TFunctionType([required], output) to every operator.
 //   Source : fun()          -> struct(all columns from schema)
@@ -13,4 +13,4 @@ namespace NQqb {
 // Idempotent — safe to call again after plan modifications.
 void AnnotateTypes(const TOperatorPtr& root);
 
-} // namespace NQqb
+} // namespace NQdb

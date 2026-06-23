@@ -16,7 +16,7 @@
 #include <string>
 #include <vector>
 
-using namespace NQqb;
+using namespace NQdb;
 using namespace NQumir::NAst;
 
 namespace {

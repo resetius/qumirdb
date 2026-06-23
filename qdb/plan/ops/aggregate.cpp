@@ -10,7 +10,7 @@
 
 #include <sstream>
 
-namespace NQqb {
+namespace NQdb {
 
 using namespace NQumir::NAst;
 
@@ -131,4 +131,4 @@ MakeAggregate(TOperatorPtr input, std::vector<std::string> groupKeys,
     return std::make_shared<TAggregateOperator>(std::move(input), std::move(groupKeys), std::move(specs));
 }
 
-} // namespace NQqb
+} // namespace NQdb

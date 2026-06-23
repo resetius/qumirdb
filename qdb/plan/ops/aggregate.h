@@ -9,7 +9,7 @@
 #include <tuple>
 #include <vector>
 
-namespace NQqb {
+namespace NQdb {
 
 struct TAggregateSpec {
     std::string Name;            // output column name
@@ -58,4 +58,4 @@ std::expected<TOperatorPtr, NQumir::TError>
 MakeAggregate(TOperatorPtr input, std::vector<std::string> groupKeys,
     std::vector<std::tuple<std::string, std::string, std::string>> aggs);
 
-} // namespace NQqb
+} // namespace NQdb

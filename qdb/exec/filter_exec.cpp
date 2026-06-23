@@ -1,6 +1,6 @@
 #include <qdb/exec/filter_exec.h>
 
-namespace NQqb {
+namespace NQdb {
 
 TRuntimeFilter::TRuntimeFilter(
     std::unique_ptr<IRuntimeNode> input,
@@ -21,4 +21,4 @@ bool TRuntimeFilter::Next(TRowSet& rowSet) {
     return true;
 }
 
-} // namespace NQqb
+} // namespace NQdb

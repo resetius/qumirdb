@@ -13,7 +13,7 @@
 
 #include <qumir/parser/type.h>
 
-namespace NQqb {
+namespace NQdb {
 
 namespace {
 
@@ -273,4 +273,4 @@ bool TParquetSource::Next(TRowSet& rowSet) {
     return true;
 }
 
-} // namespace NQqb
+} // namespace NQdb

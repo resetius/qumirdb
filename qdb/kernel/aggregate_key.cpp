@@ -6,7 +6,7 @@
 #include <algorithm>
 #include <cctype>
 
-namespace NQqb::NKernel {
+namespace NQdb::NKernel {
 
 size_t AlignUp(size_t value, size_t alignment) {
     return (value + alignment - 1) & ~(alignment - 1);
@@ -252,4 +252,4 @@ TAggregateKeyDescriptor BuildAggregateKeyDescriptor(
     return result;
 }
 
-} // namespace NQqb::NKernel
+} // namespace NQdb::NKernel

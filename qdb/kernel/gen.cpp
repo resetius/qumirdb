@@ -14,7 +14,7 @@
 #include <stdexcept>
 #include <string_view>
 
-namespace NQqb {
+namespace NQdb {
 namespace NKernel {
 
 namespace {
@@ -2254,4 +2254,4 @@ NQumir::NAst::TExprPtr GenApplyReducersFunDecl(const TAggReducerLayout& layout)
 }
 
 } // namespace NKernel
-} // namespace NQqb
+} // namespace NQdb

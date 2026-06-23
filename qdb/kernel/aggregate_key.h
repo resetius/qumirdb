@@ -7,7 +7,7 @@
 #include <string>
 #include <vector>
 
-namespace NQqb::NKernel {
+namespace NQdb::NKernel {
 
 // Byte layout of a key (component) type.
 struct TKeyLayout {
@@ -72,4 +72,4 @@ TAggregateKeyDescriptor BuildAggregateKeyDescriptor(
     const NQumir::NAst::TStructType& inputType,
     const std::vector<std::string>& groupKeys);
 
-} // namespace NQqb::NKernel
+} // namespace NQdb::NKernel

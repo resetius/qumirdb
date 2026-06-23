@@ -7,7 +7,7 @@
 
 #include <qumir/error.h>
 
-namespace NQqb::NKernel {
+namespace NQdb::NKernel {
 
 using namespace NQumir::NAst;
 
@@ -604,4 +604,4 @@ NQumir::NAst::TExprPtr GenJoinProbeAst(
         /*insertRows=*/false);
 }
 
-} // namespace NQqb::NKernel
+} // namespace NQdb::NKernel

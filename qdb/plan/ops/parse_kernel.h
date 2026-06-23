@@ -10,7 +10,7 @@
 #include <expected>
 #include <string>
 
-namespace NQqb {
+namespace NQdb {
 namespace NInternal {
 
 // Converts a qumir TTypePtr to its core-lang type string.
@@ -33,4 +33,4 @@ ParseAndAnnotate(
     const std::string& expr);
 
 } // namespace NInternal
-} // namespace NQqb
+} // namespace NQdb

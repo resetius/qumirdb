@@ -12,7 +12,7 @@
 #include <arrow/io/api.h>
 #include <parquet/arrow/writer.h>
 
-using namespace NQqb;
+using namespace NQdb;
 
 namespace {
 
@@ -56,7 +56,7 @@ TEST(IOTest, ParquetRoundtrip) {
     });
     WriteParquet(path, batch);
 
-    NQqb::TParquetSource source(path);
+    NQdb::TParquetSource source(path);
     const auto& s = source.Schema();
 
     ASSERT_EQ(s.Columns.size(), 4u);
@@ -82,7 +82,7 @@ TEST(IOTest, ParquetRoundtrip) {
     EXPECT_EQ(rowSet.ColumnCount, 4);
 
     std::ostringstream out;
-    NQqb::TConsoleSink sink(s, out);
+    NQdb::TConsoleSink sink(s, out);
     sink.Write(rowSet);
     sink.Flush();
 
@@ -91,7 +91,7 @@ TEST(IOTest, ParquetRoundtrip) {
     EXPECT_NE(result.find("1.5"), std::string::npos);
     EXPECT_NE(result.find("true"), std::string::npos);
 
-    NQqb::Release(&rowSet);
+    NQdb::Release(&rowSet);
 
     ASSERT_FALSE(source.Next(rowSet));
 }
@@ -108,7 +108,7 @@ TEST(IOTest, NullsInColumn) {
     auto batch = arrow::RecordBatch::Make(schema, 3, {ids.Finish().ValueOrDie()});
     WriteParquet(path, batch);
 
-    NQqb::TParquetSource source(path);
+    NQdb::TParquetSource source(path);
 
     TRowSet rowSet = {};
     ASSERT_TRUE(source.Next(rowSet));
@@ -124,12 +124,12 @@ TEST(IOTest, NullsInColumn) {
     EXPECT_NE(isValid(2), 0); // row 2: valid
 
     std::ostringstream out;
-    NQqb::TConsoleSink sink(source.Schema(), out);
+    NQdb::TConsoleSink sink(source.Schema(), out);
     sink.Write(rowSet);
     sink.Flush();
     EXPECT_NE(out.str().find("NULL"), std::string::npos);
 
-    NQqb::Release(&rowSet);
+    NQdb::Release(&rowSet);
 }
 
 int main(int argc, char** argv) {

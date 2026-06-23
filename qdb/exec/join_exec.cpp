@@ -7,7 +7,7 @@
 #include <algorithm>
 #include <cstring>
 
-namespace NQqb {
+namespace NQdb {
 
 using namespace NQumir::NAst;
 
@@ -740,4 +740,4 @@ bool TRuntimeJoin::Next(TRowSet& rowSet) {
     }
 }
 
-} // namespace NQqb
+} // namespace NQdb

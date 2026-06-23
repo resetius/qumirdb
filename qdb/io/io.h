@@ -6,7 +6,7 @@
 
 #include <qdb/io/schema.h>
 
-namespace NQqb {
+namespace NQdb {
 
 struct TColumn {
     char* Data;
@@ -51,4 +51,4 @@ struct ISink {
     virtual void Flush() {}
 };
 
-} // namespace NQqb
+} // namespace NQdb

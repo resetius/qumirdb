@@ -12,7 +12,7 @@
 #include <sstream>
 #include <stdexcept>
 
-namespace NQqb {
+namespace NQdb {
 namespace NKernel {
 
 std::string ReadAggregationKernel(const std::string& name) {
@@ -295,4 +295,4 @@ BuildGenericAggregateMeasureProgramAst(
 }
 
 } // namespace NKernel
-} // namespace NQqb
+} // namespace NQdb

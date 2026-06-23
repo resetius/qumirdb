@@ -87,11 +87,11 @@ std::string BuildAst(std::istream& in) {
 }
 
 // Schema-less source used for plan-shape goldens; never executed.
-struct TStubSource : NQqb::ISource {
-    const NQqb::TSchema& Schema() const override { return Schema_; }
-    bool Next(NQqb::TRowSet&) override { return false; }
+struct TStubSource : NQdb::ISource {
+    const NQdb::TSchema& Schema() const override { return Schema_; }
+    bool Next(NQdb::TRowSet&) override { return false; }
 
-    NQqb::TSchema Schema_;
+    NQdb::TSchema Schema_;
 };
 
 std::string BuildPlan(std::istream& in) {
@@ -105,13 +105,13 @@ std::string BuildPlan(std::istream& in) {
 
     std::vector<std::unique_ptr<TStubSource>> sources;
     auto factory = [&](std::string_view table)
-        -> std::expected<NQqb::TOperatorPtr, NQumir::TError>
+        -> std::expected<NQdb::TOperatorPtr, NQumir::TError>
     {
         auto& source = sources.emplace_back(std::make_unique<TStubSource>());
-        return std::make_shared<NQqb::TSourceOperator>(*source, std::string(table));
+        return std::make_shared<NQdb::TSourceOperator>(*source, std::string(table));
     };
 
-    auto plan = NQqb::BuildPlan(parsed.value(), factory);
+    auto plan = NQdb::BuildPlan(parsed.value(), factory);
     if (!plan) {
         return plan.error().ToString() + "\n";
     }
@@ -120,7 +120,7 @@ std::string BuildPlan(std::istream& in) {
     NQumir::NAst::NCore::PrintAst(
         out,
         plan.value(),
-        NQumir::NAst::NCore::TPrintOptions{ .NodePrinters = NQqb::NSexp::MakeRelPrinters() });
+        NQumir::NAst::NCore::TPrintOptions{ .NodePrinters = NQdb::NSexp::MakeRelPrinters() });
     out << "\n";
     return out.str();
 }

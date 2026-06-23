@@ -3,7 +3,7 @@
 #include <qdb/exec/executor.h>
 #include <qdb/io/io.h>
 
-namespace NQqb {
+namespace NQdb {
 
 class TRuntimeSource : public IRuntimeNode {
 public:
@@ -17,4 +17,4 @@ private:
     NQumir::NAst::TTypePtr Type_;
 };
 
-} // namespace NQqb
+} // namespace NQdb

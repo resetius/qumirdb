@@ -7,7 +7,7 @@
 #include <memory>
 #include <vector>
 
-namespace NQqb {
+namespace NQdb {
 
 class TRuntimeFilter : public IRuntimeNode {
 public:
@@ -26,4 +26,4 @@ private:
     std::vector<uint8_t> SelectionBuf_;
 };
 
-} // namespace NQqb
+} // namespace NQdb

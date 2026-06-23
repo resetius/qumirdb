@@ -6,6 +6,8 @@
 #include <qdb/plan/ops/project.h>
 #include <qdb/plan/ops/source.h>
 
+#include <qdb/plan/passes/flatten_conjucts.h>
+
 #include <qumir/parser/ast.h>
 #include <qumir/parser/type.h>
 
@@ -16,7 +18,7 @@
 #include <string>
 #include <vector>
 
-namespace NQqb {
+namespace NQdb {
 
 namespace {
 
@@ -303,16 +305,6 @@ std::expected<TOperatorPtr, TError> BuildFrom(
     return result;
 }
 
-void FlattenConjuncts(const NAst::TExprPtr& expr, std::vector<NAst::TExprPtr>& out) {
-    auto binary = NAst::TMaybeNode<NAst::TBinaryExpr>(expr);
-    if (binary && binary.Cast()->Operator == "&&") {
-        FlattenConjuncts(binary.Cast()->Left, out);
-        FlattenConjuncts(binary.Cast()->Right, out);
-    } else {
-        out.push_back(expr);
-    }
-}
-
 NAst::TExprPtr Conjoin(const std::vector<NAst::TExprPtr>& parts) {
     NAst::TExprPtr result;
     for (const auto& part : parts) {
@@ -539,4 +531,4 @@ std::expected<TOperatorPtr, TError> BuildPlan(
     return BuildQuery(*root.Cast(), sources);
 }
 
-} // namespace NQqb
+} // namespace NQdb

@@ -13,7 +13,7 @@
 #include <unordered_set>
 #include <vector>
 
-namespace NQqb {
+namespace NQdb {
 namespace NKernel {
 
 // Reads an aggregation kernel source file (qdb/kernel/aggregation/<name>),
@@ -86,4 +86,4 @@ BuildGenericAggregateMeasureProgramAst(
     NQumir::NAst::TTypePtr hashTableType);
 
 } // namespace NKernel
-} // namespace NQqb
+} // namespace NQdb

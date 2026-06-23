@@ -10,7 +10,7 @@
 
 #include <sstream>
 
-namespace NQqb {
+namespace NQdb {
 
 TProjectOperator::TProjectOperator(TOperatorPtr input, std::vector<TProjectionSpec> projections)
     : Input_(std::move(input))
@@ -70,4 +70,4 @@ MakeProject(TOperatorPtr input, std::vector<std::pair<std::string, std::string>>
     return std::make_shared<TProjectOperator>(std::move(input), std::move(specs));
 }
 
-} // namespace NQqb
+} // namespace NQdb

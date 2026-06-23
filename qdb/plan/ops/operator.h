@@ -8,7 +8,7 @@
 #include <string>
 #include <unordered_set>
 
-namespace NQqb {
+namespace NQdb {
 
 struct IOperator : NQumir::NAst::TExpr {
     static constexpr const char* NodeId = "Rel";
@@ -69,4 +69,4 @@ struct TMaybeOp {
     operator bool() const { return Op != nullptr; }
 };
 
-} // namespace NQqb
+} // namespace NQdb

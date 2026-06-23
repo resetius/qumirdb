@@ -14,7 +14,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace NQqb {
+namespace NQdb {
 
 using namespace NQumir::NAst;
 
@@ -242,4 +242,4 @@ void QualifyColumns(const TOperatorPtr& root) {
     QualifyColumnsImpl(root);
 }
 
-} // namespace NQqb
+} // namespace NQdb

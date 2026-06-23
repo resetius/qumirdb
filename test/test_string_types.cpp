@@ -60,7 +60,7 @@ bool ContainsField(const TExprPtr& expr, std::string_view name) {
 }
 
 bool ContainsField(
-    const NQqb::NKernel::TColumnValueAst& value,
+    const NQdb::NKernel::TColumnValueAst& value,
     std::string_view name)
 {
     return ContainsField(value.Value, name) || ContainsField(value.IsValid, name) ||
@@ -72,9 +72,9 @@ bool ContainsField(
 std::unique_ptr<TLLVMRunner> CompileStringColumnReader(void*& entry) {
     NQumir::NRegistry::QumirDbModule module;
     auto types = GetModuleTypes(module);
-    auto materialized = NQqb::NKernel::BuildColumnValueAst(
+    auto materialized = NQdb::NKernel::BuildColumnValueAst(
         "column", "row", "value",
-        std::make_shared<NQqb::TNullable>(std::make_shared<TStringType>()),
+        std::make_shared<NQdb::TNullable>(std::make_shared<TStringType>()),
         types.StringView);
 
     TLocation loc{};
@@ -130,8 +130,8 @@ std::unique_ptr<TLLVMRunner> CompileI32ColumnReader(void*& entry) {
     NQumir::NRegistry::QumirDbModule module;
     auto types = GetModuleTypes(module);
     auto i32Type = std::make_shared<TIntegerType>(TIntegerType::I32);
-    auto materialized = NQqb::NKernel::BuildColumnValueAst(
-        "column", "row", "value", std::make_shared<NQqb::TNullable>(i32Type),
+    auto materialized = NQdb::NKernel::BuildColumnValueAst(
+        "column", "row", "value", std::make_shared<NQdb::TNullable>(i32Type),
         types.StringView);
 
     TLocation loc{};
@@ -181,9 +181,9 @@ std::unique_ptr<TLLVMRunner> CompileScalarColumnReader(
 {
     NQumir::NRegistry::QumirDbModule module;
     auto types = GetModuleTypes(module);
-    auto materialized = NQqb::NKernel::BuildColumnValueAst(
+    auto materialized = NQdb::NKernel::BuildColumnValueAst(
         "column", "row", "value",
-        std::make_shared<NQqb::TNullable>(valueType), types.StringView);
+        std::make_shared<NQdb::TNullable>(valueType), types.StringView);
 
     TLocation loc{};
     auto i64Type = std::make_shared<TIntegerType>();
@@ -280,11 +280,11 @@ TEST(QumirDbStringTypes, ExternalTypesAreDistinctPodStructs) {
 }
 
 TEST(QumirDbStringTypes, StringViewUsesPlainStructCopies) {
-    CheckStringHandleJit<NQqb::TStringView>("StringView");
+    CheckStringHandleJit<NQdb::TStringView>("StringView");
 }
 
 TEST(QumirDbStringTypes, OwnedStringUsesPlainStructCopies) {
-    CheckStringHandleJit<NQqb::TOwnedString>("OwnedString");
+    CheckStringHandleJit<NQdb::TOwnedString>("OwnedString");
 }
 
 TEST(QumirDbStringTypes, NonNullableMaterializersSkipValidityBitmap) {
@@ -297,22 +297,22 @@ TEST(QumirDbStringTypes, NonNullableMaterializersSkipValidityBitmap) {
         std::make_shared<TStringType>(),
     };
     for (const auto& type : logicalTypes) {
-        auto value = NQqb::NKernel::BuildColumnValueAst(
+        auto value = NQdb::NKernel::BuildColumnValueAst(
             "column", "row", "value", type, types.StringView);
         EXPECT_FALSE(ContainsField(value, "Mask")) << type->ToString();
         EXPECT_FALSE(ContainsField(value, "MaskBitOffset")) << type->ToString();
-        EXPECT_FALSE(NQqb::IsNullableType(value.ValueType));
+        EXPECT_FALSE(NQdb::IsNullableType(value.ValueType));
         auto valid = TMaybeNode<TNumberExpr>(value.IsValid);
         ASSERT_TRUE(valid) << type->ToString();
         EXPECT_NE(valid.Cast()->IntValue, 0) << type->ToString();
 
-        auto nullableValue = NQqb::NKernel::BuildColumnValueAst(
+        auto nullableValue = NQdb::NKernel::BuildColumnValueAst(
             "column", "row", "value",
-            std::make_shared<NQqb::TNullable>(type), types.StringView);
+            std::make_shared<NQdb::TNullable>(type), types.StringView);
         EXPECT_TRUE(ContainsField(nullableValue, "Mask")) << type->ToString();
         EXPECT_TRUE(ContainsField(nullableValue, "MaskBitOffset"))
             << type->ToString();
-        EXPECT_FALSE(NQqb::IsNullableType(nullableValue.ValueType));
+        EXPECT_FALSE(NQdb::IsNullableType(nullableValue.ValueType));
     }
 }
 
@@ -323,12 +323,12 @@ TEST(QumirDbStringTypes, MaterializesI32AndValidity) {
 
     std::array<int32_t, 3> values = {17, -4, 29};
     std::array<uint8_t, 1> mask = {0b00000101};
-    NQqb::TColumn column{
+    NQdb::TColumn column{
         .Data = reinterpret_cast<char*>(values.data()),
         .Mask = mask.data(),
     };
     std::array<bool, 3> valid{};
-    auto read = reinterpret_cast<int64_t(*)(NQqb::TColumn*, int64_t, bool*)>(entry);
+    auto read = reinterpret_cast<int64_t(*)(NQdb::TColumn*, int64_t, bool*)>(entry);
 
     EXPECT_EQ(read(&column, 0, valid.data()), 17);
     EXPECT_EQ(read(&column, 1, valid.data()), 0);
@@ -344,14 +344,14 @@ TEST(QumirDbStringTypes, MaterializesStringAndLargeStringSlices) {
     ASSERT_NE(entry, nullptr);
 
     std::array<uint8_t, 1> mask = {0b00001010};
-    std::array<NQqb::TStringView, 3> output{};
+    std::array<NQdb::TStringView, 3> output{};
     std::array<bool, 3> valid{};
     auto read = reinterpret_cast<int64_t(*)(
-        NQqb::TColumn*, int64_t, NQqb::TStringView*, bool*)>(entry);
+        NQdb::TColumn*, int64_t, NQdb::TStringView*, bool*)>(entry);
 
     std::array<int32_t, 4> offsets32 = {10, 10, 13, 17};
     std::array<uint8_t, 7> bytes32 = {'a', 'b', 'c', 'W', 0, 'Y', 'Z'};
-    NQqb::TColumn stringColumn{
+    NQdb::TColumn stringColumn{
         .Data = reinterpret_cast<char*>(bytes32.data()),
         .Mask = mask.data(),
         .MaskBitOffset = 1,
@@ -370,7 +370,7 @@ TEST(QumirDbStringTypes, MaterializesStringAndLargeStringSlices) {
 
     std::array<int64_t, 3> offsets64 = {100, 102, 107};
     std::array<uint8_t, 7> bytes64 = {'o', 'k', 'h', 'e', 'l', 'l', 'o'};
-    NQqb::TColumn largeStringColumn{
+    NQdb::TColumn largeStringColumn{
         .Data = reinterpret_cast<char*>(bytes64.data()),
         .Offsets = offsets64.data(),
         .OffsetWidth = 8,
@@ -389,24 +389,24 @@ TEST(QumirDbStringTypes, DoesNotReadNullPayload) {
     void* i32Entry = nullptr;
     auto i32Runner = CompileI32ColumnReader(i32Entry);
     ASSERT_NE(i32Entry, nullptr);
-    NQqb::TColumn i32Column{.Data = nullptr, .Mask = mask.data()};
+    NQdb::TColumn i32Column{.Data = nullptr, .Mask = mask.data()};
     bool i32Valid = true;
     auto readI32 = reinterpret_cast<int64_t(*)(
-        NQqb::TColumn*, int64_t, bool*)>(i32Entry);
+        NQdb::TColumn*, int64_t, bool*)>(i32Entry);
     EXPECT_EQ(readI32(&i32Column, 0, &i32Valid), 0);
     EXPECT_FALSE(i32Valid);
 
     void* stringEntry = nullptr;
     auto stringRunner = CompileStringColumnReader(stringEntry);
     ASSERT_NE(stringEntry, nullptr);
-    NQqb::TColumn stringColumn{
+    NQdb::TColumn stringColumn{
         .Data = nullptr, .Mask = mask.data(), .Offsets = nullptr,
         .OffsetWidth = 4,
     };
-    NQqb::TStringView output{.Data = reinterpret_cast<uint8_t*>(1), .Size = -1};
+    NQdb::TStringView output{.Data = reinterpret_cast<uint8_t*>(1), .Size = -1};
     bool stringValid = true;
     auto readString = reinterpret_cast<int64_t(*)(
-        NQqb::TColumn*, int64_t, NQqb::TStringView*, bool*)>(stringEntry);
+        NQdb::TColumn*, int64_t, NQdb::TStringView*, bool*)>(stringEntry);
     EXPECT_EQ(readString(&stringColumn, 0, &output, &stringValid), 0);
     EXPECT_FALSE(stringValid);
     EXPECT_EQ(output.Data, nullptr);
@@ -416,10 +416,10 @@ TEST(QumirDbStringTypes, DoesNotReadNullPayload) {
     auto f64Runner = CompileScalarColumnReader(
         f64Entry, std::make_shared<TFloatType>(), "read_f64_column");
     ASSERT_NE(f64Entry, nullptr);
-    NQqb::TColumn f64Column{.Data = nullptr, .Mask = mask.data()};
+    NQdb::TColumn f64Column{.Data = nullptr, .Mask = mask.data()};
     bool f64Valid = true;
     auto readF64 = reinterpret_cast<double(*)(
-        NQqb::TColumn*, int64_t, bool*)>(f64Entry);
+        NQdb::TColumn*, int64_t, bool*)>(f64Entry);
     EXPECT_EQ(readF64(&f64Column, 0, &f64Valid), 0.0);
     EXPECT_FALSE(f64Valid);
 
@@ -427,10 +427,10 @@ TEST(QumirDbStringTypes, DoesNotReadNullPayload) {
     auto boolRunner = CompileScalarColumnReader(
         boolEntry, std::make_shared<TBoolType>(), "read_bool_column");
     ASSERT_NE(boolEntry, nullptr);
-    NQqb::TColumn boolColumn{.Data = nullptr, .Mask = mask.data()};
+    NQdb::TColumn boolColumn{.Data = nullptr, .Mask = mask.data()};
     bool boolValid = true;
     auto readBool = reinterpret_cast<bool(*)(
-        NQqb::TColumn*, int64_t, bool*)>(boolEntry);
+        NQdb::TColumn*, int64_t, bool*)>(boolEntry);
     EXPECT_FALSE(readBool(&boolColumn, 0, &boolValid));
     EXPECT_FALSE(boolValid);
 }

@@ -9,7 +9,7 @@
 
 #include <stdexcept>
 
-namespace NQqb {
+namespace NQdb {
 namespace NSexp {
 
 using namespace NQumir::NAst::NCore;
@@ -133,4 +133,4 @@ TPrintExprFactory MakeRelPrinters() {
 }
 
 } // namespace NSexp
-} // namespace NQqb
+} // namespace NQdb

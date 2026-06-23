@@ -7,7 +7,7 @@
 
 #include <functional>
 
-namespace NQqb {
+namespace NQdb {
 
 NQumir::NAst::TTypePtr StructTypeFromSchema(const TSchema& schema) {
     std::vector<std::pair<std::string, NQumir::NAst::TTypePtr>> fields;
@@ -31,4 +31,4 @@ const std::string TSourceOperator::ToString() const {
     return "(rel source)";
 }
 
-} // namespace NQqb
+} // namespace NQdb

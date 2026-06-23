@@ -14,7 +14,7 @@
 #include <unordered_set>
 #include <vector>
 
-namespace NQqb {
+namespace NQdb {
 
 // Packed row identifier: (batchIdx << 32) | rowIdx. kNullRowId marks an absent
 // row (NULL padding for OUTER joins, Stage 3).
@@ -263,4 +263,4 @@ private:
     bool ResidualSemiAntiDone_ = false;
 };
 
-} // namespace NQqb
+} // namespace NQdb

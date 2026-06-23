@@ -8,7 +8,7 @@
 #include <string>
 #include <unordered_map>
 
-namespace NQqb::NKernel {
+namespace NQdb::NKernel {
 
 using namespace NQumir::NAst;
 
@@ -141,4 +141,4 @@ TTypePtr InferProjectExprType(const TExprPtr& expr, const TStructType& inputType
         std::string(expr->NodeName()) + "'");
 }
 
-} // namespace NQqb::NKernel
+} // namespace NQdb::NKernel

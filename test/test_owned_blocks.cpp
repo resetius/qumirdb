@@ -17,8 +17,8 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileOwnedBlocks(
     const std::string& entryName,
     void*& entry)
 {
-    auto library = NQqb::NKernel::ParseFunctionLibrary(
-        NQqb::NKernel::ReadAggregationKernel("owned_blocks.oz"));
+    auto library = NQdb::NKernel::ParseFunctionLibrary(
+        NQdb::NKernel::ReadAggregationKernel("owned_blocks.oz"));
     if (!library) {
         ADD_FAILURE() << library.error().ToString();
         return {};

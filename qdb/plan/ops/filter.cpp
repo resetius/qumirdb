@@ -9,7 +9,7 @@
 
 #include <sstream>
 
-namespace NQqb {
+namespace NQdb {
 
 TFilterOperator::TFilterOperator(TOperatorPtr input, NQumir::NAst::TExprPtr predicate)
     : Input_(std::move(input))
@@ -43,4 +43,4 @@ MakeFilter(TOperatorPtr input, const std::string& predicate) {
     return std::make_shared<TFilterOperator>(std::move(input), std::move(*parsed));
 }
 
-} // namespace NQqb
+} // namespace NQdb

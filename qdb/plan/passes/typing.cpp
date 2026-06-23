@@ -9,7 +9,7 @@
 
 #include <qumir/parser/type.h>
 
-namespace NQqb {
+namespace NQdb {
 
 using namespace NQumir::NAst;
 
@@ -84,4 +84,4 @@ void AnnotateTypes(const TOperatorPtr& root) {
     }
 }
 
-} // namespace NQqb
+} // namespace NQdb

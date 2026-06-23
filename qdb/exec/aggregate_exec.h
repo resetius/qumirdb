@@ -5,7 +5,7 @@
 
 #include <memory>
 
-namespace NQqb {
+namespace NQdb {
 
 // Pipeline breaker (L4): consumes all input batches via Kernels.Dispatch
 // (init/update/destroy of the HashTable), then emits exactly one output
@@ -28,4 +28,4 @@ private:
     bool Done_ = false;
 };
 
-} // namespace NQqb
+} // namespace NQdb

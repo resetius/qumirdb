@@ -22,7 +22,7 @@ namespace {
 using namespace NQumir::NAst;
 
 TTypePtr Nullable(TTypePtr type) {
-    return std::make_shared<NQqb::TNullable>(std::move(type));
+    return std::make_shared<NQdb::TNullable>(std::move(type));
 }
 
 std::shared_ptr<TStructType> StructOf(const TTypePtr& type) {
@@ -38,7 +38,7 @@ std::string NamedTypeName(const TTypePtr& type) {
 }
 
 std::unique_ptr<NQumir::TLLVMRunner> CompileKeyOperation(
-    const NQqb::NKernel::TAggregateKeyDescriptor& key,
+    const NQdb::NKernel::TAggregateKeyDescriptor& key,
     const std::string& entryName,
     const std::string& operation,
     const std::vector<TTypePtr>& paramTypes,
@@ -61,16 +61,16 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileKeyOperation(
         stmts.push_back(std::make_shared<TTypeDeclStmt>(
             TLocation{}, key.StoredType));
     }
-    auto stringOps = NQqb::NKernel::ParseFunctionLibrary(
-        NQqb::NKernel::ReadAggregationKernel("string_ops.oz"));
+    auto stringOps = NQdb::NKernel::ParseFunctionLibrary(
+        NQdb::NKernel::ReadAggregationKernel("string_ops.oz"));
     if (!stringOps) {
         ADD_FAILURE() << stringOps.error().ToString();
         return {};
     }
     stmts.insert(stmts.end(), stringOps->begin(), stringOps->end());
-    auto keyOps = NQqb::NKernel::GenKeyOperationFunDecls(key);
+    auto keyOps = NQdb::NKernel::GenKeyOperationFunDecls(key);
     stmts.insert(stmts.end(), keyOps.begin(), keyOps.end());
-    auto ownership = NQqb::NKernel::GenKeyOwnershipFunDecls(key);
+    auto ownership = NQdb::NKernel::GenKeyOwnershipFunDecls(key);
     stmts.insert(stmts.end(), ownership.begin(), ownership.end());
 
     std::vector<TParam> params;
@@ -116,7 +116,7 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileKeyOperation(
 }
 
 std::unique_ptr<NQumir::TLLVMRunner> CompileCloneEntry(
-    const NQqb::NKernel::TAggregateKeyDescriptor& key,
+    const NQdb::NKernel::TAggregateKeyDescriptor& key,
     void*& entry)
 {
     using namespace NQumir;
@@ -134,14 +134,14 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileCloneEntry(
         stmts.push_back(std::make_shared<TTypeDeclStmt>(
             TLocation{}, key.StoredType));
     }
-    auto stringOps = NQqb::NKernel::ParseFunctionLibrary(
-        NQqb::NKernel::ReadAggregationKernel("string_ops.oz"));
+    auto stringOps = NQdb::NKernel::ParseFunctionLibrary(
+        NQdb::NKernel::ReadAggregationKernel("string_ops.oz"));
     if (!stringOps) {
         ADD_FAILURE() << stringOps.error().ToString();
         return {};
     }
     stmts.insert(stmts.end(), stringOps->begin(), stringOps->end());
-    auto ownership = NQqb::NKernel::GenKeyOwnershipFunDecls(key);
+    auto ownership = NQdb::NKernel::GenKeyOwnershipFunDecls(key);
     stmts.insert(stmts.end(), ownership.begin(), ownership.end());
 
     auto u8 = std::make_shared<TIntegerType>(TIntegerType::U8);
@@ -199,7 +199,7 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileCloneEntry(
 }
 
 std::unique_ptr<NQumir::TLLVMRunner> CompileDualKeyEntry(
-    const NQqb::NKernel::TAggregateKeyDescriptor& key,
+    const NQdb::NKernel::TAggregateKeyDescriptor& key,
     const std::string& entrySource,
     const std::string& entryName,
     void*& entry)
@@ -210,19 +210,19 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileDualKeyEntry(
     std::vector<TExprPtr> stmts;
     for (const char* file : {
              "string_ops.oz", "owned_blocks.oz", "robin_hood_dual_key.oz"}) {
-        auto library = NQqb::NKernel::ParseFunctionLibrary(
-            NQqb::NKernel::ReadAggregationKernel(file));
+        auto library = NQdb::NKernel::ParseFunctionLibrary(
+            NQdb::NKernel::ReadAggregationKernel(file));
         if (!library) {
             ADD_FAILURE() << library.error().ToString();
             return {};
         }
         stmts.insert(stmts.end(), library->begin(), library->end());
     }
-    auto keyOps = NQqb::NKernel::GenKeyOperationFunDecls(key);
+    auto keyOps = NQdb::NKernel::GenKeyOperationFunDecls(key);
     stmts.insert(stmts.end(), keyOps.begin(), keyOps.end());
-    auto ownership = NQqb::NKernel::GenKeyOwnershipFunDecls(key);
+    auto ownership = NQdb::NKernel::GenKeyOwnershipFunDecls(key);
     stmts.insert(stmts.end(), ownership.begin(), ownership.end());
-    auto entryLibrary = NQqb::NKernel::ParseFunctionLibrary(entrySource);
+    auto entryLibrary = NQdb::NKernel::ParseFunctionLibrary(entrySource);
     if (!entryLibrary) {
         ADD_FAILURE() << entryLibrary.error().ToString();
         return {};
@@ -245,7 +245,7 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileDualKeyEntry(
 
 TEST(StringKeyDescriptor, BuildsScalarLookupAndStoredTypes) {
     TStructType input({{"name", Nullable(std::make_shared<TStringType>())}});
-    auto key = NQqb::NKernel::BuildAggregateKeyDescriptor(input, {"name"});
+    auto key = NQdb::NKernel::BuildAggregateKeyDescriptor(input, {"name"});
 
     ASSERT_TRUE(key.IsScalar());
     EXPECT_TRUE(key.HasDistinctLookupType());
@@ -272,7 +272,7 @@ TEST(StringKeyDescriptor, BuildsParallelCompositeLayouts) {
     TStructType input({
         {"id", Nullable(i64)}, {"name", Nullable(string)},
         {"code", Nullable(i32)}});
-    auto key = NQqb::NKernel::BuildAggregateKeyDescriptor(
+    auto key = NQdb::NKernel::BuildAggregateKeyDescriptor(
         input, {"id", "name", "code"});
 
     ASSERT_FALSE(key.IsScalar());
@@ -309,7 +309,7 @@ TEST(StringKeyDescriptor, RewritesNestedStringLeaves) {
         std::vector<std::pair<std::string, TTypePtr>>{
             {"prefix", i64}, {"text", std::make_shared<TStringType>()}});
     TStructType input({{"nested", Nullable(nested)}});
-    auto key = NQqb::NKernel::BuildAggregateKeyDescriptor(input, {"nested"});
+    auto key = NQdb::NKernel::BuildAggregateKeyDescriptor(input, {"nested"});
 
     ASSERT_TRUE(key.IsScalar());
     EXPECT_TRUE(key.HasDistinctLookupType());
@@ -328,7 +328,7 @@ TEST(StringKeyDescriptor, RewritesNestedStringLeaves) {
 TEST(StringKeyDescriptor, KeepsFixedWidthRepresentationShared) {
     auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
     TStructType input({{"first", i64}, {"second", i64}});
-    auto key = NQqb::NKernel::BuildAggregateKeyDescriptor(
+    auto key = NQdb::NKernel::BuildAggregateKeyDescriptor(
         input, {"first", "second"});
 
     EXPECT_FALSE(key.HasDistinctLookupType());
@@ -347,7 +347,7 @@ TEST(StringKeyDescriptor, KeepsFixedWidthRepresentationShared) {
 TEST(StringKeyDescriptor, AddsValidityOnlyForNullableFields) {
     auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
     TStructType input({{"plain", i64}, {"optional", Nullable(i64)}});
-    auto key = NQqb::NKernel::BuildAggregateKeyDescriptor(
+    auto key = NQdb::NKernel::BuildAggregateKeyDescriptor(
         input, {"plain", "optional"});
 
     auto stored = StructOf(key.StoredType);
@@ -359,26 +359,26 @@ TEST(StringKeyDescriptor, AddsValidityOnlyForNullableFields) {
     EXPECT_EQ(stored->Fields[1].first, "valid_1");
     EXPECT_EQ(stored->Fields.back().first, "key_1");
     for (const auto& field : key.Fields) {
-        EXPECT_FALSE(NQqb::IsNullableType(field.Type));
+        EXPECT_FALSE(NQdb::IsNullableType(field.Type));
     }
 }
 
 TEST(StringKeyDescriptor, CompilesScalarCrossRepresentationOperations) {
     TStructType input({{"name", Nullable(std::make_shared<TStringType>())}});
-    auto key = NQqb::NKernel::BuildAggregateKeyDescriptor(input, {"name"});
+    auto key = NQdb::NKernel::BuildAggregateKeyDescriptor(input, {"name"});
     auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
     auto boolean = std::make_shared<TBoolType>();
     std::string bytes("same\0bytes", 10);
     struct TLookupKey {
         bool Valid;
         uint8_t Padding[7];
-        NQqb::TStringView Value;
+        NQdb::TStringView Value;
     } lookup{true, {}, {reinterpret_cast<uint8_t*>(bytes.data()),
         static_cast<int64_t>(bytes.size())}};
     struct TStoredKey {
         bool Valid;
         uint8_t Padding[7];
-        NQqb::TOwnedString Value;
+        NQdb::TOwnedString Value;
     } stored{true, {}, {lookup.Value.Data, lookup.Value.Size}};
 
     void* lookupHashEntry = nullptr;
@@ -420,7 +420,7 @@ struct TLookupPair {
     int64_t Id;
     bool NameValid;
     uint8_t NamePadding[7];
-    NQqb::TStringView Name;
+    NQdb::TStringView Name;
 };
 
 struct TStoredPair {
@@ -429,7 +429,7 @@ struct TStoredPair {
     int64_t Id;
     bool NameValid;
     uint8_t NamePadding[7];
-    NQqb::TOwnedString Name;
+    NQdb::TOwnedString Name;
 };
 
 static_assert(sizeof(TLookupPair) == 40);
@@ -440,7 +440,7 @@ TEST(StringKeyDescriptor, CompilesCompositeCrossRepresentationOperations) {
     TStructType input({
         {"id", Nullable(i64)},
         {"name", Nullable(std::make_shared<TStringType>())}});
-    auto key = NQqb::NKernel::BuildAggregateKeyDescriptor(input, {"id", "name"});
+    auto key = NQdb::NKernel::BuildAggregateKeyDescriptor(input, {"id", "name"});
     auto boolean = std::make_shared<TBoolType>();
 
     void* equalEntry = nullptr;
@@ -473,7 +473,7 @@ TEST(StringKeyDescriptor, CompilesCompositeCrossRepresentationOperations) {
 TEST(StringKeyDescriptor, FixedWidthOwnershipCloneIsIdentity) {
     auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
     TStructType input({{"id", Nullable(i64)}});
-    auto key = NQqb::NKernel::BuildAggregateKeyDescriptor(input, {"id"});
+    auto key = NQdb::NKernel::BuildAggregateKeyDescriptor(input, {"id"});
     void* entry = nullptr;
     auto runner = CompileCloneEntry(key, entry);
     ASSERT_NE(entry, nullptr);
@@ -489,15 +489,15 @@ TEST(StringKeyDescriptor, FixedWidthOwnershipCloneIsIdentity) {
 
 TEST(StringKeyDescriptor, StringOwnershipCloneCopiesBytes) {
     TStructType input({{"name", Nullable(std::make_shared<TStringType>())}});
-    auto key = NQqb::NKernel::BuildAggregateKeyDescriptor(input, {"name"});
+    auto key = NQdb::NKernel::BuildAggregateKeyDescriptor(input, {"name"});
     void* entry = nullptr;
     auto runner = CompileCloneEntry(key, entry);
     ASSERT_NE(entry, nullptr);
     struct TLookupKey {
-        bool Valid; uint8_t Padding[7]; NQqb::TStringView Value;
+        bool Valid; uint8_t Padding[7]; NQdb::TStringView Value;
     };
     struct TStoredKey {
-        bool Valid; uint8_t Padding[7]; NQqb::TOwnedString Value;
+        bool Valid; uint8_t Padding[7]; NQdb::TOwnedString Value;
     };
     auto clone = reinterpret_cast<int64_t(*)(
         TLookupKey*, uint8_t*, TStoredKey*)>(entry);
@@ -521,10 +521,10 @@ struct TLookupStrings {
     int64_t Id;
     bool FirstValid;
     uint8_t FirstPadding[7];
-    NQqb::TStringView First;
+    NQdb::TStringView First;
     bool SecondValid;
     uint8_t SecondPadding[7];
-    NQqb::TStringView Second;
+    NQdb::TStringView Second;
 };
 
 struct TStoredStrings {
@@ -533,10 +533,10 @@ struct TStoredStrings {
     int64_t Id;
     bool FirstValid;
     uint8_t FirstPadding[7];
-    NQqb::TOwnedString First;
+    NQdb::TOwnedString First;
     bool SecondValid;
     uint8_t SecondPadding[7];
-    NQqb::TOwnedString Second;
+    NQdb::TOwnedString Second;
 };
 
 static_assert(sizeof(TLookupStrings) == 64);
@@ -548,7 +548,7 @@ TEST(StringKeyDescriptor, CompositeOwnershipCloneUsesOneBlock) {
     TStructType input({
         {"id", Nullable(i64)}, {"first", Nullable(string)},
         {"second", Nullable(string)}});
-    auto key = NQqb::NKernel::BuildAggregateKeyDescriptor(
+    auto key = NQdb::NKernel::BuildAggregateKeyDescriptor(
         input, {"id", "first", "second"});
     void* entry = nullptr;
     auto runner = CompileCloneEntry(key, entry);

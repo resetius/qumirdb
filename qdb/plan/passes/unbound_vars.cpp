@@ -1,6 +1,6 @@
 #include <qdb/plan/passes/unbound_vars.h>
 
-namespace NQqb {
+namespace NQdb {
 
 namespace {
 
@@ -88,4 +88,4 @@ std::unordered_set<std::string> FindUnboundVars(const TExprPtr& expr) {
     return result;
 }
 
-} // namespace NQqb
+} // namespace NQdb

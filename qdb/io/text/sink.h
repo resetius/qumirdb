@@ -6,7 +6,7 @@
 #include <string>
 #include <vector>
 
-namespace NQqb {
+namespace NQdb {
 
 // PostgreSQL-style aligned table output.
 // Buffers all rows; call Flush() (or destroy) to print.
@@ -50,4 +50,4 @@ private:
     int64_t Rows_ = 0;
 };
 
-} // namespace NQqb
+} // namespace NQdb

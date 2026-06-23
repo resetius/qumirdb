@@ -8,7 +8,7 @@
 #include <string>
 #include <vector>
 
-namespace NQqb {
+namespace NQdb {
 
 struct TProjectionSpec {
     std::string Name;
@@ -44,4 +44,4 @@ private:
 std::expected<TOperatorPtr, NQumir::TError>
 MakeProject(TOperatorPtr input, std::vector<std::pair<std::string, std::string>> projections);
 
-} // namespace NQqb
+} // namespace NQdb

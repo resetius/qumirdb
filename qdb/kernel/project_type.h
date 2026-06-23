@@ -3,7 +3,7 @@
 #include <qumir/parser/ast.h>
 #include <qumir/parser/type.h>
 
-namespace NQqb::NKernel {
+namespace NQdb::NKernel {
 
 // Infers the result type of a Project expression over `inputType` (a standalone
 // type-inference pass, independent of kernel lowering). Stage 1 supports column
@@ -18,4 +18,4 @@ NQumir::NAst::TTypePtr InferProjectExprType(
     const NQumir::NAst::TExprPtr& expr,
     const NQumir::NAst::TStructType& inputType);
 
-} // namespace NQqb::NKernel
+} // namespace NQdb::NKernel

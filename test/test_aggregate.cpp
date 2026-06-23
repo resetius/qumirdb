@@ -27,8 +27,8 @@
 #include <unordered_set>
 #include <vector>
 
-using namespace NQqb;
-using namespace NQqb::NSexp;
+using namespace NQdb;
+using namespace NQdb::NSexp;
 using namespace NQumir::NAst::NCore;
 using namespace NQumir::NAst;
 
@@ -988,13 +988,13 @@ TEST(AggregateE2E, CompilesNullableReducerArgumentWithUnwrappedAstType) {
         {"v", std::make_shared<TNullable>(std::make_shared<TIntegerType>())},
     });
     NQumir::TLocation loc{};
-    std::vector<NQqb::TAggregateSpec> aggs = {{
+    std::vector<NQdb::TAggregateSpec> aggs = {{
         .Name = "s",
         .Func = "sum",
         .Arg = std::make_shared<TIdentExpr>(loc, "v"),
     }};
     EXPECT_NO_THROW(
-        NQqb::TKernelCompiler().CompileAggregate(inputType, {"k"}, aggs));
+        NQdb::TKernelCompiler().CompileAggregate(inputType, {"k"}, aggs));
 }
 
 // M13.8: a nullable reducer argument must distinguish count(*) (every row) from

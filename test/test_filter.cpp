@@ -18,7 +18,7 @@
 
 namespace {
 
-using namespace NQqb;
+using namespace NQdb;
 using namespace NQumir::NAst;
 
 TExprPtr ParsePredicate(const std::string& source) {
