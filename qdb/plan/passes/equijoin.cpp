@@ -114,6 +114,25 @@ std::unordered_set<std::string> JoinColumns(int side, const std::shared_ptr<TJoi
     return ret;
 }
 
+std::unordered_set<std::string> ColumnsOf(const TConjuct& conj) {
+    if (conj.equiv) {
+        return {conj.left, conj.right};
+    }
+    return FindUnboundVars(conj.Expr);
+}
+
+bool Covers(
+    const std::unordered_set<std::string>& cols,
+    const std::unordered_set<std::string>& side)
+{
+    for (const auto& col : cols) {
+        if (side.count(col) == 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
 struct TContext {
     std::vector<TConjuct> Conjucts;
 };
@@ -130,10 +149,25 @@ TOperatorPtr ProcessProject(std::shared_ptr<TProjectOperator> project, TContext 
     return Materialize(project, ctx.Conjucts);
 }
 
-TOperatorPtr ProcessCrossJoin(std::shared_ptr<TJoinOperator> join, TContext ctx)
+// Outer joins are excluded: pushing onto the null-extended side changes results.
+bool IsRedistributable(EJoinType type) {
+    return type == EJoinType::Inner
+        || type == EJoinType::LeftSemi || type == EJoinType::LeftAnti
+        || type == EJoinType::RightSemi || type == EJoinType::RightAnti;
+}
+
+TOperatorPtr ProcessJoin(std::shared_ptr<TJoinOperator> join, TContext ctx)
 {
+    // Fold the join's own residual into the pool so explicit JOIN ON and
+    // decorrelated semi/anti correlations feed key extraction too.
+    std::vector<TConjuct>& pool = ctx.Conjucts;
+    if (join->Filter()) {
+        ExtractConjucts(pool, join->Filter());
+        join->MutableFilter() = nullptr;
+    }
+
     TUnionFind<std::string> unionFind;
-    for (const auto& conj : ctx.Conjucts) {
+    for (const auto& conj : pool) {
         if (conj.equiv) {
             unionFind.Union(conj.left, conj.right);
         }
@@ -143,16 +177,16 @@ TOperatorPtr ProcessCrossJoin(std::shared_ptr<TJoinOperator> join, TContext ctx)
     auto rightCols = JoinColumns(1, join);
 
     std::unordered_set<std::string> used;
-    std::vector<TJoinKey> joinKeys = ExtractJoinKeys(leftCols, rightCols, unionFind);
-    for (auto& key : joinKeys) {
+    auto& keys = join->MutableKeys();
+    for (auto& key : ExtractJoinKeys(leftCols, rightCols, unionFind)) {
         used.insert(key.Left);
         used.insert(key.Right);
+        keys.push_back(std::move(key));
     }
-    join->MutableKeys().swap(joinKeys);
 
     std::unordered_set<std::string> unused;
     std::vector<TConjuct> newConjucts;
-    for (const auto& conj : ctx.Conjucts) {
+    for (const auto& conj : pool) {
         if (conj.equiv) {
             if (used.count(conj.left) == 0) {
                 unused.insert(conj.left);
@@ -165,59 +199,58 @@ TOperatorPtr ProcessCrossJoin(std::shared_ptr<TJoinOperator> join, TContext ctx)
         }
     }
 
-    // rebuild predicate
-    joinKeys = ExtractJoinKeys(unused, unused, unionFind);
-    for (auto& key : joinKeys) {
+    for (auto& key : ExtractJoinKeys(unused, unused, unionFind)) {
         newConjucts.emplace_back(TConjuct{nullptr, true, key.Left, key.Right});
     }
-
-    // push each conjunct only to the side whose schema covers all its
-    // columns; conjuncts spanning both sides stay at this join.
-    auto columnsOf = [](const TConjuct& conj) {
-        if (conj.equiv) {
-            return std::unordered_set<std::string>{conj.left, conj.right};
-        }
-        return FindUnboundVars(conj.Expr);
-    };
-
-    auto covers = [](
-        const std::unordered_set<std::string>& cols,
-        const std::unordered_set<std::string>& side)
-    {
-        for (const auto& col : cols) {
-            if (side.count(col) == 0) {
-                return false;
-            }
-        }
-        return true;
-    };
 
     std::vector<TConjuct> leftConjucts;
     std::vector<TConjuct> rightConjucts;
     std::vector<TConjuct> residualConjucts;
     for (const auto& conj : newConjucts) {
-        auto cols = columnsOf(conj);
-        if (covers(cols, leftCols)) {
+        auto cols = ColumnsOf(conj);
+        if (Covers(cols, leftCols)) {
             leftConjucts.emplace_back(conj);
-        } else if (covers(cols, rightCols)) {
+        } else if (Covers(cols, rightCols)) {
             rightConjucts.emplace_back(conj);
         } else {
-            // spans both sides: cannot push down, keep as join residual
             residualConjucts.emplace_back(conj);
         }
     }
 
     if (!residualConjucts.empty()) {
-        auto residual = Conjoin(residualConjucts);
-        auto& filter = join->MutableFilter();
-        filter = filter
-            ? std::make_shared<TBinaryExpr>(residual->Location, TOperator("&&"), filter, residual)
-            : residual;
+        join->MutableFilter() = Conjoin(residualConjucts);
     }
 
-    join->MutableLeft() = Process(join->Left(), std::move(TContext{leftConjucts}));
-    join->MutableRight() = Process(join->Right(), std::move(TContext{rightConjucts}));
+    join->MutableLeft() = Process(join->Left(), TContext{std::move(leftConjucts)});
+    join->MutableRight() = Process(join->Right(), TContext{std::move(rightConjucts)});
     return join;
+}
+
+// Outer join: only predicates over the preserved side may be pushed down
+// (pushing onto the null-extended side would change the result). Left keeps the
+// left side, Right the right, Full neither.
+TOperatorPtr ProcessOuterJoin(std::shared_ptr<TJoinOperator> join, TContext ctx) {
+    EJoinType type = join->JoinType();
+    auto leftCols = JoinColumns(0, join);
+    auto rightCols = JoinColumns(1, join);
+
+    std::vector<TConjuct> leftConjucts;
+    std::vector<TConjuct> rightConjucts;
+    std::vector<TConjuct> keep;
+    for (const auto& conj : ctx.Conjucts) {
+        auto cols = ColumnsOf(conj);
+        if (type == EJoinType::Left && Covers(cols, leftCols)) {
+            leftConjucts.emplace_back(conj);
+        } else if (type == EJoinType::Right && Covers(cols, rightCols)) {
+            rightConjucts.emplace_back(conj);
+        } else {
+            keep.emplace_back(conj);
+        }
+    }
+
+    join->MutableLeft() = Process(join->Left(), TContext{std::move(leftConjucts)});
+    join->MutableRight() = Process(join->Right(), TContext{std::move(rightConjucts)});
+    return Materialize(join, keep);
 }
 
 TOperatorPtr Process(TOperatorPtr node, TContext ctx) {
@@ -228,10 +261,9 @@ TOperatorPtr Process(TOperatorPtr node, TContext ctx) {
         return Process(filter->Input(), std::move(ctx));
     } else if (auto maybeJoin = TMaybeOp<TJoinOperator>(node)) {
         auto join = maybeJoin.Cast();
-
-        if (join->JoinType() == EJoinType::Inner && join->Keys().size() == 0) {
-            return ProcessCrossJoin(join, std::move(ctx));
-        }
+        return IsRedistributable(join->JoinType())
+            ? ProcessJoin(join, std::move(ctx))
+            : ProcessOuterJoin(join, std::move(ctx));
     } else if (auto maybeProject = TMaybeOp<TProjectOperator>(node)) {
         auto project = maybeProject.Cast();
         return ProcessProject(project, std::move(ctx));
