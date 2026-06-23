@@ -7,6 +7,7 @@
 #include <qdb/plan/passes/unbound_vars.h>
 #include <qdb/utils/union_find.h>
 
+#include "factor_conjuncts.h"
 #include "flatten_conjucts.h"
 #include "flatten_disjuncts.h"
 
@@ -75,7 +76,7 @@ std::vector<TJoinKey> ExtractJoinKeys(const std::unordered_set<std::string>& lef
 
 void ExtractConjucts(std::vector<TConjuct>& ret, const TExprPtr& expr) {
     std::vector<TExprPtr> conjucts;
-    FlattenConjuncts(expr, conjucts);
+    FactorConjuncts(expr, conjucts);
     for (auto conj : conjucts) {
         auto& cur = ret.emplace_back(TConjuct{conj});
         auto maybeBinary = TMaybeNode<TBinaryExpr>(conj);

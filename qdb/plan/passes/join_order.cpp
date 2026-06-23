@@ -5,7 +5,7 @@
 #include <qdb/plan/ops/join.h>
 #include <qdb/plan/ops/project.h>
 
-#include "flatten_conjucts.h"
+#include "factor_conjuncts.h"
 
 #include <unordered_map>
 #include <unordered_set>
@@ -24,7 +24,7 @@ struct TEdge {
 
 void CollectEquiEdges(const TExprPtr& predicate, std::vector<TEdge>& out) {
     std::vector<TExprPtr> conjucts;
-    FlattenConjuncts(predicate, conjucts);
+    FactorConjuncts(predicate, conjucts);
     for (const auto& conj : conjucts) {
         auto binary = TMaybeNode<TBinaryExpr>(conj);
         if (!binary || binary.Cast()->Operator != "==") {
