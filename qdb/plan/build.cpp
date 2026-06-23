@@ -220,6 +220,22 @@ std::expected<TOperatorPtr, TError> BuildQuery(
     const NSql::TSqlQuery& query,
     const TTableSourceFactory& sources);
 
+// Renames a built sub-plan's output columns to the given list (CTE column lists
+// and derived-table column aliases). The sub-plan's top must be a projection.
+std::expected<TOperatorPtr, TError> ApplyColumnAliases(
+    TOperatorPtr plan, const std::vector<std::string>& aliases)
+{
+    auto project = TMaybeOp<TProjectOperator>(plan);
+    if (!project || project.Cast()->Projections().size() != aliases.size()) {
+        return std::unexpected(TError("column alias count does not match output columns"));
+    }
+    auto& projections = project.Cast()->MutableProjections();
+    for (size_t i = 0; i < projections.size(); ++i) {
+        projections[i].Name = aliases[i];
+    }
+    return plan;
+}
+
 std::expected<TOperatorPtr, TError> BuildTableRef(
     const NSql::TSqlPtr<NSql::TSqlTableRef>& ref,
     const TTableSourceFactory& sources)
@@ -240,10 +256,14 @@ std::expected<TOperatorPtr, TError> BuildTableRef(
 
     if (auto sub = NSql::TMaybeNode<NSql::TSqlSubqueryTable>(ref)) {
         auto node = sub.Cast();
-        if (node->ColumnAliases) {
-            return std::unexpected(TError("column aliases on derived tables are not supported yet"));
+        auto plan = BuildQuery(*node->Query, sources);
+        if (!plan) {
+            return plan;
         }
-        return BuildQuery(*node->Query, sources);
+        if (node->ColumnAliases) {
+            return ApplyColumnAliases(std::move(*plan), node->ColumnAliases->Items);
+        }
+        return plan;
     }
 
     if (auto maybeJoin = NSql::TMaybeNode<NSql::TSqlJoin>(ref)) {
@@ -672,15 +692,7 @@ std::expected<TOperatorPtr, TError> BuildQuery(
         // Each inlined copy must own independent expression nodes.
         CloneOperatorExprs(*plan);
         if (it->second->Columns) {
-            const auto& aliases = it->second->Columns->Items;
-            auto project = TMaybeOp<TProjectOperator>(*plan);
-            if (!project || project.Cast()->Projections().size() != aliases.size()) {
-                return std::unexpected(TError("CTE column alias count mismatch"));
-            }
-            auto& projections = project.Cast()->MutableProjections();
-            for (size_t i = 0; i < projections.size(); ++i) {
-                projections[i].Name = aliases[i];
-            }
+            return ApplyColumnAliases(std::move(*plan), it->second->Columns->Items);
         }
         return plan;
     };
