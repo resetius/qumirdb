@@ -270,14 +270,15 @@ NQumir::NAst::TExprPtr list(TLocation loc, std::vector<NQumir::NAst::TExprPtr> i
     return std::make_shared<NQumir::NAst::TBlockExpr>(loc, std::move(items));
 }
 
-// builds a column reference: <ident> for a single name, a chain of field
-// accesses for a qualified one (a.b.c -> ((a).b).c)
+// builds a column reference as a single dotted ident (a.b.c -> "a.b.c"), the
+// qualified form the logical layer (QualifyColumns, equijoin, pushdown) expects.
 NQumir::NAst::TExprPtr qualified_ref(TLocation loc, const std::vector<std::string>& parts) {
-    NQumir::NAst::TExprPtr ret = std::make_shared<NQumir::NAst::TIdentExpr>(loc, parts.front());
+    std::string name = parts.front();
     for (size_t i = 1; i < parts.size(); ++i) {
-        ret = std::make_shared<NQumir::NAst::TFieldAccessExpr>(loc, ret, parts[i]);
+        name += '.';
+        name += parts[i];
     }
-    return ret;
+    return std::make_shared<NQumir::NAst::TIdentExpr>(loc, std::move(name));
 }
 
 // <ident> ::= <regular_ident> | <quoted_ident>
