@@ -495,8 +495,46 @@ std::expected<TOperatorPtr, TError> BuildSelect(
         keys = std::move(*groupKeys);
     }
 
+    auto specs = collector.TakeSpecs();
+
+    // The aggregate executor requires column-reference arguments, so materialize
+    // computed arguments (and pass the group keys through) in a project below.
+    bool needsArgProject = false;
+    for (const auto& spec : specs) {
+        if (spec.Arg && !NAst::TMaybeNode<NAst::TIdentExpr>(spec.Arg)) {
+            needsArgProject = true;
+            break;
+        }
+    }
+    if (needsArgProject) {
+        std::vector<TProjectionSpec> argProjections;
+        std::set<std::string> projected;
+        auto passthrough = [&](const std::string& name) {
+            if (projected.insert(name).second) {
+                argProjections.push_back({ .Name = name, .Expression = Ident({}, name) });
+            }
+        };
+        for (const auto& key : keys) {
+            passthrough(key);
+        }
+        int counter = 0;
+        for (auto& spec : specs) {
+            if (!spec.Arg) {
+                continue;
+            }
+            if (auto ident = NAst::TMaybeNode<NAst::TIdentExpr>(spec.Arg)) {
+                passthrough(ident.Cast()->Name);
+            } else {
+                std::string name = "arg_" + std::to_string(counter++);
+                argProjections.push_back({ .Name = name, .Expression = spec.Arg });
+                spec.Arg = Ident(spec.Arg->Location, name);
+            }
+        }
+        node = std::make_shared<TProjectOperator>(std::move(node), std::move(argProjections));
+    }
+
     node = std::make_shared<TAggregateOperator>(
-        std::move(node), std::move(keys), collector.TakeSpecs());
+        std::move(node), std::move(keys), std::move(specs));
     if (having) {
         node = std::make_shared<TFilterOperator>(std::move(node), std::move(having));
     }
