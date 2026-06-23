@@ -497,9 +497,13 @@ std::expected<TOperatorPtr, TError> BuildSelect(
 
     auto specs = collector.TakeSpecs();
 
+    // A global aggregate (no GROUP BY) still needs a grouping-key descriptor, so
+    // synthesize a constant key column and group by it, as the hand-written plans do.
+    bool global = keys.empty();
+
     // The aggregate executor requires column-reference arguments, so materialize
     // computed arguments (and pass the group keys through) in a project below.
-    bool needsArgProject = false;
+    bool needsArgProject = global;
     for (const auto& spec : specs) {
         if (spec.Arg && !NAst::TMaybeNode<NAst::TIdentExpr>(spec.Arg)) {
             needsArgProject = true;
@@ -529,6 +533,13 @@ std::expected<TOperatorPtr, TError> BuildSelect(
                 argProjections.push_back({ .Name = name, .Expression = spec.Arg });
                 spec.Arg = Ident(spec.Arg->Location, name);
             }
+        }
+        if (global) {
+            argProjections.push_back({
+                .Name = "__group__",
+                .Expression = std::make_shared<NAst::TNumberExpr>(TLocation{}, static_cast<int64_t>(1)),
+            });
+            keys.push_back("__group__");
         }
         node = std::make_shared<TProjectOperator>(std::move(node), std::move(argProjections));
     }
