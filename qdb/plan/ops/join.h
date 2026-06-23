@@ -57,6 +57,8 @@ public:
 
     TOperatorPtr Left() const { return Left_; }
     TOperatorPtr Right() const { return Right_; }
+    TOperatorPtr& MutableLeft() { return Left_; }
+    TOperatorPtr& MutableRight() { return Right_; }
     const std::vector<TJoinKey>& Keys() const { return Keys_; }
     std::vector<TJoinKey>& MutableKeys() { return Keys_; }
     EJoinType JoinType() const { return Type_; }
