@@ -477,6 +477,30 @@ QumirDbModule::QumirDbModule() {
             .ArgTypes = {i32Type},
             .ReturnType = i32Type,
         },
+        {
+            .Name = "qdb_sql_date",
+            .MangledName = "qdb_sql_date",
+            .Ptr = reinterpret_cast<void*>(static_cast<int32_t(*)(const char*)>(qdb_sql_date)),
+            .Packed = +[](const uint64_t* args, size_t) -> uint64_t {
+                return static_cast<uint64_t>(static_cast<uint32_t>(
+                    qdb_sql_date(reinterpret_cast<const char*>(args[0]))));
+            },
+            .ArgTypes = {stringLiteralType},
+            .ReturnType = i32Type,
+        },
+        {
+            .Name = "qdb_sql_interval",
+            .MangledName = "qdb_sql_interval",
+            .Ptr = reinterpret_cast<void*>(static_cast<int32_t(*)(const char*, const char*)>(qdb_sql_interval)),
+            .Packed = +[](const uint64_t* args, size_t) -> uint64_t {
+                return static_cast<uint64_t>(static_cast<uint32_t>(
+                    qdb_sql_interval(
+                        reinterpret_cast<const char*>(args[0]),
+                        reinterpret_cast<const char*>(args[1]))));
+            },
+            .ArgTypes = {stringLiteralType, stringLiteralType},
+            .ReturnType = i32Type,
+        },
     };
 }
 
