@@ -4,6 +4,7 @@
 #include <qdb/plan/build.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/passes/column_pruning.h>
+#include <qdb/plan/passes/equijoin.h>
 #include <qdb/plan/passes/qualify_columns.h>
 #include <qdb/plan/passes/typing.h>
 #include <qdb/sexp/parser.h>
@@ -209,6 +210,8 @@ int RunQuery(ESyntax syntax, std::istream& in, const TConfig& config) {
     NQdb::AssignSourceAliases(*plan);
     NQdb::QualifyColumns(*plan);
     NQdb::AnnotateTypes(*plan);
+    *plan = NQdb::ExtractEquiJoins(*plan);
+    NQdb::AnnotateTypes(*plan); // re-annotate: equi-join extraction adds/removes nodes
     NQdb::ApplyColumnPruning(*plan);
 
     if (config.Verbose) {
