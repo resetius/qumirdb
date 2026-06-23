@@ -21,6 +21,7 @@ public:
     const std::string ToString() const override;
 
     TOperatorPtr Input() const { return Input_; }
+    TOperatorPtr& MutableInput() { return Input_; }
     const NQumir::NAst::TExprPtr& Predicate() const { return Predicate_; }
     NQumir::NAst::TExprPtr& MutablePredicate() { return Predicate_; }
 

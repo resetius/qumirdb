@@ -25,6 +25,7 @@ add_library(qumirdb
     plan/passes/column_pruning.cpp
     plan/passes/qualify_columns.cpp
     plan/passes/equijoin.cpp
+    plan/passes/join_order.cpp
     plan/passes/flatten_conjucts.cpp
     plan/passes/flatten_disjuncts.cpp
     plan/build.cpp
