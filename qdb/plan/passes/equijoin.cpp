@@ -8,8 +8,7 @@
 #include <qdb/utils/union_find.h>
 
 #include "flatten_conjucts.h"
-
-#include <iostream>
+#include "flatten_disjuncts.h"
 
 namespace NQdb {
 
@@ -133,6 +132,45 @@ bool Covers(
     return true;
 }
 
+TExprPtr Combine(const std::vector<TExprPtr>& parts, TOperator op) {
+    TExprPtr result;
+    for (const auto& part : parts) {
+        result = result
+            ? std::make_shared<TBinaryExpr>(part->Location, op, result, part)
+            : part;
+    }
+    return result;
+}
+
+// Weakens a disjunction into a single-side necessary condition: per disjunct,
+// keep only the atoms over `side`; if a disjunct constrains no `side` column,
+// nothing can be derived. Returns null when there is nothing to push.
+TExprPtr DeriveSideFilter(const TExprPtr& expr, const std::unordered_set<std::string>& side) {
+    std::vector<TExprPtr> disjuncts;
+    FlattenDisjuncts(expr, disjuncts);
+    if (disjuncts.size() < 2) {
+        return nullptr;
+    }
+
+    std::vector<TExprPtr> parts;
+    for (const auto& disjunct : disjuncts) {
+        std::vector<TExprPtr> atoms;
+        FlattenConjuncts(disjunct, atoms);
+
+        std::vector<TExprPtr> kept;
+        for (const auto& atom : atoms) {
+            if (Covers(FindUnboundVars(atom), side)) {
+                kept.push_back(atom);
+            }
+        }
+        if (kept.empty()) {
+            return nullptr;
+        }
+        parts.push_back(Combine(kept, TOperator("&&")));
+    }
+    return Combine(parts, TOperator("||"));
+}
+
 struct TContext {
     std::vector<TConjuct> Conjucts;
 };
@@ -214,6 +252,14 @@ TOperatorPtr ProcessJoin(std::shared_ptr<TJoinOperator> join, TContext ctx)
             rightConjucts.emplace_back(conj);
         } else {
             residualConjucts.emplace_back(conj);
+            if (conj.Expr) {
+                if (auto derived = DeriveSideFilter(conj.Expr, leftCols)) {
+                    leftConjucts.emplace_back(TConjuct{derived});
+                }
+                if (auto derived = DeriveSideFilter(conj.Expr, rightCols)) {
+                    rightConjucts.emplace_back(TConjuct{derived});
+                }
+            }
         }
     }
 
