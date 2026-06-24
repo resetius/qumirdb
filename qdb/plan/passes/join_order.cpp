@@ -140,36 +140,43 @@ TOperatorPtr BuildChain(
     return result;
 }
 
-TOperatorPtr Reorder(TOperatorPtr node) {
+// `edges` are equality edges threaded down from enclosing filters, so an
+// inner-join chain can be reordered even when a filter is separated from it by
+// other operators (e.g. a decorrelation LEFT JOIN). Edges are reset across
+// project/aggregate, which redefine columns; BuildChain ignores edges whose
+// endpoints aren't owned by the chain's leaves (qualified names disambiguate).
+TOperatorPtr Reorder(TOperatorPtr node, std::vector<TEdge> edges) {
     if (!node) {
         return node;
     }
     if (auto maybeFilter = TMaybeOp<TFilterOperator>(node)) {
         auto filter = maybeFilter.Cast();
-        filter->MutableInput() = Reorder(filter->Input());
-        if (IsReorderableJoin(filter->Input())) {
-            std::vector<TOperatorPtr> leaves;
-            CollectChainLeaves(filter->Input(), leaves);
-            std::vector<TEdge> edges;
-            CollectEquiEdges(filter->Predicate(), edges);
-            filter->MutableInput() = BuildChain(leaves, edges);
-        }
+        CollectEquiEdges(filter->Predicate(), edges);
+        filter->MutableInput() = Reorder(filter->Input(), std::move(edges));
         return filter;
+    }
+    if (IsReorderableJoin(node)) {
+        std::vector<TOperatorPtr> leaves;
+        CollectChainLeaves(node, leaves);
+        for (auto& leaf : leaves) {
+            leaf = Reorder(std::move(leaf), {});
+        }
+        return BuildChain(leaves, edges);
     }
     if (auto maybeJoin = TMaybeOp<TJoinOperator>(node)) {
         auto join = maybeJoin.Cast();
-        join->MutableLeft() = Reorder(join->Left());
-        join->MutableRight() = Reorder(join->Right());
+        join->MutableLeft() = Reorder(join->Left(), edges);
+        join->MutableRight() = Reorder(join->Right(), edges);
         return join;
     }
     if (auto maybeProject = TMaybeOp<TProjectOperator>(node)) {
         auto project = maybeProject.Cast();
-        project->MutableInput() = Reorder(project->Input());
+        project->MutableInput() = Reorder(project->Input(), {});
         return project;
     }
     if (auto maybeAggregate = TMaybeOp<TAggregateOperator>(node)) {
         auto aggregate = maybeAggregate.Cast();
-        aggregate->MutableInput() = Reorder(aggregate->Input());
+        aggregate->MutableInput() = Reorder(aggregate->Input(), {});
         return aggregate;
     }
     return node;
@@ -178,7 +185,7 @@ TOperatorPtr Reorder(TOperatorPtr node) {
 } // namespace
 
 TOperatorPtr ReorderJoins(TOperatorPtr root) {
-    return Reorder(std::move(root));
+    return Reorder(std::move(root), {});
 }
 
 } // namespace NQdb

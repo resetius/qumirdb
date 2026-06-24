@@ -19,6 +19,8 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace NQdb {
@@ -455,10 +457,31 @@ std::expected<TOperatorPtr, TError> DecorrelateIn(
         std::move(left), *right, std::vector<TJoinKey>{}, type, std::move(residual));
 }
 
-// Replaces each uncorrelated scalar subquery in `expr` with a reference to a
-// fresh column produced by cross-joining the (single-row) subquery plan onto
-// `node`. The subquery must project exactly one column. Correlated scalar
-// subqueries are not handled here.
+// Columns produced by a subquery's own FROM tables (base tables, recursing into
+// joins). Used to tell a subquery's local columns from outer (correlated) ones.
+void CollectLocalColumns(
+    const NSql::TSqlPtr<NSql::TSqlTableRef>& ref,
+    const TTableSourceFactory& sources,
+    std::unordered_set<std::string>& out)
+{
+    if (auto table = NSql::TMaybeNode<NSql::TSqlTableName>(ref)) {
+        if (auto src = sources(TableName(table.Cast()->Name))) {
+            if (auto source = TMaybeOp<TSourceOperator>(*src)) {
+                for (const auto& col : source.Cast()->GetSource().Schema().Columns) {
+                    out.insert(std::string(col.Name));
+                }
+            }
+        }
+    } else if (auto join = NSql::TMaybeNode<NSql::TSqlJoin>(ref)) {
+        CollectLocalColumns(join.Cast()->Left, sources, out);
+        CollectLocalColumns(join.Cast()->Right, sources, out);
+    }
+}
+
+// Replaces each scalar subquery in `expr` with a reference to a fresh column.
+// Uncorrelated subqueries broadcast via a cross join (a single row). Correlated
+// ones are decorrelated: the subquery is grouped by its correlation columns and
+// LEFT-joined onto `node` (Apply elimination).
 std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
     NAst::TExprPtr expr,
     TOperatorPtr& node,
@@ -469,10 +492,99 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
         return expr;
     }
     if (auto sub = NAst::TMaybeNode<NSql::TSubqueryExpr>(expr)) {
-        if (sub.Cast()->Kind != NSql::TSubqueryExpr::EKind::Scalar) {
+        auto scalar = sub.Cast();
+        if (scalar->Kind != NSql::TSubqueryExpr::EKind::Scalar) {
             return std::unexpected(TError("subquery is not supported in this position"));
         }
-        auto plan = BuildQuery(*sub.Cast()->Query, sources);
+
+        auto maybeSelect = NSql::TMaybeNode<NSql::TSqlSelect>(scalar->Query->Body);
+        if (maybeSelect && !scalar->Query->WithClause
+            && maybeSelect.Cast()->From && maybeSelect.Cast()->Where)
+        {
+            auto sel = maybeSelect.Cast();
+            std::unordered_set<std::string> local;
+            for (const auto& item : sel->From->Items) {
+                CollectLocalColumns(item, sources, local);
+            }
+
+            // Correlation = an equality with one local and one outer column.
+            std::vector<std::pair<std::string, std::string>> correlation; // (outer, local)
+            std::vector<NAst::TExprPtr> localPreds;
+            std::vector<NAst::TExprPtr> conjuncts;
+            FlattenConjuncts(sel->Where, conjuncts);
+            for (const auto& conj : conjuncts) {
+                bool isCorrelation = false;
+                if (auto binary = NAst::TMaybeNode<NAst::TBinaryExpr>(conj);
+                    binary && binary.Cast()->Operator == "==")
+                {
+                    auto left = NAst::TMaybeNode<NAst::TIdentExpr>(binary.Cast()->Left);
+                    auto right = NAst::TMaybeNode<NAst::TIdentExpr>(binary.Cast()->Right);
+                    if (left && right) {
+                        const std::string& ln = left.Cast()->Name;
+                        const std::string& rn = right.Cast()->Name;
+                        bool lLocal = local.count(ln) > 0;
+                        bool rLocal = local.count(rn) > 0;
+                        if (lLocal && !rLocal) {
+                            correlation.emplace_back(rn, ln);
+                            isCorrelation = true;
+                        } else if (rLocal && !lLocal) {
+                            correlation.emplace_back(ln, rn);
+                            isCorrelation = true;
+                        }
+                    }
+                }
+                if (!isCorrelation) {
+                    localPreds.push_back(conj);
+                }
+            }
+
+            if (!correlation.empty()) {
+                int id = counter++;
+                // Group by the correlation columns (exposed under fresh names) and
+                // keep only the local predicates.
+                if (!sel->GroupBy) {
+                    sel->GroupBy = std::make_shared<NSql::TSqlGroupBy>();
+                }
+                std::vector<NSql::TSqlPtr<NSql::TSqlSelectItem>> prepend;
+                std::vector<TJoinKey> joinKeys;
+                for (size_t k = 0; k < correlation.size(); ++k) {
+                    const auto& [outerCol, localCol] = correlation[k];
+                    std::string corrName =
+                        "__corr_" + std::to_string(id) + "_" + std::to_string(k) + "__";
+                    auto item = std::make_shared<NSql::TSqlSelectItem>();
+                    item->Expr = Ident({}, localCol);
+                    item->Alias = corrName;
+                    prepend.push_back(std::move(item));
+                    sel->GroupBy->Items.push_back(Ident({}, localCol));
+                    joinKeys.push_back({ .Left = outerCol, .Right = corrName });
+                }
+                sel->SelectList->Items.insert(
+                    sel->SelectList->Items.begin(), prepend.begin(), prepend.end());
+                sel->Where = localPreds.empty() ? nullptr : Conjoin(localPreds);
+
+                auto plan = BuildQuery(*scalar->Query, sources);
+                if (!plan) {
+                    return std::unexpected(plan.error());
+                }
+                auto project = TMaybeOp<TProjectOperator>(*plan);
+                if (!project
+                    || project.Cast()->Projections().size() != correlation.size() + 1)
+                {
+                    return std::unexpected(
+                        TError("correlated scalar subquery must return one value"));
+                }
+                std::string scalarName = "__scalar_" + std::to_string(id) + "__";
+                project.Cast()->MutableProjections().back().Name = scalarName;
+                // LEFT join preserves outer rows; a missing match yields NULL, so
+                // the surrounding comparison filters the row out (SQL semantics).
+                node = std::make_shared<TJoinOperator>(
+                    std::move(node), *plan, std::move(joinKeys), EJoinType::Left, nullptr);
+                return Ident(expr->Location, std::move(scalarName));
+            }
+        }
+
+        // Uncorrelated: the subquery yields one row, broadcast via a cross join.
+        auto plan = BuildQuery(*scalar->Query, sources);
         if (!plan) {
             return std::unexpected(plan.error());
         }
@@ -482,7 +594,6 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
         }
         std::string name = "__scalar_" + std::to_string(counter++) + "__";
         project.Cast()->MutableProjections()[0].Name = name;
-        // The subquery yields one row, so a cross join just broadcasts its value.
         node = std::make_shared<TJoinOperator>(
             std::move(node), *plan, std::vector<TJoinKey>{}, EJoinType::Inner, nullptr);
         return Ident(expr->Location, std::move(name));
