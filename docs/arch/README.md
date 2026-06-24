@@ -1,6 +1,24 @@
 # Architecture
 
-Logical planning (SQL → optimized logical plan), in pipeline order:
+## Query pipeline
+
+SQL → logical plan → idempotent rewrite passes → physical plan. Entry point
+`bin/cli.cpp` (`RunQuery`); builder `qdb/plan/build.cpp`; passes
+`qdb/plan/passes/`.
+
+1. **Build** — SQL AST → naive operator tree (no keys, no pushdown, no reorder).
+   [logical_plan_build.md](logical_plan_build.md), [decorrelation.md](decorrelation.md).
+2. **AssignSourceAliases** — unique alias per source.
+3. **QualifyColumns** — rewrite refs to `alias.col`; set source/join schemas.
+4. **AnnotateTypes** — attach `TFunctionType` (input/output schema) to every op;
+   idempotent, re-run after each structural rewrite.
+5. **ReorderJoins** — cross-join chains → connected order.
+   [join_reorder.md](join_reorder.md).
+6. **ExtractEquiJoins** — lift equi-keys (equivalence classes), push predicates
+   per side, leave residuals. [predicate_pushdown.md](predicate_pushdown.md).
+7. **ApplyColumnPruning** — narrow each op's required input columns.
+
+Detailed algorithm docs:
 
 - [Logical plan build](logical_plan_build.md) - SQL AST → naive operator tree:
   FROM/WHERE/SELECT/GROUP BY/HAVING mapping, aggregate-argument materialization,
