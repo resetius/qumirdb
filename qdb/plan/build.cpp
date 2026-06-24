@@ -12,6 +12,7 @@
 #include <qumir/parser/ast.h>
 #include <qumir/parser/type.h>
 
+#include <algorithm>
 #include <cctype>
 #include <map>
 #include <memory>
@@ -135,11 +136,36 @@ public:
         return Specs_.empty();
     }
 
+    // Set when a count(distinct <col>) was collected: BuildSelect realizes it via
+    // a double aggregation (inner dedup on the group keys ∪ <col>, then count).
+    const std::optional<std::string>& DistinctColumn() const {
+        return DistinctColumn_;
+    }
+    bool HasNonDistinct() const {
+        return HasNonDistinct_;
+    }
+
 private:
     std::expected<NAst::TExprPtr, TError> Emit(const TAggCall& agg, TLocation loc) {
         if (agg.Distinct) {
-            return std::unexpected(TError(loc, "count(distinct) is not supported yet"));
+            if (agg.Func != "count") {
+                return std::unexpected(TError(loc, "only count(distinct ...) is supported"));
+            }
+            auto ident = NAst::TMaybeNode<NAst::TIdentExpr>(agg.Arg);
+            if (!ident) {
+                return std::unexpected(TError(loc, "count(distinct ...) requires a column argument"));
+            }
+            const std::string& column = ident.Cast()->Name;
+            if (DistinctColumn_ && *DistinctColumn_ != column) {
+                return std::unexpected(TError(loc, "multiple distinct columns are not supported"));
+            }
+            DistinctColumn_ = column;
+            std::string name = NextName("count");
+            Specs_.push_back({ .Name = name, .Func = "count", .Arg = agg.Arg });
+            return Ident(loc, name);
         }
+
+        HasNonDistinct_ = true;
 
         // avg has no aggregate kernel; express it as sum / count.
         if (agg.Func == "avg") {
@@ -168,6 +194,8 @@ private:
 
     std::vector<TAggregateSpec> Specs_;
     int Counter_ = 0;
+    std::optional<std::string> DistinctColumn_;
+    bool HasNonDistinct_ = false;
 };
 
 std::string ItemName(const NSql::TSqlSelectItem& item, size_t index) {
@@ -562,6 +590,22 @@ std::expected<TOperatorPtr, TError> BuildSelect(
     }
 
     auto specs = collector.TakeSpecs();
+
+    // count(distinct col): dedup with an inner aggregate on (group keys ∪ col),
+    // then count over the deduped rows above — the double aggregation the hand
+    // plans use.
+    if (auto distinctColumn = collector.DistinctColumn()) {
+        if (collector.HasNonDistinct()) {
+            return std::unexpected(
+                TError("mixing DISTINCT and non-DISTINCT aggregates is not supported"));
+        }
+        std::vector<std::string> dedupKeys = keys;
+        if (std::find(dedupKeys.begin(), dedupKeys.end(), *distinctColumn) == dedupKeys.end()) {
+            dedupKeys.push_back(*distinctColumn);
+        }
+        node = std::make_shared<TAggregateOperator>(
+            std::move(node), std::move(dedupKeys), std::vector<TAggregateSpec>{});
+    }
 
     // A global aggregate (no GROUP BY) still needs a grouping-key descriptor, so
     // synthesize a constant key column and group by it, as the hand-written plans do.
