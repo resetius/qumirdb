@@ -13,11 +13,11 @@
 
   ;; ---- pure generic probe leaves (no scalar pointers) ----
 
-  (fun rh_lookup_slot ((var keys <ptr <named Key (template readable mutable)>>)
+  (fun rh_lookup_slot ((var keys <ptr <named Key (template)>>)
                        (var dist <ptr i64>)
                        (var slot_ids <ptr i64>)
                        (var capacity i64)
-                       (var key <named Key (template readable mutable)>)) -> i64
+                       (var key <named Key (template)>)) -> i64
     (block
       (var slot = (& (call rh_hash key) (- capacity (: 1 i64))))
       (var probe_dist i64)
@@ -35,11 +35,11 @@
 
   ;; Inserts a key known to be absent, assigning it dense_slot, with Robin
   ;; Hood displacement. Returns #f only when the table is unexpectedly full.
-  (fun rh_insert_displace ((var keys <ptr <named Key (template readable mutable)>>)
+  (fun rh_insert_displace ((var keys <ptr <named Key (template)>>)
                            (var dist <ptr i64>)
                            (var slot_ids <ptr i64>)
                            (var capacity i64)
-                           (var key <named Key (template readable mutable)>)
+                           (var key <named Key (template)>)
                            (var dense_slot i64)) -> bool
     (block
       (var carried_key = key)
@@ -203,7 +203,7 @@
 
   (fun aht_rehash ((var ht <ref HashTable>)
                    (var new_capacity i64)
-                   (var key_witness <named Key (template readable mutable)>)) -> bool
+                   (var key_witness <named Key (template)>)) -> bool
     (block
       (var key_size = (field ht KeySize))
       (if (|| (< new_capacity (: 1 i64))
@@ -256,9 +256,9 @@
               (call qdb_free (cast new_agg_buffers <ptr i8>))))
           (return #f)))
       (var old_keys_typed =
-        (cast (field ht Keys) <ptr <named Key (template readable mutable)>>))
+        (cast (field ht Keys) <ptr <named Key (template)>>))
       (var new_keys_typed =
-        (cast new_keys <ptr <named Key (template readable mutable)>>))
+        (cast new_keys <ptr <named Key (template)>>))
       (if (! (call rh_rehash_into old_keys_typed (field ht Dist) (field ht SlotId)
                     (field ht Capacity) new_keys_typed new_dist new_slot_ids
                     new_capacity))
@@ -275,9 +275,9 @@
           (call qdb_free (cast new_agg_buffers <ptr i8>))
           (return #f)))
       (var old_group_typed =
-        (cast (field ht GroupKeys) <ptr <named Key (template readable mutable)>>))
+        (cast (field ht GroupKeys) <ptr <named Key (template)>>))
       (var new_group_typed =
-        (cast new_group_keys <ptr <named Key (template readable mutable)>>))
+        (cast new_group_keys <ptr <named Key (template)>>))
       (var old_agg_buffers = (field ht AggBuffers))
       (var i i64)
       (= i (: 0 i64))
@@ -315,11 +315,11 @@
       (return #t)))
 
   (fun aht_update ((var ht <ref HashTable>)
-                   (var key <named Key (template readable mutable)>)
+                   (var key <named Key (template)>)
                    (var value i64)) -> i64
     (block
       (var keys_typed =
-        (cast (field ht Keys) <ptr <named Key (template readable mutable)>>))
+        (cast (field ht Keys) <ptr <named Key (template)>>))
       (var dense_slot = (call rh_lookup_slot keys_typed (field ht Dist)
                           (field ht SlotId) (field ht Capacity) key))
       (if (!= dense_slot (: -1 i64))
@@ -335,12 +335,12 @@
             (block (return (: -1 i64))))
           (= capacity (field ht Capacity))))
       (= keys_typed
-        (cast (field ht Keys) <ptr <named Key (template readable mutable)>>))
+        (cast (field ht Keys) <ptr <named Key (template)>>))
       (if (! (call rh_insert_displace keys_typed (field ht Dist) (field ht SlotId)
                     capacity key size))
         (block (return (: -1 i64))))
       (var group_typed =
-        (cast (field ht GroupKeys) <ptr <named Key (template readable mutable)>>))
+        (cast (field ht GroupKeys) <ptr <named Key (template)>>))
       (= group_typed [size] key)
       (var agg_buffers = (field ht AggBuffers))
       (var num_aggs = (field ht NumAggs))

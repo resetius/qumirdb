@@ -93,7 +93,7 @@
                        (var size i64)
                        (var key_size i64)
                        (var num_aggs i64)
-                       (var key_witness <named Key (template readable mutable)>)) -> bool
+                       (var key_witness <named Key (template)>)) -> bool
     (block
       (if (|| (< new_capacity size)
               (|| (< new_capacity (: 1 i64))
@@ -142,9 +142,9 @@
       (var old_group_keys = (index group_keys_ref (: 0 i64)))
       (var old_agg_buffers = (index agg_buffers_ref (: 0 i64)))
       (var typed_old =
-        (cast old_group_keys <ptr <named Key (template readable mutable)>>))
+        (cast old_group_keys <ptr <named Key (template)>>))
       (var typed_new =
-        (cast new_group_keys <ptr <named Key (template readable mutable)>>))
+        (cast new_group_keys <ptr <named Key (template)>>))
       (var slot i64)
       (= slot (: 0 i64))
       (while (< slot size)
@@ -166,11 +166,11 @@
   (fun agg_dense_update ((var group_keys <ptr u8>)
                          (var agg_buffers <ptr <ptr i64>>)
                          (var dense_slot i64)
-                         (var key <named Key (template readable mutable)>)
+                         (var key <named Key (template)>)
                          (var value i64)
                          (var is_new bool))
     (block
       (var typed_group_keys =
-        (cast group_keys <ptr <named Key (template readable mutable)>>))
+        (cast group_keys <ptr <named Key (template)>>))
       (if is_new (block (= typed_group_keys [dense_slot] key)))
       (call agg_apply_reducers agg_buffers dense_slot value is_new))))

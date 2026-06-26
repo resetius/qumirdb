@@ -4,9 +4,9 @@
   (fun rh_hash ((var key i64)) -> i64
     (block
       (var h = (cast key u64))
-      (= h (xor h (>> h (: 12 u64))))
-      (= h (xor h (<< h (: 25 u64))))
-      (= h (xor h (>> h (: 27 u64))))
+      (= h (^ h (>> h (: 12 u64))))
+      (= h (^ h (<< h (: 25 u64))))
+      (= h (^ h (>> h (: 27 u64))))
       (= h (* h (: 2685821657736338717 u64)))
       (return (cast h i64))))
 
@@ -14,12 +14,12 @@
     (block
       (return (== left right))))
 
-  (fun rh_insert_slot_id ((var keys <ptr <named Key (template readable mutable)>>)
+  (fun rh_insert_slot_id ((var keys <ptr <named Key (template)>>)
                           (var dist <ptr i64>)
                           (var slot_ids <ptr i64>)
                           (var capacity i64)
                           (var size <ptr i64>)
-                          (var key <named Key (template readable mutable)>)) -> i64
+                          (var key <named Key (template)>)) -> i64
     (block
       (if (>= (index size (: 0 i64)) capacity)
         (block

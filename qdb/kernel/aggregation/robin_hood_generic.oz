@@ -4,12 +4,12 @@
   ;; Returns the stable dense slot id. out_is_new[0] is 1 for a new key and
   ;; 0 for an existing key. Key representation is visible only through the
   ;; injected rh_hash/rh_key_equal overloads.
-  (fun rh_upsert ((var keys <ptr <named Key (template readable mutable)>>)
+  (fun rh_upsert ((var keys <ptr <named Key (template)>>)
                   (var dist <ptr i64>)
                   (var slot_ids <ptr i64>)
                   (var capacity i64)
                   (var size <ptr i64>)
-                  (var key <named Key (template readable mutable)>)
+                  (var key <named Key (template)>)
                   (var out_is_new <ptr i64>)) -> i64
     (block
       (= out_is_new [(: 0 i64)] (: 0 i64))

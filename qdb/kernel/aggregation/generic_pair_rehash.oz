@@ -6,31 +6,31 @@
   (fun rh_mix_i64 ((var value i64)) -> i64
     (block
       (var h = (cast value u64))
-      (= h (xor h (>> h (: 12 u64))))
-      (= h (xor h (<< h (: 25 u64))))
-      (= h (xor h (>> h (: 27 u64))))
+      (= h (^ h (>> h (: 12 u64))))
+      (= h (^ h (<< h (: 25 u64))))
+      (= h (^ h (>> h (: 27 u64))))
       (= h (* h (: 2685821657736338717 u64)))
       (return (cast h i64))))
 
   (fun rh_hash ((var key <named PairKey>)) -> i64
     (block
       (return (call rh_mix_i64
-        (xor (field key first)
+        (^ (field key first)
              (call rh_mix_i64 (field key second)))))))
 
-  (fun rh_rehash ((var old_keys <ptr <named Key (template readable mutable)>>)
+  (fun rh_rehash ((var old_keys <ptr <named Key (template)>>)
                   (var old_dist <ptr i64>)
                   (var old_slot_ids <ptr i64>)
                   (var old_capacity i64)
                   (var size i64)
-                  (var old_group_keys <ptr <named Key (template readable mutable)>>)
+                  (var old_group_keys <ptr <named Key (template)>>)
                   (var old_counts <ptr i64>)
                   (var old_sums <ptr i64>)
-                  (var new_keys <ptr <named Key (template readable mutable)>>)
+                  (var new_keys <ptr <named Key (template)>>)
                   (var new_dist <ptr i64>)
                   (var new_slot_ids <ptr i64>)
                   (var new_capacity i64)
-                  (var new_group_keys <ptr <named Key (template readable mutable)>>)
+                  (var new_group_keys <ptr <named Key (template)>>)
                   (var new_counts <ptr i64>)
                   (var new_sums <ptr i64>)) -> i64
     (block

@@ -5,8 +5,8 @@
     (block
       (return (== left right))))
 
-  (fun rh_keys_equal ((var left <named Key (template readable mutable)>)
-                      (var right <named Key (template readable mutable)>)) -> bool
+  (fun rh_keys_equal ((var left <named Key (template)>)
+                      (var right <named Key (template)>)) -> bool
     (block
       (return (call rh_key_equal left right))))
 

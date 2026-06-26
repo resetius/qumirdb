@@ -1,2 +1,18 @@
-Error: column aliases on derived tables are not supported yet
-
+(rel project
+  (rel aggregate
+    (rel project
+      (rel aggregate
+        (rel join
+          (rel source "customer")
+          (rel source "orders")
+          ()
+          (left)
+          (&& (== c_custkey o_custkey) (! (call qdb_string_view_sql_like o_comment "%special%packages%"))))
+        (keys c_custkey)
+        (agg count_0 count o_orderkey))
+      (c_custkey c_custkey)
+      (c_count count_0))
+    (keys c_count)
+    (agg count_0 count))
+  (c_count c_count)
+  (custdist count_0))

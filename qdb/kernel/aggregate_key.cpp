@@ -106,23 +106,11 @@ TRepresentedKeyType RepresentKeyType(const NQumir::NAst::TTypePtr& original) {
         std::vector<std::pair<std::string, TTypePtr>> storedFields;
         size_t offset = 0;
         size_t maxAlignment = 1;
-        size_t paddingIndex = 0;
         bool hasString = false;
-
-        auto addPadding = [&](size_t targetOffset) {
-            while (offset < targetOffset) {
-                const std::string name =
-                    "__qdb_padding_" + std::to_string(paddingIndex++);
-                auto paddingType = std::make_shared<TIntegerType>(TIntegerType::U8);
-                lookupFields.emplace_back(name, paddingType);
-                storedFields.emplace_back(name, paddingType);
-                ++offset;
-            }
-        };
 
         for (const auto& [name, fieldType] : structure.Cast()->Fields) {
             auto represented = RepresentKeyType(fieldType);
-            addPadding(AlignUp(offset, represented.Layout.Alignment));
+            offset = AlignUp(offset, represented.Layout.Alignment);
             lookupFields.emplace_back(name, represented.Lookup);
             storedFields.emplace_back(name, represented.Stored);
             offset += represented.Layout.Size;
@@ -131,7 +119,6 @@ TRepresentedKeyType RepresentKeyType(const NQumir::NAst::TTypePtr& original) {
         }
         const size_t alignment = std::min<size_t>(maxAlignment, 8);
         const size_t size = AlignUp(offset, alignment);
-        addPadding(size);
         if (!hasString) {
             return {
                 .Lookup = inner,
@@ -170,18 +157,6 @@ TAggregateKeyDescriptor BuildAggregateKeyDescriptor(
     size_t maxAlignment = 1;
     std::vector<std::pair<std::string, TTypePtr>> lookupFields;
     std::vector<std::pair<std::string, TTypePtr>> storedFields;
-    size_t paddingIndex = 0;
-
-    auto addPadding = [&](size_t targetOffset) {
-        while (offset < targetOffset) {
-            const std::string name =
-                "__qdb_padding_" + std::to_string(paddingIndex++);
-            auto type = std::make_shared<TIntegerType>(TIntegerType::U8);
-            lookupFields.emplace_back(name, type);
-            storedFields.emplace_back(name, type);
-            ++offset;
-        }
-    };
 
     for (const auto& key : groupKeys) {
         int32_t columnIndex = -1;
@@ -208,7 +183,7 @@ TAggregateKeyDescriptor BuildAggregateKeyDescriptor(
                 std::make_shared<TBoolType>());
             ++offset;
         }
-        addPadding(AlignUp(offset, layout.Alignment));
+        offset = AlignUp(offset, layout.Alignment);
         result.Fields.push_back({
             .ColumnName = key,
             .ColumnIndex = columnIndex,
@@ -230,7 +205,6 @@ TAggregateKeyDescriptor BuildAggregateKeyDescriptor(
 
     result.Alignment = std::min<size_t>(maxAlignment, 8);
     result.Size = AlignUp(offset, result.Alignment);
-    addPadding(result.Size);
     result.TypeName = KeyTypeName(result.Fields);
     const bool hasDistinctType = std::any_of(
         result.Fields.begin(), result.Fields.end(),

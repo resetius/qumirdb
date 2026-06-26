@@ -20,10 +20,10 @@
           (select
             (select-list
               (item as supp_nation
-                (field n1 n_name)
+                |n1.n_name|
               )
               (item as cust_nation
-                (field n2 n_name)
+                |n2.n_name|
               )
               (item as l_year
                 (call qdb_date_year l_shipdate)
@@ -42,10 +42,10 @@
             )
             (where
               (&& (&& (&& (&& (&& (&& (== s_suppkey l_suppkey) (== o_orderkey l_orderkey)) (== c_custkey o_custkey))
-                      (== s_nationkey (field n1 n_nationkey)))
-                    (== c_nationkey (field n2 n_nationkey)))
-                  (|| (&& (== (field n1 n_name) "FRANCE") (== (field n2 n_name) "UNITED KINGDOM"))
-                    (&& (== (field n1 n_name) "UNITED KINGDOM") (== (field n2 n_name) "FRANCE"))))
+                      (== s_nationkey |n1.n_nationkey|))
+                    (== c_nationkey |n2.n_nationkey|))
+                  (|| (&& (== |n1.n_name| "FRANCE") (== |n2.n_name| "UNITED KINGDOM"))
+                    (&& (== |n1.n_name| "UNITED KINGDOM") (== |n2.n_name| "FRANCE"))))
                 (&& (<= (call qdb_sql_date "1995-01-01") l_shipdate) (<= l_shipdate (call qdb_sql_date "1996-12-31"))))
             )
           )

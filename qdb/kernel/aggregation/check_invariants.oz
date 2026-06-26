@@ -4,9 +4,9 @@
   (fun rh_hash ((var key i64)) -> i64
     (block
       (var h = (cast key u64))
-      (= h (xor h (>> h (: 12 u64))))
-      (= h (xor h (<< h (: 25 u64))))
-      (= h (xor h (>> h (: 27 u64))))
+      (= h (^ h (>> h (: 12 u64))))
+      (= h (^ h (<< h (: 25 u64))))
+      (= h (^ h (>> h (: 27 u64))))
       (= h (* h (: 2685821657736338717 u64)))
       (return (cast h i64))))
 
@@ -14,7 +14,7 @@
     (block
       (return (== left right))))
 
-  (fun rh_check_invariants ((var keys <ptr <named Key (template readable mutable)>>)
+  (fun rh_check_invariants ((var keys <ptr <named Key (template)>>)
                             (var dist <ptr i64>)
                             (var capacity i64)) -> bool
     (block

@@ -8,7 +8,7 @@
       (= index (: 0 i64))
       (while (< index size)
         (block
-          (= hash (xor hash (cast (index data index) u64)))
+          (= hash (^ hash (cast (index data index) u64)))
           (= hash (* hash (: 1099511628211 u64)))
           (= index (+ index (: 1 i64)))))
       (return (cast hash i64))))

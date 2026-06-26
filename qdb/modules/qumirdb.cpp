@@ -69,37 +69,16 @@ QumirDbModule::QumirDbModule() {
     auto ownedStringType = makeStringHandleType();
     auto stringLiteralType = std::make_shared<TStringType>();
 
-    // TColumn C layout (all fields at 8-byte boundaries due to pointer padding):
-    // offset  0: Data          char*      <ptr i8>
-    // offset  8: DataBitOffset int32_t    i32  (+4 pad)
-    // offset 16: Mask          uint8_t*   <ptr u8>
-    // offset 24: MaskBitOffset int32_t    i32  (+4 pad)
-    // offset 32: Offsets       void*      <ptr i64>
-    // offset 40: OffsetWidth   uint8_t    u8   (+7 pad)
-    // sizeof = 48
+    // TColumn C layout. Qumir struct layout follows the C ABI, so implicit
+    // padding is enough to match qdb::TColumn.
     auto columnType = std::make_shared<TStructType>(
         std::vector<std::pair<std::string, TTypePtr>>{
             {"Data", ptrI8Type},
             {"DataBitOffset", i32Type},
-            {"__qdb_padding_column_0", u8Type},
-            {"__qdb_padding_column_1", u8Type},
-            {"__qdb_padding_column_2", u8Type},
-            {"__qdb_padding_column_3", u8Type},
             {"Mask", ptrU8Type},
             {"MaskBitOffset", i32Type},
-            {"__qdb_padding_column_4", u8Type},
-            {"__qdb_padding_column_5", u8Type},
-            {"__qdb_padding_column_6", u8Type},
-            {"__qdb_padding_column_7", u8Type},
             {"Offsets", voidPtrType},
             {"OffsetWidth", u8Type},
-            {"__qdb_padding_column_8", u8Type},
-            {"__qdb_padding_column_9", u8Type},
-            {"__qdb_padding_column_10", u8Type},
-            {"__qdb_padding_column_11", u8Type},
-            {"__qdb_padding_column_12", u8Type},
-            {"__qdb_padding_column_13", u8Type},
-            {"__qdb_padding_column_14", u8Type},
         });
     auto columnNamedType = std::make_shared<TNamedType>("TColumn", columnType);
     auto ptrColumnType = std::make_shared<TPointerType>(columnNamedType);
@@ -227,7 +206,6 @@ QumirDbModule::QumirDbModule() {
         {
             .Name = "qdb_alloc",
             .MangledName = "qdb_alloc",
-            .Ptr = reinterpret_cast<void*>(static_cast<void*(*)(int64_t)>(qdb_alloc)),
             .Packed = +[](const uint64_t* args, size_t) -> uint64_t {
                 return reinterpret_cast<uint64_t>(qdb_alloc(static_cast<int64_t>(args[0])));
             },
@@ -237,7 +215,6 @@ QumirDbModule::QumirDbModule() {
         {
             .Name = "qdb_realloc",
             .MangledName = "qdb_realloc",
-            .Ptr = reinterpret_cast<void*>(static_cast<void*(*)(void*, int64_t)>(qdb_realloc)),
             .Packed = +[](const uint64_t* args, size_t) -> uint64_t {
                 return reinterpret_cast<uint64_t>(
                     qdb_realloc(reinterpret_cast<void*>(args[0]), static_cast<int64_t>(args[1])));
@@ -248,7 +225,6 @@ QumirDbModule::QumirDbModule() {
         {
             .Name = "qdb_free",
             .MangledName = "qdb_free",
-            .Ptr = reinterpret_cast<void*>(static_cast<void(*)(void*)>(qdb_free)),
             .Packed = +[](const uint64_t* args, size_t) -> uint64_t {
                 qdb_free(reinterpret_cast<void*>(args[0]));
                 return 0;
@@ -259,9 +235,6 @@ QumirDbModule::QumirDbModule() {
         {
             .Name = "qdb_filter_string_compare",
             .MangledName = "qdb_filter_string_compare",
-            .Ptr = reinterpret_cast<void*>(static_cast<int64_t(*)(
-                const uint8_t*, int64_t, const uint8_t*, int64_t)>(
-                    qdb_filter_string_compare)),
             .Packed = +[](const uint64_t* args, size_t) -> uint64_t {
                 return static_cast<uint64_t>(qdb_filter_string_compare(
                     reinterpret_cast<const uint8_t*>(args[0]),
@@ -275,8 +248,6 @@ QumirDbModule::QumirDbModule() {
         {
             .Name = "qdb_string_view_sql_like",
             .MangledName = "qdb_string_view_sql_like",
-            .Ptr = reinterpret_cast<void*>(static_cast<int64_t(*)(
-                qdb_string_view, const char*)>(qdb_string_view_sql_like)),
             .Packed = +[](const uint64_t* args, size_t) -> uint64_t {
                 qdb_string_view str = *reinterpret_cast<const qdb_string_view*>(args[0]);
                 return static_cast<uint64_t>(qdb_string_view_sql_like(str, reinterpret_cast<const char*>(args[1])));
@@ -287,8 +258,6 @@ QumirDbModule::QumirDbModule() {
         {
             .Name = "qdb_string_view_cmp_cstr",
             .MangledName = "qdb_string_view_cmp_cstr",
-            .Ptr = reinterpret_cast<void*>(static_cast<int64_t(*)(
-                const uint8_t*, int64_t, const char*)>(qdb_string_view_cmp_cstr)),
             .Packed = +[](const uint64_t* args, size_t) -> uint64_t {
                 return static_cast<uint64_t>(qdb_string_view_cmp_cstr(
                     reinterpret_cast<const uint8_t*>(args[0]),
@@ -301,8 +270,6 @@ QumirDbModule::QumirDbModule() {
         {
             .Name = "qdb_cstr_cmp_cstr",
             .MangledName = "qdb_cstr_cmp_cstr",
-            .Ptr = reinterpret_cast<void*>(static_cast<int64_t(*)(
-                const char*, const char*)>(qdb_cstr_cmp_cstr)),
             .Packed = +[](const uint64_t* args, size_t) -> uint64_t {
                 return static_cast<uint64_t>(qdb_cstr_cmp_cstr(
                     reinterpret_cast<const char*>(args[0]),
@@ -403,8 +370,6 @@ QumirDbModule::QumirDbModule() {
         {
             .Name = "qdb_substring",
             .MangledName = "qdb_substring",
-            .Ptr = reinterpret_cast<void*>(static_cast<qdb_string_view(*)(
-                qdb_string_view, int32_t, int32_t)>(qdb_substring)),
             .Packed = +[](const uint64_t* args, size_t) -> uint64_t {
                 // args[0] = sret pointer (destination qdb_string_view)
                 // args[1] = pointer to source qdb_string_view
@@ -422,8 +387,6 @@ QumirDbModule::QumirDbModule() {
         {
             .Name = "qdb_bitmap_set_valid",
             .MangledName = "qdb_bitmap_set_valid",
-            .Ptr = reinterpret_cast<void*>(static_cast<void(*)(
-                uint8_t*, int64_t, bool)>(qdb_bitmap_set_valid)),
             .Packed = +[](const uint64_t* args, size_t) -> uint64_t {
                 qdb_bitmap_set_valid(
                     reinterpret_cast<uint8_t*>(args[0]),
@@ -436,8 +399,6 @@ QumirDbModule::QumirDbModule() {
         {
             .Name = "qdb_sql_bool_and",
             .MangledName = "qdb_sql_bool_and",
-            .Ptr = reinterpret_cast<void*>(static_cast<int64_t(*)(
-                int64_t, int64_t)>(qdb_sql_bool_and)),
             .Packed = +[](const uint64_t* args, size_t) -> uint64_t {
                 return qdb_sql_bool_and(args[0], args[1]);
             },
@@ -447,8 +408,6 @@ QumirDbModule::QumirDbModule() {
         {
             .Name = "qdb_sql_bool_or",
             .MangledName = "qdb_sql_bool_or",
-            .Ptr = reinterpret_cast<void*>(static_cast<int64_t(*)(
-                int64_t, int64_t)>(qdb_sql_bool_or)),
             .Packed = +[](const uint64_t* args, size_t) -> uint64_t {
                 return qdb_sql_bool_or(args[0], args[1]);
             },
@@ -458,8 +417,6 @@ QumirDbModule::QumirDbModule() {
         {
             .Name = "qdb_sql_bool_not",
             .MangledName = "qdb_sql_bool_not",
-            .Ptr = reinterpret_cast<void*>(static_cast<int64_t(*)(
-                int64_t)>(qdb_sql_bool_not)),
             .Packed = +[](const uint64_t* args, size_t) -> uint64_t {
                 return qdb_sql_bool_not(args[0]);
             },
@@ -469,7 +426,6 @@ QumirDbModule::QumirDbModule() {
         {
             .Name = "qdb_date_year",
             .MangledName = "qdb_date_year",
-            .Ptr = reinterpret_cast<void*>(static_cast<int32_t(*)(int32_t)>(qdb_date_year)),
             .Packed = +[](const uint64_t* args, size_t) -> uint64_t {
                 return static_cast<uint64_t>(static_cast<uint32_t>(
                     qdb_date_year(static_cast<int32_t>(args[0]))));
@@ -480,7 +436,6 @@ QumirDbModule::QumirDbModule() {
         {
             .Name = "qdb_sql_date",
             .MangledName = "qdb_sql_date",
-            .Ptr = reinterpret_cast<void*>(static_cast<int32_t(*)(const char*)>(qdb_sql_date)),
             .Packed = +[](const uint64_t* args, size_t) -> uint64_t {
                 return static_cast<uint64_t>(static_cast<uint32_t>(
                     qdb_sql_date(reinterpret_cast<const char*>(args[0]))));
@@ -491,7 +446,6 @@ QumirDbModule::QumirDbModule() {
         {
             .Name = "qdb_sql_interval",
             .MangledName = "qdb_sql_interval",
-            .Ptr = reinterpret_cast<void*>(static_cast<int32_t(*)(const char*, const char*)>(qdb_sql_interval)),
             .Packed = +[](const uint64_t* args, size_t) -> uint64_t {
                 return static_cast<uint64_t>(static_cast<uint32_t>(
                     qdb_sql_interval(

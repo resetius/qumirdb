@@ -8,7 +8,7 @@ and composite fixed-width integer/`f64` keys. The algorithm uses a template key
 type:
 
 ```text
-<named Key (template readable mutable)>
+<named Key (template)>
 ```
 
 Operations that depend on the key representation (`rh_hash` and equality) are

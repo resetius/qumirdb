@@ -20,7 +20,7 @@
             (table s)
           )
           (where
-            (== (field s id) (field t id))
+            (== |s.id| |t.id|)
           )
         )
       )

@@ -15,8 +15,8 @@
       (table nation)
     )
     (where
-      (&& (&& (&& (&& (&& (&& (&& (== s_suppkey (field l1 l_suppkey)) (== o_orderkey (field l1 l_orderkey))) (== o_orderstatus "F"))
-                (> (field l1 l_receiptdate) (field l1 l_commitdate)))
+      (&& (&& (&& (&& (&& (&& (&& (== s_suppkey |l1.l_suppkey|) (== o_orderkey |l1.l_orderkey|)) (== o_orderstatus "F"))
+                (> |l1.l_receiptdate| |l1.l_commitdate|))
               (subquery exists (query
         (select
           (select-list
@@ -26,7 +26,7 @@
             (table lineitem as l2)
           )
           (where
-            (&& (== (field l2 l_orderkey) (field l1 l_orderkey)) (!= (field l2 l_suppkey) (field l1 l_suppkey)))
+            (&& (== |l2.l_orderkey| |l1.l_orderkey|) (!= |l2.l_suppkey| |l1.l_suppkey|))
           )
         )
       )
@@ -40,8 +40,8 @@
             (table lineitem as l3)
           )
           (where
-            (&& (&& (== (field l3 l_orderkey) (field l1 l_orderkey)) (!= (field l3 l_suppkey) (field l1 l_suppkey)))
-              (> (field l3 l_receiptdate) (field l3 l_commitdate)))
+            (&& (&& (== |l3.l_orderkey| |l1.l_orderkey|) (!= |l3.l_suppkey| |l1.l_suppkey|))
+              (> |l3.l_receiptdate| |l3.l_commitdate|))
           )
         )
       )

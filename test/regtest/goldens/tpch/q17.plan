@@ -1,2 +1,25 @@
-Error: subquery is not supported in this position
-
+(rel project
+  (rel aggregate
+    (rel project
+      (rel filter
+        (rel join
+          (rel join (rel source "lineitem") (rel source "part") () (inner))
+          (rel project
+            (rel aggregate
+              (rel project
+                (rel filter (rel source "lineitem") (== l_partkey p_partkey))
+                (l_quantity l_quantity)
+                (__group__ 1))
+              (keys __group__)
+              (agg sum_0 sum l_quantity)
+              (agg count_1 count))
+            (__scalar_0__ (* 0.20000000000000001 (/ sum_0 (cast count_1 f64)))))
+          ()
+          (inner))
+        (&& (&& (&& (== p_partkey l_partkey) (== p_brand "Brand#45")) (== p_container "MED BAG"))
+          (< l_quantity __scalar_0__)))
+      (l_extendedprice l_extendedprice)
+      (__group__ 1))
+    (keys __group__)
+    (agg sum_0 sum l_extendedprice))
+  (avg_yearly (/ sum_0 7)))

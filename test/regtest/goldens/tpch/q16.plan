@@ -1,2 +1,25 @@
-Error: count(distinct) is not supported yet @ Line: 5, Byte: 1, Column: 1
-
+(rel project
+  (rel aggregate
+    (rel aggregate
+      (rel filter
+        (rel join
+          (rel join (rel source "partsupp") (rel source "part") () (inner))
+          (rel project
+            (rel filter (rel source "supplier") (call qdb_string_view_sql_like s_comment "%Customer%Complaints%"))
+            (s_suppkey s_suppkey))
+          ()
+          (left_anti)
+          (== ps_suppkey s_suppkey))
+        (&& (&& (&& (== p_partkey ps_partkey) (!= p_brand "Brand#54"))
+            (! (call qdb_string_view_sql_like p_type "PROMO ANODIZED%")))
+          (|| (|| (|| (|| (|| (|| (|| (== p_size 24) (== p_size 47)) (== p_size 25)) (== p_size 36)) (== p_size 22))
+                (== p_size 26))
+              (== p_size 49))
+            (== p_size 40))))
+      (keys p_brand p_type p_size ps_suppkey))
+    (keys p_brand p_type p_size)
+    (agg count_0 count ps_suppkey))
+  (p_brand p_brand)
+  (p_type p_type)
+  (p_size p_size)
+  (supplier_cnt count_0))
