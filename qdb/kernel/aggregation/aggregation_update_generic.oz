@@ -11,7 +11,7 @@
         (var size_ref <ptr i64>)
         (var key_size i64)
         (var num_aggs i64)
-        (var key <named Key (template readable mutable)>)
+        (var key <named Key (template)>)
         (var value i64)
         (var out_is_new <ptr i64>)) -> i64
     (block

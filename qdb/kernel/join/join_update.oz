@@ -13,7 +13,7 @@
   ;; left, zero means it is right. Returns #f only on PairBuffer allocation
   ;; failure.
   (fun jt_probe_and_emit ((var build <ref HashTable>)
-                          (var key <named Key (template readable mutable)>)
+                          (var key <named Key (template)>)
                           (var row_id i64)
                           (var is_left i64)
                           (var pairs <ref PairBuffer>)
@@ -23,7 +23,7 @@
                           (var stream_right_batch <ref TRowSet>)) -> bool
     (block
       (var build_keys =
-        (cast (field build Keys) <ptr <named Key (template readable mutable)>>))
+        (cast (field build Keys) <ptr <named Key (template)>>))
       (var build_slot = (call rh_lookup_slot build_keys (field build Dist)
                         (field build SlotId) (field build Capacity) key))
       (if (!= build_slot (: -1 i64))
@@ -64,7 +64,7 @@
   ;; emitted pair as (left, right). Returns #f only on allocation failure.
   (fun jt_emit_and_insert ((var own <ref HashTable>)
                            (var opp <ref HashTable>)
-                           (var key <named Key (template readable mutable)>)
+                           (var key <named Key (template)>)
                            (var own_row_id i64)
                            (var is_left i64)
                            (var pairs <ref PairBuffer>)
@@ -77,7 +77,7 @@
                     (index right_store (: 0 i64))))
         (block (return #f)))
       (var own_keys =
-        (cast (field own Keys) <ptr <named Key (template readable mutable)>>))
+        (cast (field own Keys) <ptr <named Key (template)>>))
       (var own_slot = (call rh_lookup_slot own_keys (field own Dist)
                         (field own SlotId) (field own Capacity) key))
       (if (== own_slot (: -1 i64))
@@ -90,13 +90,13 @@
                 (block (return #f)))
               (= capacity (field own Capacity))))
           (= own_keys
-            (cast (field own Keys) <ptr <named Key (template readable mutable)>>))
+            (cast (field own Keys) <ptr <named Key (template)>>))
           (= own_slot size)
           (if (! (call rh_insert_displace own_keys (field own Dist)
                         (field own SlotId) capacity key own_slot))
             (block (return #f)))
           (var group_keys =
-            (cast (field own GroupKeys) <ptr <named Key (template readable mutable)>>))
+            (cast (field own GroupKeys) <ptr <named Key (template)>>))
           (= group_keys [own_slot] key)
           (var own_aggs = (field own AggBuffers))
           (var own_counts = (index own_aggs (: 0 i64)))
@@ -114,10 +114,10 @@
   ;; Used for the non-retained side (right side) of SEMI / ANTI joins —
   ;; the right table is queried for key existence only, not row materialization.
   (fun jt_insert_slot_only ((var own <ref HashTable>)
-                             (var key <named Key (template readable mutable)>)) -> bool
+                             (var key <named Key (template)>)) -> bool
     (block
       (var own_keys =
-        (cast (field own Keys) <ptr <named Key (template readable mutable)>>))
+        (cast (field own Keys) <ptr <named Key (template)>>))
       (var own_slot = (call rh_lookup_slot own_keys (field own Dist)
                         (field own SlotId) (field own Capacity) key))
       (if (== own_slot (: -1 i64))
@@ -130,13 +130,13 @@
                 (block (return #f)))
               (= capacity (field own Capacity))))
           (= own_keys
-            (cast (field own Keys) <ptr <named Key (template readable mutable)>>))
+            (cast (field own Keys) <ptr <named Key (template)>>))
           (= own_slot size)
           (if (! (call rh_insert_displace own_keys (field own Dist)
                         (field own SlotId) capacity key own_slot))
             (block (return #f)))
           (var group_keys =
-            (cast (field own GroupKeys) <ptr <named Key (template readable mutable)>>))
+            (cast (field own GroupKeys) <ptr <named Key (template)>>))
           (= group_keys [own_slot] key)
           (var own_aggs = (field own AggBuffers))
           (var own_counts = (index own_aggs (: 0 i64)))

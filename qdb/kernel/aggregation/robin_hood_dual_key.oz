@@ -2,11 +2,11 @@
   (pragma language overloads)
 
   (fun rh_lookup_dual
-       ((var keys <ptr <named StoredKey (template readable mutable)>>)
+       ((var keys <ptr <named StoredKey (template)>>)
         (var dist <ptr i64>)
         (var slot_ids <ptr i64>)
         (var capacity i64)
-        (var key <named LookupKey (template readable mutable)>)) -> i64
+        (var key <named LookupKey (template)>)) -> i64
     (block
       (var slot = (& (call rh_hash key) (- capacity (: 1 i64))))
       (var probe_dist i64)
@@ -23,11 +23,11 @@
       (return (: -1 i64))))
 
   (fun rh_insert_stored
-       ((var keys <ptr <named StoredKey (template readable mutable)>>)
+       ((var keys <ptr <named StoredKey (template)>>)
         (var dist <ptr i64>)
         (var slot_ids <ptr i64>)
         (var capacity i64)
-        (var key <named StoredKey (template readable mutable)>)
+        (var key <named StoredKey (template)>)
         (var dense_slot i64)) -> bool
     (block
       (var carried_key = key)
@@ -63,14 +63,14 @@
 
   (fun aht_upsert_dual
        ((var ht <ref HashTable>)
-        (var key <named LookupKey (template readable mutable)>)
-        (var stored_witness <named StoredKey (template readable mutable)>)
+        (var key <named LookupKey (template)>)
+        (var stored_witness <named StoredKey (template)>)
         (var out_is_new <ref i64>)) -> i64
     (block
       (= out_is_new (: 0 i64))
       (var capacity = (field ht Capacity))
       (var keys = (cast (field ht Keys)
-        <ptr <named StoredKey (template readable mutable)>>))
+        <ptr <named StoredKey (template)>>))
       (var dense_slot = (call rh_lookup_dual
         keys (field ht Dist) (field ht SlotId) capacity key))
       (if (>= dense_slot (: 0 i64)) (block (return dense_slot)))
@@ -85,7 +85,7 @@
             (block (return (: -1 i64))))
           (= capacity (field ht Capacity))
           (= keys (cast (field ht Keys)
-            <ptr <named StoredKey (template readable mutable)>>))))
+            <ptr <named StoredKey (template)>>))))
       (var owned_bytes = (call key_owned_bytes key))
       (var owned_block = (cast (: 0 i64) <ptr u8>))
       (if (> owned_bytes (: 0 i64))
@@ -104,7 +104,7 @@
             (block (call qdb_free (cast owned_block <ptr i8>))))
           (return (: -1 i64))))
       (var group_keys = (cast (field ht GroupKeys)
-        <ptr <named StoredKey (template readable mutable)>>))
+        <ptr <named StoredKey (template)>>))
       (= group_keys [dense_slot] stored_key)
       (var agg_buffers = (field ht AggBuffers))
       (var agg i64)
@@ -120,15 +120,15 @@
       (return dense_slot)))
 
   (fun rh_rehash_stored
-       ((var old_keys <ptr <named StoredKey (template readable mutable)>>)
+       ((var old_keys <ptr <named StoredKey (template)>>)
         (var old_dist <ptr i64>)
         (var old_slot_ids <ptr i64>)
         (var old_capacity i64)
-        (var new_keys <ptr <named StoredKey (template readable mutable)>>)
+        (var new_keys <ptr <named StoredKey (template)>>)
         (var new_dist <ptr i64>)
         (var new_slot_ids <ptr i64>)
         (var new_capacity i64)
-        (var stored_witness <named StoredKey (template readable mutable)>)) -> bool
+        (var stored_witness <named StoredKey (template)>)) -> bool
     (block
       (var index i64)
       (= index (: 0 i64))
@@ -152,7 +152,7 @@
   (fun aht_rehash_dual
        ((var ht <ref HashTable>)
         (var new_capacity i64)
-        (var stored_witness <named StoredKey (template readable mutable)>)) -> bool
+        (var stored_witness <named StoredKey (template)>)) -> bool
     (block
       (var old_capacity = (field ht Capacity))
       (var size = (field ht Size))
@@ -221,9 +221,9 @@
             (block (call qdb_free (cast new_agg_buffers <ptr i8>))))
           (return #f)))
       (var old_keys = (cast (field ht Keys)
-        <ptr <named StoredKey (template readable mutable)>>))
+        <ptr <named StoredKey (template)>>))
       (var new_keys_typed = (cast new_keys
-        <ptr <named StoredKey (template readable mutable)>>))
+        <ptr <named StoredKey (template)>>))
       (if (! (call rh_rehash_stored
         old_keys (field ht Dist) (field ht SlotId) old_capacity
         new_keys_typed new_dist new_slot_ids new_capacity stored_witness))
@@ -243,9 +243,9 @@
             (block (call qdb_free (cast new_agg_buffers <ptr i8>))))
           (return #f)))
       (var old_group_keys = (cast (field ht GroupKeys)
-        <ptr <named StoredKey (template readable mutable)>>))
+        <ptr <named StoredKey (template)>>))
       (var new_group_keys_typed = (cast new_group_keys
-        <ptr <named StoredKey (template readable mutable)>>))
+        <ptr <named StoredKey (template)>>))
       (var index i64)
       (= index (: 0 i64))
       (while (< index size)

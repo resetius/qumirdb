@@ -4,9 +4,9 @@
   (fun rh_hash ((var key i64)) -> i64
     (block
       (var h = (cast key u64))
-      (= h (xor h (>> h (: 12 u64))))
-      (= h (xor h (<< h (: 25 u64))))
-      (= h (xor h (>> h (: 27 u64))))
+      (= h (^ h (>> h (: 12 u64))))
+      (= h (^ h (<< h (: 25 u64))))
+      (= h (^ h (>> h (: 27 u64))))
       (= h (* h (: 2685821657736338717 u64)))
       (return (cast h i64))))
 
@@ -22,10 +22,10 @@
     (block
       (return (& (+ index (: 1 i64)) (- capacity (: 1 i64))))))
 
-  (fun rh_find_slot ((var keys <ptr <named Key (template readable mutable)>>)
+  (fun rh_find_slot ((var keys <ptr <named Key (template)>>)
                      (var dist <ptr i64>)
                      (var capacity i64)
-                     (var query <named Key (template readable mutable)>)) -> i64
+                     (var query <named Key (template)>)) -> i64
     (block
       (var index = (call rh_home (call rh_hash query) capacity))
       (var query_dist i64)

@@ -20,7 +20,7 @@
                 (* l_extendedprice (- 1 l_discount))
               )
               (item as nation
-                (field n2 n_name)
+                |n2.n_name|
               )
             )
             (from
@@ -36,10 +36,10 @@
             (where
               (&& (&& (&& (&& (&& (&& (&& (&& (&& (== p_partkey l_partkey) (== s_suppkey l_suppkey)) (== l_orderkey o_orderkey))
                             (== o_custkey c_custkey))
-                          (== c_nationkey (field n1 n_nationkey)))
-                        (== (field n1 n_regionkey) r_regionkey))
+                          (== c_nationkey |n1.n_nationkey|))
+                        (== |n1.n_regionkey| r_regionkey))
                       (== r_name "EUROPE"))
-                    (== s_nationkey (field n2 n_nationkey)))
+                    (== s_nationkey |n2.n_nationkey|))
                   (&& (<= (call qdb_sql_date "1995-01-01") o_orderdate) (<= o_orderdate (call qdb_sql_date "1996-12-31"))))
                 (== p_type "PROMO POLISHED BRASS"))
             )

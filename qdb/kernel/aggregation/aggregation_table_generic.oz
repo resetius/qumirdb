@@ -74,11 +74,11 @@
                              (var slot_ids <ptr i64>)
                              (var capacity i64)
                              (var size <ptr i64>)
-                             (var key <named Key (template readable mutable)>)
+                             (var key <named Key (template)>)
                              (var out_is_new <ptr i64>)) -> i64
     (block
       (var typed_keys =
-        (cast key_bytes <ptr <named Key (template readable mutable)>>))
+        (cast key_bytes <ptr <named Key (template)>>))
       (return (call rh_upsert typed_keys dist slot_ids capacity size key
                     out_is_new))))
 
@@ -87,7 +87,7 @@
                              (var slot_ids_ref <ptr <ptr i64>>)
                              (var capacity_ref <ptr i64>)
                              (var key_size i64)
-                             (var key_witness <named Key (template readable mutable)>)
+                             (var key_witness <named Key (template)>)
                              (var new_capacity i64)) -> bool
     (block
       (if (|| (< new_capacity (: 1 i64))
@@ -116,9 +116,9 @@
       (var old_dist = (index dist_ref (: 0 i64)))
       (var old_slot_ids = (index slot_ids_ref (: 0 i64)))
       (var typed_old_keys =
-        (cast old_keys <ptr <named Key (template readable mutable)>>))
+        (cast old_keys <ptr <named Key (template)>>))
       (var typed_new_keys =
-        (cast new_keys <ptr <named Key (template readable mutable)>>))
+        (cast new_keys <ptr <named Key (template)>>))
       (if (! (call rh_rehash_into typed_old_keys old_dist old_slot_ids
                     (index capacity_ref (: 0 i64)) typed_new_keys new_dist
                     new_slot_ids new_capacity))
@@ -144,7 +144,7 @@
                                   (var capacity_ref <ptr i64>)
                                   (var size_ref <ptr i64>)
                                   (var key_size i64)
-                                  (var key <named Key (template readable mutable)>)
+                                  (var key <named Key (template)>)
                                   (var out_is_new <ptr i64>)) -> i64
     (block
       (var capacity = (index capacity_ref (: 0 i64)))

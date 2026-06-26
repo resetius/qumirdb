@@ -2,10 +2,10 @@
   (select
     (select-list
       (item
-        (field t a)
+        |t.a|
       )
       (item
-        (field s b)
+        |s.b|
       )
     )
     (from
@@ -13,7 +13,7 @@
         (table t)
         (table s)
         (on
-          (== (field t id) (field s id))
+          (== |t.id| |s.id|)
         )
       )
     )

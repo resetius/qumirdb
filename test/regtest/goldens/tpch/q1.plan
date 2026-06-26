@@ -1,13 +1,21 @@
 (rel project
   (rel aggregate
-    (rel filter
-      (rel source "lineitem")
-      (<= l_shipdate (- (call qdb_sql_date "1998-12-01") (call qdb_sql_interval "81" "day"))))
+    (rel project
+      (rel filter
+        (rel source "lineitem")
+        (<= l_shipdate (- (call qdb_sql_date "1998-12-01") (call qdb_sql_interval "81" "day"))))
+      (l_returnflag l_returnflag)
+      (l_linestatus l_linestatus)
+      (l_quantity l_quantity)
+      (l_extendedprice l_extendedprice)
+      (arg_0 (* l_extendedprice (- 1 l_discount)))
+      (arg_1 (* (* l_extendedprice (- 1 l_discount)) (+ 1 l_tax)))
+      (l_discount l_discount))
     (keys l_returnflag l_linestatus)
     (agg sum_0 sum l_quantity)
     (agg sum_1 sum l_extendedprice)
-    (agg sum_2 sum (* l_extendedprice (- 1 l_discount)))
-    (agg sum_3 sum (* (* l_extendedprice (- 1 l_discount)) (+ 1 l_tax)))
+    (agg sum_2 sum arg_0)
+    (agg sum_3 sum arg_1)
     (agg sum_4 sum l_quantity)
     (agg count_5 count)
     (agg sum_6 sum l_extendedprice)

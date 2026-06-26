@@ -155,11 +155,11 @@ NQumir::NAst::TExprPtr HashKeyValue(
         auto bits = std::make_shared<TCastExpr>(
             loc, KeyValueExpr(root, path), std::move(unsignedType));
         assign(name, std::make_shared<TCastExpr>(loc, std::move(bits), u64Type));
-        assign(name, binary("xor", ident(name),
+        assign(name, binary("^", ident(name),
             binary(">>", ident(name), number(12))));
-        assign(name, binary("xor", ident(name),
+        assign(name, binary("^", ident(name),
             binary("<<", ident(name), number(25))));
-        assign(name, binary("xor", ident(name),
+        assign(name, binary("^", ident(name),
             binary(">>", ident(name), number(27))));
         assign(name, binary("*", ident(name), number(2685821657736338717LL)));
         return ident(name);
@@ -178,11 +178,11 @@ NQumir::NAst::TExprPtr HashKeyValue(
         const std::string name = "key_hash_" + std::to_string(nextTemporary++);
         body.push_back(std::make_shared<TVarStmt>(loc, name, u64Type));
         assign(name, CanonicalFloatBits(root, path));
-        assign(name, binary("xor", ident(name),
+        assign(name, binary("^", ident(name),
             binary(">>", ident(name), number(12))));
-        assign(name, binary("xor", ident(name),
+        assign(name, binary("^", ident(name),
             binary("<<", ident(name), number(25))));
-        assign(name, binary("xor", ident(name),
+        assign(name, binary("^", ident(name),
             binary(">>", ident(name), number(27))));
         assign(name, binary("*", ident(name), number(2685821657736338717LL)));
         return ident(name);
@@ -218,7 +218,7 @@ NQumir::NAst::TExprPtr HashKeyValue(
                 binary("<<", ident(name), number(6)));
             combined = binary("+", std::move(combined),
                 binary(">>", ident(name), number(2)));
-            assign(name, binary("xor", ident(name), std::move(combined)));
+            assign(name, binary("^", ident(name), std::move(combined)));
         }
         return ident(name);
     }

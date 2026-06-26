@@ -13,7 +13,7 @@ The implementation is deliberately split into three layers:
 
 1. C++ derives concrete query types and generates query-specific Qumir AST.
 2. Reusable Oz code implements the generic hash table and lifecycle over
-   `<named Key (template readable mutable)>`.
+   `<named Key (template)>`.
 3. C++ owns execution, the small `HashTable` header, and the result buffers;
    Oz code allocates and frees the table's internal arrays.
 
@@ -81,7 +81,7 @@ function.
 - multiple group columns: `Key` is a generated named struct such as
   `AggKey_k1_i64_k2_f64`;
 - generated struct fields are named `key_0`, `key_1`, and so on;
-- explicit `u8` padding fields preserve the C/LLVM layout;
+- Qumir's struct layout supplies the C ABI padding implicitly;
 - each descriptor records source column index, offset, size, and alignment.
 
 Supported layout leaves are integers, `f64`, `bool`, and recursively nested
@@ -148,7 +148,7 @@ same AST. They do not come from a fixed `key_ops_i64.oz` production dependency.
 Specialization works as follows:
 
 1. Generic Oz functions declare parameters as
-   `<named Key (template readable mutable)>`.
+   `<named Key (template)>`.
 2. Generated `agg_dispatch` calls `aht_update` with the concrete key value.
 3. Qumir infers that template `Key` from the call and instantiates the generic
    function chain.
@@ -167,14 +167,13 @@ The generator recursively walks the AST type rather than the raw memory:
   `u64`, and mixed with the xorshift/multiply sequence used by the project;
 - `f64` uses `qdb_f64_bits`, canonicalizes `+0.0` and `-0.0` to the same bits,
   canonicalizes every NaN payload to one quiet NaN, then uses the same mixer;
-- structs hash every non-padding field recursively and combine field hashes in
-  declaration order with a boost-style ordered combiner;
-- generated `__qdb_padding_*` fields are ignored.
+- structs hash every field recursively and combine field hashes in declaration
+  order with a boost-style ordered combiner.
 
 Equality follows the same recursive type walk. Integer leaves use ordinary
 equality. `f64` compares canonicalized bits, so all NaNs are equal for hash-key
 purposes and signed zeroes are equal. Struct equality is the conjunction of
-all non-padding field equalities.
+all field equalities.
 
 The invariant is strict: if `rh_key_equal(a, b)` is true, both values must have
 the same `rh_hash` result.

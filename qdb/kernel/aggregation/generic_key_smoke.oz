@@ -9,7 +9,7 @@
 
   ;; Robin Hood helpers use a template Key and depend only on the key
   ;; operation contract above.
-  (fun rh_hash_key ((var key <named Key (template readable mutable)>)) -> i64
+  (fun rh_hash_key ((var key <named Key (template)>)) -> i64
     (block
       (return (call rh_hash key))))
 

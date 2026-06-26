@@ -5,7 +5,7 @@
     (block
       (return (+ key (: 1000 i64)))))
 
-  (fun rh_hash_generic ((var key <named Key (template readable mutable)>)) -> i64
+  (fun rh_hash_generic ((var key <named Key (template)>)) -> i64
     (block
       (return (call rh_hash key))))
 

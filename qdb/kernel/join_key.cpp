@@ -52,19 +52,8 @@ TJoinKeyDescriptor BuildJoinKeyDescriptor(
     TJoinKeyDescriptor result;
     size_t offset = 0;
     size_t maxAlignment = 1;
-    size_t paddingIndex = 0;
     std::vector<std::pair<std::string, TTypePtr>> lookupFields;
     std::vector<std::pair<std::string, TTypePtr>> storedFields;
-
-    auto addPadding = [&](size_t targetOffset) {
-        while (offset < targetOffset) {
-            const std::string name = "__qdb_padding_" + std::to_string(paddingIndex++);
-            auto type = std::make_shared<TIntegerType>(TIntegerType::U8);
-            lookupFields.emplace_back(name, type);
-            storedFields.emplace_back(name, type);
-            ++offset;
-        }
-    };
 
     for (const auto& [leftName, rightName] : keys) {
         TTypePtr leftFieldType;
@@ -97,7 +86,7 @@ TJoinKeyDescriptor BuildJoinKeyDescriptor(
                 "valid_" + std::to_string(result.Fields.size()), std::make_shared<TBoolType>());
             ++offset;
         }
-        addPadding(AlignUp(offset, layout.Alignment));
+        offset = AlignUp(offset, layout.Alignment);
         result.Fields.push_back({
             .LeftColumnName = leftName,
             .RightColumnName = rightName,
@@ -121,7 +110,6 @@ TJoinKeyDescriptor BuildJoinKeyDescriptor(
 
     result.Alignment = std::min<size_t>(maxAlignment, 8);
     result.Size = AlignUp(offset, result.Alignment);
-    addPadding(result.Size);
     result.TypeName = JoinKeyTypeName(result.Fields);
     const bool hasDistinctType = std::any_of(
         result.Fields.begin(), result.Fields.end(),
