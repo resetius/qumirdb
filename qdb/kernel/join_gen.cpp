@@ -165,10 +165,6 @@ NQumir::NAst::TExprPtr GenJoinInsertKeyOnlyAst(
     std::vector<TExprPtr> structFields;
     structFields.reserve(keyStruct.Cast()->Fields.size());
     for (const auto& [fieldName, fieldType] : keyStruct.Cast()->Fields) {
-        if (fieldName.starts_with("__qdb_padding_")) {
-            structFields.push_back(number(0, fieldType));
-            continue;
-        }
         const bool validity = fieldName.starts_with("valid_");
         const std::string_view prefix = validity ? "valid_" : "key_";
         const size_t fieldIndex = std::stoull(fieldName.substr(prefix.size()));
@@ -507,10 +503,6 @@ NQumir::NAst::TExprPtr GenJoinBatchAst(
     std::vector<TExprPtr> structFields;
     structFields.reserve(keyStruct.Cast()->Fields.size());
     for (const auto& [fieldName, fieldType] : keyStruct.Cast()->Fields) {
-        if (fieldName.starts_with("__qdb_padding_")) {
-            structFields.push_back(number(0, fieldType));
-            continue;
-        }
         const bool validity = fieldName.starts_with("valid_");
         const std::string_view prefix = validity ? "valid_" : "key_";
         const size_t fieldIndex = std::stoull(fieldName.substr(prefix.size()));

@@ -193,9 +193,6 @@ NQumir::NAst::TExprPtr HashKeyValue(
         body.push_back(std::make_shared<TVarStmt>(loc, name, u64Type));
         assign(name, number(0));
         for (const auto& [fieldName, fieldType] : structure.Cast()->Fields) {
-            if (fieldName.starts_with("__qdb_padding_")) {
-                continue;
-            }
             path.push_back(fieldName);
             auto fieldHash = HashKeyValue(
                 fieldType, root, path, body, nextTemporary);
@@ -277,9 +274,6 @@ NQumir::NAst::TExprPtr EqualKeyValue(
         }
         TExprPtr result;
         for (const auto& [fieldName, fieldType] : leftStruct.Cast()->Fields) {
-            if (fieldName.starts_with("__qdb_padding_")) {
-                continue;
-            }
             auto rightField = std::find_if(
                 rightStruct.Cast()->Fields.begin(), rightStruct.Cast()->Fields.end(),
                 [&](const auto& field) { return field.first == fieldName; });
@@ -417,9 +411,6 @@ NQumir::NAst::TExprPtr KeyOwnedBytesExpr(
     if (auto structure = TMaybeType<TStructType>(type)) {
         TExprPtr result = zero();
         for (const auto& [fieldName, fieldType] : structure.Cast()->Fields) {
-            if (fieldName.starts_with("__qdb_padding_")) {
-                continue;
-            }
             path.push_back(fieldName);
             auto fieldBytes = KeyOwnedBytesExpr(fieldType, root, path);
             path.pop_back();
@@ -511,12 +502,6 @@ NQumir::NAst::TExprPtr CloneKeyValue(
         std::vector<TExprPtr> fields;
         fields.reserve(storedStruct.Cast()->Fields.size());
         for (const auto& [fieldName, fieldType] : storedStruct.Cast()->Fields) {
-            if (fieldName.starts_with("__qdb_padding_")) {
-                auto padding = std::make_shared<TNumberExpr>(loc, int64_t{0});
-                padding->Type = fieldType;
-                fields.push_back(std::move(padding));
-                continue;
-            }
             auto lookupField = std::find_if(
                 lookupStruct.Cast()->Fields.begin(), lookupStruct.Cast()->Fields.end(),
                 [&](const auto& item) { return item.first == fieldName; });
@@ -1520,10 +1505,6 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
     }
     fields.reserve(keyStruct.Cast()->Fields.size());
     for (const auto& [fieldName, fieldType] : keyStruct.Cast()->Fields) {
-        if (fieldName.starts_with("__qdb_padding_")) {
-            fields.push_back(number(0, fieldType));
-            continue;
-        }
         const bool validity = fieldName.starts_with("valid_");
         const std::string_view prefix = validity ? "valid_" : "key_";
         if (!fieldName.starts_with(prefix)) {
