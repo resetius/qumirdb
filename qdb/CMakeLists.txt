@@ -13,6 +13,7 @@ add_library(qumirdb
     plan/ops/project.cpp
     plan/ops/aggregate.cpp
     plan/ops/join.cpp
+    plan/ops/sort.cpp
     plan/ops/parse_kernel.cpp
     sexp/printer.cpp
     sexp/parser.cpp
