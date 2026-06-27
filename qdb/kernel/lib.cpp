@@ -37,6 +37,17 @@ std::string ReadJoinKernel(const std::string& name) {
     return source.str();
 }
 
+std::string ReadSortKernel(const std::string& name) {
+    auto path = std::filesystem::path(__FILE__).parent_path() / "sort" / name;
+    std::ifstream input(path);
+    if (!input) {
+        throw std::runtime_error("cannot open sort kernel: " + path.string());
+    }
+    std::ostringstream source;
+    source << input.rdbuf();
+    return source.str();
+}
+
 std::expected<std::vector<NQumir::NAst::TExprPtr>, NQumir::TError>
 BuildJoinKernelLibrary() {
     std::vector<NQumir::NAst::TExprPtr> library;

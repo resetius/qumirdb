@@ -2,9 +2,16 @@
 
 #include <stdint.h>
 
-#include <vector>
-#include <iostream>
+#include <qdb/kernel/lib.h>
+
+#include <qumir/runner/runner_llvm.h>
+
+#include <algorithm>
+#include <bit>
+#include <limits>
 #include <numeric>
+#include <type_traits>
+#include <vector>
 
 namespace {
 
@@ -43,7 +50,7 @@ uint64_t RadixKey(double x) {
 }
 
 template<typename T>
-void CountSortIndices(T* dest, uint32_t* indices, T* work, int n, int digit)
+void CountSortIndices(T* dest, uint32_t* indices, uint32_t* work, int n, int digit)
 {
     // base-16, 8 bits
     uint32_t counts[256] = {0};
@@ -69,7 +76,7 @@ void CountSortIndices(T* dest, uint32_t* indices, T* work, int n, int digit)
 }
 
 template<typename T>
-void RadixSortIndices(T* dest, uint32_t* indices, T* work, int n) {
+void RadixSortIndices(T* dest, uint32_t* indices, uint32_t* work, int n) {
     for (int i = 0; i < sizeof(T) * 8; i += 8) {
         CountSortIndices(dest, indices, work, n, i);
     }
@@ -117,16 +124,61 @@ void GenerateColumn(uint32_t* column, int n, int* seed) {
     }
 }
 
+std::unique_ptr<NQumir::TLLVMRunner> CompileRadixOperation(
+    const std::string& entryName,
+    void*& entry)
+{
+    std::vector<NQumir::NAst::TExprPtr> programStmts;
+    auto addLibrary = [&](const std::string& name, bool skipUse) -> bool {
+        auto library = NQdb::NKernel::ParseFunctionLibrary(
+            NQdb::NKernel::ReadSortKernel(name));
+        if (!library) {
+            ADD_FAILURE() << library.error().ToString();
+            return false;
+        }
+        for (auto& stmt : *library) {
+            if (skipUse && NQumir::NAst::TMaybeNode<NQumir::NAst::TUseExpr>(stmt)) {
+                continue;
+            }
+            programStmts.push_back(std::move(stmt));
+        }
+        return true;
+    };
+    if (!addLibrary("radix.oz", false) ||
+        !addLibrary("radix_wrappers.oz", true)) {
+        return {};
+    }
+
+    NQumir::TLLVMRunnerOptions options;
+    options.CoreInput = true;
+    options.NativeCode = true;
+    options.AllowOverloads = true;
+    auto runner = std::make_unique<NQumir::TLLVMRunner>(options);
+    auto program = std::make_shared<NQumir::NAst::TBlockExpr>(
+        NQumir::TLocation{}, std::move(programStmts));
+    std::string error;
+    entry = runner->CompileKernelAst(program, entryName, &error);
+    EXPECT_NE(entry, nullptr) << error;
+    return runner;
+}
+
+template<typename T>
+std::vector<uint32_t> StableSortedIndices(const std::vector<T>& values) {
+    std::vector<uint32_t> expected(values.size());
+    std::iota(expected.begin(), expected.end(), 0);
+    std::stable_sort(expected.begin(), expected.end(), [&](uint32_t lhs, uint32_t rhs) {
+        return values[lhs] < values[rhs];
+    });
+    return expected;
+}
+
 } // namespace
 
 TEST(SortTest, Basic) {
     std::vector<uint32_t> ar = {2345, 123498, 123, 1, 2, 555, 10};
     std::vector<uint32_t> work; work.resize(ar.size());
     RadixSort(ar.data(), work.data(), ar.size());
-    for (int i = 0; i < ar.size(); i++) {
-        std::cerr << ar[i] << ", ";
-    }
-    std::cerr << "\n";
+    EXPECT_TRUE(std::is_sorted(ar.begin(), ar.end()));
 }
 
 TEST(SortTest, BasicIndices) {
@@ -135,34 +187,25 @@ TEST(SortTest, BasicIndices) {
     std::vector<uint32_t> indices; indices.resize(ar.size());
     std::iota(indices.begin(), indices.end(), 0);
     RadixSortIndices(ar.data(), indices.data(), work.data(), ar.size());
-    for (int i = 0; i < ar.size(); i++) {
-        std::cerr << ar[indices[i]] << ", ";
-    }
-    std::cerr << "\n";
+    EXPECT_EQ(indices, StableSortedIndices(ar));
 }
 
 TEST(SortTest, BasicIndicesSigned) {
     std::vector<int32_t> ar = {-2345, 123498, -123, 1, -2, 555, 10};
-    std::vector<int32_t> work; work.resize(ar.size());
+    std::vector<uint32_t> work; work.resize(ar.size());
     std::vector<uint32_t> indices; indices.resize(ar.size());
     std::iota(indices.begin(), indices.end(), 0);
     RadixSortIndices(ar.data(), indices.data(), work.data(), ar.size());
-    for (int i = 0; i < ar.size(); i++) {
-        std::cerr << ar[indices[i]] << ", ";
-    }
-    std::cerr << "\n";
+    EXPECT_EQ(indices, StableSortedIndices(ar));
 }
 
 TEST(SortTest, BasicIndicesDouble) {
-    std::vector<double> ar = {-2345.6, 123498.1, -123.5, 1.2, -2.5, 555.99, 10.12344, std::numeric_limits<double>::quiet_NaN()};
-    std::vector<double> work; work.resize(ar.size());
+    std::vector<double> ar = {-2345.6, 123498.1, -123.5, 1.2, -2.5, 555.99, 10.12344};
+    std::vector<uint32_t> work; work.resize(ar.size());
     std::vector<uint32_t> indices; indices.resize(ar.size());
     std::iota(indices.begin(), indices.end(), 0);
     RadixSortIndices(ar.data(), indices.data(), work.data(), ar.size());
-    for (int i = 0; i < ar.size(); i++) {
-        std::cerr << ar[indices[i]] << ", ";
-    }
-    std::cerr << "\n";
+    EXPECT_EQ(indices, StableSortedIndices(ar));
 }
 
 TEST(SortTest, RowSet) {
@@ -180,23 +223,158 @@ TEST(SortTest, RowSet) {
     GenerateColumn(col2.data(), n, &seed);
     GenerateColumn(col3.data(), n, &seed);
 
-    for (int i = 0; i < n; i++) {
-        std::cerr << col1[indices[i]] << "," << col2[indices[i]] << "," << col3[indices[i]] << "\n";
-    }
-    std::cerr << "\n";
-
     RadixSortIndices(col3.data(), indices.data(), work.data(), n);
     RadixSortIndices(col2.data(), indices.data(), work.data(), n);
     RadixSortIndices(col1.data(), indices.data(), work.data(), n);
 
-    for (int i = 0; i < n; i++) {
-        std::cerr << col1[indices[i]] << "," << col2[indices[i]] << "," << col3[indices[i]] << "\n";
+    std::vector<uint32_t> expected(n);
+    std::iota(expected.begin(), expected.end(), 0);
+    std::stable_sort(expected.begin(), expected.end(), [&](uint32_t lhs, uint32_t rhs) {
+        return std::tuple(col1[lhs], col2[lhs], col3[lhs])
+            < std::tuple(col1[rhs], col2[rhs], col3[rhs]);
+    });
+    EXPECT_EQ(indices, expected);
+}
+
+TEST(SortRadixOz, NumericKeysMatchPrototype) {
+    void* i32Entry = nullptr;
+    auto i32Runner = CompileRadixOperation("qdb_radix_key_i32_test", i32Entry);
+    ASSERT_NE(i32Entry, nullptr);
+    auto i32Key = reinterpret_cast<uint64_t(*)(int32_t)>(i32Entry);
+    EXPECT_EQ(i32Key(std::numeric_limits<int32_t>::min()), RadixKey(std::numeric_limits<int32_t>::min()));
+    EXPECT_EQ(i32Key(-1), RadixKey(-1));
+    EXPECT_EQ(i32Key(0), RadixKey(0));
+    EXPECT_EQ(i32Key(42), RadixKey(42));
+    EXPECT_EQ(i32Key(std::numeric_limits<int32_t>::max()), RadixKey(std::numeric_limits<int32_t>::max()));
+
+    void* f64Entry = nullptr;
+    auto f64Runner = CompileRadixOperation("qdb_radix_key_f64_test", f64Entry);
+    ASSERT_NE(f64Entry, nullptr);
+    auto f64Key = reinterpret_cast<uint64_t(*)(double)>(f64Entry);
+    for (double value : {-2345.6, -0.0, 0.0, 1.2, 555.99}) {
+        EXPECT_EQ(f64Key(value), RadixKey(value));
     }
-    std::cerr << "\n";
+}
+
+TEST(SortRadixOz, SortsU32IndicesAscending) {
+    void* entry = nullptr;
+    auto runner = CompileRadixOperation("qdb_radix_sort_indices_u32_asc", entry);
+    ASSERT_NE(entry, nullptr);
+    auto sort = reinterpret_cast<void(*)(uint32_t*, uint32_t*, uint32_t*, uint32_t*, int64_t)>(entry);
+
+    std::vector<uint32_t> values = {7, 3, 7, 1, 9, 3, 0, 7};
+    std::vector<uint32_t> indices(values.size());
+    std::vector<uint32_t> work(values.size());
+    std::vector<uint32_t> counts(256);
+    std::iota(indices.begin(), indices.end(), 0);
+
+    sort(values.data(), indices.data(), work.data(), counts.data(), values.size());
+    EXPECT_EQ(indices, StableSortedIndices(values));
+}
+
+TEST(SortRadixOz, SortsU8IndicesAscending) {
+    void* entry = nullptr;
+    auto runner = CompileRadixOperation("qdb_radix_sort_indices_u8_asc", entry);
+    ASSERT_NE(entry, nullptr);
+    auto sort = reinterpret_cast<void(*)(uint8_t*, uint32_t*, uint32_t*, uint32_t*, int64_t)>(entry);
+
+    std::vector<uint8_t> values = {7, 3, 7, 1, 255, 3, 0, 7};
+    std::vector<uint32_t> indices(values.size());
+    std::vector<uint32_t> work(values.size());
+    std::vector<uint32_t> counts(256);
+    std::iota(indices.begin(), indices.end(), 0);
+
+    sort(values.data(), indices.data(), work.data(), counts.data(), values.size());
+    EXPECT_EQ(indices, StableSortedIndices(values));
+}
+
+TEST(SortRadixOz, SortsI8IndicesAscending) {
+    void* entry = nullptr;
+    auto runner = CompileRadixOperation("qdb_radix_sort_indices_i8_asc_test", entry);
+    ASSERT_NE(entry, nullptr);
+    auto sort = reinterpret_cast<void(*)(int8_t*, uint32_t*, uint32_t*, uint32_t*, int64_t)>(entry);
+
+    std::vector<int8_t> values = {-7, 3, -7, 1, 127, 3, 0, std::numeric_limits<int8_t>::min()};
+    std::vector<uint32_t> indices(values.size());
+    std::vector<uint32_t> work(values.size());
+    std::vector<uint32_t> counts(256);
+    std::iota(indices.begin(), indices.end(), 0);
+
+    sort(values.data(), indices.data(), work.data(), counts.data(), values.size());
+    EXPECT_EQ(indices, StableSortedIndices(values));
+}
+
+TEST(SortRadixOz, SortsU16IndicesAscending) {
+    void* entry = nullptr;
+    auto runner = CompileRadixOperation("qdb_radix_sort_indices_u16_asc", entry);
+    ASSERT_NE(entry, nullptr);
+    auto sort = reinterpret_cast<void(*)(uint16_t*, uint32_t*, uint32_t*, uint32_t*, int64_t)>(entry);
+
+    std::vector<uint16_t> values = {700, 3, 700, 1, 65535, 3, 0, 7};
+    std::vector<uint32_t> indices(values.size());
+    std::vector<uint32_t> work(values.size());
+    std::vector<uint32_t> counts(256);
+    std::iota(indices.begin(), indices.end(), 0);
+
+    sort(values.data(), indices.data(), work.data(), counts.data(), values.size());
+    EXPECT_EQ(indices, StableSortedIndices(values));
+}
+
+TEST(SortRadixOz, SortsI16IndicesAscending) {
+    void* entry = nullptr;
+    auto runner = CompileRadixOperation("qdb_radix_sort_indices_i16_asc_test", entry);
+    ASSERT_NE(entry, nullptr);
+    auto sort = reinterpret_cast<void(*)(int16_t*, uint32_t*, uint32_t*, uint32_t*, int64_t)>(entry);
+
+    std::vector<int16_t> values = {-700, 3, -700, 1, 32767, 3, 0, std::numeric_limits<int16_t>::min()};
+    std::vector<uint32_t> indices(values.size());
+    std::vector<uint32_t> work(values.size());
+    std::vector<uint32_t> counts(256);
+    std::iota(indices.begin(), indices.end(), 0);
+
+    sort(values.data(), indices.data(), work.data(), counts.data(), values.size());
+    EXPECT_EQ(indices, StableSortedIndices(values));
+}
+
+TEST(SortRadixOz, SortsU32IndicesDescendingStably) {
+    void* entry = nullptr;
+    auto runner = CompileRadixOperation("qdb_radix_sort_indices_u32_desc", entry);
+    ASSERT_NE(entry, nullptr);
+    auto sort = reinterpret_cast<void(*)(uint32_t*, uint32_t*, uint32_t*, uint32_t*, int64_t)>(entry);
+
+    std::vector<uint32_t> values = {7, 3, 7, 1, 9, 3, 0, 7};
+    std::vector<uint32_t> indices(values.size());
+    std::vector<uint32_t> work(values.size());
+    std::vector<uint32_t> counts(256);
+    std::iota(indices.begin(), indices.end(), 0);
+
+    sort(values.data(), indices.data(), work.data(), counts.data(), values.size());
+
+    std::vector<uint32_t> expected(values.size());
+    std::iota(expected.begin(), expected.end(), 0);
+    std::stable_sort(expected.begin(), expected.end(), [&](uint32_t lhs, uint32_t rhs) {
+        return values[lhs] > values[rhs];
+    });
+    EXPECT_EQ(indices, expected);
+}
+
+TEST(SortRadixOz, GenericSortUsesI32RadixKeyOverload) {
+    void* entry = nullptr;
+    auto runner = CompileRadixOperation("qdb_radix_sort_indices_i32_asc_test", entry);
+    ASSERT_NE(entry, nullptr);
+    auto sort = reinterpret_cast<void(*)(int32_t*, uint32_t*, uint32_t*, uint32_t*, int64_t)>(entry);
+
+    std::vector<int32_t> values = {-7, 3, -7, 1, 9, 3, 0, std::numeric_limits<int32_t>::min()};
+    std::vector<uint32_t> indices(values.size());
+    std::vector<uint32_t> work(values.size());
+    std::vector<uint32_t> counts(256);
+    std::iota(indices.begin(), indices.end(), 0);
+
+    sort(values.data(), indices.data(), work.data(), counts.data(), values.size());
+    EXPECT_EQ(indices, StableSortedIndices(values));
 }
 
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
 }
-

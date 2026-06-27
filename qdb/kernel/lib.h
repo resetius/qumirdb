@@ -25,6 +25,10 @@ std::string ReadAggregationKernel(const std::string& name);
 // to this source file's location.
 std::string ReadJoinKernel(const std::string& name);
 
+// Reads a sort kernel source file (qdb/kernel/sort/<name>), resolved relative
+// to this source file's location.
+std::string ReadSortKernel(const std::string& name);
+
 // Assembles the Stage-1 join kernel library (i64 key ops + generic Robin Hood
 // rehash + the aggregation HashTable lifecycle minus aht_update + the join
 // sources). Wrap in a (block ...) and compile with AllowOverloads=true,
