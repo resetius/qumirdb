@@ -730,6 +730,7 @@ TJoinKernels TKernelCompiler::CompileJoin(
         options.CoreInput = true;
         options.NativeCode = true;
         options.AllowOverloads = true;
+        options.EnablePerfJitEventListener = true;
         options.OptLevel = 3;
         options.PrintIr = Diagnostics_ != nullptr;
         options.PrintLlvm = Diagnostics_ != nullptr;

@@ -131,6 +131,7 @@ public:
         Opts_.NativeCode = true;
         Opts_.OptLevel = 3;
         Opts_.AllowOverloads = true;
+        Opts_.EnablePerfJitEventListener = true;
         Opts_.PrintIr = Diagnostics_ != nullptr;
         Opts_.PrintLlvm = Diagnostics_ != nullptr;
     }
