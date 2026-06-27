@@ -16,6 +16,35 @@ namespace NQdb {
 
 using namespace NQumir::NAst;
 
+struct TTopSortPick {
+    uint8_t Src = 0; // 0 = old state, 1 = incoming temp batch
+    uint32_t Idx = 0;
+};
+
+struct TTopSortState {
+    std::vector<TGatheredColumn> Gathered;
+    std::vector<TColumn> Columns;
+    int64_t RowCount = 0;
+
+    const TRowSet RowSet() const {
+        return TRowSet{
+            .Columns = const_cast<TColumn*>(Columns.data()),
+            .ColumnCount = static_cast<int64_t>(Columns.size()),
+            .RowCount = RowCount,
+            .Selection = nullptr,
+            .Destroy = nullptr,
+            .Private = nullptr,
+            .RefCount = 1,
+        };
+    }
+};
+
+struct TTopSortScratch {
+    std::unique_ptr<TTopSortState> State = std::make_unique<TTopSortState>();
+    std::vector<uint32_t> TempRows;
+    std::vector<TTopSortPick> Picks;
+};
+
 namespace {
 
 struct TSortedRowSetData {
@@ -23,8 +52,19 @@ struct TSortedRowSetData {
     std::vector<TColumn> Columns;
 };
 
+struct TLimitRowSetData {
+    TRowSet Input{};
+    std::vector<uint8_t> Selection;
+};
+
 void DestroySortedRowSet(TRowSet* rowSet) {
     delete static_cast<TSortedRowSetData*>(rowSet->Private);
+}
+
+void DestroyLimitRowSet(TRowSet* rowSet) {
+    auto* data = static_cast<TLimitRowSetData*>(rowSet->Private);
+    Release(&data->Input);
+    delete data;
 }
 
 bool IsBitSet(const uint8_t* data, int64_t bit) {
@@ -187,6 +227,131 @@ bool SortRowsLess(const TRowStore& store, const std::vector<TSortKey>& keys,
         }
     }
     return false;
+}
+
+bool SortRowsLessColumns(const TColumn* leftColumns, int32_t leftRow,
+    const TColumn* rightColumns, int32_t rightRow,
+    const std::vector<TSortKey>& keys,
+    const std::vector<TSortColumnRef>& keyColumns)
+{
+    for (size_t i = 0; i < keys.size(); ++i) {
+        const auto& keyColumn = keyColumns[i];
+        const TColumn& leftColumn = leftColumns[keyColumn.Index];
+        const TColumn& rightColumn = rightColumns[keyColumn.Index];
+        const bool leftValid = SourceValid(leftColumn, leftRow);
+        const bool rightValid = SourceValid(rightColumn, rightRow);
+        if (!leftValid || !rightValid) {
+            if (leftValid != rightValid) {
+                return EffectiveNulls(keys[i]) == ESortNulls::First ? !leftValid : leftValid;
+            }
+            continue;
+        }
+
+        int cmp = CompareValues(leftColumn, leftRow, rightColumn, rightRow, keyColumn.Type);
+        if (cmp != 0) {
+            if (keys[i].Direction == ESortDirection::Desc) {
+                cmp = -cmp;
+            }
+            return cmp < 0;
+        }
+    }
+    return false;
+}
+
+size_t SortColumnFixedWidth(const TTypePtr& type);
+
+void GatherTopSortColumn(const TColumn& stateColumn, const TColumn& tempColumn,
+    const std::vector<TTopSortPick>& picks, size_t pickCount,
+    const TTypePtr& type, TGatheredColumn& out)
+{
+    const auto valueType = UnwrapNamedType(UnwrapNullableType(type));
+    const bool isBool = static_cast<bool>(TMaybeType<TBoolType>(valueType));
+    const bool isString = static_cast<bool>(TMaybeType<TStringType>(valueType));
+    const size_t width = SortColumnFixedWidth(type);
+
+    out.Data.clear();
+    out.Offsets.clear();
+    out.Mask.assign((pickCount + 7) / 8, 0xff);
+    bool anyNull = false;
+
+    auto source = [&](const TTopSortPick& pick) -> std::pair<const TColumn&, int32_t> {
+        return pick.Src == 0
+            ? std::pair<const TColumn&, int32_t>{stateColumn, static_cast<int32_t>(pick.Idx)}
+            : std::pair<const TColumn&, int32_t>{tempColumn, static_cast<int32_t>(pick.Idx)};
+    };
+    auto markNull = [&](size_t i) {
+        ClearBit(out.Mask, i);
+        anyNull = true;
+    };
+
+    if (isString) {
+        out.Offsets.resize(pickCount + 1);
+        out.Offsets[0] = 0;
+        for (size_t i = 0; i < pickCount; ++i) {
+            auto [col, row] = source(picks[i]);
+            int64_t len = 0;
+            if (!SourceValid(col, row)) {
+                markNull(i);
+            } else {
+                len = OffsetAt(col, row + 1) - OffsetAt(col, row);
+            }
+            out.Offsets[i + 1] = out.Offsets[i] + len;
+        }
+        out.Data.resize(static_cast<size_t>(out.Offsets[pickCount]));
+        for (size_t i = 0; i < pickCount; ++i) {
+            auto [col, row] = source(picks[i]);
+            if (!SourceValid(col, row)) {
+                continue;
+            }
+            const int64_t begin = OffsetAt(col, row);
+            const int64_t len = OffsetAt(col, row + 1) - begin;
+            if (len > 0) {
+                std::memcpy(out.Data.data() + out.Offsets[i], col.Data + begin, len);
+            }
+        }
+        out.Column = TColumn{
+            .Data = out.Data.data(),
+            .Mask = anyNull ? out.Mask.data() : nullptr,
+            .Offsets = out.Offsets.data(),
+            .OffsetWidth = 8,
+        };
+    } else if (isBool) {
+        out.Data.assign((pickCount + 7) / 8, 0);
+        for (size_t i = 0; i < pickCount; ++i) {
+            auto [col, row] = source(picks[i]);
+            if (!SourceValid(col, row)) {
+                markNull(i);
+                continue;
+            }
+            if (BoolAt(col, row)) {
+                out.Data[i / 8] |= char(uint8_t(1) << (i % 8));
+            }
+        }
+        out.Column = TColumn{
+            .Data = out.Data.data(),
+            .DataBitOffset = 0,
+            .Mask = anyNull ? out.Mask.data() : nullptr,
+        };
+    } else {
+        out.Data.assign(pickCount * width, 0);
+        for (size_t i = 0; i < pickCount; ++i) {
+            auto [col, row] = source(picks[i]);
+            if (!SourceValid(col, row)) {
+                markNull(i);
+                continue;
+            }
+            std::memcpy(out.Data.data() + i * width,
+                col.Data + static_cast<int64_t>(row) * width, width);
+        }
+        out.Column = TColumn{
+            .Data = out.Data.data(),
+            .Mask = anyNull ? out.Mask.data() : nullptr,
+        };
+    }
+
+    if (!anyNull) {
+        out.Mask.clear();
+    }
 }
 
 bool HasAnyNullMask(const TRowStore& store, const std::vector<TRowId>& rows,
@@ -494,6 +659,198 @@ bool TRuntimeSort::Next(TRowSet& rowSet) {
     };
     Cursor_ += n;
     return true;
+}
+
+TRuntimeTopSort::TRuntimeTopSort(std::unique_ptr<IRuntimeNode> input,
+    TTypePtr outputType,
+    std::vector<TSortKey> keys,
+    std::vector<TSortColumnRef> keyColumns,
+    int64_t limit,
+    int64_t batchRows)
+    : Input_(std::move(input))
+    , OutputType_(std::move(outputType))
+    , Keys_(std::move(keys))
+    , KeyColumns_(std::move(keyColumns))
+    , Limit_(limit)
+    , BatchRows_(batchRows)
+    , Scratch_(std::make_unique<TTopSortScratch>())
+{}
+
+TRuntimeTopSort::~TRuntimeTopSort() = default;
+
+void TRuntimeTopSort::Materialize() {
+    if (Materialized_) {
+        return;
+    }
+    if (Limit_ <= 0) {
+        Materialized_ = true;
+        return;
+    }
+
+    auto* outputType = static_cast<TStructType*>(OutputType_.get());
+    if (!outputType) {
+        throw std::runtime_error("top-sort output must have TStructType");
+    }
+
+    TRowSet batch{};
+    while (Input_->Next(batch)) {
+        auto& tempRows = Scratch_->TempRows;
+        auto& picks = Scratch_->Picks;
+        tempRows.clear();
+        tempRows.reserve(static_cast<size_t>(batch.RowCount));
+        for (int32_t row = 0; row < batch.RowCount; ++row) {
+            if (RowSelected(batch, row)) {
+                tempRows.push_back(static_cast<uint32_t>(row));
+            }
+        }
+
+        std::stable_sort(tempRows.begin(), tempRows.end(),
+            [&](uint32_t lhs, uint32_t rhs) {
+                return SortRowsLessColumns(batch.Columns, static_cast<int32_t>(lhs),
+                    batch.Columns, static_cast<int32_t>(rhs), Keys_, KeyColumns_);
+            });
+
+        const TRowSet stateView = Scratch_->State->RowSet();
+        const size_t stateRows = static_cast<size_t>(Scratch_->State->RowCount);
+        const size_t limit = static_cast<size_t>(Limit_);
+        const size_t pickCount = std::min(limit, stateRows + tempRows.size());
+        picks.resize(pickCount);
+
+        size_t left = 0;
+        size_t right = 0;
+        size_t out = 0;
+        while (out < pickCount && (left < stateRows || right < tempRows.size())) {
+            if (right == tempRows.size()) {
+                picks[out++] = TTopSortPick{0, static_cast<uint32_t>(left++)};
+                continue;
+            }
+            if (left == stateRows) {
+                picks[out++] = TTopSortPick{1, tempRows[right++]};
+                continue;
+            }
+
+            const uint32_t tempRow = tempRows[right];
+            if (SortRowsLessColumns(batch.Columns, static_cast<int32_t>(tempRow),
+                    stateView.Columns, static_cast<int32_t>(left), Keys_, KeyColumns_)) {
+                picks[out++] = TTopSortPick{1, tempRow};
+                ++right;
+            } else {
+                picks[out++] = TTopSortPick{0, static_cast<uint32_t>(left++)};
+            }
+        }
+
+        auto next = std::make_unique<TTopSortState>();
+        next->Gathered.resize(outputType->Fields.size());
+        next->Columns.resize(outputType->Fields.size());
+        next->RowCount = static_cast<int64_t>(pickCount);
+        for (size_t c = 0; c < outputType->Fields.size(); ++c) {
+            const TColumn emptyState{};
+            const TColumn& stateColumn = Scratch_->State->RowCount == 0 ? emptyState : stateView.Columns[c];
+            GatherTopSortColumn(stateColumn, batch.Columns[c], picks, pickCount,
+                outputType->Fields[c].second, next->Gathered[c]);
+            next->Columns[c] = next->Gathered[c].Column;
+        }
+        Scratch_->State = std::move(next);
+        Release(&batch);
+    }
+
+    Materialized_ = true;
+}
+
+bool TRuntimeTopSort::Next(TRowSet& rowSet) {
+    Materialize();
+    if (!Scratch_ || !Scratch_->State ||
+        Cursor_ >= static_cast<size_t>(Scratch_->State->RowCount)) {
+        return false;
+    }
+
+    const size_t n = std::min<size_t>(
+        static_cast<size_t>(BatchRows_), static_cast<size_t>(Scratch_->State->RowCount) - Cursor_);
+    std::vector<TTopSortPick> picks(n);
+    for (size_t i = 0; i < n; ++i) {
+        picks[i] = TTopSortPick{0, static_cast<uint32_t>(Cursor_ + i)};
+    }
+
+    auto* outputType = static_cast<TStructType*>(OutputType_.get());
+    auto* data = new TSortedRowSetData;
+    data->Gathered.resize(outputType->Fields.size());
+    data->Columns.resize(outputType->Fields.size());
+    const TColumn emptyTemp{};
+    for (size_t c = 0; c < outputType->Fields.size(); ++c) {
+        GatherTopSortColumn(Scratch_->State->Columns[c], emptyTemp, picks, n,
+            outputType->Fields[c].second, data->Gathered[c]);
+        data->Columns[c] = data->Gathered[c].Column;
+    }
+
+    rowSet = TRowSet{
+        .Columns = data->Columns.data(),
+        .ColumnCount = static_cast<int64_t>(data->Columns.size()),
+        .RowCount = static_cast<int64_t>(n),
+        .Selection = nullptr,
+        .Destroy = DestroySortedRowSet,
+        .Private = data,
+        .RefCount = 1,
+    };
+    Cursor_ += n;
+    return true;
+}
+
+TRuntimeLimit::TRuntimeLimit(std::unique_ptr<IRuntimeNode> input,
+    TTypePtr outputType,
+    int64_t limit,
+    int64_t offset,
+    int64_t batchRows)
+    : Input_(std::move(input))
+    , OutputType_(std::move(outputType))
+    , Limit_(limit)
+    , Offset_(offset)
+    , BatchRows_(batchRows)
+{}
+
+bool TRuntimeLimit::Next(TRowSet& rowSet) {
+    if (Limit_ <= 0 || Emitted_ >= Limit_) {
+        return false;
+    }
+
+    TRowSet input{};
+    while (Input_->Next(input)) {
+        auto* data = new TLimitRowSetData;
+        data->Input = input;
+        data->Selection.assign(static_cast<size_t>(input.RowCount), uint8_t{0});
+
+        bool any = false;
+        for (int32_t row = 0; row < input.RowCount && Emitted_ < Limit_; ++row) {
+            if (!RowSelected(input, row)) {
+                continue;
+            }
+            if (Skipped_ < Offset_) {
+                ++Skipped_;
+                continue;
+            }
+            data->Selection[row] = 1;
+            ++Emitted_;
+            any = true;
+        }
+
+        if (!any) {
+            Release(&data->Input);
+            delete data;
+            continue;
+        }
+
+        rowSet = TRowSet{
+            .Columns = input.Columns,
+            .ColumnCount = input.ColumnCount,
+            .RowCount = input.RowCount,
+            .Selection = data->Selection.data(),
+            .Destroy = DestroyLimitRowSet,
+            .Private = data,
+            .RefCount = 1,
+        };
+        return true;
+    }
+
+    return false;
 }
 
 } // namespace NQdb

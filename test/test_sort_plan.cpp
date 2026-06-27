@@ -305,6 +305,120 @@ TEST(SortExec, SortsCompositeNumericKeysWithFusedRadixKernel) {
     Release(&out);
 }
 
+TEST(SortExec, TopSortReturnsLimitFromOneBatch) {
+    using namespace NQumir::NAst;
+
+    int64_t keys[] = {5, 1, 3, 2};
+    int64_t payload[] = {50, 10, 30, 20};
+    std::vector<TColumn> columns;
+    TRowSet batch = MakeI64I64Batch(keys, payload, 4, columns);
+
+    auto i64 = std::make_shared<TIntegerType>();
+    TVectorSource source(
+        {{"k", i64}, {"payload", i64}},
+        {batch});
+    auto plan = BuildSqlPlan("SELECT k, payload FROM t ORDER BY k LIMIT 2", source);
+    ASSERT_TRUE(plan.has_value()) << (plan ? "" : plan.error().ToString());
+    auto optimized = ApplyTopSort(*plan);
+    ASSERT_TRUE(TMaybeOp<TTopSortOperator>(optimized));
+
+    TPhysicalPlanner planner;
+    auto runtime = planner.Build(optimized);
+
+    TRowSet out{};
+    ASSERT_TRUE(runtime->Next(out));
+    ASSERT_EQ(out.RowCount, 2);
+    auto* outK = reinterpret_cast<int64_t*>(out.Columns[0].Data);
+    auto* outPayload = reinterpret_cast<int64_t*>(out.Columns[1].Data);
+    EXPECT_EQ(std::vector<int64_t>(outK, outK + out.RowCount),
+        (std::vector<int64_t>{1, 2}));
+    EXPECT_EQ(std::vector<int64_t>(outPayload, outPayload + out.RowCount),
+        (std::vector<int64_t>{10, 20}));
+    Release(&out);
+    TRowSet second{};
+    EXPECT_FALSE(runtime->Next(second));
+}
+
+TEST(SortExec, TopSortMergesBatchesStably) {
+    using namespace NQumir::NAst;
+
+    int64_t k1[] = {1, 2, 2};
+    int64_t p1[] = {10, 20, 21};
+    std::vector<TColumn> columns1;
+    TRowSet batch1 = MakeI64I64Batch(k1, p1, 3, columns1);
+
+    int64_t k2[] = {0, 2, 1};
+    int64_t p2[] = {0, 22, 11};
+    std::vector<TColumn> columns2;
+    TRowSet batch2 = MakeI64I64Batch(k2, p2, 3, columns2);
+
+    auto i64 = std::make_shared<TIntegerType>();
+    TVectorSource source(
+        {{"k", i64}, {"payload", i64}},
+        {batch1, batch2});
+    auto plan = BuildSqlPlan("SELECT k, payload FROM t ORDER BY k LIMIT 5", source);
+    ASSERT_TRUE(plan.has_value()) << (plan ? "" : plan.error().ToString());
+    auto optimized = ApplyTopSort(*plan);
+    ASSERT_TRUE(TMaybeOp<TTopSortOperator>(optimized));
+
+    TPhysicalPlanner planner;
+    auto runtime = planner.Build(optimized);
+
+    TRowSet out{};
+    ASSERT_TRUE(runtime->Next(out));
+    ASSERT_EQ(out.RowCount, 5);
+    auto* outK = reinterpret_cast<int64_t*>(out.Columns[0].Data);
+    auto* outPayload = reinterpret_cast<int64_t*>(out.Columns[1].Data);
+    EXPECT_EQ(std::vector<int64_t>(outK, outK + out.RowCount),
+        (std::vector<int64_t>{0, 1, 1, 2, 2}));
+    EXPECT_EQ(std::vector<int64_t>(outPayload, outPayload + out.RowCount),
+        (std::vector<int64_t>{0, 10, 11, 20, 21}));
+    Release(&out);
+}
+
+TEST(SortExec, TopSortHandlesNullableNumericKeys) {
+    using namespace NQumir::NAst;
+
+    int64_t keys[] = {30, 1000, 10, -999, 20};
+    int64_t payload[] = {1, 2, 3, 4, 5};
+    uint8_t keyMask[] = {0b00010101}; // rows 1 and 3 are NULL.
+    std::vector<TColumn> columns = {
+        TColumn{.Data = reinterpret_cast<char*>(keys), .Mask = keyMask},
+        TColumn{.Data = reinterpret_cast<char*>(payload)},
+    };
+    TRowSet batch{
+        .Columns = columns.data(),
+        .ColumnCount = 2,
+        .RowCount = 5,
+        .RefCount = 1,
+    };
+
+    auto i64 = std::make_shared<TIntegerType>();
+    TVectorSource source(
+        {{"k", std::make_shared<TNullable>(i64)}, {"payload", i64}},
+        {batch});
+    auto plan = BuildSqlPlan(
+        "SELECT k, payload FROM t ORDER BY k NULLS FIRST LIMIT 3", source);
+    ASSERT_TRUE(plan.has_value()) << (plan ? "" : plan.error().ToString());
+    auto optimized = ApplyTopSort(*plan);
+    ASSERT_TRUE(TMaybeOp<TTopSortOperator>(optimized));
+
+    TPhysicalPlanner planner;
+    auto runtime = planner.Build(optimized);
+
+    TRowSet out{};
+    ASSERT_TRUE(runtime->Next(out));
+    ASSERT_EQ(out.RowCount, 3);
+    ASSERT_NE(out.Columns[0].Mask, nullptr);
+    auto* outPayload = reinterpret_cast<int64_t*>(out.Columns[1].Data);
+    EXPECT_EQ(std::vector<int64_t>(outPayload, outPayload + out.RowCount),
+        (std::vector<int64_t>{2, 4, 3}));
+    EXPECT_FALSE(MaskBit(out.Columns[0], 0));
+    EXPECT_FALSE(MaskBit(out.Columns[0], 1));
+    EXPECT_TRUE(MaskBit(out.Columns[0], 2));
+    Release(&out);
+}
+
 TEST(SortExec, EmptyInputProducesNoRows) {
     using namespace NQumir::NAst;
 
