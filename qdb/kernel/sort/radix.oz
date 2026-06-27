@@ -115,4 +115,65 @@
       (while (< digit key_bits)
         (block
           (call radix_count_sort_indices values indices work counts n digit desc)
-          (= digit (+ digit (: 8 i64))))))))
+          (= digit (+ digit (: 8 i64)))))))
+
+;; do not use in hot path
+(fun radix_sort
+  ((var n i64)
+   (var values <array <named Value (template)> 1>)
+   (var desc bool)) -> void
+
+  (block
+    (var key_bits = (: 64 i64))
+    (var counts <array u32 1> [0 255])
+    (var work <array <named Value (template)> 1> [0 n])
+    (var indices <array u32 1> [0 n])
+    (var index_work <array u32 1> [0 n])
+
+    (var i i64)
+    (= i (: 0 i64))
+    (while (< i n)
+      (block
+        (= indices [i] (cast i u32))
+        (= i (+ i (: 1 i64)))))
+
+    (call radix_sort_indices
+      (cast values <ptr <named Value (template)>>)
+      (cast indices <ptr u32>)
+      (cast index_work <ptr u32>)
+      (cast counts <ptr u32>)
+      n
+      key_bits
+      desc)
+
+    (= i (: 0 i64))
+    (while (< i n)
+      (block
+        (var source = (cast (index indices i) i64))
+        (var item = (index values source))
+        (= work [i] item)
+        (= i (+ i (: 1 i64)))))
+
+    (= i (: 0 i64))
+    (while (< i n)
+      (block
+        (= values [i] (index work i))
+        (= i (+ i (: 1 i64)))))
+  )
+)
+
+(fun radix_sort
+  ((var n i64)
+   (var values <array <named Value (template)> 1>)) -> void
+   (block
+    (call radix_sort n values #f))
+)
+
+(fun radix_sort_desc
+  ((var n i64)
+   (var values <array <named Value (template)> 1>)) -> void
+   (block
+    (call radix_sort n values #t))
+)
+
+) ; global block
