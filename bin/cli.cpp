@@ -11,6 +11,7 @@
 #include <qdb/plan/passes/equijoin.h>
 #include <qdb/plan/passes/join_order.h>
 #include <qdb/plan/passes/qualify_columns.h>
+#include <qdb/plan/passes/top_sort.h>
 #include <qdb/plan/passes/typing.h>
 #include <qdb/sexp/parser.h>
 #include <qdb/sexp/printer.h>
@@ -346,6 +347,8 @@ int RunQuery(ESyntax syntax, std::istream& in, const TConfig& config) {
     NQdb::AnnotateTypes(*plan); // re-annotate: reordering rebuilt the join tree
     *plan = NQdb::ExtractEquiJoins(*plan);
     NQdb::AnnotateTypes(*plan); // re-annotate: equi-join extraction adds/removes nodes
+    *plan = NQdb::ApplyTopSort(*plan);
+    NQdb::AnnotateTypes(*plan); // re-annotate: top-sort replaces limit(sort(...))
     NQdb::ApplyColumnPruning(*plan);
 
     if (config.Verbose) {

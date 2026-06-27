@@ -3,6 +3,7 @@
 #include <qdb/plan/ops/aggregate.h>
 #include <qdb/plan/ops/filter.h>
 #include <qdb/plan/ops/join.h>
+#include <qdb/plan/ops/limit.h>
 #include <qdb/plan/ops/project.h>
 #include <qdb/plan/ops/sort.h>
 #include <qdb/plan/ops/source.h>
@@ -41,6 +42,22 @@ void AnnotateTypes(const TOperatorPtr& root) {
     }
 
     if (auto maybe = TMaybeOp<TSortOperator>(root)) {
+        auto schema = maybe.Cast()->Input()->OutputColumns();
+        root->Type = std::make_shared<TFunctionType>(
+            std::vector<TTypePtr>{schema},
+            schema);
+        return;
+    }
+
+    if (auto maybe = TMaybeOp<TTopSortOperator>(root)) {
+        auto schema = maybe.Cast()->Input()->OutputColumns();
+        root->Type = std::make_shared<TFunctionType>(
+            std::vector<TTypePtr>{schema},
+            schema);
+        return;
+    }
+
+    if (auto maybe = TMaybeOp<TLimitOperator>(root)) {
         auto schema = maybe.Cast()->Input()->OutputColumns();
         root->Type = std::make_shared<TFunctionType>(
             std::vector<TTypePtr>{schema},
