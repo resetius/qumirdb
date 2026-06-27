@@ -13,6 +13,7 @@
 #include <qumir/parser/core/printer.h>
 
 #include <optional>
+#include <sstream>
 #include <stdexcept>
 #include <unordered_map>
 #include <vector>
@@ -45,6 +46,63 @@ NQumir::NAst::TExprPtr ClonePredicate(
     const NQumir::NAst::TExprPtr& predicate)
 {
     return CloneExpr(predicate);
+}
+
+std::string SortCoreTypeName(const NQumir::NAst::TTypePtr& type) {
+    using namespace NQumir::NAst;
+    auto valueType = UnwrapNamedType(UnwrapNullableType(type));
+    if (auto integer = TMaybeType<TIntegerType>(valueType)) {
+        return integer.Cast()->ToString();
+    }
+    if (TMaybeType<TFloatType>(valueType)) {
+        return "f64";
+    }
+    return {};
+}
+
+int64_t SortRadixKeyBits(const NQumir::NAst::TTypePtr& type) {
+    using namespace NQumir::NAst;
+    auto valueType = UnwrapNamedType(UnwrapNullableType(type));
+    if (auto integer = TMaybeType<TIntegerType>(valueType)) {
+        return integer.Cast()->BitWidth();
+    }
+    if (TMaybeType<TFloatType>(valueType)) {
+        return 64;
+    }
+    return 0;
+}
+
+std::string BuildRadixCompositeWrapperSource(
+    const std::vector<NQumir::NAst::TTypePtr>& types)
+{
+    std::ostringstream out;
+    out << "(block\n"
+        << "  (fun qdb_radix_sort_indices_composite\n"
+        << "       ((var values <ptr <ptr i8>>)\n"
+        << "        (var indices <ptr u32>)\n"
+        << "        (var work <ptr u32>)\n"
+        << "        (var counts <ptr u32>)\n"
+        << "        (var n i64)\n"
+        << "        (var descs <ptr bool>))\n"
+        << "    (block\n";
+
+    for (size_t k = types.size(); k > 0; --k) {
+        const size_t keyIdx = k - 1;
+        const auto coreType = SortCoreTypeName(types[keyIdx]);
+        const int64_t keyBits = SortRadixKeyBits(types[keyIdx]);
+        if (coreType.empty() || keyBits == 0) {
+            throw NQumir::TError(
+                "CompileRadixSortComposite: unsupported key type " +
+                (types[keyIdx] ? types[keyIdx]->ToString() : std::string("<null>")));
+        }
+        out << "      (call radix_sort_indices"
+            << " (cast (index values (: " << keyIdx << " i64)) <ptr " << coreType << ">)"
+            << " indices work counts n (: " << keyBits << " i64)"
+            << " (index descs (: " << keyIdx << " i64)))\n";
+    }
+
+    out << "      )))\n";
+    return out.str();
 }
 
 } // namespace
@@ -239,6 +297,61 @@ TKernelCompiler::TSortRadixDispatch TKernelCompiler::CompileRadixSortIndices(
     return [fnPtr, sharedRunner](void* values, uint32_t* indices, uint32_t* work,
         uint32_t* counts, int64_t n, bool desc) {
         reinterpret_cast<TSortFn>(fnPtr)(values, indices, work, counts, n, desc);
+    };
+}
+
+TKernelCompiler::TSortRadixCompositeDispatch TKernelCompiler::CompileRadixSortComposite(
+    const std::vector<NQumir::NAst::TTypePtr>& types)
+{
+    using namespace NQumir::NAst;
+
+    if (types.empty()) {
+        throw NQumir::TError("CompileRadixSortComposite: empty key list");
+    }
+
+    std::vector<TExprPtr> programStmts;
+    auto addLibrary = [&](const std::string& name, bool skipUse) {
+        auto library = NKernel::ParseFunctionLibrary(NKernel::ReadSortKernel(name));
+        if (!library) {
+            throw NQumir::TError(
+                "CompileRadixSortComposite: " + library.error().ToString());
+        }
+        for (auto& stmt : *library) {
+            if (skipUse && TMaybeNode<TUseExpr>(stmt)) {
+                continue;
+            }
+            programStmts.push_back(std::move(stmt));
+        }
+    };
+    addLibrary("radix.oz", false);
+
+    auto wrapper = NKernel::ParseFunctionLibrary(BuildRadixCompositeWrapperSource(types));
+    if (!wrapper) {
+        throw NQumir::TError(
+            "CompileRadixSortComposite: " + wrapper.error().ToString());
+    }
+    for (auto& stmt : *wrapper) {
+        programStmts.push_back(std::move(stmt));
+    }
+
+    auto program = std::make_shared<TBlockExpr>(NQumir::TLocation{}, std::move(programStmts));
+    auto runner = std::make_unique<NQumir::TLLVMRunner>(Opts_);
+
+    PrintKernelAst(Diagnostics_, "sort.radix.fused", program);
+
+    std::string err;
+    void* fnPtr = runner->CompileKernelAst(
+        std::move(program), "qdb_radix_sort_indices_composite", &err);
+    FinishKernelDiagnostics(Diagnostics_);
+    if (!fnPtr) {
+        throw std::runtime_error("sort fused radix kernel compilation failed: " + err);
+    }
+
+    using TSortFn = void(*)(void**, uint32_t*, uint32_t*, uint32_t*, int64_t, bool*);
+    auto sharedRunner = std::shared_ptr<NQumir::TLLVMRunner>(std::move(runner));
+    return [fnPtr, sharedRunner](void** values, uint32_t* indices, uint32_t* work,
+        uint32_t* counts, int64_t n, bool* descs) {
+        reinterpret_cast<TSortFn>(fnPtr)(values, indices, work, counts, n, descs);
     };
 }
 

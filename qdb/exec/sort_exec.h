@@ -16,9 +16,9 @@ struct TSortColumnRef {
     NQumir::NAst::TTypePtr Type;
 };
 
-struct TSortRadixKey {
+struct TSortRadixKernel {
     bool Enabled = false;
-    TKernelCompiler::TSortRadixDispatch Dispatch;
+    TKernelCompiler::TSortRadixCompositeDispatch Dispatch;
 };
 
 class TRuntimeSort : public IRuntimeNode {
@@ -27,7 +27,7 @@ public:
         NQumir::NAst::TTypePtr outputType,
         std::vector<TSortKey> keys,
         std::vector<TSortColumnRef> keyColumns,
-        std::vector<TSortRadixKey> radixKeys,
+        TSortRadixKernel radixKernel,
         int64_t batchRows = kJoinOutputBatchRows);
 
     NQumir::NAst::TTypePtr OutputType() const override { return OutputType_; }
@@ -41,7 +41,7 @@ private:
     NQumir::NAst::TTypePtr OutputType_;
     std::vector<TSortKey> Keys_;
     std::vector<TSortColumnRef> KeyColumns_;
-    std::vector<TSortRadixKey> RadixKeys_;
+    TSortRadixKernel RadixKernel_;
     int64_t BatchRows_ = kJoinOutputBatchRows;
 
     bool Materialized_ = false;

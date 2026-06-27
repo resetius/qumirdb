@@ -91,6 +91,21 @@ TRowSet MakeStringI64Batch(const std::string& names, int64_t* offsets, int64_t* 
     };
 }
 
+TRowSet MakeI64I64Batch(int64_t* left, int64_t* right, int64_t rows,
+    std::vector<TColumn>& columns)
+{
+    columns = {
+        TColumn{.Data = reinterpret_cast<char*>(left)},
+        TColumn{.Data = reinterpret_cast<char*>(right)},
+    };
+    return TRowSet{
+        .Columns = columns.data(),
+        .ColumnCount = 2,
+        .RowCount = rows,
+        .RefCount = 1,
+    };
+}
+
 std::string StringCell(const TColumn& column, int64_t row) {
     const auto* offsets = static_cast<const int64_t*>(column.Offsets);
     return std::string(column.Data + offsets[row], column.Data + offsets[row + 1]);
@@ -169,6 +184,45 @@ TEST(SortExec, SortsStringAndNumericKeysAcrossBatches) {
 
     TRowSet second{};
     EXPECT_FALSE(runtime->Next(second));
+}
+
+TEST(SortExec, SortsCompositeNumericKeysWithFusedRadixKernel) {
+    using namespace NQumir::NAst;
+
+    int64_t a1[] = {2, 1, 2};
+    int64_t b1[] = {10, 5, 30};
+    std::vector<TColumn> columns1;
+    TRowSet batch1 = MakeI64I64Batch(a1, b1, 3, columns1);
+
+    int64_t a2[] = {1, 2};
+    int64_t b2[] = {7, 20};
+    std::vector<TColumn> columns2;
+    TRowSet batch2 = MakeI64I64Batch(a2, b2, 2, columns2);
+
+    auto i64 = std::make_shared<TIntegerType>();
+    TVectorSource source(
+        {{"a", i64}, {"b", i64}},
+        {batch1, batch2});
+
+    auto sourceOp = std::make_shared<TSourceOperator>(source, "t");
+    auto root = std::make_shared<TSortOperator>(sourceOp, std::vector<TSortKey>{
+        {.Column = "a", .Direction = ESortDirection::Asc},
+        {.Column = "b", .Direction = ESortDirection::Desc},
+    });
+
+    TPhysicalPlanner planner;
+    auto runtime = planner.Build(root);
+
+    TRowSet out{};
+    ASSERT_TRUE(runtime->Next(out));
+    ASSERT_EQ(out.RowCount, 5);
+    auto* outA = reinterpret_cast<int64_t*>(out.Columns[0].Data);
+    auto* outB = reinterpret_cast<int64_t*>(out.Columns[1].Data);
+    EXPECT_EQ(std::vector<int64_t>(outA, outA + out.RowCount),
+        (std::vector<int64_t>{1, 1, 2, 2, 2}));
+    EXPECT_EQ(std::vector<int64_t>(outB, outB + out.RowCount),
+        (std::vector<int64_t>{7, 5, 30, 20, 10}));
+    Release(&out);
 }
 
 TEST(SortExec, RespectsInputSelection) {
