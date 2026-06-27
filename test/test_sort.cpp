@@ -172,6 +172,75 @@ std::vector<uint32_t> StableSortedIndices(const std::vector<T>& values) {
     return expected;
 }
 
+struct Pick {
+    uint8_t src; // 0 = state, 1 = temp
+    uint32_t idx;
+};
+
+template<typename T>
+struct TTopSortScratch {
+    std::vector<T> State;
+    std::vector<T> NextState;
+    std::vector<uint32_t> TempIndices;
+    std::vector<uint32_t> Work;
+    std::vector<Pick> Picks;
+
+    void Prepare(size_t tempSize, size_t limit) {
+        if (TempIndices.size() != tempSize) {
+            TempIndices.resize(tempSize);
+        }
+        if (Work.size() != tempSize) {
+            Work.resize(tempSize);
+        }
+        if (Picks.size() != limit) {
+            Picks.resize(limit);
+        }
+        if (NextState.size() != limit) {
+            NextState.resize(limit);
+        }
+    }
+};
+
+template<typename T>
+size_t MergeTopSortPicks(const T* state, size_t stateSize,
+    const T* temp, const uint32_t* tempIndices, size_t tempSize,
+    Pick* picks, size_t limit)
+{
+    size_t left = 0;
+    size_t right = 0;
+    size_t out = 0;
+    while (out < limit && (left < stateSize || right < tempSize)) {
+        if (right == tempSize) {
+            picks[out++] = Pick{0, static_cast<uint32_t>(left++)};
+            continue;
+        }
+        if (left == stateSize) {
+            picks[out++] = Pick{1, tempIndices[right++]};
+            continue;
+        }
+
+        const uint32_t tempIndex = tempIndices[right];
+        if (temp[tempIndex] < state[left]) {
+            picks[out++] = Pick{1, tempIndex};
+            ++right;
+        } else {
+            picks[out++] = Pick{0, static_cast<uint32_t>(left++)};
+        }
+    }
+
+    return out;
+}
+
+template<typename T>
+void GatherTopSortState(const T* state, const T* temp, const Pick* picks,
+    size_t pickCount, T* nextState)
+{
+    for (size_t i = 0; i < pickCount; ++i) {
+        const Pick& pick = picks[i];
+        nextState[i] = pick.src == 0 ? state[pick.idx] : temp[pick.idx];
+    }
+}
+
 } // namespace
 
 TEST(SortTest, Basic) {
@@ -234,6 +303,35 @@ TEST(SortTest, RowSet) {
             < std::tuple(col1[rhs], col2[rhs], col3[rhs]);
     });
     EXPECT_EQ(indices, expected);
+}
+
+TEST(SortTest, TopSortMergesSortedStateAndRadixSortedBatch) {
+    constexpr size_t limit = 5;
+    TTopSortScratch<int32_t> scratch;
+    scratch.State = {1, 4, 8, 10, 15};
+    std::vector<int32_t> temp = {6, 3, 12, 0, 4, 9};
+    scratch.Prepare(temp.size(), limit);
+    std::iota(scratch.TempIndices.begin(), scratch.TempIndices.end(), 0);
+
+    RadixSortIndices(temp.data(), scratch.TempIndices.data(), scratch.Work.data(), temp.size());
+    const size_t pickCount = MergeTopSortPicks(
+        scratch.State.data(), scratch.State.size(),
+        temp.data(), scratch.TempIndices.data(), scratch.TempIndices.size(),
+        scratch.Picks.data(), limit);
+    GatherTopSortState(
+        scratch.State.data(), temp.data(), scratch.Picks.data(), pickCount,
+        scratch.NextState.data());
+
+    ASSERT_EQ(pickCount, limit);
+    EXPECT_EQ(scratch.NextState, (std::vector<int32_t>{0, 1, 3, 4, 4}));
+    EXPECT_EQ(scratch.Picks[0].src, 1);
+    EXPECT_EQ(scratch.Picks[0].idx, 3u);
+    EXPECT_EQ(scratch.Picks[1].src, 0);
+    EXPECT_EQ(scratch.Picks[1].idx, 0u);
+    EXPECT_EQ(scratch.Picks[3].src, 0);
+    EXPECT_EQ(scratch.Picks[3].idx, 1u);
+    EXPECT_EQ(scratch.Picks[4].src, 1);
+    EXPECT_EQ(scratch.Picks[4].idx, 4u);
 }
 
 TEST(SortRadixOz, NumericKeysMatchPrototype) {
