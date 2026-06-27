@@ -135,9 +135,6 @@ TColumnValueAst BuildColumnValueAst(
         };
     }
     if (TMaybeType<TStringType>(type)) {
-        if (!stringViewType) {
-            throw std::invalid_argument("BuildColumnValueAst: missing StringView type");
-        }
         auto namedStringView = std::make_shared<TNamedType>(
             "StringView", stringViewType);
         const std::string offsets32Name = temporaryPrefix + "_offsets32";

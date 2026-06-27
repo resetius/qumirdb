@@ -112,6 +112,78 @@ int64_t qdb_cstr_cmp_cstr(const char* a, const char* b)
     return static_cast<int64_t>(std::strcmp(a, b));
 }
 
+bool qdb_sv_lit_eq(qdb_string_view left, const char* right) {
+    return qdb_string_view_cmp_cstr(left.Data, left.Size, right) == 0;
+}
+
+bool qdb_sv_lit_ne(qdb_string_view left, const char* right) {
+    return qdb_string_view_cmp_cstr(left.Data, left.Size, right) != 0;
+}
+
+bool qdb_sv_lit_lt(qdb_string_view left, const char* right) {
+    return qdb_string_view_cmp_cstr(left.Data, left.Size, right) < 0;
+}
+
+bool qdb_sv_lit_le(qdb_string_view left, const char* right) {
+    return qdb_string_view_cmp_cstr(left.Data, left.Size, right) <= 0;
+}
+
+bool qdb_sv_lit_gt(qdb_string_view left, const char* right) {
+    return qdb_string_view_cmp_cstr(left.Data, left.Size, right) > 0;
+}
+
+bool qdb_sv_lit_ge(qdb_string_view left, const char* right) {
+    return qdb_string_view_cmp_cstr(left.Data, left.Size, right) >= 0;
+}
+
+bool qdb_lit_sv_eq(const char* left, qdb_string_view right) {
+    return qdb_string_view_cmp_cstr(right.Data, right.Size, left) == 0;
+}
+
+bool qdb_lit_sv_ne(const char* left, qdb_string_view right) {
+    return qdb_string_view_cmp_cstr(right.Data, right.Size, left) != 0;
+}
+
+bool qdb_lit_sv_lt(const char* left, qdb_string_view right) {
+    return 0 < qdb_string_view_cmp_cstr(right.Data, right.Size, left);
+}
+
+bool qdb_lit_sv_le(const char* left, qdb_string_view right) {
+    return 0 <= qdb_string_view_cmp_cstr(right.Data, right.Size, left);
+}
+
+bool qdb_lit_sv_gt(const char* left, qdb_string_view right) {
+    return 0 > qdb_string_view_cmp_cstr(right.Data, right.Size, left);
+}
+
+bool qdb_lit_sv_ge(const char* left, qdb_string_view right) {
+    return 0 >= qdb_string_view_cmp_cstr(right.Data, right.Size, left);
+}
+
+bool qdb_lit_lit_eq(const char* left, const char* right) {
+    return qdb_cstr_cmp_cstr(left, right) == 0;
+}
+
+bool qdb_lit_lit_ne(const char* left, const char* right) {
+    return qdb_cstr_cmp_cstr(left, right) != 0;
+}
+
+bool qdb_lit_lit_lt(const char* left, const char* right) {
+    return qdb_cstr_cmp_cstr(left, right) < 0;
+}
+
+bool qdb_lit_lit_le(const char* left, const char* right) {
+    return qdb_cstr_cmp_cstr(left, right) <= 0;
+}
+
+bool qdb_lit_lit_gt(const char* left, const char* right) {
+    return qdb_cstr_cmp_cstr(left, right) > 0;
+}
+
+bool qdb_lit_lit_ge(const char* left, const char* right) {
+    return qdb_cstr_cmp_cstr(left, right) >= 0;
+}
+
 // SQL SUBSTRING(str FROM start FOR length), 1-based start index.
 qdb_string_view qdb_substring(qdb_string_view str, int32_t start, int32_t length)
 {

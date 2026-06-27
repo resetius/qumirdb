@@ -132,6 +132,7 @@ public:
         Opts_.OptLevel = 3;
         Opts_.AllowOverloads = true;
         Opts_.EnablePerfJitEventListener = true;
+        Opts_.ModuleFiles = {std::string(QDB_SOURCE_DIR) + "/modules/qumirdb.oz"};
         Opts_.PrintIr = Diagnostics_ != nullptr;
         Opts_.PrintLlvm = Diagnostics_ != nullptr;
     }

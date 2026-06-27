@@ -1,6 +1,5 @@
 #include <qdb/kernel/project_type.h>
 
-#include <qdb/modules/qumirdb.h>
 #include <qdb/plan/types/nullable.h>
 
 #include <qumir/error.h>
@@ -33,13 +32,20 @@ bool IsLogical(const TOperator& op) {
 
 const std::unordered_map<std::string, TTypePtr>& ExternalFuncReturnTypes() {
     static const auto map = []() {
-        NQumir::NRegistry::QumirDbModule mod;
         std::unordered_map<std::string, TTypePtr> m;
-        for (const auto& fn : mod.ExternalFunctions()) {
-            if (fn.ReturnType && !fn.IsOp) {
-                m.try_emplace(fn.Name, fn.ReturnType);
-            }
-        }
+        auto i32 = std::make_shared<TIntegerType>(TIntegerType::I32);
+        auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
+        auto string = std::make_shared<TStringType>();
+        m.emplace("qdb_string_view_sql_like", i64);
+        m.emplace("qdb_string_view_cmp_cstr", i64);
+        m.emplace("qdb_cstr_cmp_cstr", i64);
+        m.emplace("qdb_substring", string);
+        m.emplace("qdb_sql_bool_and", i64);
+        m.emplace("qdb_sql_bool_or", i64);
+        m.emplace("qdb_sql_bool_not", i64);
+        m.emplace("qdb_date_year", i32);
+        m.emplace("qdb_sql_date", i32);
+        m.emplace("qdb_sql_interval", i32);
         return m;
     }();
     return map;

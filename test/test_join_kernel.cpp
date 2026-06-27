@@ -8,6 +8,8 @@
 #include <qdb/modules/qumirdb.h>
 #include <qdb/modules/qumirdb_runtime.h>
 
+#include "qumirdb_source_module.h"
+
 #include <qumir/codegen/llvm/llvm_initializer.h>
 #include <qumir/runner/runner_llvm.h>
 
@@ -61,11 +63,11 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileJoinEntry(
     options.CoreInput = true;
     options.NativeCode = true;
     options.AllowOverloads = true;
+    NQdb::NTest::ConfigureQumirDbSourceModule(options);
     auto runner = std::make_unique<NQumir::TLLVMRunner>(options);
-    runner->RegisterModule(
-        std::make_shared<NQumir::NRegistry::QumirDbModule>(), true);
     auto program = std::make_shared<NQumir::NAst::TBlockExpr>(
         NQumir::TLocation{}, std::move(*lib));
+    NQdb::NTest::AddQumirDbUse(program);
     std::string error;
     entry = runner->CompileKernelAst(program, entryName, &error);
     EXPECT_NE(entry, nullptr) << error;
@@ -75,10 +77,9 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileJoinEntry(
 } // namespace
 
 TEST(JoinKernel, PairBufferLayout) {
-    NQumir::NRegistry::QumirDbModule module;
     std::shared_ptr<NQumir::NAst::TStructType> pairBuffer;
     bool hasJoinTable = false;
-    for (const auto& type : module.ExternalTypes()) {
+    for (const auto& type : NQumir::NRegistry::QumirDbExternalTypes()) {
         if (type.Name == "PairBuffer") {
             pairBuffer = NQumir::NAst::TMaybeType<NQumir::NAst::TStructType>(type.Type).Cast();
         } else if (type.Name == "JoinTable") {
@@ -310,9 +311,8 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileGenericJoin(
     const NKernel::TJoinKeyDescriptor& keyDesc, const std::string& entry, void*& fn)
 {
     using namespace NQumir::NAst;
-    auto module = std::make_shared<NQumir::NRegistry::QumirDbModule>();
     TTypePtr columnType, rowSetType, hashTableType, pairBufferType;
-    for (const auto& et : module->ExternalTypes()) {
+    for (const auto& et : NQumir::NRegistry::QumirDbExternalTypes()) {
         if (et.Name == "TColumn") columnType = et.Type;
         else if (et.Name == "TRowSet") rowSetType = et.Type;
         else if (et.Name == "HashTable") hashTableType = et.Type;
@@ -337,9 +337,10 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileGenericJoin(
     options.CoreInput = true;
     options.NativeCode = true;
     options.AllowOverloads = true;
+    NQdb::NTest::ConfigureQumirDbSourceModule(options);
     auto runner = std::make_unique<NQumir::TLLVMRunner>(options);
-    runner->RegisterModule(std::make_shared<NQumir::NRegistry::QumirDbModule>(), true);
     auto prog = std::make_shared<TBlockExpr>(NQumir::TLocation{}, std::move(program));
+    NQdb::NTest::AddQumirDbUse(prog);
     std::string error;
     fn = runner->CompileKernelAst(prog, entry, &error);
     EXPECT_NE(fn, nullptr) << error;

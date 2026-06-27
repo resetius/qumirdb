@@ -14,7 +14,6 @@
 #include <qdb/plan/ops/sort.h>
 
 #include <qdb/kernel/project_type.h>
-#include <qdb/modules/qumirdb.h>
 #include <qdb/plan/types/nullable.h>
 
 #include <qumir/parser/type.h>
@@ -49,20 +48,12 @@ size_t ProjectColumnWidth(const NQumir::NAst::TTypePtr& type) {
         (type ? type->ToString() : std::string("<null>")));
 }
 
-// Returns the LLVM-level type the project kernel should write for a computed
-// column. For TStringType outputs the kernel writes a raw TStringView struct
-// (Named("StringView") unwrapped to its inner struct).
+// Returns the kernel-level type the project kernel should write for a computed
+// column. StringView is resolved from the qumirdb source module before lowering.
 NQumir::NAst::TTypePtr ProjectJitType(const NQumir::NAst::TTypePtr& outType) {
     using namespace NQumir::NAst;
     if (TMaybeType<TStringType>(UnwrapNamedType(UnwrapNullableType(outType)))) {
-        static const auto sv = []() -> TTypePtr {
-            NQumir::NRegistry::QumirDbModule mod;
-            for (const auto& et : mod.ExternalTypes()) {
-                if (et.Name == "StringView") return et.Type;
-            }
-            return nullptr;
-        }();
-        return sv;
+        return std::make_shared<TNamedType>("StringView", nullptr);
     }
     return outType;
 }

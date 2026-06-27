@@ -1,0 +1,31 @@
+#pragma once
+
+#include <qumir/parser/ast.h>
+#include <qumir/runner/runner_llvm.h>
+
+#include <string>
+
+namespace NQdb::NTest {
+
+inline void ConfigureQumirDbSourceModule(NQumir::TLLVMRunnerOptions& options) {
+    options.ModuleFiles = {std::string(QDB_SOURCE_DIR) + "/modules/qumirdb.oz"};
+}
+
+inline void AddQumirDbUse(const NQumir::NAst::TExprPtr& ast) {
+    using namespace NQumir::NAst;
+    auto block = TMaybeNode<TBlockExpr>(ast);
+    if (!block) {
+        return;
+    }
+    for (const auto& stmt : block.Cast()->Stmts) {
+        auto use = TMaybeNode<TUseExpr>(stmt);
+        if (use && use.Cast()->ModuleName == "qumirdb") {
+            return;
+        }
+    }
+    block.Cast()->Stmts.insert(
+        block.Cast()->Stmts.begin(),
+        std::make_shared<TUseExpr>(NQumir::TLocation{}, "qumirdb"));
+}
+
+} // namespace NQdb::NTest

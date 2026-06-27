@@ -51,6 +51,7 @@ add_library(qumirdb
     exec/planner.cpp
 )
 target_include_directories(qumirdb PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)
+target_compile_definitions(qumirdb PUBLIC QDB_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 target_compile_features(qumirdb PUBLIC cxx_std_23)
 if(UNIX AND NOT APPLE)
     target_link_libraries(qumirdb PUBLIC
