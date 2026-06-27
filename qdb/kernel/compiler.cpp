@@ -105,6 +105,43 @@ std::string BuildRadixCompositeWrapperSource(
     return out.str();
 }
 
+std::string BuildRadixCompositeNullableWrapperSource(
+    const std::vector<NQumir::NAst::TTypePtr>& types)
+{
+    std::ostringstream out;
+    out << "(block\n"
+        << "  (fun qdb_radix_sort_indices_composite_nullable\n"
+        << "       ((var values <ptr <ptr i8>>)\n"
+        << "        (var valids <ptr <ptr u8>>)\n"
+        << "        (var indices <ptr u32>)\n"
+        << "        (var work <ptr u32>)\n"
+        << "        (var counts <ptr u32>)\n"
+        << "        (var n i64)\n"
+        << "        (var descs <ptr bool>)\n"
+        << "        (var nulls_firsts <ptr bool>))\n"
+        << "    (block\n";
+
+    for (size_t k = types.size(); k > 0; --k) {
+        const size_t keyIdx = k - 1;
+        const auto coreType = SortCoreTypeName(types[keyIdx]);
+        const int64_t keyBits = SortRadixKeyBits(types[keyIdx]);
+        if (coreType.empty() || keyBits == 0) {
+            throw NQumir::TError(
+                "CompileRadixSortCompositeNullable: unsupported key type " +
+                (types[keyIdx] ? types[keyIdx]->ToString() : std::string("<null>")));
+        }
+        out << "      (call radix_sort_indices_nullable"
+            << " (cast (index values (: " << keyIdx << " i64)) <ptr " << coreType << ">)"
+            << " (cast (index valids (: " << keyIdx << " i64)) <ptr u8>)"
+            << " indices work counts n (: " << keyBits << " i64)"
+            << " (index descs (: " << keyIdx << " i64))"
+            << " (index nulls_firsts (: " << keyIdx << " i64)))\n";
+    }
+
+    out << "      )))\n";
+    return out.str();
+}
+
 } // namespace
 
 TKernelCompiler::TFilterDispatch TKernelCompiler::CompileFilter(
@@ -352,6 +389,66 @@ TKernelCompiler::TSortRadixCompositeDispatch TKernelCompiler::CompileRadixSortCo
     return [fnPtr, sharedRunner](void** values, uint32_t* indices, uint32_t* work,
         uint32_t* counts, int64_t n, bool* descs) {
         reinterpret_cast<TSortFn>(fnPtr)(values, indices, work, counts, n, descs);
+    };
+}
+
+TKernelCompiler::TSortRadixCompositeNullableDispatch
+TKernelCompiler::CompileRadixSortCompositeNullable(
+    const std::vector<NQumir::NAst::TTypePtr>& types)
+{
+    using namespace NQumir::NAst;
+
+    if (types.empty()) {
+        throw NQumir::TError("CompileRadixSortCompositeNullable: empty key list");
+    }
+
+    std::vector<TExprPtr> programStmts;
+    auto addLibrary = [&](const std::string& name, bool skipUse) {
+        auto library = NKernel::ParseFunctionLibrary(NKernel::ReadSortKernel(name));
+        if (!library) {
+            throw NQumir::TError(
+                "CompileRadixSortCompositeNullable: " + library.error().ToString());
+        }
+        for (auto& stmt : *library) {
+            if (skipUse && TMaybeNode<TUseExpr>(stmt)) {
+                continue;
+            }
+            programStmts.push_back(std::move(stmt));
+        }
+    };
+    addLibrary("radix.oz", false);
+    addLibrary("radix_nullable.oz", true);
+
+    auto wrapper = NKernel::ParseFunctionLibrary(
+        BuildRadixCompositeNullableWrapperSource(types));
+    if (!wrapper) {
+        throw NQumir::TError(
+            "CompileRadixSortCompositeNullable: " + wrapper.error().ToString());
+    }
+    for (auto& stmt : *wrapper) {
+        programStmts.push_back(std::move(stmt));
+    }
+
+    auto program = std::make_shared<TBlockExpr>(NQumir::TLocation{}, std::move(programStmts));
+    auto runner = std::make_unique<NQumir::TLLVMRunner>(Opts_);
+
+    PrintKernelAst(Diagnostics_, "sort.radix.nullable.fused", program);
+
+    std::string err;
+    void* fnPtr = runner->CompileKernelAst(
+        std::move(program), "qdb_radix_sort_indices_composite_nullable", &err);
+    FinishKernelDiagnostics(Diagnostics_);
+    if (!fnPtr) {
+        throw std::runtime_error("sort fused nullable radix kernel compilation failed: " + err);
+    }
+
+    using TSortFn = void(*)(void**, uint8_t**, uint32_t*, uint32_t*, uint32_t*,
+        int64_t, bool*, bool*);
+    auto sharedRunner = std::shared_ptr<NQumir::TLLVMRunner>(std::move(runner));
+    return [fnPtr, sharedRunner](void** values, uint8_t** valids, uint32_t* indices,
+        uint32_t* work, uint32_t* counts, int64_t n, bool* descs, bool* nullsFirsts) {
+        reinterpret_cast<TSortFn>(fnPtr)(
+            values, valids, indices, work, counts, n, descs, nullsFirsts);
     };
 }
 
