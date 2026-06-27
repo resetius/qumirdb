@@ -3,7 +3,9 @@
 #include <qdb/plan/ops/aggregate.h>
 #include <qdb/plan/ops/filter.h>
 #include <qdb/plan/ops/join.h>
+#include <qdb/plan/ops/limit.h>
 #include <qdb/plan/ops/project.h>
+#include <qdb/plan/ops/sort.h>
 #include <qdb/plan/passes/unbound_vars.h>
 #include <qdb/utils/union_find.h>
 
@@ -186,9 +188,24 @@ TOperatorPtr ProcessAggregate(std::shared_ptr<TAggregateOperator> aggregate, TCo
     return Materialize(aggregate, ctx.Conjucts);
 }
 
+TOperatorPtr ProcessLimit(std::shared_ptr<TLimitOperator> limit, TContext ctx) {
+    limit->MutableInput() = Process(limit->Input(), {});
+    return Materialize(limit, ctx.Conjucts);
+}
+
 TOperatorPtr ProcessProject(std::shared_ptr<TProjectOperator> project, TContext ctx) {
     project->MutableInput() = Process(project->Input(), {});
     return Materialize(project, ctx.Conjucts);
+}
+
+TOperatorPtr ProcessSort(std::shared_ptr<TSortOperator> sort, TContext ctx) {
+    sort->MutableInput() = Process(sort->Input(), {});
+    return Materialize(sort, ctx.Conjucts);
+}
+
+TOperatorPtr ProcessTopSort(std::shared_ptr<TTopSortOperator> topSort, TContext ctx) {
+    topSort->MutableInput() = Process(topSort->Input(), {});
+    return Materialize(topSort, ctx.Conjucts);
 }
 
 // Outer joins are excluded: pushing onto the null-extended side changes results.
@@ -401,6 +418,15 @@ TOperatorPtr Process(TOperatorPtr node, TContext ctx) {
     } else if (auto maybeAggregate = TMaybeOp<TAggregateOperator>(node)) {
         auto aggregate = maybeAggregate.Cast();
         return ProcessAggregate(aggregate, std::move(ctx));
+    } else if (auto maybeLimit = TMaybeOp<TLimitOperator>(node)) {
+        auto limit = maybeLimit.Cast();
+        return ProcessLimit(limit, std::move(ctx));
+    } else if (auto maybeSort = TMaybeOp<TSortOperator>(node)) {
+        auto sort = maybeSort.Cast();
+        return ProcessSort(sort, std::move(ctx));
+    } else if (auto maybeTopSort = TMaybeOp<TTopSortOperator>(node)) {
+        auto topSort = maybeTopSort.Cast();
+        return ProcessTopSort(topSort, std::move(ctx));
     }
 
     return Materialize(node, ctx.Conjucts);

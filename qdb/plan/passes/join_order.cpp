@@ -3,7 +3,9 @@
 #include <qdb/plan/ops/aggregate.h>
 #include <qdb/plan/ops/filter.h>
 #include <qdb/plan/ops/join.h>
+#include <qdb/plan/ops/limit.h>
 #include <qdb/plan/ops/project.h>
+#include <qdb/plan/ops/sort.h>
 
 #include "factor_conjuncts.h"
 
@@ -178,6 +180,21 @@ TOperatorPtr Reorder(TOperatorPtr node, std::vector<TEdge> edges) {
         auto aggregate = maybeAggregate.Cast();
         aggregate->MutableInput() = Reorder(aggregate->Input(), {});
         return aggregate;
+    }
+    if (auto maybeLimit = TMaybeOp<TLimitOperator>(node)) {
+        auto limit = maybeLimit.Cast();
+        limit->MutableInput() = Reorder(limit->Input(), {});
+        return limit;
+    }
+    if (auto maybeSort = TMaybeOp<TSortOperator>(node)) {
+        auto sort = maybeSort.Cast();
+        sort->MutableInput() = Reorder(sort->Input(), {});
+        return sort;
+    }
+    if (auto maybeTopSort = TMaybeOp<TTopSortOperator>(node)) {
+        auto topSort = maybeTopSort.Cast();
+        topSort->MutableInput() = Reorder(topSort->Input(), {});
+        return topSort;
     }
     return node;
 }
