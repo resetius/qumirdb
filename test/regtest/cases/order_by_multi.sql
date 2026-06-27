@@ -1,0 +1,1 @@
+SELECT a, b FROM t ORDER BY a ASC, b DESC;
