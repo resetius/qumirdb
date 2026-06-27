@@ -8,6 +8,7 @@
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/ops/sort.h>
 #include <qdb/plan/passes/column_pruning.h>
+#include <qdb/plan/types/nullable.h>
 #include <qdb/sql/parser.h>
 
 #include <qumir/codegen/llvm/llvm_initializer.h>
@@ -112,6 +113,10 @@ TRowSet MakeI64I64Batch(int64_t* left, int64_t* right, int64_t rows,
 std::string StringCell(const TColumn& column, int64_t row) {
     const auto* offsets = static_cast<const int64_t*>(column.Offsets);
     return std::string(column.Data + offsets[row], column.Data + offsets[row + 1]);
+}
+
+bool MaskBit(const TColumn& column, int64_t row) {
+    return ((column.Mask[row / 8] >> (row % 8)) & 1) != 0;
 }
 
 NQumir::NAst::TExprPtr Ident(std::string name) {
@@ -264,6 +269,54 @@ TEST(SortExec, SortsCompositeNumericKeysWithFusedRadixKernel) {
     Release(&out);
 }
 
+TEST(SortExec, EmptyInputProducesNoRows) {
+    using namespace NQumir::NAst;
+
+    auto i64 = std::make_shared<TIntegerType>();
+    TVectorSource source({{"a", i64}}, {});
+
+    auto sourceOp = std::make_shared<TSourceOperator>(source, "t");
+    auto root = std::make_shared<TSortOperator>(sourceOp, std::vector<TSortKey>{
+        {.Column = "a", .Direction = ESortDirection::Asc},
+    });
+
+    TPhysicalPlanner planner;
+    auto runtime = planner.Build(root);
+
+    TRowSet out{};
+    EXPECT_FALSE(runtime->Next(out));
+}
+
+TEST(SortExec, AllEqualNumericKeysKeepInputOrderWithRadixKernel) {
+    using namespace NQumir::NAst;
+
+    int64_t keys[] = {7, 7, 7, 7};
+    int64_t payload[] = {10, 20, 30, 40};
+    std::vector<TColumn> columns;
+    TRowSet batch = MakeI64I64Batch(keys, payload, 4, columns);
+
+    auto i64 = std::make_shared<TIntegerType>();
+    TVectorSource source(
+        {{"k", i64}, {"payload", i64}},
+        {batch});
+
+    auto sourceOp = std::make_shared<TSourceOperator>(source, "t");
+    auto root = std::make_shared<TSortOperator>(sourceOp, std::vector<TSortKey>{
+        {.Column = "k", .Direction = ESortDirection::Desc},
+    });
+
+    TPhysicalPlanner planner;
+    auto runtime = planner.Build(root);
+
+    TRowSet out{};
+    ASSERT_TRUE(runtime->Next(out));
+    ASSERT_EQ(out.RowCount, 4);
+    auto* outPayload = reinterpret_cast<int64_t*>(out.Columns[1].Data);
+    EXPECT_EQ(std::vector<int64_t>(outPayload, outPayload + out.RowCount),
+        (std::vector<int64_t>{10, 20, 30, 40}));
+    Release(&out);
+}
+
 TEST(SortExec, ProjectionAfterSortSeesSortedRows) {
     using namespace NQumir::NAst;
 
@@ -337,6 +390,96 @@ TEST(SortExec, SortAfterAggregate) {
         (std::vector<int64_t>{2, 1, 3}));
     EXPECT_EQ(std::vector<int64_t>(outS, outS + out.RowCount),
         (std::vector<int64_t>{17, 11, 4}));
+    Release(&out);
+}
+
+TEST(SortExec, NullableNumericKeysUseRadixNullOrdering) {
+    using namespace NQumir::NAst;
+
+    int64_t keys[] = {30, 1000, 10, -999, 20};
+    int64_t payload[] = {1, 2, 3, 4, 5};
+    uint8_t keyMask[] = {0b00010101}; // rows 1 and 3 are NULL.
+    std::vector<TColumn> columns = {
+        TColumn{.Data = reinterpret_cast<char*>(keys), .Mask = keyMask},
+        TColumn{.Data = reinterpret_cast<char*>(payload)},
+    };
+    TRowSet batch{
+        .Columns = columns.data(),
+        .ColumnCount = 2,
+        .RowCount = 5,
+        .RefCount = 1,
+    };
+
+    auto i64 = std::make_shared<TIntegerType>();
+    TVectorSource source(
+        {{"k", std::make_shared<TNullable>(i64)}, {"payload", i64}},
+        {batch});
+
+    auto sourceOp = std::make_shared<TSourceOperator>(source, "t");
+    auto sort = std::make_shared<TSortOperator>(sourceOp, std::vector<TSortKey>{
+        {.Column = "k", .Direction = ESortDirection::Asc, .Nulls = ESortNulls::First},
+    });
+
+    TPhysicalPlanner planner;
+    auto runtime = planner.Build(sort);
+
+    TRowSet out{};
+    ASSERT_TRUE(runtime->Next(out));
+    ASSERT_EQ(out.RowCount, 5);
+    ASSERT_NE(out.Columns[0].Mask, nullptr);
+    auto* outPayload = reinterpret_cast<int64_t*>(out.Columns[1].Data);
+    EXPECT_EQ(std::vector<int64_t>(outPayload, outPayload + out.RowCount),
+        (std::vector<int64_t>{2, 4, 3, 5, 1}));
+    EXPECT_FALSE(MaskBit(out.Columns[0], 0));
+    EXPECT_FALSE(MaskBit(out.Columns[0], 1));
+    EXPECT_TRUE(MaskBit(out.Columns[0], 2));
+    EXPECT_TRUE(MaskBit(out.Columns[0], 3));
+    EXPECT_TRUE(MaskBit(out.Columns[0], 4));
+    Release(&out);
+}
+
+TEST(SortExec, NullableNumericKeysRespectDescNullsLast) {
+    using namespace NQumir::NAst;
+
+    int64_t keys[] = {30, 1000, 10, -999, 20};
+    int64_t payload[] = {1, 2, 3, 4, 5};
+    uint8_t keyMask[] = {0b00010101}; // rows 1 and 3 are NULL.
+    std::vector<TColumn> columns = {
+        TColumn{.Data = reinterpret_cast<char*>(keys), .Mask = keyMask},
+        TColumn{.Data = reinterpret_cast<char*>(payload)},
+    };
+    TRowSet batch{
+        .Columns = columns.data(),
+        .ColumnCount = 2,
+        .RowCount = 5,
+        .RefCount = 1,
+    };
+
+    auto i64 = std::make_shared<TIntegerType>();
+    TVectorSource source(
+        {{"k", std::make_shared<TNullable>(i64)}, {"payload", i64}},
+        {batch});
+
+    auto sourceOp = std::make_shared<TSourceOperator>(source, "t");
+    auto sort = std::make_shared<TSortOperator>(sourceOp, std::vector<TSortKey>{
+        {.Column = "k", .Direction = ESortDirection::Desc, .Nulls = ESortNulls::Last},
+    });
+
+    TPhysicalPlanner planner;
+    auto runtime = planner.Build(sort);
+
+    TRowSet out{};
+    ASSERT_TRUE(runtime->Next(out));
+    ASSERT_EQ(out.RowCount, 5);
+    ASSERT_NE(out.Columns[0].Mask, nullptr);
+    auto* outPayload = reinterpret_cast<int64_t*>(out.Columns[1].Data);
+    EXPECT_EQ(std::vector<int64_t>(outPayload, outPayload + out.RowCount),
+        (std::vector<int64_t>{1, 5, 3, 2, 4}));
+    EXPECT_TRUE(MaskBit(out.Columns[0], 0));
+    EXPECT_TRUE(MaskBit(out.Columns[0], 1));
+    EXPECT_TRUE(MaskBit(out.Columns[0], 2));
+    EXPECT_FALSE(MaskBit(out.Columns[0], 3));
+    EXPECT_FALSE(MaskBit(out.Columns[0], 4));
     Release(&out);
 }
 

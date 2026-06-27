@@ -378,6 +378,7 @@ std::unique_ptr<IRuntimeNode> TPhysicalPlanner::Build(const TOperatorPtr& root) 
             radixKernel = {
                 .Enabled = true,
                 .Dispatch = compiler.CompileRadixSortComposite(radixTypes),
+                .NullableDispatch = compiler.CompileRadixSortCompositeNullable(radixTypes),
             };
         }
 

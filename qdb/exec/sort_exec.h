@@ -19,6 +19,7 @@ struct TSortColumnRef {
 struct TSortRadixKernel {
     bool Enabled = false;
     TKernelCompiler::TSortRadixCompositeDispatch Dispatch;
+    TKernelCompiler::TSortRadixCompositeNullableDispatch NullableDispatch;
 };
 
 class TRuntimeSort : public IRuntimeNode {

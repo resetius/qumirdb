@@ -344,6 +344,18 @@ std::vector<char> MaterializeRadixValues(const TRowStore& store,
     return values;
 }
 
+std::vector<uint8_t> MaterializeRadixValidity(const TRowStore& store,
+    const std::vector<TRowId>& rows, const TSortColumnRef& keyColumn)
+{
+    std::vector<uint8_t> valid(rows.size(), uint8_t{1});
+    for (size_t i = 0; i < rows.size(); ++i) {
+        const TRowId rowId = rows[i];
+        const auto& column = store.Column(rowId, keyColumn.Index);
+        valid[i] = SourceValid(column, RowIndex(rowId)) ? uint8_t{1} : uint8_t{0};
+    }
+    return valid;
+}
+
 } // namespace
 
 TRuntimeSort::TRuntimeSort(std::unique_ptr<IRuntimeNode> input,
@@ -373,21 +385,23 @@ bool TRuntimeSort::TryRadixSort() {
     if (KeyColumns_.size() != Keys_.size()) {
         return false;
     }
+    bool hasAnyNulls = false;
     for (size_t i = 0; i < Keys_.size(); ++i) {
-        if (EffectiveNulls(Keys_[i]) != Keys_[i].Nulls && Keys_[i].Nulls != ESortNulls::Default) {
-            return false;
-        }
-        if (HasAnyNullMask(Store_, Rows_, KeyColumns_[i].Index)) {
-            return false;
-        }
+        hasAnyNulls = hasAnyNulls || HasAnyNullMask(Store_, Rows_, KeyColumns_[i].Index);
+    }
+    if (hasAnyNulls && !RadixKernel_.NullableDispatch) {
+        return false;
     }
 
     std::vector<uint32_t> indices(Rows_.size());
     std::vector<uint32_t> work(Rows_.size());
-    std::vector<uint32_t> counts(256);
+    std::vector<uint32_t> counts(hasAnyNulls ? 257 : 256);
     std::vector<std::vector<char>> valueStorage(Keys_.size());
     std::vector<void*> valuePtrs(Keys_.size());
+    std::vector<std::vector<uint8_t>> validStorage(Keys_.size());
+    std::vector<uint8_t*> validPtrs(Keys_.size());
     auto descs = std::make_unique<bool[]>(Keys_.size());
+    auto nullsFirsts = std::make_unique<bool[]>(Keys_.size());
     for (uint32_t i = 0; i < static_cast<uint32_t>(indices.size()); ++i) {
         indices[i] = i;
     }
@@ -398,10 +412,21 @@ bool TRuntimeSort::TryRadixSort() {
         }
         valuePtrs[k] = valueStorage[k].data();
         descs[k] = Keys_[k].Direction == ESortDirection::Desc;
+        nullsFirsts[k] = EffectiveNulls(Keys_[k]) == ESortNulls::First;
+        if (hasAnyNulls) {
+            validStorage[k] = MaterializeRadixValidity(Store_, Rows_, KeyColumns_[k]);
+            validPtrs[k] = validStorage[k].data();
+        }
     }
 
-    RadixKernel_.Dispatch(valuePtrs.data(), indices.data(), work.data(), counts.data(),
-        static_cast<int64_t>(indices.size()), descs.get());
+    if (hasAnyNulls) {
+        RadixKernel_.NullableDispatch(valuePtrs.data(), validPtrs.data(),
+            indices.data(), work.data(), counts.data(),
+            static_cast<int64_t>(indices.size()), descs.get(), nullsFirsts.get());
+    } else {
+        RadixKernel_.Dispatch(valuePtrs.data(), indices.data(), work.data(), counts.data(),
+            static_cast<int64_t>(indices.size()), descs.get());
+    }
 
     std::vector<TRowId> sorted;
     sorted.reserve(Rows_.size());
