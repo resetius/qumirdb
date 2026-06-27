@@ -162,6 +162,44 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileRadixOperation(
     return runner;
 }
 
+std::unique_ptr<NQumir::TLLVMRunner> CompileTopSortOperation(
+    const std::string& entryName,
+    const std::string& entrySource,
+    void*& entry)
+{
+    std::vector<NQumir::NAst::TExprPtr> programStmts;
+    auto library = NQdb::NKernel::ParseFunctionLibrary(
+        NQdb::NKernel::ReadSortKernel("top_sort.oz"));
+    if (!library) {
+        ADD_FAILURE() << library.error().ToString();
+        return {};
+    }
+    for (auto& stmt : *library) {
+        programStmts.push_back(std::move(stmt));
+    }
+
+    auto wrapper = NQdb::NKernel::ParseFunctionLibrary(entrySource);
+    if (!wrapper) {
+        ADD_FAILURE() << wrapper.error().ToString();
+        return {};
+    }
+    for (auto& stmt : *wrapper) {
+        programStmts.push_back(std::move(stmt));
+    }
+
+    NQumir::TLLVMRunnerOptions options;
+    options.CoreInput = true;
+    options.NativeCode = true;
+    options.AllowOverloads = true;
+    auto runner = std::make_unique<NQumir::TLLVMRunner>(options);
+    auto program = std::make_shared<NQumir::NAst::TBlockExpr>(
+        NQumir::TLocation{}, std::move(programStmts));
+    std::string error;
+    entry = runner->CompileKernelAst(program, entryName, &error);
+    EXPECT_NE(entry, nullptr) << error;
+    return runner;
+}
+
 template<typename T>
 std::vector<uint32_t> StableSortedIndices(const std::vector<T>& values) {
     std::vector<uint32_t> expected(values.size());
@@ -394,6 +432,74 @@ TEST(SortTest, TopSortGathersMultipleColumnsByPickSelector) {
     EXPECT_EQ(columns.NextStateColumns[0], (std::vector<int32_t>{0, 1, 3, 4}));
     EXPECT_EQ(columns.NextStateColumns[1], (std::vector<int32_t>{0, 10, 30, 40}));
     EXPECT_EQ(columns.NextStateColumns[2], (std::vector<int32_t>{0, -1, -3, -4}));
+}
+
+TEST(SortTopSortOz, MergesAndGathersMultipleColumns) {
+    const std::string entrySource = R"(
+(block
+  (fun qdb_top_sort_merge_and_gather_i32
+       ((var state_key <ptr i32>)
+        (var state_col1 <ptr i32>)
+        (var state_col2 <ptr i32>)
+        (var state_n i64)
+        (var temp_key <ptr i32>)
+        (var temp_col1 <ptr i32>)
+        (var temp_col2 <ptr i32>)
+        (var temp_indices <ptr u32>)
+        (var temp_n i64)
+        (var pick_src <ptr u8>)
+        (var pick_idx <ptr u32>)
+        (var out_key <ptr i32>)
+        (var out_col1 <ptr i32>)
+        (var out_col2 <ptr i32>)
+        (var limit i64)
+        (var desc bool)) -> i64
+    (block
+      (var n = (call top_sort_merge_picks
+        state_key state_n temp_key temp_indices temp_n pick_src pick_idx limit desc))
+      (call top_sort_gather_column state_key temp_key pick_src pick_idx out_key n)
+      (call top_sort_gather_column state_col1 temp_col1 pick_src pick_idx out_col1 n)
+      (call top_sort_gather_column state_col2 temp_col2 pick_src pick_idx out_col2 n)
+      (return n))))
+)";
+    void* entry = nullptr;
+    auto runner = CompileTopSortOperation(
+        "qdb_top_sort_merge_and_gather_i32", entrySource, entry);
+    ASSERT_NE(entry, nullptr);
+    auto topSort = reinterpret_cast<int64_t(*)(
+        int32_t*, int32_t*, int32_t*, int64_t,
+        int32_t*, int32_t*, int32_t*, uint32_t*, int64_t,
+        uint8_t*, uint32_t*, int32_t*, int32_t*, int32_t*, int64_t, bool)>(entry);
+
+    constexpr int64_t limit = 4;
+    std::vector<int32_t> stateKey = {1, 4, 8, 10};
+    std::vector<int32_t> stateCol1 = {10, 40, 80, 100};
+    std::vector<int32_t> stateCol2 = {-1, -4, -8, -10};
+    std::vector<int32_t> tempKey = {6, 3, 12, 0, 4};
+    std::vector<int32_t> tempCol1 = {60, 30, 120, 0, 41};
+    std::vector<int32_t> tempCol2 = {-6, -3, -12, 0, -41};
+    std::vector<uint32_t> tempIndices(tempKey.size());
+    std::vector<uint32_t> work(tempKey.size());
+    std::vector<uint8_t> pickSrc(limit);
+    std::vector<uint32_t> pickIdx(limit);
+    std::vector<int32_t> outKey(limit);
+    std::vector<int32_t> outCol1(limit);
+    std::vector<int32_t> outCol2(limit);
+    std::iota(tempIndices.begin(), tempIndices.end(), 0);
+    RadixSortIndices(tempKey.data(), tempIndices.data(), work.data(), tempKey.size());
+
+    const int64_t n = topSort(
+        stateKey.data(), stateCol1.data(), stateCol2.data(), stateKey.size(),
+        tempKey.data(), tempCol1.data(), tempCol2.data(), tempIndices.data(), tempKey.size(),
+        pickSrc.data(), pickIdx.data(), outKey.data(), outCol1.data(), outCol2.data(),
+        limit, false);
+
+    ASSERT_EQ(n, limit);
+    EXPECT_EQ(outKey, (std::vector<int32_t>{0, 1, 3, 4}));
+    EXPECT_EQ(outCol1, (std::vector<int32_t>{0, 10, 30, 40}));
+    EXPECT_EQ(outCol2, (std::vector<int32_t>{0, -1, -3, -4}));
+    EXPECT_EQ(pickSrc, (std::vector<uint8_t>{1, 0, 1, 0}));
+    EXPECT_EQ(pickIdx, (std::vector<uint32_t>{3, 0, 1, 1}));
 }
 
 TEST(SortRadixOz, NumericKeysMatchPrototype) {
