@@ -4,10 +4,12 @@
 #include <qdb/exec/planner.h>
 #include <qdb/plan/build.h>
 #include <qdb/plan/ops/aggregate.h>
+#include <qdb/plan/ops/limit.h>
 #include <qdb/plan/ops/project.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/ops/sort.h>
 #include <qdb/plan/passes/column_pruning.h>
+#include <qdb/plan/passes/top_sort.h>
 #include <qdb/plan/types/nullable.h>
 #include <qdb/sql/parser.h>
 
@@ -155,6 +157,40 @@ TEST(SortPlan, BuildPlanWrapsOrderByAfterProjection) {
     ASSERT_TRUE(project);
     ASSERT_EQ(project.Cast()->Projections().size(), 1u);
     EXPECT_EQ(project.Cast()->Projections()[0].Name, "k");
+}
+
+TEST(SortPlan, BuildPlanKeepsLimitAboveSort) {
+    auto i64 = std::make_shared<NQumir::NAst::TIntegerType>();
+    TStubSource source({{"a", i64}, {"b", i64}});
+    auto plan = BuildSqlPlan("SELECT a FROM t ORDER BY a LIMIT 3", source);
+    ASSERT_TRUE(plan.has_value()) << (plan ? "" : plan.error().ToString());
+
+    auto limit = TMaybeOp<TLimitOperator>(*plan);
+    ASSERT_TRUE(limit);
+    EXPECT_EQ(limit.Cast()->Limit(), 3);
+    EXPECT_EQ(limit.Cast()->Offset(), 0);
+    auto sort = TMaybeOp<TSortOperator>(limit.Cast()->Input());
+    ASSERT_TRUE(sort);
+    ASSERT_EQ(sort.Cast()->Keys().size(), 1u);
+    EXPECT_EQ(sort.Cast()->Keys()[0].Column, "a");
+}
+
+TEST(SortPlan, TopSortPassRewritesLimitOverSort) {
+    auto i64 = std::make_shared<NQumir::NAst::TIntegerType>();
+    TStubSource source({{"a", i64}, {"b", i64}});
+    auto plan = BuildSqlPlan("SELECT a FROM t ORDER BY a DESC LIMIT 3", source);
+    ASSERT_TRUE(plan.has_value()) << (plan ? "" : plan.error().ToString());
+
+    auto optimized = ApplyTopSort(*plan);
+
+    auto topSort = TMaybeOp<TTopSortOperator>(optimized);
+    ASSERT_TRUE(topSort);
+    EXPECT_EQ(topSort.Cast()->Limit(), 3);
+    ASSERT_EQ(topSort.Cast()->Keys().size(), 1u);
+    EXPECT_EQ(topSort.Cast()->Keys()[0].Column, "a");
+    EXPECT_EQ(topSort.Cast()->Keys()[0].Direction, ESortDirection::Desc);
+    auto project = TMaybeOp<TProjectOperator>(topSort.Cast()->Input());
+    ASSERT_TRUE(project);
 }
 
 TEST(SortPlan, BuildPlanRejectsOrderByExpressionForMvp) {

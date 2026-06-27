@@ -14,6 +14,7 @@ add_library(qumirdb
     plan/ops/aggregate.cpp
     plan/ops/join.cpp
     plan/ops/sort.cpp
+    plan/ops/limit.cpp
     plan/ops/parse_kernel.cpp
     sexp/printer.cpp
     sexp/parser.cpp
@@ -27,6 +28,7 @@ add_library(qumirdb
     plan/passes/qualify_columns.cpp
     plan/passes/equijoin.cpp
     plan/passes/join_order.cpp
+    plan/passes/top_sort.cpp
     plan/passes/flatten_conjucts.cpp
     plan/passes/flatten_disjuncts.cpp
     plan/passes/factor_conjuncts.cpp

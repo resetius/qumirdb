@@ -3,6 +3,7 @@
 #include <qdb/plan/ops/aggregate.h>
 #include <qdb/plan/ops/filter.h>
 #include <qdb/plan/ops/join.h>
+#include <qdb/plan/ops/limit.h>
 #include <qdb/plan/ops/project.h>
 #include <qdb/plan/ops/sort.h>
 #include <qdb/plan/ops/source.h>
@@ -20,6 +21,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <string_view>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -867,6 +869,52 @@ std::expected<TOperatorPtr, TError> ApplyOrderBy(
     return std::make_shared<TSortOperator>(std::move(plan), std::move(keys));
 }
 
+std::expected<int64_t, TError> ConstNonNegativeI64(
+    const NAst::TExprPtr& expr,
+    std::string_view clauseName)
+{
+    if (!expr) {
+        return int64_t{0};
+    }
+    auto number = NAst::TMaybeNode<NAst::TNumberExpr>(expr);
+    if (!number || number.Cast()->IsFloat()) {
+        return std::unexpected(TError(expr->Location,
+            std::string(clauseName) + " currently requires an integer literal"));
+    }
+    if (number.Cast()->IntValue < 0) {
+        return std::unexpected(TError(expr->Location,
+            std::string(clauseName) + " must be non-negative"));
+    }
+    return number.Cast()->IntValue;
+}
+
+std::expected<TOperatorPtr, TError> ApplyLimit(
+    const NSql::TSqlQuery& query,
+    TOperatorPtr plan)
+{
+    if (!query.Limit && !query.Offset) {
+        return plan;
+    }
+    if (!query.Limit) {
+        return std::unexpected(TError(query.Offset->Location,
+            "OFFSET without LIMIT is not supported yet"));
+    }
+
+    auto limit = ConstNonNegativeI64(query.Limit, "LIMIT");
+    if (!limit) {
+        return std::unexpected(limit.error());
+    }
+    int64_t offsetValue = 0;
+    if (query.Offset) {
+        auto offset = ConstNonNegativeI64(query.Offset, "OFFSET");
+        if (!offset) {
+            return std::unexpected(offset.error());
+        }
+        offsetValue = *offset;
+    }
+    return std::make_shared<TLimitOperator>(std::move(plan), *limit, offsetValue);
+}
+
 std::expected<TOperatorPtr, TError> BuildQuery(
     const NSql::TSqlQuery& query,
     const TTableSourceFactory& sources)
@@ -875,14 +923,16 @@ std::expected<TOperatorPtr, TError> BuildQuery(
     if (!select) {
         return std::unexpected(TError("expected a SELECT statement"));
     }
-    // TODO: LIMIT / OFFSET require a limit operator.
-
     if (!query.WithClause) {
         auto plan = BuildSelect(*select.Cast(), sources);
         if (!plan) {
             return plan;
         }
-        return ApplyOrderBy(query, std::move(*plan));
+        auto ordered = ApplyOrderBy(query, std::move(*plan));
+        if (!ordered) {
+            return ordered;
+        }
+        return ApplyLimit(query, std::move(*ordered));
     }
     if (query.WithClause->Recursive) {
         return std::unexpected(TError("WITH RECURSIVE is not supported yet"));
@@ -919,7 +969,11 @@ std::expected<TOperatorPtr, TError> BuildQuery(
     if (!plan) {
         return plan;
     }
-    return ApplyOrderBy(query, std::move(*plan));
+    auto ordered = ApplyOrderBy(query, std::move(*plan));
+    if (!ordered) {
+        return ordered;
+    }
+    return ApplyLimit(query, std::move(*ordered));
 }
 
 } // namespace
