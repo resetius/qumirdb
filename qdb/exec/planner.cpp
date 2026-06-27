@@ -411,17 +411,31 @@ std::unique_ptr<IRuntimeNode> TPhysicalPlanner::Build(const TOperatorPtr& root) 
         }
 
         std::vector<TSortColumnRef> keyColumns;
+        std::vector<NQumir::NAst::TTypePtr> radixTypes;
+        TSortRadixKernel radixKernel;
         keyColumns.reserve(sort->Keys().size());
+        radixTypes.reserve(sort->Keys().size());
+        bool allKeysRadixSortable = true;
         for (const auto& key : sort->Keys()) {
             auto it = std::find_if(inputType->Fields.begin(), inputType->Fields.end(),
                 [&](const auto& field) { return field.first == key.Column; });
             if (it == inputType->Fields.end()) {
                 throw std::runtime_error("top-sort column not found: " + key.Column);
             }
+            allKeysRadixSortable = allKeysRadixSortable && IsRadixSortableType(it->second);
+            radixTypes.push_back(it->second);
             keyColumns.push_back({
                 .Index = static_cast<int32_t>(std::distance(inputType->Fields.begin(), it)),
                 .Type = it->second,
             });
+        }
+        if (allKeysRadixSortable && !radixTypes.empty()) {
+            TKernelCompiler compiler(Diagnostics_);
+            radixKernel = {
+                .Enabled = true,
+                .Dispatch = compiler.CompileRadixSortComposite(radixTypes),
+                .NullableDispatch = compiler.CompileRadixSortCompositeNullable(radixTypes),
+            };
         }
 
         return std::make_unique<TRuntimeTopSort>(
@@ -429,6 +443,7 @@ std::unique_ptr<IRuntimeNode> TPhysicalPlanner::Build(const TOperatorPtr& root) 
             input->OutputType(),
             sort->Keys(),
             std::move(keyColumns),
+            std::move(radixKernel),
             sort->Limit());
     }
 

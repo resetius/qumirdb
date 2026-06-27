@@ -42,7 +42,31 @@ struct TTopSortState {
 struct TTopSortScratch {
     std::unique_ptr<TTopSortState> State = std::make_unique<TTopSortState>();
     std::vector<uint32_t> TempRows;
+    std::vector<uint32_t> TempLocalIndices;
+    std::vector<uint32_t> TempRowsSorted;
+    std::vector<uint32_t> Work;
+    std::vector<uint32_t> Counts;
+    std::vector<std::vector<char>> ValueStorage;
+    std::vector<void*> ValuePtrs;
+    std::vector<std::vector<uint8_t>> ValidStorage;
+    std::vector<uint8_t*> ValidPtrs;
+    std::unique_ptr<bool[]> Descs;
+    std::unique_ptr<bool[]> NullsFirsts;
+    size_t KeyCapacity = 0;
     std::vector<TTopSortPick> Picks;
+
+    void EnsureKeyCapacity(size_t keyCount) {
+        if (KeyCapacity == keyCount) {
+            return;
+        }
+        ValueStorage.resize(keyCount);
+        ValuePtrs.resize(keyCount);
+        ValidStorage.resize(keyCount);
+        ValidPtrs.resize(keyCount);
+        Descs = std::make_unique<bool[]>(keyCount);
+        NullsFirsts = std::make_unique<bool[]>(keyCount);
+        KeyCapacity = keyCount;
+    }
 };
 
 namespace {
@@ -521,6 +545,43 @@ std::vector<uint8_t> MaterializeRadixValidity(const TRowStore& store,
     return valid;
 }
 
+bool HasAnyNullMask(const TRowSet& batch, const std::vector<uint32_t>& rows,
+    int32_t columnIdx)
+{
+    const TColumn& column = batch.Columns[columnIdx];
+    return column.Mask && !rows.empty();
+}
+
+std::vector<char> MaterializeRadixValues(const TRowSet& batch,
+    const std::vector<uint32_t>& rows, const TSortColumnRef& keyColumn)
+{
+    const size_t width = RadixValueWidth(keyColumn.Type);
+    if (width == 0) {
+        return {};
+    }
+    std::vector<char> values(rows.size() * width);
+    const TColumn& column = batch.Columns[keyColumn.Index];
+    for (size_t i = 0; i < rows.size(); ++i) {
+        std::memcpy(values.data() + i * width,
+            column.Data + static_cast<int64_t>(rows[i]) * width,
+            width);
+    }
+    return values;
+}
+
+std::vector<uint8_t> MaterializeRadixValidity(const TRowSet& batch,
+    const std::vector<uint32_t>& rows, const TSortColumnRef& keyColumn)
+{
+    std::vector<uint8_t> valid(rows.size(), uint8_t{1});
+    const TColumn& column = batch.Columns[keyColumn.Index];
+    for (size_t i = 0; i < rows.size(); ++i) {
+        valid[i] = SourceValid(column, static_cast<int32_t>(rows[i]))
+            ? uint8_t{1}
+            : uint8_t{0};
+    }
+    return valid;
+}
+
 } // namespace
 
 TRuntimeSort::TRuntimeSort(std::unique_ptr<IRuntimeNode> input,
@@ -665,18 +726,84 @@ TRuntimeTopSort::TRuntimeTopSort(std::unique_ptr<IRuntimeNode> input,
     TTypePtr outputType,
     std::vector<TSortKey> keys,
     std::vector<TSortColumnRef> keyColumns,
+    TSortRadixKernel radixKernel,
     int64_t limit,
     int64_t batchRows)
     : Input_(std::move(input))
     , OutputType_(std::move(outputType))
     , Keys_(std::move(keys))
     , KeyColumns_(std::move(keyColumns))
+    , RadixKernel_(std::move(radixKernel))
     , Limit_(limit)
     , BatchRows_(batchRows)
     , Scratch_(std::make_unique<TTopSortScratch>())
 {}
 
 TRuntimeTopSort::~TRuntimeTopSort() = default;
+
+bool TRuntimeTopSort::TryRadixSortBatch(const TRowSet& batch, std::vector<uint32_t>& rows) {
+    if (rows.empty()) {
+        return true;
+    }
+    if (rows.size() > std::numeric_limits<uint32_t>::max()) {
+        return false;
+    }
+    if (!RadixKernel_.Enabled || !RadixKernel_.Dispatch) {
+        return false;
+    }
+    if (KeyColumns_.size() != Keys_.size()) {
+        return false;
+    }
+
+    bool hasAnyNulls = false;
+    for (size_t i = 0; i < Keys_.size(); ++i) {
+        hasAnyNulls = hasAnyNulls || HasAnyNullMask(batch, rows, KeyColumns_[i].Index);
+    }
+    if (hasAnyNulls && !RadixKernel_.NullableDispatch) {
+        return false;
+    }
+
+    auto& scratch = *Scratch_;
+    scratch.EnsureKeyCapacity(Keys_.size());
+    scratch.TempLocalIndices.resize(rows.size());
+    scratch.Work.resize(rows.size());
+    scratch.Counts.assign(hasAnyNulls ? 257 : 256, 0);
+    scratch.TempRowsSorted.resize(rows.size());
+    for (uint32_t i = 0; i < static_cast<uint32_t>(scratch.TempLocalIndices.size()); ++i) {
+        scratch.TempLocalIndices[i] = i;
+    }
+
+    for (size_t k = 0; k < Keys_.size(); ++k) {
+        scratch.ValueStorage[k] = MaterializeRadixValues(batch, rows, KeyColumns_[k]);
+        if (scratch.ValueStorage[k].empty()) {
+            return false;
+        }
+        scratch.ValuePtrs[k] = scratch.ValueStorage[k].data();
+        scratch.Descs[k] = Keys_[k].Direction == ESortDirection::Desc;
+        scratch.NullsFirsts[k] = EffectiveNulls(Keys_[k]) == ESortNulls::First;
+        if (hasAnyNulls) {
+            scratch.ValidStorage[k] = MaterializeRadixValidity(batch, rows, KeyColumns_[k]);
+            scratch.ValidPtrs[k] = scratch.ValidStorage[k].data();
+        }
+    }
+
+    if (hasAnyNulls) {
+        RadixKernel_.NullableDispatch(scratch.ValuePtrs.data(), scratch.ValidPtrs.data(),
+            scratch.TempLocalIndices.data(), scratch.Work.data(), scratch.Counts.data(),
+            static_cast<int64_t>(scratch.TempLocalIndices.size()),
+            scratch.Descs.get(), scratch.NullsFirsts.get());
+    } else {
+        RadixKernel_.Dispatch(scratch.ValuePtrs.data(),
+            scratch.TempLocalIndices.data(), scratch.Work.data(), scratch.Counts.data(),
+            static_cast<int64_t>(scratch.TempLocalIndices.size()), scratch.Descs.get());
+    }
+
+    for (size_t i = 0; i < rows.size(); ++i) {
+        scratch.TempRowsSorted[i] = rows[scratch.TempLocalIndices[i]];
+    }
+    rows.swap(scratch.TempRowsSorted);
+    return true;
+}
 
 void TRuntimeTopSort::Materialize() {
     if (Materialized_) {
@@ -704,11 +831,13 @@ void TRuntimeTopSort::Materialize() {
             }
         }
 
-        std::stable_sort(tempRows.begin(), tempRows.end(),
-            [&](uint32_t lhs, uint32_t rhs) {
-                return SortRowsLessColumns(batch.Columns, static_cast<int32_t>(lhs),
-                    batch.Columns, static_cast<int32_t>(rhs), Keys_, KeyColumns_);
-            });
+        if (!TryRadixSortBatch(batch, tempRows)) {
+            std::stable_sort(tempRows.begin(), tempRows.end(),
+                [&](uint32_t lhs, uint32_t rhs) {
+                    return SortRowsLessColumns(batch.Columns, static_cast<int32_t>(lhs),
+                        batch.Columns, static_cast<int32_t>(rhs), Keys_, KeyColumns_);
+                });
+        }
 
         const TRowSet stateView = Scratch_->State->RowSet();
         const size_t stateRows = static_cast<size_t>(Scratch_->State->RowCount);
