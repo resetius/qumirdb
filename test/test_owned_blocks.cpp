@@ -4,6 +4,8 @@
 #include <qdb/modules/qumirdb.h>
 #include <qdb/modules/qumirdb_runtime.h>
 
+#include "qumirdb_source_module.h"
+
 #include <qumir/codegen/llvm/llvm_initializer.h>
 #include <qumir/runner/runner_llvm.h>
 
@@ -26,11 +28,11 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileOwnedBlocks(
     NQumir::TLLVMRunnerOptions options;
     options.CoreInput = true;
     options.NativeCode = true;
+    NQdb::NTest::ConfigureQumirDbSourceModule(options);
     auto runner = std::make_unique<NQumir::TLLVMRunner>(options);
-    runner->RegisterModule(
-        std::make_shared<NQumir::NRegistry::QumirDbModule>(), true);
     auto program = std::make_shared<NQumir::NAst::TBlockExpr>(
         NQumir::TLocation{}, std::move(*library));
+    NQdb::NTest::AddQumirDbUse(program);
     std::string error;
     entry = runner->CompileKernelAst(program, entryName, &error);
     EXPECT_NE(entry, nullptr) << error;
@@ -130,9 +132,8 @@ TEST(OwnedBlocks, ReserveThenCommitCannotReallocate) {
 }
 
 TEST(OwnedBlocks, HashTableUsesFormerScratchSlots) {
-    NQumir::NRegistry::QumirDbModule module;
     std::shared_ptr<NQumir::NAst::TStructType> hashTable;
-    for (const auto& type : module.ExternalTypes()) {
+    for (const auto& type : NQumir::NRegistry::QumirDbExternalTypes()) {
         if (type.Name == "HashTable") {
             hashTable = NQumir::NAst::TMaybeType<NQumir::NAst::TStructType>(
                 type.Type).Cast();

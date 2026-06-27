@@ -6,6 +6,8 @@
 #include <qdb/kernel/column_value.h>
 #include <qdb/plan/types/nullable.h>
 
+#include "qumirdb_source_module.h"
+
 #include <qumir/codegen/llvm/llvm_initializer.h>
 #include <qumir/parser/type.h>
 #include <qumir/runner/runner_llvm.h>
@@ -22,10 +24,10 @@ using namespace NQumir;
 using namespace NQumir::NAst;
 
 TTypePtr FindExternalType(
-    const NQumir::NRegistry::QumirDbModule& module,
+    const std::vector<NQumir::NRegistry::TExternalType>& types,
     const std::string& name)
 {
-    for (const auto& type : module.ExternalTypes()) {
+    for (const auto& type : types) {
         if (type.Name == name) {
             return type.Type;
         }
@@ -38,10 +40,11 @@ struct TModuleTypes {
     TTypePtr StringView;
 };
 
-TModuleTypes GetModuleTypes(const NQumir::NRegistry::QumirDbModule& module) {
+TModuleTypes GetModuleTypes() {
+    const auto& types = NQumir::NRegistry::QumirDbExternalTypes();
     return {
-        .Column = FindExternalType(module, "TColumn"),
-        .StringView = FindExternalType(module, "StringView"),
+        .Column = FindExternalType(types, "TColumn"),
+        .StringView = FindExternalType(types, "StringView"),
     };
 }
 
@@ -70,8 +73,7 @@ bool ContainsField(
 }
 
 std::unique_ptr<TLLVMRunner> CompileStringColumnReader(void*& entry) {
-    NQumir::NRegistry::QumirDbModule module;
-    auto types = GetModuleTypes(module);
+    auto types = GetModuleTypes();
     auto materialized = NQdb::NKernel::BuildColumnValueAst(
         "column", "row", "value",
         std::make_shared<NQdb::TNullable>(std::make_shared<TStringType>()),
@@ -116,10 +118,10 @@ std::unique_ptr<TLLVMRunner> CompileStringColumnReader(void*& entry) {
     TLLVMRunnerOptions options;
     options.CoreInput = true;
     options.NativeCode = true;
+    NQdb::NTest::ConfigureQumirDbSourceModule(options);
     auto runner = std::make_unique<TLLVMRunner>(options);
-    runner->RegisterModule(
-        std::make_shared<NQumir::NRegistry::QumirDbModule>(), true);
     std::string error;
+    NQdb::NTest::AddQumirDbUse(program);
     entry = runner->CompileKernelAst(
         std::move(program), "read_string_column", &error);
     EXPECT_NE(entry, nullptr) << error;
@@ -127,8 +129,7 @@ std::unique_ptr<TLLVMRunner> CompileStringColumnReader(void*& entry) {
 }
 
 std::unique_ptr<TLLVMRunner> CompileI32ColumnReader(void*& entry) {
-    NQumir::NRegistry::QumirDbModule module;
-    auto types = GetModuleTypes(module);
+    auto types = GetModuleTypes();
     auto i32Type = std::make_shared<TIntegerType>(TIntegerType::I32);
     auto materialized = NQdb::NKernel::BuildColumnValueAst(
         "column", "row", "value", std::make_shared<NQdb::TNullable>(i32Type),
@@ -164,10 +165,10 @@ std::unique_ptr<TLLVMRunner> CompileI32ColumnReader(void*& entry) {
     TLLVMRunnerOptions options;
     options.CoreInput = true;
     options.NativeCode = true;
+    NQdb::NTest::ConfigureQumirDbSourceModule(options);
     auto runner = std::make_unique<TLLVMRunner>(options);
-    runner->RegisterModule(
-        std::make_shared<NQumir::NRegistry::QumirDbModule>(), true);
     std::string error;
+    NQdb::NTest::AddQumirDbUse(program);
     entry = runner->CompileKernelAst(
         std::move(program), "read_i32_column", &error);
     EXPECT_NE(entry, nullptr) << error;
@@ -179,8 +180,7 @@ std::unique_ptr<TLLVMRunner> CompileScalarColumnReader(
     TTypePtr valueType,
     const std::string& entryName)
 {
-    NQumir::NRegistry::QumirDbModule module;
-    auto types = GetModuleTypes(module);
+    auto types = GetModuleTypes();
     auto materialized = NQdb::NKernel::BuildColumnValueAst(
         "column", "row", "value",
         std::make_shared<NQdb::TNullable>(valueType), types.StringView);
@@ -214,10 +214,10 @@ std::unique_ptr<TLLVMRunner> CompileScalarColumnReader(
     TLLVMRunnerOptions options;
     options.CoreInput = true;
     options.NativeCode = true;
+    NQdb::NTest::ConfigureQumirDbSourceModule(options);
     auto runner = std::make_unique<TLLVMRunner>(options);
-    runner->RegisterModule(
-        std::make_shared<NQumir::NRegistry::QumirDbModule>(), true);
     std::string error;
+    NQdb::NTest::AddQumirDbUse(program);
     entry = runner->CompileKernelAst(std::move(program), entryName, &error);
     EXPECT_NE(entry, nullptr) << error;
     return runner;
@@ -229,13 +229,13 @@ void CheckStringHandleJit(const std::string& typeName) {
     options.CoreInput = true;
     options.ResolveCoreInput = true;
     options.NativeCode = true;
+    NQdb::NTest::ConfigureQumirDbSourceModule(options);
 
     TLLVMRunner runner(options);
-    runner.RegisterModule(
-        std::make_shared<NQumir::NRegistry::QumirDbModule>(), true);
 
     const std::string source =
         "(block "
+        "  (use qumirdb) "
         "  (fun copy_handle ((var dst <ptr " + typeName + ">) "
         "                    (var src <ptr " + typeName + ">)) -> i64 "
         "    (block "
@@ -258,9 +258,9 @@ void CheckStringHandleJit(const std::string& typeName) {
 }
 
 TEST(QumirDbStringTypes, ExternalTypesAreDistinctPodStructs) {
-    NQumir::NRegistry::QumirDbModule module;
-    auto stringView = FindExternalType(module, "StringView");
-    auto ownedString = FindExternalType(module, "OwnedString");
+    const auto& externalTypes = NQumir::NRegistry::QumirDbExternalTypes();
+    auto stringView = FindExternalType(externalTypes, "StringView");
+    auto ownedString = FindExternalType(externalTypes, "OwnedString");
 
     ASSERT_NE(stringView, nullptr);
     ASSERT_NE(ownedString, nullptr);
@@ -288,8 +288,7 @@ TEST(QumirDbStringTypes, OwnedStringUsesPlainStructCopies) {
 }
 
 TEST(QumirDbStringTypes, NonNullableMaterializersSkipValidityBitmap) {
-    NQumir::NRegistry::QumirDbModule module;
-    auto types = GetModuleTypes(module);
+    auto types = GetModuleTypes();
     const std::array<TTypePtr, 4> logicalTypes = {
         std::make_shared<TIntegerType>(TIntegerType::I32),
         std::make_shared<TFloatType>(),

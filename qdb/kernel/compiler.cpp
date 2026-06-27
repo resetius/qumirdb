@@ -48,6 +48,38 @@ NQumir::NAst::TExprPtr ClonePredicate(
     return CloneExpr(predicate);
 }
 
+void EnsureQumirDbUse(const NQumir::NAst::TExprPtr& ast) {
+    using namespace NQumir::NAst;
+    auto block = TMaybeNode<TBlockExpr>(ast);
+    if (!block) {
+        return;
+    }
+    for (const auto& stmt : block.Cast()->Stmts) {
+        auto use = TMaybeNode<TUseExpr>(stmt);
+        if (use && use.Cast()->ModuleName == "qumirdb") {
+            return;
+        }
+    }
+    block.Cast()->Stmts.insert(
+        block.Cast()->Stmts.begin(),
+        std::make_shared<TUseExpr>(NQumir::TLocation{}, "qumirdb"));
+}
+
+void* CompileKernelAst(
+    NQumir::TLLVMRunner& runner,
+    NQumir::NAst::TExprPtr ast,
+    const std::string& entryName,
+    std::string* error)
+{
+    NQumir::NRegistry::EnsureQumirDbRuntimeSymbolsLinked();
+    EnsureQumirDbUse(ast);
+    return runner.CompileKernelAst(std::move(ast), entryName, error);
+}
+
+NQumir::NAst::TTypePtr QumirDbNamedType(const std::string& name) {
+    return std::make_shared<NQumir::NAst::TNamedType>(name, nullptr);
+}
+
 std::string SortCoreTypeName(const NQumir::NAst::TTypePtr& type) {
     using namespace NQumir::NAst;
     auto valueType = UnwrapNamedType(UnwrapNullableType(type));
@@ -153,21 +185,9 @@ TKernelCompiler::TFilterDispatch TKernelCompiler::CompileFilter(
         fieldIndices[inputType.Fields[i].first] = i;
     }
 
-    auto dbModule = std::make_shared<NQumir::NRegistry::QumirDbModule>();
-    const auto& extTypes = dbModule->ExternalTypes();
-    // ExternalTypes_[0] = TColumn, [1] = TRowSet (order from qumirdb.cpp)
-    NQumir::NAst::TTypePtr columnType;
-    NQumir::NAst::TTypePtr rowSetType;
-    NQumir::NAst::TTypePtr stringViewType;
-    for (const auto& et : extTypes) {
-        if (et.Name == "TColumn") {
-            columnType = et.Type;
-        } else if (et.Name == "TRowSet") {
-            rowSetType = et.Type;
-        } else if (et.Name == "StringView") {
-            stringViewType = et.Type;
-        }
-    }
+    auto columnType = QumirDbNamedType("TColumn");
+    auto rowSetType = QumirDbNamedType("TRowSet");
+    auto stringViewType = QumirDbNamedType("StringView");
 
     auto literalStorage =
         std::make_shared<std::vector<std::shared_ptr<std::string>>>();
@@ -180,12 +200,12 @@ TKernelCompiler::TFilterDispatch TKernelCompiler::CompileFilter(
     }
 
     auto runner = std::make_unique<NQumir::TLLVMRunner>(Opts_);
-    runner->RegisterModule(dbModule, true);
 
     PrintKernelAst(Diagnostics_, "filter", *kernelAst);
 
     std::string err;
-    void* fnPtr = runner->CompileKernelAst(
+    void* fnPtr = CompileKernelAst(
+        *runner,
         std::move(*kernelAst), "<kernel>", &err);
     FinishKernelDiagnostics(Diagnostics_);
     if (!fnPtr) {
@@ -213,17 +233,9 @@ TKernelCompiler::TProjectDispatch TKernelCompiler::CompileProject(
         fieldIndices[inputType.Fields[i].first] = i;
     }
 
-    auto dbModule = std::make_shared<NQumir::NRegistry::QumirDbModule>();
-    NQumir::NAst::TTypePtr columnType, rowSetType, stringViewType;
-    for (const auto& et : dbModule->ExternalTypes()) {
-        if (et.Name == "TColumn") {
-            columnType = et.Type;
-        } else if (et.Name == "TRowSet") {
-            rowSetType = et.Type;
-        } else if (et.Name == "StringView") {
-            stringViewType = et.Type;
-        }
-    }
+    auto columnType = QumirDbNamedType("TColumn");
+    auto rowSetType = QumirDbNamedType("TRowSet");
+    auto stringViewType = QumirDbNamedType("StringView");
 
     auto literalStorage =
         std::make_shared<std::vector<std::shared_ptr<std::string>>>();
@@ -238,12 +250,11 @@ TKernelCompiler::TProjectDispatch TKernelCompiler::CompileProject(
         columnType, rowSetType, stringViewType, *literalStorage);
 
     auto runner = std::make_unique<NQumir::TLLVMRunner>(Opts_);
-    runner->RegisterModule(dbModule, true);
 
     PrintKernelAst(Diagnostics_, "project", kernelAst);
 
     std::string err;
-    void* fnPtr = runner->CompileKernelAst(std::move(kernelAst), "<project>", &err);
+    void* fnPtr = CompileKernelAst(*runner, std::move(kernelAst), "<project>", &err);
     FinishKernelDiagnostics(Diagnostics_);
     if (!fnPtr) {
         throw std::runtime_error("project kernel compilation failed: " + err);
@@ -323,7 +334,7 @@ TKernelCompiler::TSortRadixDispatch TKernelCompiler::CompileRadixSortIndices(
     PrintKernelAst(Diagnostics_, "sort.radix", program);
 
     std::string err;
-    void* fnPtr = runner->CompileKernelAst(std::move(program), entryName, &err);
+    void* fnPtr = CompileKernelAst(*runner, std::move(program), entryName, &err);
     FinishKernelDiagnostics(Diagnostics_);
     if (!fnPtr) {
         throw std::runtime_error("sort radix kernel compilation failed: " + err);
@@ -377,7 +388,8 @@ TKernelCompiler::TSortRadixCompositeDispatch TKernelCompiler::CompileRadixSortCo
     PrintKernelAst(Diagnostics_, "sort.radix.fused", program);
 
     std::string err;
-    void* fnPtr = runner->CompileKernelAst(
+    void* fnPtr = CompileKernelAst(
+        *runner,
         std::move(program), "qdb_radix_sort_indices_composite", &err);
     FinishKernelDiagnostics(Diagnostics_);
     if (!fnPtr) {
@@ -435,7 +447,8 @@ TKernelCompiler::CompileRadixSortCompositeNullable(
     PrintKernelAst(Diagnostics_, "sort.radix.nullable.fused", program);
 
     std::string err;
-    void* fnPtr = runner->CompileKernelAst(
+    void* fnPtr = CompileKernelAst(
+        *runner,
         std::move(program), "qdb_radix_sort_indices_composite_nullable", &err);
     FinishKernelDiagnostics(Diagnostics_);
     if (!fnPtr) {
@@ -533,20 +546,11 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
     }
     const auto layout = NKernel::BuildAggReducerLayout(funcs, args);
 
-    auto dbModule = std::make_shared<NQumir::NRegistry::QumirDbModule>();
-    TTypePtr columnType, rowSetType, hashTableType;
-    for (const auto& et : dbModule->ExternalTypes()) {
-        if (et.Name == "TColumn") {
-            columnType = et.Type;
-        } else if (et.Name == "TRowSet") {
-            rowSetType = et.Type;
-        } else if (et.Name == "HashTable") {
-            hashTableType = et.Type;
-        }
-    }
+    auto columnType = QumirDbNamedType("TColumn");
+    auto rowSetType = QumirDbNamedType("TRowSet");
+    auto hashTableType = QumirDbNamedType("HashTable");
 
     auto dispatchRunner = std::make_shared<NQumir::TLLVMRunner>(Opts_);
-    dispatchRunner->RegisterModule(dbModule, true);
 
     auto dispatchProgram = NKernel::BuildGenericAggregateProgramAst(
         inputType, keyDescriptor, layout,
@@ -557,7 +561,8 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
     }
     PrintKernelAst(Diagnostics_, "aggregate.update", *dispatchProgram);
     std::string error;
-    void* dispatchFn = dispatchRunner->CompileKernelAst(
+    void* dispatchFn = CompileKernelAst(
+        *dispatchRunner,
         std::move(*dispatchProgram), "agg_dispatch", &error);
     FinishKernelDiagnostics(Diagnostics_);
     if (!dispatchFn) {
@@ -565,7 +570,6 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
     }
 
     auto measureRunner = std::make_shared<NQumir::TLLVMRunner>(Opts_);
-    measureRunner->RegisterModule(dbModule, true);
     auto measureProgram = NKernel::BuildGenericAggregateMeasureProgramAst(
         keyDescriptor, hashTableType);
     if (!measureProgram) {
@@ -573,7 +577,8 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
             "CompileAggregate: measure program: " + measureProgram.error().ToString());
     }
     PrintKernelAst(Diagnostics_, "aggregate.measure", *measureProgram);
-    void* measureFn = measureRunner->CompileKernelAst(
+    void* measureFn = CompileKernelAst(
+        *measureRunner,
         std::move(*measureProgram), "agg_measure_keys", &error);
     FinishKernelDiagnostics(Diagnostics_);
     if (!measureFn) {
@@ -582,7 +587,6 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
     }
 
     auto finalizeRunner = std::make_shared<NQumir::TLLVMRunner>(Opts_);
-    finalizeRunner->RegisterModule(dbModule, true);
 
     auto finalizeProgram = NKernel::BuildGenericAggregateFinalizeProgramAst(
         keyDescriptor, layout, hashTableType, columnType);
@@ -591,7 +595,8 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
             "CompileAggregate: finalize program: " + finalizeProgram.error().ToString());
     }
     PrintKernelAst(Diagnostics_, "aggregate.finalize", *finalizeProgram);
-    void* finalizeFn = finalizeRunner->CompileKernelAst(
+    void* finalizeFn = CompileKernelAst(
+        *finalizeRunner,
         std::move(*finalizeProgram), "agg_finalize", &error);
     FinishKernelDiagnostics(Diagnostics_);
     if (!finalizeFn) {
@@ -656,21 +661,11 @@ TJoinKernels TKernelCompiler::CompileJoin(
     const auto keyDesc = NKernel::BuildJoinKeyDescriptor(leftType, rightType, keys);
     const int64_t keySize = static_cast<int64_t>(keyDesc.Size);
 
-    auto dbModule = std::make_shared<NQumir::NRegistry::QumirDbModule>();
-    TTypePtr columnType, rowSetType, hashTableType, pairBufferType, stringViewType;
-    for (const auto& et : dbModule->ExternalTypes()) {
-        if (et.Name == "TColumn") {
-            columnType = et.Type;
-        } else if (et.Name == "TRowSet") {
-            rowSetType = et.Type;
-        } else if (et.Name == "HashTable") {
-            hashTableType = et.Type;
-        } else if (et.Name == "PairBuffer") {
-            pairBufferType = et.Type;
-        } else if (et.Name == "StringView") {
-            stringViewType = et.Type;
-        }
-    }
+    auto columnType = QumirDbNamedType("TColumn");
+    auto rowSetType = QumirDbNamedType("TRowSet");
+    auto hashTableType = QumirDbNamedType("HashTable");
+    auto pairBufferType = QumirDbNamedType("PairBuffer");
+    auto stringViewType = QumirDbNamedType("StringView");
 
     // Fresh program per entry (CompileKernelAst consumes the AST): key type
     // decls + key-ops overloads + shared library + generated process functions.
@@ -726,20 +721,14 @@ TJoinKernels TKernelCompiler::CompileJoin(
     auto compileEntry = [&](const std::string& entry)
         -> std::pair<void*, std::shared_ptr<NQumir::TLLVMRunner>>
     {
-        NQumir::TLLVMRunnerOptions options;
-        options.CoreInput = true;
-        options.NativeCode = true;
-        options.AllowOverloads = true;
-        options.EnablePerfJitEventListener = true;
-        options.OptLevel = 3;
+        auto options = Opts_;
         options.PrintIr = Diagnostics_ != nullptr;
         options.PrintLlvm = Diagnostics_ != nullptr;
         auto runner = std::make_shared<NQumir::TLLVMRunner>(options);
-        runner->RegisterModule(dbModule, true);
         auto program = std::make_shared<TBlockExpr>(NQumir::TLocation{}, buildProgram());
         PrintKernelAst(Diagnostics_, "join." + entry, program);
         std::string error;
-        void* fn = runner->CompileKernelAst(program, entry, &error);
+        void* fn = CompileKernelAst(*runner, program, entry, &error);
         FinishKernelDiagnostics(Diagnostics_);
         if (!fn) {
             throw std::runtime_error("CompileJoin: " + entry + " compilation failed: " + error);

@@ -7,6 +7,8 @@
 #include <qdb/modules/qumirdb.h>
 #include <qdb/modules/qumirdb_types.h>
 
+#include "qumirdb_source_module.h"
+
 #include <qumir/codegen/llvm/llvm_initializer.h>
 #include <qumir/parser/type.h>
 #include <qumir/runner/runner_llvm.h>
@@ -105,10 +107,10 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileKeyOperation(
     options.CoreInput = true;
     options.NativeCode = true;
     options.AllowOverloads = true;
+    NQdb::NTest::ConfigureQumirDbSourceModule(options);
     auto runner = std::make_unique<TLLVMRunner>(options);
-    runner->RegisterModule(
-        std::make_shared<NQumir::NRegistry::QumirDbModule>(), true);
     auto program = std::make_shared<TBlockExpr>(TLocation{}, std::move(stmts));
+    NQdb::NTest::AddQumirDbUse(program);
     std::string error;
     entry = runner->CompileKernelAst(program, entryName, &error);
     EXPECT_NE(entry, nullptr) << error;
@@ -188,10 +190,10 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileCloneEntry(
     options.CoreInput = true;
     options.NativeCode = true;
     options.AllowOverloads = true;
+    NQdb::NTest::ConfigureQumirDbSourceModule(options);
     auto runner = std::make_unique<TLLVMRunner>(options);
-    runner->RegisterModule(
-        std::make_shared<NQumir::NRegistry::QumirDbModule>(), true);
     auto program = std::make_shared<TBlockExpr>(TLocation{}, std::move(stmts));
+    NQdb::NTest::AddQumirDbUse(program);
     std::string error;
     entry = runner->CompileKernelAst(program, "clone_key", &error);
     EXPECT_NE(entry, nullptr) << error;
@@ -233,10 +235,10 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileDualKeyEntry(
     options.CoreInput = true;
     options.NativeCode = true;
     options.AllowOverloads = true;
+    NQdb::NTest::ConfigureQumirDbSourceModule(options);
     auto runner = std::make_unique<TLLVMRunner>(options);
-    runner->RegisterModule(
-        std::make_shared<NQumir::NRegistry::QumirDbModule>(), true);
     auto program = std::make_shared<TBlockExpr>(TLocation{}, std::move(stmts));
+    NQdb::NTest::AddQumirDbUse(program);
     std::string error;
     entry = runner->CompileKernelAst(program, entryName, &error);
     EXPECT_NE(entry, nullptr) << error;

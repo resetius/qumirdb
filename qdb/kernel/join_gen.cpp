@@ -11,6 +11,34 @@ namespace NQdb::NKernel {
 
 using namespace NQumir::NAst;
 
+namespace {
+
+TTypePtr NamedType(const std::string& name) {
+    return std::make_shared<TNamedType>(name, nullptr);
+}
+
+TTypePtr ColumnPointerType(const TTypePtr& columnType, const TTypePtr& rowSetType) {
+    auto rowSetStruct = TMaybeType<TStructType>(UnwrapNamedType(rowSetType));
+    if (rowSetStruct) {
+        for (const auto& [name, type] : rowSetStruct.Cast()->Fields) {
+            if (name == "Columns") {
+                return type;
+            }
+        }
+    }
+    return std::make_shared<TPointerType>(
+        columnType ? columnType : NamedType("TColumn"));
+}
+
+TTypePtr PointerPointeeOr(const TTypePtr& pointerType, const TTypePtr& fallback) {
+    if (auto pointer = TMaybeType<TPointerType>(pointerType)) {
+        return pointer.Cast()->PointeeType;
+    }
+    return fallback ? fallback : NamedType("TColumn");
+}
+
+} // namespace
+
 std::vector<NQumir::NAst::TExprPtr> GenJoinKeyTypeDecls(const TJoinKeyDescriptor& key) {
     NQumir::TLocation loc{};
     std::vector<NQumir::NAst::TExprPtr> stmts;
@@ -107,19 +135,8 @@ NQumir::NAst::TExprPtr GenJoinInsertKeyOnlyAst(
         std::make_shared<TVarStmt>(loc, "pairs", pairBufferRefType),
     };
 
-    auto ptrColumnType = [&]() -> TTypePtr {
-        auto* rowSet = static_cast<TStructType*>(rowSetType.get());
-        for (const auto& [name, type] : rowSet->Fields) {
-            if (name == "Columns") return type;
-        }
-        return std::make_shared<TPointerType>(columnType);
-    }();
-    auto columnValueType = [&]() -> TTypePtr {
-        if (auto pointer = TMaybeType<TPointerType>(ptrColumnType)) {
-            return pointer.Cast()->PointeeType;
-        }
-        return columnType;
-    }();
+    auto ptrColumnType = ColumnPointerType(columnType, rowSetType);
+    auto columnValueType = PointerPointeeOr(ptrColumnType, columnType);
     auto columnAt = [&](int32_t index) -> TExprPtr {
         return std::make_shared<TIndexExpr>(loc, ident("cols"), numI64(index));
     };
@@ -438,21 +455,8 @@ NQumir::NAst::TExprPtr GenJoinBatchAst(
     params.push_back(std::make_shared<TVarStmt>(loc, "left_store", rowSetPtrType));
     params.push_back(std::make_shared<TVarStmt>(loc, "right_store", rowSetPtrType));
 
-    auto ptrColumnType = [&]() -> TTypePtr {
-        auto* rowSet = static_cast<TStructType*>(rowSetType.get());
-        for (const auto& [name, type] : rowSet->Fields) {
-            if (name == "Columns") {
-                return type;
-            }
-        }
-        return std::make_shared<TPointerType>(columnType);
-    }();
-    auto columnValueType = [&]() -> TTypePtr {
-        if (auto pointer = TMaybeType<TPointerType>(ptrColumnType)) {
-            return pointer.Cast()->PointeeType;
-        }
-        return columnType;
-    }();
+    auto ptrColumnType = ColumnPointerType(columnType, rowSetType);
+    auto columnValueType = PointerPointeeOr(ptrColumnType, columnType);
     auto columnAt = [&](int32_t index) -> TExprPtr {
         return std::make_shared<TIndexExpr>(loc, ident("cols"), numI64(index));
     };
