@@ -258,9 +258,9 @@ TEST(SortRadixOz, NumericKeysMatchPrototype) {
 
 TEST(SortRadixOz, SortsU32IndicesAscending) {
     void* entry = nullptr;
-    auto runner = CompileRadixOperation("qdb_radix_sort_indices_u32_asc", entry);
+    auto runner = CompileRadixOperation("qdb_radix_sort_indices_u32", entry);
     ASSERT_NE(entry, nullptr);
-    auto sort = reinterpret_cast<void(*)(uint32_t*, uint32_t*, uint32_t*, uint32_t*, int64_t)>(entry);
+    auto sort = reinterpret_cast<void(*)(uint32_t*, uint32_t*, uint32_t*, uint32_t*, int64_t, bool)>(entry);
 
     std::vector<uint32_t> values = {7, 3, 7, 1, 9, 3, 0, 7};
     std::vector<uint32_t> indices(values.size());
@@ -268,15 +268,15 @@ TEST(SortRadixOz, SortsU32IndicesAscending) {
     std::vector<uint32_t> counts(256);
     std::iota(indices.begin(), indices.end(), 0);
 
-    sort(values.data(), indices.data(), work.data(), counts.data(), values.size());
+    sort(values.data(), indices.data(), work.data(), counts.data(), values.size(), false);
     EXPECT_EQ(indices, StableSortedIndices(values));
 }
 
 TEST(SortRadixOz, SortsU8IndicesAscending) {
     void* entry = nullptr;
-    auto runner = CompileRadixOperation("qdb_radix_sort_indices_u8_asc", entry);
+    auto runner = CompileRadixOperation("qdb_radix_sort_indices_u8", entry);
     ASSERT_NE(entry, nullptr);
-    auto sort = reinterpret_cast<void(*)(uint8_t*, uint32_t*, uint32_t*, uint32_t*, int64_t)>(entry);
+    auto sort = reinterpret_cast<void(*)(uint8_t*, uint32_t*, uint32_t*, uint32_t*, int64_t, bool)>(entry);
 
     std::vector<uint8_t> values = {7, 3, 7, 1, 255, 3, 0, 7};
     std::vector<uint32_t> indices(values.size());
@@ -284,15 +284,15 @@ TEST(SortRadixOz, SortsU8IndicesAscending) {
     std::vector<uint32_t> counts(256);
     std::iota(indices.begin(), indices.end(), 0);
 
-    sort(values.data(), indices.data(), work.data(), counts.data(), values.size());
+    sort(values.data(), indices.data(), work.data(), counts.data(), values.size(), false);
     EXPECT_EQ(indices, StableSortedIndices(values));
 }
 
 TEST(SortRadixOz, SortsI8IndicesAscending) {
     void* entry = nullptr;
-    auto runner = CompileRadixOperation("qdb_radix_sort_indices_i8_asc_test", entry);
+    auto runner = CompileRadixOperation("qdb_radix_sort_indices_i8", entry);
     ASSERT_NE(entry, nullptr);
-    auto sort = reinterpret_cast<void(*)(int8_t*, uint32_t*, uint32_t*, uint32_t*, int64_t)>(entry);
+    auto sort = reinterpret_cast<void(*)(int8_t*, uint32_t*, uint32_t*, uint32_t*, int64_t, bool)>(entry);
 
     std::vector<int8_t> values = {-7, 3, -7, 1, 127, 3, 0, std::numeric_limits<int8_t>::min()};
     std::vector<uint32_t> indices(values.size());
@@ -300,15 +300,15 @@ TEST(SortRadixOz, SortsI8IndicesAscending) {
     std::vector<uint32_t> counts(256);
     std::iota(indices.begin(), indices.end(), 0);
 
-    sort(values.data(), indices.data(), work.data(), counts.data(), values.size());
+    sort(values.data(), indices.data(), work.data(), counts.data(), values.size(), false);
     EXPECT_EQ(indices, StableSortedIndices(values));
 }
 
 TEST(SortRadixOz, SortsU16IndicesAscending) {
     void* entry = nullptr;
-    auto runner = CompileRadixOperation("qdb_radix_sort_indices_u16_asc", entry);
+    auto runner = CompileRadixOperation("qdb_radix_sort_indices_u16", entry);
     ASSERT_NE(entry, nullptr);
-    auto sort = reinterpret_cast<void(*)(uint16_t*, uint32_t*, uint32_t*, uint32_t*, int64_t)>(entry);
+    auto sort = reinterpret_cast<void(*)(uint16_t*, uint32_t*, uint32_t*, uint32_t*, int64_t, bool)>(entry);
 
     std::vector<uint16_t> values = {700, 3, 700, 1, 65535, 3, 0, 7};
     std::vector<uint32_t> indices(values.size());
@@ -316,15 +316,15 @@ TEST(SortRadixOz, SortsU16IndicesAscending) {
     std::vector<uint32_t> counts(256);
     std::iota(indices.begin(), indices.end(), 0);
 
-    sort(values.data(), indices.data(), work.data(), counts.data(), values.size());
+    sort(values.data(), indices.data(), work.data(), counts.data(), values.size(), false);
     EXPECT_EQ(indices, StableSortedIndices(values));
 }
 
 TEST(SortRadixOz, SortsI16IndicesAscending) {
     void* entry = nullptr;
-    auto runner = CompileRadixOperation("qdb_radix_sort_indices_i16_asc_test", entry);
+    auto runner = CompileRadixOperation("qdb_radix_sort_indices_i16", entry);
     ASSERT_NE(entry, nullptr);
-    auto sort = reinterpret_cast<void(*)(int16_t*, uint32_t*, uint32_t*, uint32_t*, int64_t)>(entry);
+    auto sort = reinterpret_cast<void(*)(int16_t*, uint32_t*, uint32_t*, uint32_t*, int64_t, bool)>(entry);
 
     std::vector<int16_t> values = {-700, 3, -700, 1, 32767, 3, 0, std::numeric_limits<int16_t>::min()};
     std::vector<uint32_t> indices(values.size());
@@ -332,15 +332,15 @@ TEST(SortRadixOz, SortsI16IndicesAscending) {
     std::vector<uint32_t> counts(256);
     std::iota(indices.begin(), indices.end(), 0);
 
-    sort(values.data(), indices.data(), work.data(), counts.data(), values.size());
+    sort(values.data(), indices.data(), work.data(), counts.data(), values.size(), false);
     EXPECT_EQ(indices, StableSortedIndices(values));
 }
 
 TEST(SortRadixOz, SortsU32IndicesDescendingStably) {
     void* entry = nullptr;
-    auto runner = CompileRadixOperation("qdb_radix_sort_indices_u32_desc", entry);
+    auto runner = CompileRadixOperation("qdb_radix_sort_indices_u32", entry);
     ASSERT_NE(entry, nullptr);
-    auto sort = reinterpret_cast<void(*)(uint32_t*, uint32_t*, uint32_t*, uint32_t*, int64_t)>(entry);
+    auto sort = reinterpret_cast<void(*)(uint32_t*, uint32_t*, uint32_t*, uint32_t*, int64_t, bool)>(entry);
 
     std::vector<uint32_t> values = {7, 3, 7, 1, 9, 3, 0, 7};
     std::vector<uint32_t> indices(values.size());
@@ -348,7 +348,7 @@ TEST(SortRadixOz, SortsU32IndicesDescendingStably) {
     std::vector<uint32_t> counts(256);
     std::iota(indices.begin(), indices.end(), 0);
 
-    sort(values.data(), indices.data(), work.data(), counts.data(), values.size());
+    sort(values.data(), indices.data(), work.data(), counts.data(), values.size(), true);
 
     std::vector<uint32_t> expected(values.size());
     std::iota(expected.begin(), expected.end(), 0);
@@ -360,9 +360,9 @@ TEST(SortRadixOz, SortsU32IndicesDescendingStably) {
 
 TEST(SortRadixOz, GenericSortUsesI32RadixKeyOverload) {
     void* entry = nullptr;
-    auto runner = CompileRadixOperation("qdb_radix_sort_indices_i32_asc_test", entry);
+    auto runner = CompileRadixOperation("qdb_radix_sort_indices_i32", entry);
     ASSERT_NE(entry, nullptr);
-    auto sort = reinterpret_cast<void(*)(int32_t*, uint32_t*, uint32_t*, uint32_t*, int64_t)>(entry);
+    auto sort = reinterpret_cast<void(*)(int32_t*, uint32_t*, uint32_t*, uint32_t*, int64_t, bool)>(entry);
 
     std::vector<int32_t> values = {-7, 3, -7, 1, 9, 3, 0, std::numeric_limits<int32_t>::min()};
     std::vector<uint32_t> indices(values.size());
@@ -370,7 +370,7 @@ TEST(SortRadixOz, GenericSortUsesI32RadixKeyOverload) {
     std::vector<uint32_t> counts(256);
     std::iota(indices.begin(), indices.end(), 0);
 
-    sort(values.data(), indices.data(), work.data(), counts.data(), values.size());
+    sort(values.data(), indices.data(), work.data(), counts.data(), values.size(), false);
     EXPECT_EQ(indices, StableSortedIndices(values));
 }
 

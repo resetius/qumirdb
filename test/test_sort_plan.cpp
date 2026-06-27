@@ -1,15 +1,18 @@
 #include <gtest/gtest.h>
 
 #include <qdb/io/schema.h>
+#include <qdb/exec/planner.h>
 #include <qdb/plan/build.h>
 #include <qdb/plan/ops/project.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/ops/sort.h>
 #include <qdb/sql/parser.h>
 
+#include <qumir/codegen/llvm/llvm_initializer.h>
 #include <qumir/parser/type.h>
 
 #include <expected>
+#include <memory>
 #include <sstream>
 #include <string_view>
 #include <vector>
@@ -31,6 +34,29 @@ struct TStubSource : ISource {
     TSchema Schema_;
 };
 
+struct TVectorSource : ISource {
+    TVectorSource(std::vector<TColumnSchema> columns, std::vector<TRowSet> batches)
+        : Cols_(std::move(columns))
+        , Schema_{Cols_}
+        , Batches_(std::move(batches))
+    {}
+
+    const TSchema& Schema() const override { return Schema_; }
+
+    bool Next(TRowSet& rowSet) override {
+        if (Cursor_ >= Batches_.size()) {
+            return false;
+        }
+        rowSet = Batches_[Cursor_++];
+        return true;
+    }
+
+    std::vector<TColumnSchema> Cols_;
+    TSchema Schema_;
+    std::vector<TRowSet> Batches_;
+    size_t Cursor_ = 0;
+};
+
 std::expected<TOperatorPtr, NQumir::TError> BuildSqlPlan(std::string_view sql, ISource& source) {
     std::istringstream in{std::string(sql)};
     NSql::TTokenStream ts(in);
@@ -47,6 +73,27 @@ std::expected<TOperatorPtr, NQumir::TError> BuildSqlPlan(std::string_view sql, I
     };
 
     return BuildPlan(parsed.value(), factory);
+}
+
+TRowSet MakeStringI64Batch(const std::string& names, int64_t* offsets, int64_t* values,
+    int64_t rows, std::vector<TColumn>& columns, uint8_t* selection = nullptr)
+{
+    columns = {
+        TColumn{.Data = const_cast<char*>(names.data()), .Offsets = offsets, .OffsetWidth = 8},
+        TColumn{.Data = reinterpret_cast<char*>(values)},
+    };
+    return TRowSet{
+        .Columns = columns.data(),
+        .ColumnCount = 2,
+        .RowCount = rows,
+        .Selection = selection,
+        .RefCount = 1,
+    };
+}
+
+std::string StringCell(const TColumn& column, int64_t row) {
+    const auto* offsets = static_cast<const int64_t*>(column.Offsets);
+    return std::string(column.Data + offsets[row], column.Data + offsets[row + 1]);
 }
 
 } // namespace
@@ -79,7 +126,87 @@ TEST(SortPlan, BuildPlanRejectsOrderByExpressionForMvp) {
         std::string::npos);
 }
 
+TEST(SortExec, SortsStringAndNumericKeysAcrossBatches) {
+    using namespace NQumir::NAst;
+
+    std::string data1 = "bobalice";
+    int64_t offsets1[] = {0, 3, 8};
+    int64_t values1[] = {2, 1};
+    std::vector<TColumn> columns1;
+    TRowSet batch1 = MakeStringI64Batch(data1, offsets1, values1, 2, columns1);
+
+    std::string data2 = "carolalice";
+    int64_t offsets2[] = {0, 5, 10};
+    int64_t values2[] = {3, 4};
+    std::vector<TColumn> columns2;
+    TRowSet batch2 = MakeStringI64Batch(data2, offsets2, values2, 2, columns2);
+
+    auto str = std::make_shared<TStringType>();
+    auto i64 = std::make_shared<TIntegerType>();
+    TVectorSource source(
+        {{"name", str}, {"score", i64}},
+        {batch1, batch2});
+
+    auto sourceOp = std::make_shared<TSourceOperator>(source, "t");
+    auto root = std::make_shared<TSortOperator>(sourceOp, std::vector<TSortKey>{
+        {.Column = "name", .Direction = ESortDirection::Asc},
+        {.Column = "score", .Direction = ESortDirection::Desc},
+    });
+
+    TPhysicalPlanner planner;
+    auto runtime = planner.Build(root);
+
+    TRowSet out{};
+    ASSERT_TRUE(runtime->Next(out));
+    ASSERT_EQ(out.RowCount, 4);
+    EXPECT_EQ(StringCell(out.Columns[0], 0), "alice");
+    EXPECT_EQ(reinterpret_cast<int64_t*>(out.Columns[1].Data)[0], 4);
+    EXPECT_EQ(StringCell(out.Columns[0], 1), "alice");
+    EXPECT_EQ(reinterpret_cast<int64_t*>(out.Columns[1].Data)[1], 1);
+    EXPECT_EQ(StringCell(out.Columns[0], 2), "bob");
+    EXPECT_EQ(StringCell(out.Columns[0], 3), "carol");
+    Release(&out);
+
+    TRowSet second{};
+    EXPECT_FALSE(runtime->Next(second));
+}
+
+TEST(SortExec, RespectsInputSelection) {
+    using namespace NQumir::NAst;
+
+    std::string data = "cab";
+    int64_t offsets[] = {0, 1, 2, 3};
+    int64_t values[] = {3, 1, 2};
+    uint8_t selection[] = {1, 0, 1};
+    std::vector<TColumn> columns;
+    TRowSet batch = MakeStringI64Batch(data, offsets, values, 3, columns, selection);
+
+    auto str = std::make_shared<TStringType>();
+    auto i64 = std::make_shared<TIntegerType>();
+    TVectorSource source(
+        {{"name", str}, {"score", i64}},
+        {batch});
+
+    auto sourceOp = std::make_shared<TSourceOperator>(source, "t");
+    auto root = std::make_shared<TSortOperator>(sourceOp, std::vector<TSortKey>{
+        {.Column = "score", .Direction = ESortDirection::Asc},
+    });
+
+    TPhysicalPlanner planner;
+    auto runtime = planner.Build(root);
+
+    TRowSet out{};
+    ASSERT_TRUE(runtime->Next(out));
+    ASSERT_EQ(out.RowCount, 2);
+    EXPECT_EQ(reinterpret_cast<int64_t*>(out.Columns[1].Data)[0], 2);
+    EXPECT_EQ(reinterpret_cast<int64_t*>(out.Columns[1].Data)[1], 3);
+    EXPECT_EQ(StringCell(out.Columns[0], 0), "b");
+    EXPECT_EQ(StringCell(out.Columns[0], 1), "c");
+    Release(&out);
+}
+
 int main(int argc, char** argv) {
+    NQumir::NCodeGen::TLLVMInitializer initializer;
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
 }

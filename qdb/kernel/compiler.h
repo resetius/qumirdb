@@ -144,6 +144,13 @@ public:
     // type). Only computed (non-ident) columns go through this kernel.
     using TProjectDispatch = std::function<void(TRowSet* in, void** outBuffers)>;
 
+    // Radix sort dispatch over a contiguous key array. `values` points to an
+    // array whose concrete element type is selected by CompileRadixSortIndices.
+    // `indices` is sorted in place, preserving equal-key order.
+    using TSortRadixDispatch = std::function<void(
+        void* values, uint32_t* indices, uint32_t* work, uint32_t* counts,
+        int64_t n, bool desc)>;
+
     // sizeof(HashTable) per modules/qumirdb.cpp's layout — callers of
     // CompileAggregate must allocate a zero-initialized buffer this large
     // for `ht`.
@@ -169,6 +176,9 @@ public:
         const NQumir::NAst::TStructType& inputType,
         const std::vector<NQumir::NAst::TExprPtr>& computedExprs,
         const std::vector<NQumir::NAst::TTypePtr>& computedTypes);
+
+    TSortRadixDispatch CompileRadixSortIndices(
+        const NQumir::NAst::TTypePtr& type);
 
     // Compiles the per-query generic update and finalize programs for `aggs`
     // grouped by `groupKeys`, over rows of `inputType`.
