@@ -1,0 +1,1 @@
+SELECT a AS k FROM t ORDER BY k ASC;

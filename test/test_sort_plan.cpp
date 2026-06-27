@@ -3,12 +3,15 @@
 #include <qdb/io/schema.h>
 #include <qdb/exec/planner.h>
 #include <qdb/plan/build.h>
+#include <qdb/plan/ops/aggregate.h>
 #include <qdb/plan/ops/project.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/ops/sort.h>
+#include <qdb/plan/passes/column_pruning.h>
 #include <qdb/sql/parser.h>
 
 #include <qumir/codegen/llvm/llvm_initializer.h>
+#include <qumir/parser/ast.h>
 #include <qumir/parser/type.h>
 
 #include <expected>
@@ -111,6 +114,23 @@ std::string StringCell(const TColumn& column, int64_t row) {
     return std::string(column.Data + offsets[row], column.Data + offsets[row + 1]);
 }
 
+NQumir::NAst::TExprPtr Ident(std::string name) {
+    return std::make_shared<NQumir::NAst::TIdentExpr>(
+        NQumir::TLocation{}, std::move(name));
+}
+
+std::vector<std::string> FieldNames(const NQumir::NAst::TTypePtr& type) {
+    auto* st = static_cast<NQumir::NAst::TStructType*>(type.get());
+    std::vector<std::string> names;
+    if (!st) {
+        return names;
+    }
+    for (const auto& [name, _] : st->Fields) {
+        names.push_back(name);
+    }
+    return names;
+}
+
 } // namespace
 
 TEST(SortPlan, BuildPlanWrapsOrderByAfterProjection) {
@@ -139,6 +159,25 @@ TEST(SortPlan, BuildPlanRejectsOrderByExpressionForMvp) {
     ASSERT_FALSE(plan.has_value());
     EXPECT_NE(plan.error().ToString().find("ORDER BY currently supports only output column identifiers"),
         std::string::npos);
+}
+
+TEST(SortPlan, ColumnPruningKeepsSortKeyColumns) {
+    using namespace NQumir::NAst;
+
+    auto i64 = std::make_shared<TIntegerType>();
+    TStubSource source({{"a", i64}, {"b", i64}, {"c", i64}});
+    auto sourceOp = std::make_shared<TSourceOperator>(source, "t");
+    auto sort = std::make_shared<TSortOperator>(sourceOp, std::vector<TSortKey>{
+        {.Column = "b", .Direction = ESortDirection::Asc},
+    });
+    auto project = std::make_shared<TProjectOperator>(sort, std::vector<TProjectionSpec>{
+        {.Name = "a", .Expression = Ident("a")},
+    });
+
+    ApplyColumnPruning(project);
+
+    EXPECT_EQ(FieldNames(sourceOp->OutputColumns()), (std::vector<std::string>{"a", "b"}));
+    EXPECT_EQ(FieldNames(sort->RequiredColumns()), (std::vector<std::string>{"a", "b"}));
 }
 
 TEST(SortExec, SortsStringAndNumericKeysAcrossBatches) {
@@ -222,6 +261,82 @@ TEST(SortExec, SortsCompositeNumericKeysWithFusedRadixKernel) {
         (std::vector<int64_t>{1, 1, 2, 2, 2}));
     EXPECT_EQ(std::vector<int64_t>(outB, outB + out.RowCount),
         (std::vector<int64_t>{7, 5, 30, 20, 10}));
+    Release(&out);
+}
+
+TEST(SortExec, ProjectionAfterSortSeesSortedRows) {
+    using namespace NQumir::NAst;
+
+    int64_t a[] = {100, 200, 300, 400};
+    int64_t b[] = {3, 1, 4, 2};
+    std::vector<TColumn> columns;
+    TRowSet batch = MakeI64I64Batch(a, b, 4, columns);
+
+    auto i64 = std::make_shared<TIntegerType>();
+    TVectorSource source(
+        {{"a", i64}, {"b", i64}},
+        {batch});
+
+    auto sourceOp = std::make_shared<TSourceOperator>(source, "t");
+    auto sort = std::make_shared<TSortOperator>(sourceOp, std::vector<TSortKey>{
+        {.Column = "b", .Direction = ESortDirection::Asc},
+    });
+    auto project = std::make_shared<TProjectOperator>(sort, std::vector<TProjectionSpec>{
+        {.Name = "a", .Expression = Ident("a")},
+    });
+
+    TPhysicalPlanner planner;
+    auto runtime = planner.Build(project);
+
+    TRowSet out{};
+    ASSERT_TRUE(runtime->Next(out));
+    ASSERT_EQ(out.ColumnCount, 1);
+    ASSERT_EQ(out.RowCount, 4);
+    auto* outA = reinterpret_cast<int64_t*>(out.Columns[0].Data);
+    EXPECT_EQ(std::vector<int64_t>(outA, outA + out.RowCount),
+        (std::vector<int64_t>{200, 400, 100, 300}));
+    Release(&out);
+}
+
+TEST(SortExec, SortAfterAggregate) {
+    using namespace NQumir::NAst;
+
+    int64_t keys[] = {2, 1, 2, 3, 1};
+    int64_t values[] = {10, 5, 7, 4, 6};
+    std::vector<TColumn> columns;
+    TRowSet batch = MakeI64I64Batch(keys, values, 5, columns);
+
+    auto i64 = std::make_shared<TIntegerType>();
+    TVectorSource source(
+        {{"k", i64}, {"v", i64}},
+        {batch});
+
+    auto sourceOp = std::make_shared<TSourceOperator>(source, "t");
+    auto aggregate = std::make_shared<TAggregateOperator>(
+        sourceOp,
+        std::vector<std::string>{"k"},
+        std::vector<TAggregateSpec>{{
+            .Name = "s",
+            .Func = "sum",
+            .Arg = Ident("v"),
+        }});
+    auto sort = std::make_shared<TSortOperator>(aggregate, std::vector<TSortKey>{
+        {.Column = "s", .Direction = ESortDirection::Desc},
+    });
+
+    TPhysicalPlanner planner;
+    auto runtime = planner.Build(sort);
+
+    TRowSet out{};
+    ASSERT_TRUE(runtime->Next(out));
+    ASSERT_EQ(out.ColumnCount, 2);
+    ASSERT_EQ(out.RowCount, 3);
+    auto* outK = reinterpret_cast<int64_t*>(out.Columns[0].Data);
+    auto* outS = reinterpret_cast<int64_t*>(out.Columns[1].Data);
+    EXPECT_EQ(std::vector<int64_t>(outK, outK + out.RowCount),
+        (std::vector<int64_t>{2, 1, 3}));
+    EXPECT_EQ(std::vector<int64_t>(outS, outS + out.RowCount),
+        (std::vector<int64_t>{17, 11, 4}));
     Release(&out);
 }
 

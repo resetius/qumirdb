@@ -1,0 +1,17 @@
+(query
+  (select
+    (select-list
+      (item
+        a
+      )
+    )
+    (from
+      (table t)
+    )
+  )
+  (order-by
+    (order asc nulls-first
+      a
+    )
+  )
+)
