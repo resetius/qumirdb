@@ -15,6 +15,7 @@
 #include <optional>
 #include <stdexcept>
 #include <unordered_map>
+#include <vector>
 
 namespace NQdb {
 
@@ -157,6 +158,87 @@ TKernelCompiler::TProjectDispatch TKernelCompiler::CompileProject(
     auto sharedRunner = std::shared_ptr<NQumir::TLLVMRunner>(std::move(runner));
     return [fnPtr, sharedRunner, literalStorage](TRowSet* in, void** outBuffers) {
         reinterpret_cast<TProjectFn>(fnPtr)(in, outBuffers);
+    };
+}
+
+TKernelCompiler::TSortRadixDispatch TKernelCompiler::CompileRadixSortIndices(
+    const NQumir::NAst::TTypePtr& type)
+{
+    using namespace NQumir::NAst;
+
+    auto valueType = UnwrapNamedType(UnwrapNullableType(type));
+    std::string entryName;
+    if (auto integer = TMaybeType<TIntegerType>(valueType)) {
+        switch (integer.Cast()->Kind) {
+            case TIntegerType::I8:
+                entryName = "qdb_radix_sort_indices_i8";
+                break;
+            case TIntegerType::I16:
+                entryName = "qdb_radix_sort_indices_i16";
+                break;
+            case TIntegerType::I32:
+                entryName = "qdb_radix_sort_indices_i32";
+                break;
+            case TIntegerType::I64:
+                entryName = "qdb_radix_sort_indices_i64";
+                break;
+            case TIntegerType::U8:
+                entryName = "qdb_radix_sort_indices_u8";
+                break;
+            case TIntegerType::U16:
+                entryName = "qdb_radix_sort_indices_u16";
+                break;
+            case TIntegerType::U32:
+                entryName = "qdb_radix_sort_indices_u32";
+                break;
+            case TIntegerType::U64:
+                entryName = "qdb_radix_sort_indices_u64";
+                break;
+        }
+    } else if (TMaybeType<TFloatType>(valueType)) {
+        entryName = "qdb_radix_sort_indices_f64";
+    }
+
+    if (entryName.empty()) {
+        throw NQumir::TError(
+            "CompileRadixSortIndices: unsupported key type " +
+            (type ? type->ToString() : std::string("<null>")));
+    }
+
+    std::vector<TExprPtr> programStmts;
+    auto addLibrary = [&](const std::string& name, bool skipUse) {
+        auto library = NKernel::ParseFunctionLibrary(NKernel::ReadSortKernel(name));
+        if (!library) {
+            throw NQumir::TError(
+                "CompileRadixSortIndices: " + library.error().ToString());
+        }
+        for (auto& stmt : *library) {
+            if (skipUse && TMaybeNode<TUseExpr>(stmt)) {
+                continue;
+            }
+            programStmts.push_back(std::move(stmt));
+        }
+    };
+    addLibrary("radix.oz", false);
+    addLibrary("radix_wrappers.oz", true);
+
+    auto program = std::make_shared<TBlockExpr>(NQumir::TLocation{}, std::move(programStmts));
+    auto runner = std::make_unique<NQumir::TLLVMRunner>(Opts_);
+
+    PrintKernelAst(Diagnostics_, "sort.radix", program);
+
+    std::string err;
+    void* fnPtr = runner->CompileKernelAst(std::move(program), entryName, &err);
+    FinishKernelDiagnostics(Diagnostics_);
+    if (!fnPtr) {
+        throw std::runtime_error("sort radix kernel compilation failed: " + err);
+    }
+
+    using TSortFn = void(*)(void*, uint32_t*, uint32_t*, uint32_t*, int64_t, bool);
+    auto sharedRunner = std::shared_ptr<NQumir::TLLVMRunner>(std::move(runner));
+    return [fnPtr, sharedRunner](void* values, uint32_t* indices, uint32_t* work,
+        uint32_t* counts, int64_t n, bool desc) {
+        reinterpret_cast<TSortFn>(fnPtr)(values, indices, work, counts, n, desc);
     };
 }
 

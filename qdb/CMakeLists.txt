@@ -45,6 +45,7 @@ add_library(qumirdb
     exec/project_exec.cpp
     exec/aggregate_exec.cpp
     exec/join_exec.cpp
+    exec/sort_exec.cpp
     exec/planner.cpp
 )
 target_include_directories(qumirdb PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)

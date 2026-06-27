@@ -3,12 +3,14 @@
 #include <qdb/exec/filter_exec.h>
 #include <qdb/exec/join_exec.h>
 #include <qdb/exec/project_exec.h>
+#include <qdb/exec/sort_exec.h>
 #include <qdb/exec/source_exec.h>
 #include <qdb/plan/ops/aggregate.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/ops/filter.h>
 #include <qdb/plan/ops/join.h>
 #include <qdb/plan/ops/project.h>
+#include <qdb/plan/ops/sort.h>
 
 #include <qdb/kernel/project_type.h>
 #include <qdb/modules/qumirdb.h>
@@ -64,6 +66,13 @@ NQumir::NAst::TTypePtr ProjectJitType(const NQumir::NAst::TTypePtr& outType) {
     return outType;
 }
 
+bool IsRadixSortableType(const NQumir::NAst::TTypePtr& type) {
+    using namespace NQumir::NAst;
+    auto inner = UnwrapNamedType(UnwrapNullableType(type));
+    return static_cast<bool>(TMaybeType<TIntegerType>(inner)) ||
+        static_cast<bool>(TMaybeType<TFloatType>(inner));
+}
+
 } // namespace
 
 void TPhysicalPlanner::PrintRuntimePlan(const TOperatorPtr& root) const {
@@ -101,6 +110,11 @@ void TPhysicalPlanner::PrintRuntimePlan(const TOperatorPtr& root, int depth) con
         *Diagnostics_ << "join [symmetric hash, JIT probe+insert]\n";
         PrintRuntimePlan(node.Cast()->Left(), depth + 1);
         PrintRuntimePlan(node.Cast()->Right(), depth + 1);
+        return;
+    }
+    if (auto node = TMaybeOp<TSortOperator>(root)) {
+        *Diagnostics_ << "sort [stable indices]\n";
+        PrintRuntimePlan(node.Cast()->Input(), depth + 1);
         return;
     }
     *Diagnostics_ << "unknown\n";
@@ -326,6 +340,53 @@ std::unique_ptr<IRuntimeNode> TPhysicalPlanner::Build(const TOperatorPtr& root) 
             std::move(left), std::move(right), std::move(*outputType), std::move(kernels),
             join->JoinType(),
             /*hasResidual=*/join->Filter() != nullptr);
+    }
+
+    if (auto maybe = TMaybeOp<TSortOperator>(root)) {
+        auto sort = maybe.Cast();
+        auto input = Build(sort->Input());
+        auto* inputType = static_cast<NQumir::NAst::TStructType*>(input->OutputType().get());
+        if (!inputType) {
+            throw std::runtime_error("sort input must have TStructType");
+        }
+
+        std::vector<TSortColumnRef> keyColumns;
+        std::vector<TSortRadixKey> radixKeys;
+        keyColumns.reserve(sort->Keys().size());
+        radixKeys.reserve(sort->Keys().size());
+        bool allKeysRadixSortable = true;
+        for (const auto& key : sort->Keys()) {
+            auto it = std::find_if(inputType->Fields.begin(), inputType->Fields.end(),
+                [&](const auto& field) { return field.first == key.Column; });
+            if (it == inputType->Fields.end()) {
+                throw std::runtime_error("sort column not found: " + key.Column);
+            }
+            allKeysRadixSortable = allKeysRadixSortable && IsRadixSortableType(it->second);
+        }
+        TKernelCompiler compiler(Diagnostics_);
+        for (const auto& key : sort->Keys()) {
+            auto it = std::find_if(inputType->Fields.begin(), inputType->Fields.end(),
+                [&](const auto& field) { return field.first == key.Column; });
+            keyColumns.push_back({
+                .Index = static_cast<int32_t>(std::distance(inputType->Fields.begin(), it)),
+                .Type = it->second,
+            });
+            if (allKeysRadixSortable) {
+                radixKeys.push_back({
+                    .Enabled = true,
+                    .Dispatch = compiler.CompileRadixSortIndices(it->second),
+                });
+            } else {
+                radixKeys.push_back({});
+            }
+        }
+
+        return std::make_unique<TRuntimeSort>(
+            std::move(input),
+            input->OutputType(),
+            sort->Keys(),
+            std::move(keyColumns),
+            std::move(radixKeys));
     }
 
     throw std::runtime_error("TPhysicalPlanner: unknown operator");
