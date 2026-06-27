@@ -2,10 +2,14 @@
 
 #include <qdb/io/io.h>
 #include <qdb/io/schema.h>
+#include <qdb/plan/ops/filter.h>
 #include <qdb/plan/ops/join.h>
+#include <qdb/plan/ops/limit.h>
 #include <qdb/plan/ops/operator.h>
+#include <qdb/plan/ops/sort.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/passes/equijoin.h>
+#include <qdb/plan/passes/join_order.h>
 #include <qdb/plan/passes/qualify_columns.h>
 #include <qdb/plan/passes/typing.h>
 #include <qdb/sexp/parser.h>
@@ -97,6 +101,26 @@ std::vector<std::pair<std::string, std::string>> Keys(const TOperatorPtr& root) 
 
 using TKeys = std::vector<std::pair<std::string, std::string>>;
 
+const TSourceOperator* AsSource(const TOperatorPtr& op) {
+    return dynamic_cast<const TSourceOperator*>(op.get());
+}
+
+const TJoinOperator* AsJoin(const TOperatorPtr& op) {
+    return dynamic_cast<const TJoinOperator*>(op.get());
+}
+
+const TFilterOperator* AsFilter(const TOperatorPtr& op) {
+    return dynamic_cast<const TFilterOperator*>(op.get());
+}
+
+const TSortOperator* AsSort(const TOperatorPtr& op) {
+    return dynamic_cast<const TSortOperator*>(op.get());
+}
+
+const TLimitOperator* AsLimit(const TOperatorPtr& op) {
+    return dynamic_cast<const TLimitOperator*>(op.get());
+}
+
 } // namespace
 
 // one join: filter (== aid bid) over cross(A, B) -> key (a.aid, b.bid)
@@ -151,6 +175,83 @@ TEST(EquiJoin, ThreeJoinsFromFilter) {
         tables);
 
     EXPECT_EQ(Keys(root), (TKeys{{"a.aid", "b.bid"}, {"b.bcid", "c.cid"}, {"c.ccid", "d.did"}}));
+}
+
+TEST(EquiJoin, ExtractsKeysThroughLimitAndSort) {
+    TMockSource a({"aid", "aval"});
+    TMockSource b({"bid", "bval"});
+
+    auto left = std::make_shared<TSourceOperator>(a, "A");
+    left->SetAlias("a");
+    auto right = std::make_shared<TSourceOperator>(b, "B");
+    right->SetAlias("b");
+
+    TOperatorPtr root = std::make_shared<TLimitOperator>(
+        std::make_shared<TSortOperator>(
+            std::make_shared<TFilterOperator>(
+                std::make_shared<TJoinOperator>(
+                    left, right, std::vector<TJoinKey>{}, EJoinType::Inner, nullptr),
+                std::make_shared<TBinaryExpr>(
+                    NQumir::TLocation{}, TOperator("=="),
+                    std::make_shared<TIdentExpr>(NQumir::TLocation{}, "aid"),
+                    std::make_shared<TIdentExpr>(NQumir::TLocation{}, "bid"))),
+            std::vector<TSortKey>{{"aval", ESortDirection::Asc, ESortNulls::Default}}),
+        10);
+
+    QualifyColumns(root);
+    AnnotateTypes(root);
+    root = ExtractEquiJoins(root);
+
+    EXPECT_EQ(Keys(root), (TKeys{{"a.aid", "b.bid"}}));
+}
+
+TEST(JoinOrder, ReordersThroughLimitAndSort) {
+    TMockSource a({"aid", "aval"});
+    TMockSource b({"bid", "bval"});
+    TMockSource c({"cid", "cval"});
+
+    auto sourceA = std::make_shared<TSourceOperator>(a, "A");
+    sourceA->SetAlias("a");
+    auto sourceB = std::make_shared<TSourceOperator>(b, "B");
+    sourceB->SetAlias("b");
+    auto sourceC = std::make_shared<TSourceOperator>(c, "C");
+    sourceC->SetAlias("c");
+
+    TOperatorPtr root = std::make_shared<TLimitOperator>(
+        std::make_shared<TSortOperator>(
+            std::make_shared<TFilterOperator>(
+                std::make_shared<TJoinOperator>(
+                    std::make_shared<TJoinOperator>(
+                        sourceA, sourceC, std::vector<TJoinKey>{}, EJoinType::Inner, nullptr),
+                    sourceB, std::vector<TJoinKey>{}, EJoinType::Inner, nullptr),
+                std::make_shared<TBinaryExpr>(
+                    NQumir::TLocation{}, TOperator("=="),
+                    std::make_shared<TIdentExpr>(NQumir::TLocation{}, "aid"),
+                    std::make_shared<TIdentExpr>(NQumir::TLocation{}, "bid"))),
+            std::vector<TSortKey>{{"aval", ESortDirection::Asc, ESortNulls::Default}}),
+        10);
+
+    QualifyColumns(root);
+    AnnotateTypes(root);
+    root = ReorderJoins(root);
+
+    auto limit = AsLimit(root);
+    ASSERT_NE(limit, nullptr);
+    auto sort = AsSort(limit->Input());
+    ASSERT_NE(sort, nullptr);
+    auto filter = AsFilter(sort->Input());
+    ASSERT_NE(filter, nullptr);
+    auto topJoin = AsJoin(filter->Input());
+    ASSERT_NE(topJoin, nullptr);
+    auto firstJoin = AsJoin(topJoin->Left());
+    ASSERT_NE(firstJoin, nullptr);
+
+    ASSERT_NE(AsSource(firstJoin->Left()), nullptr);
+    ASSERT_NE(AsSource(firstJoin->Right()), nullptr);
+    ASSERT_NE(AsSource(topJoin->Right()), nullptr);
+    EXPECT_EQ(AsSource(firstJoin->Left())->GetAlias(), "a");
+    EXPECT_EQ(AsSource(firstJoin->Right())->GetAlias(), "b");
+    EXPECT_EQ(AsSource(topJoin->Right())->GetAlias(), "c");
 }
 
 int main(int argc, char** argv) {
