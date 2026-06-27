@@ -4,6 +4,7 @@
 #include <qdb/plan/ops/filter.h>
 #include <qdb/plan/ops/join.h>
 #include <qdb/plan/ops/project.h>
+#include <qdb/plan/ops/sort.h>
 #include <qdb/plan/ops/source.h>
 
 #include <qdb/plan/clone_expr.h>
@@ -808,6 +809,64 @@ void CloneOperatorExprs(const TOperatorPtr& op) {
     }
 }
 
+bool HasOutputColumn(const TOperatorPtr& op, const std::string& name) {
+    auto* output = static_cast<NAst::TStructType*>(op->OutputColumns().get());
+    if (!output) {
+        return false;
+    }
+    for (const auto& [fieldName, _] : output->Fields) {
+        if (fieldName == name) {
+            return true;
+        }
+    }
+    return false;
+}
+
+ESortNulls ConvertSortNulls(NSql::TSqlOrderItem::ENullOrder nulls) {
+    switch (nulls) {
+        case NSql::TSqlOrderItem::ENullOrder::Default:
+            return ESortNulls::Default;
+        case NSql::TSqlOrderItem::ENullOrder::First:
+            return ESortNulls::First;
+        case NSql::TSqlOrderItem::ENullOrder::Last:
+            return ESortNulls::Last;
+    }
+    return ESortNulls::Default;
+}
+
+std::expected<TOperatorPtr, TError> ApplyOrderBy(
+    const NSql::TSqlQuery& query,
+    TOperatorPtr plan)
+{
+    if (!query.OrderBy || query.OrderBy->Items.empty()) {
+        return plan;
+    }
+
+    std::vector<TSortKey> keys;
+    keys.reserve(query.OrderBy->Items.size());
+    for (const auto& item : query.OrderBy->Items) {
+        auto ident = NAst::TMaybeNode<NAst::TIdentExpr>(item->Expr);
+        if (!ident) {
+            return std::unexpected(TError(item->Expr->Location,
+                "ORDER BY currently supports only output column identifiers"));
+        }
+
+        const auto& column = ident.Cast()->Name;
+        if (!HasOutputColumn(plan, column)) {
+            return std::unexpected(TError(item->Expr->Location,
+                "unknown ORDER BY output column: " + column));
+        }
+
+        keys.push_back({
+            .Column = column,
+            .Direction = item->Desc ? ESortDirection::Desc : ESortDirection::Asc,
+            .Nulls = ConvertSortNulls(item->NullOrder),
+        });
+    }
+
+    return std::make_shared<TSortOperator>(std::move(plan), std::move(keys));
+}
+
 std::expected<TOperatorPtr, TError> BuildQuery(
     const NSql::TSqlQuery& query,
     const TTableSourceFactory& sources)
@@ -816,10 +875,14 @@ std::expected<TOperatorPtr, TError> BuildQuery(
     if (!select) {
         return std::unexpected(TError("expected a SELECT statement"));
     }
-    // TODO: ORDER BY / LIMIT / OFFSET require sort/limit operators.
+    // TODO: LIMIT / OFFSET require a limit operator.
 
     if (!query.WithClause) {
-        return BuildSelect(*select.Cast(), sources);
+        auto plan = BuildSelect(*select.Cast(), sources);
+        if (!plan) {
+            return plan;
+        }
+        return ApplyOrderBy(query, std::move(*plan));
     }
     if (query.WithClause->Recursive) {
         return std::unexpected(TError("WITH RECURSIVE is not supported yet"));
@@ -852,7 +915,11 @@ std::expected<TOperatorPtr, TError> BuildQuery(
         return plan;
     };
 
-    return BuildSelect(*select.Cast(), factory);
+    auto plan = BuildSelect(*select.Cast(), factory);
+    if (!plan) {
+        return plan;
+    }
+    return ApplyOrderBy(query, std::move(*plan));
 }
 
 } // namespace

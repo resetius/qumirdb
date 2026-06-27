@@ -5,6 +5,7 @@
 #include <qdb/plan/ops/join.h>
 #include <qdb/plan/ops/operator.h>
 #include <qdb/plan/ops/project.h>
+#include <qdb/plan/ops/sort.h>
 #include <qdb/plan/ops/source.h>
 
 #include <stdexcept>
@@ -56,6 +57,25 @@ static void PrintRel(NQumir::NAst::TExpr& expr, TPrinter& printer, TPrintFrame f
             printer.PrintIdentifier(spec.Name);
             printer.Space();
             printer.PrintExpr(spec.Expression, frame.AllowTypeWrap, frame.Level + 2);
+            out << ')';
+        }
+        out << ')';
+        return;
+    }
+
+    if (rel == TSortOperator::OpId) {
+        auto& sort = static_cast<TSortOperator&>(op);
+        out << "(rel sort";
+        printer.Separator(frame.Level + 1);
+        printer.PrintExpr(sort.Input(), frame.AllowTypeWrap, frame.Level + 1);
+        for (const auto& key : sort.Keys()) {
+            printer.Separator(frame.Level + 1);
+            out << '(';
+            printer.PrintIdentifier(key.Column);
+            printer.Space();
+            out << SortDirectionName(key.Direction);
+            printer.Space();
+            out << SortNullsName(key.Nulls);
             out << ')';
         }
         out << ')';
