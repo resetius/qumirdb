@@ -1,53 +1,58 @@
-(rel project
-  (rel filter
-    (rel join
+(rel sort
+  (rel project
+    (rel filter
       (rel join
         (rel join
           (rel join
-            (rel join (rel source "part") (rel source "supplier") () (inner))
-            (rel source "partsupp")
+            (rel join
+              (rel join (rel source "part") (rel source "supplier") () (inner))
+              (rel source "partsupp")
+              ()
+              (inner))
+            (rel source "nation")
             ()
             (inner))
-          (rel source "nation")
+          (rel source "region")
           ()
           (inner))
-        (rel source "region")
-        ()
-        (inner))
-      (rel project
-        (rel aggregate
-          (rel project
-            (rel filter
-              (rel join
+        (rel project
+          (rel aggregate
+            (rel project
+              (rel filter
                 (rel join
-                  (rel join (rel source "partsupp") (rel source "supplier") () (inner))
-                  (rel source "nation")
+                  (rel join
+                    (rel join (rel source "partsupp") (rel source "supplier") () (inner))
+                    (rel source "nation")
+                    ()
+                    (inner))
+                  (rel source "region")
                   ()
                   (inner))
-                (rel source "region")
-                ()
-                (inner))
-              (&& (&& (&& (&& (== p_partkey ps_partkey) (== s_suppkey ps_suppkey)) (== s_nationkey n_nationkey))
-                  (== n_regionkey r_regionkey))
-                (== r_name "EUROPE")))
-            (ps_supplycost ps_supplycost)
-            (__group__ 1))
-          (keys __group__)
-          (agg min_0 min ps_supplycost))
-        (__scalar_0__ min_0))
-      ()
-      (inner))
-    (&& (&& (&& (&& (&& (&& (&& (== p_partkey ps_partkey) (== s_suppkey ps_suppkey)) (== p_size 37))
-              (call qdb_string_view_sql_like p_type "%BRASS"))
-            (== s_nationkey n_nationkey))
-          (== n_regionkey r_regionkey))
-        (== r_name "EUROPE"))
-      (== ps_supplycost __scalar_0__)))
-  (s_acctbal s_acctbal)
-  (s_name s_name)
-  (n_name n_name)
-  (p_partkey p_partkey)
-  (p_mfgr p_mfgr)
-  (s_address s_address)
-  (s_phone s_phone)
-  (s_comment s_comment))
+                (&& (&& (&& (&& (== p_partkey ps_partkey) (== s_suppkey ps_suppkey)) (== s_nationkey n_nationkey))
+                    (== n_regionkey r_regionkey))
+                  (== r_name "EUROPE")))
+              (ps_supplycost ps_supplycost)
+              (__group__ 1))
+            (keys __group__)
+            (agg min_0 min ps_supplycost))
+          (__scalar_0__ min_0))
+        ()
+        (inner))
+      (&& (&& (&& (&& (&& (&& (&& (== p_partkey ps_partkey) (== s_suppkey ps_suppkey)) (== p_size 37))
+                (call qdb_string_view_sql_like p_type "%BRASS"))
+              (== s_nationkey n_nationkey))
+            (== n_regionkey r_regionkey))
+          (== r_name "EUROPE"))
+        (== ps_supplycost __scalar_0__)))
+    (s_acctbal s_acctbal)
+    (s_name s_name)
+    (n_name n_name)
+    (p_partkey p_partkey)
+    (p_mfgr p_mfgr)
+    (s_address s_address)
+    (s_phone s_phone)
+    (s_comment s_comment))
+  (s_acctbal desc nulls-default)
+  (n_name asc nulls-default)
+  (s_name asc nulls-default)
+  (p_partkey asc nulls-default))
