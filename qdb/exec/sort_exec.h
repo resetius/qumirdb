@@ -60,6 +60,7 @@ public:
         NQumir::NAst::TTypePtr outputType,
         std::vector<TSortKey> keys,
         std::vector<TSortColumnRef> keyColumns,
+        TSortRadixKernel radixKernel,
         int64_t limit,
         int64_t batchRows = kJoinOutputBatchRows);
     ~TRuntimeTopSort() override;
@@ -69,11 +70,13 @@ public:
 
 private:
     void Materialize();
+    bool TryRadixSortBatch(const TRowSet& batch, std::vector<uint32_t>& rows);
 
     std::unique_ptr<IRuntimeNode> Input_;
     NQumir::NAst::TTypePtr OutputType_;
     std::vector<TSortKey> Keys_;
     std::vector<TSortColumnRef> KeyColumns_;
+    TSortRadixKernel RadixKernel_;
     int64_t Limit_ = 0;
     int64_t BatchRows_ = kJoinOutputBatchRows;
 

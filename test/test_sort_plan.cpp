@@ -339,6 +339,38 @@ TEST(SortExec, TopSortReturnsLimitFromOneBatch) {
     EXPECT_FALSE(runtime->Next(second));
 }
 
+TEST(SortExec, TopSortHonorsDescDirection) {
+    using namespace NQumir::NAst;
+
+    int64_t keys[] = {5, 1, 3, 2};
+    int64_t payload[] = {50, 10, 30, 20};
+    std::vector<TColumn> columns;
+    TRowSet batch = MakeI64I64Batch(keys, payload, 4, columns);
+
+    auto i64 = std::make_shared<TIntegerType>();
+    TVectorSource source(
+        {{"k", i64}, {"payload", i64}},
+        {batch});
+    auto plan = BuildSqlPlan("SELECT k, payload FROM t ORDER BY k DESC LIMIT 2", source);
+    ASSERT_TRUE(plan.has_value()) << (plan ? "" : plan.error().ToString());
+    auto optimized = ApplyTopSort(*plan);
+    ASSERT_TRUE(TMaybeOp<TTopSortOperator>(optimized));
+
+    TPhysicalPlanner planner;
+    auto runtime = planner.Build(optimized);
+
+    TRowSet out{};
+    ASSERT_TRUE(runtime->Next(out));
+    ASSERT_EQ(out.RowCount, 2);
+    auto* outK = reinterpret_cast<int64_t*>(out.Columns[0].Data);
+    auto* outPayload = reinterpret_cast<int64_t*>(out.Columns[1].Data);
+    EXPECT_EQ(std::vector<int64_t>(outK, outK + out.RowCount),
+        (std::vector<int64_t>{5, 3}));
+    EXPECT_EQ(std::vector<int64_t>(outPayload, outPayload + out.RowCount),
+        (std::vector<int64_t>{50, 30}));
+    Release(&out);
+}
+
 TEST(SortExec, TopSortMergesBatchesStably) {
     using namespace NQumir::NAst;
 
