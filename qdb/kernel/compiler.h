@@ -151,6 +151,10 @@ public:
         void* values, uint32_t* indices, uint32_t* work, uint32_t* counts,
         int64_t n, bool desc)>;
 
+    using TSortRadixCompositeDispatch = std::function<void(
+        void** values, uint32_t* indices, uint32_t* work, uint32_t* counts,
+        int64_t n, bool* descs)>;
+
     // sizeof(HashTable) per modules/qumirdb.cpp's layout — callers of
     // CompileAggregate must allocate a zero-initialized buffer this large
     // for `ht`.
@@ -179,6 +183,9 @@ public:
 
     TSortRadixDispatch CompileRadixSortIndices(
         const NQumir::NAst::TTypePtr& type);
+
+    TSortRadixCompositeDispatch CompileRadixSortComposite(
+        const std::vector<NQumir::NAst::TTypePtr>& types);
 
     // Compiles the per-query generic update and finalize programs for `aggs`
     // grouped by `groupKeys`, over rows of `inputType`.

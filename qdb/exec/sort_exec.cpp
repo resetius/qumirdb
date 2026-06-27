@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <stdexcept>
 #include <string_view>
 #include <utility>
@@ -199,84 +200,6 @@ bool HasAnyNullMask(const TRowStore& store, const std::vector<TRowId>& rows,
     return false;
 }
 
-template <class T>
-std::vector<T> MaterializeValues(const TRowStore& store,
-    const std::vector<TRowId>& rows, int32_t columnIdx)
-{
-    std::vector<T> values;
-    values.reserve(rows.size());
-    for (TRowId rowId : rows) {
-        const auto& column = store.Column(rowId, columnIdx);
-        values.push_back(Load<T>(column, RowIndex(rowId)));
-    }
-    return values;
-}
-
-bool ApplyRadixKey(const TRowStore& store, const std::vector<TRowId>& rows,
-    const TSortColumnRef& keyColumn, const TSortRadixKey& radixKey,
-    bool desc, std::vector<uint32_t>& indices, std::vector<uint32_t>& work,
-    std::vector<uint32_t>& counts)
-{
-    auto valueType = UnwrapNamedType(UnwrapNullableType(keyColumn.Type));
-    void* valuesPtr = nullptr;
-    std::vector<int8_t> i8;
-    std::vector<int16_t> i16;
-    std::vector<int32_t> i32;
-    std::vector<int64_t> i64;
-    std::vector<uint8_t> u8;
-    std::vector<uint16_t> u16;
-    std::vector<uint32_t> u32;
-    std::vector<uint64_t> u64;
-    std::vector<double> f64;
-
-    if (auto integer = TMaybeType<TIntegerType>(valueType)) {
-        switch (integer.Cast()->Kind) {
-            case TIntegerType::I8:
-                i8 = MaterializeValues<int8_t>(store, rows, keyColumn.Index);
-                valuesPtr = i8.data();
-                break;
-            case TIntegerType::I16:
-                i16 = MaterializeValues<int16_t>(store, rows, keyColumn.Index);
-                valuesPtr = i16.data();
-                break;
-            case TIntegerType::I32:
-                i32 = MaterializeValues<int32_t>(store, rows, keyColumn.Index);
-                valuesPtr = i32.data();
-                break;
-            case TIntegerType::I64:
-                i64 = MaterializeValues<int64_t>(store, rows, keyColumn.Index);
-                valuesPtr = i64.data();
-                break;
-            case TIntegerType::U8:
-                u8 = MaterializeValues<uint8_t>(store, rows, keyColumn.Index);
-                valuesPtr = u8.data();
-                break;
-            case TIntegerType::U16:
-                u16 = MaterializeValues<uint16_t>(store, rows, keyColumn.Index);
-                valuesPtr = u16.data();
-                break;
-            case TIntegerType::U32:
-                u32 = MaterializeValues<uint32_t>(store, rows, keyColumn.Index);
-                valuesPtr = u32.data();
-                break;
-            case TIntegerType::U64:
-                u64 = MaterializeValues<uint64_t>(store, rows, keyColumn.Index);
-                valuesPtr = u64.data();
-                break;
-        }
-    } else if (TMaybeType<TFloatType>(valueType)) {
-        f64 = MaterializeValues<double>(store, rows, keyColumn.Index);
-        valuesPtr = f64.data();
-    }
-
-    if (!valuesPtr) {
-        return false;
-    }
-    radixKey.Dispatch(valuesPtr, indices.data(), work.data(), counts.data(),
-        static_cast<int64_t>(indices.size()), desc);
-    return true;
-}
-
 size_t SortColumnFixedWidth(const TTypePtr& type) {
     auto valueType = UnwrapNamedType(UnwrapNullableType(type));
     if (auto integer = TMaybeType<TIntegerType>(valueType)) {
@@ -392,19 +315,48 @@ void GatherColumn(const TRowStore& store, const std::vector<TRowId>& rowIds,
     }
 }
 
+size_t RadixValueWidth(const TTypePtr& type) {
+    auto valueType = UnwrapNamedType(UnwrapNullableType(type));
+    if (auto integer = TMaybeType<TIntegerType>(valueType)) {
+        return static_cast<size_t>(integer.Cast()->BitWidth() / 8);
+    }
+    if (TMaybeType<TFloatType>(valueType)) {
+        return 8;
+    }
+    return 0;
+}
+
+std::vector<char> MaterializeRadixValues(const TRowStore& store,
+    const std::vector<TRowId>& rows, const TSortColumnRef& keyColumn)
+{
+    const size_t width = RadixValueWidth(keyColumn.Type);
+    if (width == 0) {
+        return {};
+    }
+    std::vector<char> values(rows.size() * width);
+    for (size_t i = 0; i < rows.size(); ++i) {
+        const TRowId rowId = rows[i];
+        const auto& column = store.Column(rowId, keyColumn.Index);
+        std::memcpy(values.data() + i * width,
+            column.Data + static_cast<int64_t>(RowIndex(rowId)) * width,
+            width);
+    }
+    return values;
+}
+
 } // namespace
 
 TRuntimeSort::TRuntimeSort(std::unique_ptr<IRuntimeNode> input,
     TTypePtr outputType,
     std::vector<TSortKey> keys,
     std::vector<TSortColumnRef> keyColumns,
-    std::vector<TSortRadixKey> radixKeys,
+    TSortRadixKernel radixKernel,
     int64_t batchRows)
     : Input_(std::move(input))
     , OutputType_(std::move(outputType))
     , Keys_(std::move(keys))
     , KeyColumns_(std::move(keyColumns))
-    , RadixKeys_(std::move(radixKeys))
+    , RadixKernel_(std::move(radixKernel))
     , BatchRows_(batchRows)
 {}
 
@@ -415,13 +367,13 @@ bool TRuntimeSort::TryRadixSort() {
     if (Rows_.size() > std::numeric_limits<uint32_t>::max()) {
         return false;
     }
-    if (RadixKeys_.size() != Keys_.size() || KeyColumns_.size() != Keys_.size()) {
+    if (!RadixKernel_.Enabled || !RadixKernel_.Dispatch) {
+        return false;
+    }
+    if (KeyColumns_.size() != Keys_.size()) {
         return false;
     }
     for (size_t i = 0; i < Keys_.size(); ++i) {
-        if (!RadixKeys_[i].Enabled || !RadixKeys_[i].Dispatch) {
-            return false;
-        }
         if (EffectiveNulls(Keys_[i]) != Keys_[i].Nulls && Keys_[i].Nulls != ESortNulls::Default) {
             return false;
         }
@@ -433,17 +385,23 @@ bool TRuntimeSort::TryRadixSort() {
     std::vector<uint32_t> indices(Rows_.size());
     std::vector<uint32_t> work(Rows_.size());
     std::vector<uint32_t> counts(256);
+    std::vector<std::vector<char>> valueStorage(Keys_.size());
+    std::vector<void*> valuePtrs(Keys_.size());
+    auto descs = std::make_unique<bool[]>(Keys_.size());
     for (uint32_t i = 0; i < static_cast<uint32_t>(indices.size()); ++i) {
         indices[i] = i;
     }
-
-    for (size_t k = Keys_.size(); k > 0; --k) {
-        const size_t keyIdx = k - 1;
-        if (!ApplyRadixKey(Store_, Rows_, KeyColumns_[keyIdx], RadixKeys_[keyIdx],
-                Keys_[keyIdx].Direction == ESortDirection::Desc, indices, work, counts)) {
+    for (size_t k = 0; k < Keys_.size(); ++k) {
+        valueStorage[k] = MaterializeRadixValues(Store_, Rows_, KeyColumns_[k]);
+        if (valueStorage[k].empty() && !Rows_.empty()) {
             return false;
         }
+        valuePtrs[k] = valueStorage[k].data();
+        descs[k] = Keys_[k].Direction == ESortDirection::Desc;
     }
+
+    RadixKernel_.Dispatch(valuePtrs.data(), indices.data(), work.data(), counts.data(),
+        static_cast<int64_t>(indices.size()), descs.get());
 
     std::vector<TRowId> sorted;
     sorted.reserve(Rows_.size());
