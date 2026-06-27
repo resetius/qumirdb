@@ -241,6 +241,23 @@ void GatherTopSortState(const T* state, const T* temp, const Pick* picks,
     }
 }
 
+struct TTopSortColumns {
+    std::vector<std::vector<int32_t>> StateColumns;
+    std::vector<std::vector<int32_t>> NextStateColumns;
+    std::vector<std::vector<int32_t>> TempColumns;
+};
+
+void PrepareNextStateColumns(TTopSortColumns& columns, size_t columnCount, size_t limit) {
+    if (columns.NextStateColumns.size() != columnCount) {
+        columns.NextStateColumns.resize(columnCount);
+    }
+    for (auto& column : columns.NextStateColumns) {
+        if (column.size() != limit) {
+            column.resize(limit);
+        }
+    }
+}
+
 } // namespace
 
 TEST(SortTest, Basic) {
@@ -332,6 +349,51 @@ TEST(SortTest, TopSortMergesSortedStateAndRadixSortedBatch) {
     EXPECT_EQ(scratch.Picks[3].idx, 1u);
     EXPECT_EQ(scratch.Picks[4].src, 1);
     EXPECT_EQ(scratch.Picks[4].idx, 4u);
+}
+
+TEST(SortTest, TopSortGathersMultipleColumnsByPickSelector) {
+    constexpr size_t limit = 4;
+    TTopSortScratch<int32_t> scratch;
+    TTopSortColumns columns{
+        .StateColumns = {
+            {1, 4, 8, 10},
+            {10, 40, 80, 100},
+            {-1, -4, -8, -10},
+        },
+        .TempColumns = {
+            {6, 3, 12, 0, 4},
+            {60, 30, 120, 0, 41},
+            {-6, -3, -12, 0, -41},
+        },
+    };
+    scratch.State = columns.StateColumns[0];
+    scratch.Prepare(columns.TempColumns[0].size(), limit);
+    PrepareNextStateColumns(columns, columns.StateColumns.size(), limit);
+    std::iota(scratch.TempIndices.begin(), scratch.TempIndices.end(), 0);
+
+    RadixSortIndices(
+        columns.TempColumns[0].data(),
+        scratch.TempIndices.data(),
+        scratch.Work.data(),
+        columns.TempColumns[0].size());
+    const size_t pickCount = MergeTopSortPicks(
+        scratch.State.data(), scratch.State.size(),
+        columns.TempColumns[0].data(), scratch.TempIndices.data(),
+        scratch.TempIndices.size(), scratch.Picks.data(), limit);
+
+    ASSERT_EQ(pickCount, limit);
+    for (size_t column = 0; column < columns.StateColumns.size(); ++column) {
+        GatherTopSortState(
+            columns.StateColumns[column].data(),
+            columns.TempColumns[column].data(),
+            scratch.Picks.data(),
+            pickCount,
+            columns.NextStateColumns[column].data());
+    }
+
+    EXPECT_EQ(columns.NextStateColumns[0], (std::vector<int32_t>{0, 1, 3, 4}));
+    EXPECT_EQ(columns.NextStateColumns[1], (std::vector<int32_t>{0, 10, 30, 40}));
+    EXPECT_EQ(columns.NextStateColumns[2], (std::vector<int32_t>{0, -1, -3, -4}));
 }
 
 TEST(SortRadixOz, NumericKeysMatchPrototype) {
