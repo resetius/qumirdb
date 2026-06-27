@@ -6,6 +6,7 @@
 #include <qdb/exec/sort_exec.h>
 #include <qdb/exec/source_exec.h>
 #include <qdb/plan/ops/aggregate.h>
+#include <qdb/plan/ops/limit.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/ops/filter.h>
 #include <qdb/plan/ops/join.h>
@@ -114,6 +115,17 @@ void TPhysicalPlanner::PrintRuntimePlan(const TOperatorPtr& root, int depth) con
     }
     if (auto node = TMaybeOp<TSortOperator>(root)) {
         *Diagnostics_ << "sort [stable indices]\n";
+        PrintRuntimePlan(node.Cast()->Input(), depth + 1);
+        return;
+    }
+    if (auto node = TMaybeOp<TTopSortOperator>(root)) {
+        *Diagnostics_ << "top-sort [bounded stable state]\n";
+        PrintRuntimePlan(node.Cast()->Input(), depth + 1);
+        return;
+    }
+    if (auto node = TMaybeOp<TLimitOperator>(root)) {
+        *Diagnostics_ << "limit [" << node.Cast()->Limit()
+            << ", offset " << node.Cast()->Offset() << "]\n";
         PrintRuntimePlan(node.Cast()->Input(), depth + 1);
         return;
     }
@@ -388,6 +400,46 @@ std::unique_ptr<IRuntimeNode> TPhysicalPlanner::Build(const TOperatorPtr& root) 
             sort->Keys(),
             std::move(keyColumns),
             std::move(radixKernel));
+    }
+
+    if (auto maybe = TMaybeOp<TTopSortOperator>(root)) {
+        auto sort = maybe.Cast();
+        auto input = Build(sort->Input());
+        auto* inputType = static_cast<NQumir::NAst::TStructType*>(input->OutputType().get());
+        if (!inputType) {
+            throw std::runtime_error("top-sort input must have TStructType");
+        }
+
+        std::vector<TSortColumnRef> keyColumns;
+        keyColumns.reserve(sort->Keys().size());
+        for (const auto& key : sort->Keys()) {
+            auto it = std::find_if(inputType->Fields.begin(), inputType->Fields.end(),
+                [&](const auto& field) { return field.first == key.Column; });
+            if (it == inputType->Fields.end()) {
+                throw std::runtime_error("top-sort column not found: " + key.Column);
+            }
+            keyColumns.push_back({
+                .Index = static_cast<int32_t>(std::distance(inputType->Fields.begin(), it)),
+                .Type = it->second,
+            });
+        }
+
+        return std::make_unique<TRuntimeTopSort>(
+            std::move(input),
+            input->OutputType(),
+            sort->Keys(),
+            std::move(keyColumns),
+            sort->Limit());
+    }
+
+    if (auto maybe = TMaybeOp<TLimitOperator>(root)) {
+        auto limit = maybe.Cast();
+        auto input = Build(limit->Input());
+        return std::make_unique<TRuntimeLimit>(
+            std::move(input),
+            input->OutputType(),
+            limit->Limit(),
+            limit->Offset());
     }
 
     throw std::runtime_error("TPhysicalPlanner: unknown operator");
