@@ -45,6 +45,29 @@ private:
     std::vector<TSortKey> Keys_;
 };
 
+class TTopSortOperator : public IOperator {
+public:
+    static constexpr const char* OpId = "top-sort";
+
+    TTopSortOperator(TOperatorPtr input, std::vector<TSortKey> keys, int64_t limit);
+
+    std::string_view RelName() const override { return OpId; }
+    std::unordered_set<std::string> ComputeReferencedColumns() const override;
+    std::vector<NQumir::NAst::TExprPtr> Children() const override { return {Input_}; }
+    const std::string ToString() const override;
+
+    TOperatorPtr Input() const { return Input_; }
+    TOperatorPtr& MutableInput() { return Input_; }
+    const std::vector<TSortKey>& Keys() const { return Keys_; }
+    std::vector<TSortKey>& MutableKeys() { return Keys_; }
+    int64_t Limit() const { return Limit_; }
+
+private:
+    TOperatorPtr Input_;
+    std::vector<TSortKey> Keys_;
+    int64_t Limit_ = 0;
+};
+
 std::string_view SortDirectionName(ESortDirection direction);
 std::string_view SortNullsName(ESortNulls nulls);
 

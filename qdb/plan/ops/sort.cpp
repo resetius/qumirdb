@@ -61,4 +61,36 @@ const std::string TSortOperator::ToString() const {
     return s + ")";
 }
 
+TTopSortOperator::TTopSortOperator(TOperatorPtr input, std::vector<TSortKey> keys, int64_t limit)
+    : Input_(std::move(input))
+    , Keys_(std::move(keys))
+    , Limit_(limit)
+{
+    auto inputSchema = Input_->OutputColumns();
+    Type = std::make_shared<TFunctionType>(
+        std::vector<TTypePtr>{inputSchema},
+        inputSchema);
+}
+
+std::unordered_set<std::string> TTopSortOperator::ComputeReferencedColumns() const {
+    std::unordered_set<std::string> refs;
+    for (const auto& key : Keys_) {
+        refs.insert(key.Column);
+    }
+    return refs;
+}
+
+const std::string TTopSortOperator::ToString() const {
+    std::string s = "(rel top-sort " + Input_->ToString();
+    for (const auto& key : Keys_) {
+        s += " (" + key.Column + " ";
+        s += SortDirectionName(key.Direction);
+        s += " ";
+        s += SortNullsName(key.Nulls);
+        s += ")";
+    }
+    s += " (limit " + std::to_string(Limit_) + ")";
+    return s + ")";
+}
+
 } // namespace NQdb

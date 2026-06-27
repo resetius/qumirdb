@@ -3,6 +3,7 @@
 #include <qdb/plan/ops/aggregate.h>
 #include <qdb/plan/ops/filter.h>
 #include <qdb/plan/ops/join.h>
+#include <qdb/plan/ops/limit.h>
 #include <qdb/plan/ops/operator.h>
 #include <qdb/plan/ops/project.h>
 #include <qdb/plan/ops/sort.h>
@@ -77,6 +78,42 @@ static void PrintRel(NQumir::NAst::TExpr& expr, TPrinter& printer, TPrintFrame f
             printer.Space();
             out << SortNullsName(key.Nulls);
             out << ')';
+        }
+        out << ')';
+        return;
+    }
+
+    if (rel == TTopSortOperator::OpId) {
+        auto& sort = static_cast<TTopSortOperator&>(op);
+        out << "(rel top-sort";
+        printer.Separator(frame.Level + 1);
+        printer.PrintExpr(sort.Input(), frame.AllowTypeWrap, frame.Level + 1);
+        for (const auto& key : sort.Keys()) {
+            printer.Separator(frame.Level + 1);
+            out << '(';
+            printer.PrintIdentifier(key.Column);
+            printer.Space();
+            out << SortDirectionName(key.Direction);
+            printer.Space();
+            out << SortNullsName(key.Nulls);
+            out << ')';
+        }
+        printer.Separator(frame.Level + 1);
+        out << "(limit " << sort.Limit() << ')';
+        out << ')';
+        return;
+    }
+
+    if (rel == TLimitOperator::OpId) {
+        auto& limit = static_cast<TLimitOperator&>(op);
+        out << "(rel limit";
+        printer.Separator(frame.Level + 1);
+        printer.PrintExpr(limit.Input(), frame.AllowTypeWrap, frame.Level + 1);
+        printer.Separator(frame.Level + 1);
+        out << "(limit " << limit.Limit() << ')';
+        if (limit.Offset() != 0) {
+            printer.Separator(frame.Level + 1);
+            out << "(offset " << limit.Offset() << ')';
         }
         out << ')';
         return;
