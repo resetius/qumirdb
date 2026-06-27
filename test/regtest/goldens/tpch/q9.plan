@@ -1,34 +1,37 @@
-(rel project
-  (rel aggregate
-    (rel project
-      (rel filter
-        (rel join
+(rel sort
+  (rel project
+    (rel aggregate
+      (rel project
+        (rel filter
           (rel join
             (rel join
               (rel join
-                (rel join (rel source "part") (rel source "supplier") () (inner))
-                (rel source "lineitem")
+                (rel join
+                  (rel join (rel source "part") (rel source "supplier") () (inner))
+                  (rel source "lineitem")
+                  ()
+                  (inner))
+                (rel source "partsupp")
                 ()
                 (inner))
-              (rel source "partsupp")
+              (rel source "orders")
               ()
               (inner))
-            (rel source "orders")
+            (rel source "nation")
             ()
             (inner))
-          (rel source "nation")
-          ()
-          (inner))
-        (&& (&& (&& (&& (&& (&& (== s_suppkey l_suppkey) (== ps_suppkey l_suppkey)) (== ps_partkey l_partkey))
-                (== p_partkey l_partkey))
-              (== o_orderkey l_orderkey))
-            (== s_nationkey n_nationkey))
-          (call qdb_string_view_sql_like p_name "%turquoise%")))
-      (nation n_name)
-      (o_year (call qdb_date_year o_orderdate))
-      (amount (- (* l_extendedprice (- 1 l_discount)) (* ps_supplycost l_quantity))))
-    (keys nation o_year)
-    (agg sum_0 sum amount))
-  (nation nation)
-  (o_year o_year)
-  (sum_profit sum_0))
+          (&& (&& (&& (&& (&& (&& (== s_suppkey l_suppkey) (== ps_suppkey l_suppkey)) (== ps_partkey l_partkey))
+                  (== p_partkey l_partkey))
+                (== o_orderkey l_orderkey))
+              (== s_nationkey n_nationkey))
+            (call qdb_string_view_sql_like p_name "%turquoise%")))
+        (nation n_name)
+        (o_year (call qdb_date_year o_orderdate))
+        (amount (- (* l_extendedprice (- 1 l_discount)) (* ps_supplycost l_quantity))))
+      (keys nation o_year)
+      (agg sum_0 sum amount))
+    (nation nation)
+    (o_year o_year)
+    (sum_profit sum_0))
+  (nation asc nulls-default)
+  (o_year desc nulls-default))

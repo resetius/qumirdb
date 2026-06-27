@@ -1,19 +1,21 @@
-(rel project
-  (rel aggregate
-    (rel project
-      (rel filter
-        (rel join (rel source "orders") (rel source "lineitem") () (inner))
-        (&& (&& (&& (&& (&& (== o_orderkey l_orderkey) (|| (== l_shipmode "TRUCK") (== l_shipmode "AIR")))
-                (< l_commitdate l_receiptdate))
-              (< l_shipdate l_commitdate))
-            (>= l_receiptdate (call qdb_sql_date "1993-01-01")))
-          (< l_receiptdate (+ (call qdb_sql_date "1993-01-01") (call qdb_sql_interval "1" "year")))))
-      (l_shipmode l_shipmode)
-      (arg_0 (if (|| (== o_orderpriority "1-URGENT") (== o_orderpriority "2-HIGH")) 1 0))
-      (arg_1 (if (&& (!= o_orderpriority "1-URGENT") (!= o_orderpriority "2-HIGH")) 1 0)))
-    (keys l_shipmode)
-    (agg sum_0 sum arg_0)
-    (agg sum_1 sum arg_1))
-  (l_shipmode l_shipmode)
-  (high_line_count sum_0)
-  (low_line_count sum_1))
+(rel sort
+  (rel project
+    (rel aggregate
+      (rel project
+        (rel filter
+          (rel join (rel source "orders") (rel source "lineitem") () (inner))
+          (&& (&& (&& (&& (&& (== o_orderkey l_orderkey) (|| (== l_shipmode "TRUCK") (== l_shipmode "AIR")))
+                  (< l_commitdate l_receiptdate))
+                (< l_shipdate l_commitdate))
+              (>= l_receiptdate (call qdb_sql_date "1993-01-01")))
+            (< l_receiptdate (+ (call qdb_sql_date "1993-01-01") (call qdb_sql_interval "1" "year")))))
+        (l_shipmode l_shipmode)
+        (arg_0 (if (|| (== o_orderpriority "1-URGENT") (== o_orderpriority "2-HIGH")) 1 0))
+        (arg_1 (if (&& (!= o_orderpriority "1-URGENT") (!= o_orderpriority "2-HIGH")) 1 0)))
+      (keys l_shipmode)
+      (agg sum_0 sum arg_0)
+      (agg sum_1 sum arg_1))
+    (l_shipmode l_shipmode)
+    (high_line_count sum_0)
+    (low_line_count sum_1))
+  (l_shipmode asc nulls-default))

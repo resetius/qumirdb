@@ -1,49 +1,51 @@
-(rel project
-  (rel filter
-    (rel join
+(rel sort
+  (rel project
+    (rel filter
       (rel join
-        (rel source "supplier")
+        (rel join
+          (rel source "supplier")
+          (rel project
+            (rel aggregate
+              (rel project
+                (rel filter
+                  (rel source "lineitem")
+                  (&& (>= l_shipdate (call qdb_sql_date "1995-03-01"))
+                    (< l_shipdate (+ (call qdb_sql_date "1995-03-01") (call qdb_sql_interval "3" "month")))))
+                (l_suppkey l_suppkey)
+                (arg_0 (* l_extendedprice (- 1 l_discount))))
+              (keys l_suppkey)
+              (agg sum_0 sum arg_0))
+            (supplier_no l_suppkey)
+            (total_revenue sum_0))
+          ()
+          (inner))
         (rel project
           (rel aggregate
             (rel project
-              (rel filter
-                (rel source "lineitem")
-                (&& (>= l_shipdate (call qdb_sql_date "1995-03-01"))
-                  (< l_shipdate (+ (call qdb_sql_date "1995-03-01") (call qdb_sql_interval "3" "month")))))
-              (l_suppkey l_suppkey)
-              (arg_0 (* l_extendedprice (- 1 l_discount))))
-            (keys l_suppkey)
-            (agg sum_0 sum arg_0))
-          (supplier_no l_suppkey)
-          (total_revenue sum_0))
+              (rel project
+                (rel aggregate
+                  (rel project
+                    (rel filter
+                      (rel source "lineitem")
+                      (&& (>= l_shipdate (call qdb_sql_date "1995-03-01"))
+                        (< l_shipdate (+ (call qdb_sql_date "1995-03-01") (call qdb_sql_interval "3" "month")))))
+                    (l_suppkey l_suppkey)
+                    (arg_0 (* l_extendedprice (- 1 l_discount))))
+                  (keys l_suppkey)
+                  (agg sum_0 sum arg_0))
+                (supplier_no l_suppkey)
+                (total_revenue sum_0))
+              (total_revenue total_revenue)
+              (__group__ 1))
+            (keys __group__)
+            (agg max_0 max total_revenue))
+          (__scalar_0__ max_0))
         ()
         (inner))
-      (rel project
-        (rel aggregate
-          (rel project
-            (rel project
-              (rel aggregate
-                (rel project
-                  (rel filter
-                    (rel source "lineitem")
-                    (&& (>= l_shipdate (call qdb_sql_date "1995-03-01"))
-                      (< l_shipdate (+ (call qdb_sql_date "1995-03-01") (call qdb_sql_interval "3" "month")))))
-                  (l_suppkey l_suppkey)
-                  (arg_0 (* l_extendedprice (- 1 l_discount))))
-                (keys l_suppkey)
-                (agg sum_0 sum arg_0))
-              (supplier_no l_suppkey)
-              (total_revenue sum_0))
-            (total_revenue total_revenue)
-            (__group__ 1))
-          (keys __group__)
-          (agg max_0 max total_revenue))
-        (__scalar_0__ max_0))
-      ()
-      (inner))
-    (&& (== s_suppkey supplier_no) (== total_revenue __scalar_0__)))
-  (s_suppkey s_suppkey)
-  (s_name s_name)
-  (s_address s_address)
-  (s_phone s_phone)
-  (total_revenue total_revenue))
+      (&& (== s_suppkey supplier_no) (== total_revenue __scalar_0__)))
+    (s_suppkey s_suppkey)
+    (s_name s_name)
+    (s_address s_address)
+    (s_phone s_phone)
+    (total_revenue total_revenue))
+  (s_suppkey asc nulls-default))
