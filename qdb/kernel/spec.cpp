@@ -1,6 +1,12 @@
 #include <qdb/kernel/spec.h>
 
+#include <qdb/plan/passes/unbound_vars.h>
+
+#include <algorithm>
+#include <memory>
 #include <ostream>
+#include <string>
+#include <unordered_set>
 
 namespace NQdb {
 namespace NKernel {
@@ -29,6 +35,81 @@ std::string_view KernelKindName(EOperatorKernelKind kind) {
             return "binary";
     }
     return "unknown";
+}
+
+TOperatorKernelSpec BuildFilterKernelSpec(
+    const NQumir::NAst::TStructType& inputType,
+    const NQumir::NAst::TExprPtr& predicate,
+    std::string entrypointName)
+{
+    const auto refs = FindUnboundVars(predicate);
+
+    std::vector<TKernelColumnRef> referenced;
+    for (int32_t i = 0; i < static_cast<int32_t>(inputType.Fields.size()); ++i) {
+        const auto& [name, type] = inputType.Fields[i];
+        if (refs.contains(name)) {
+            referenced.push_back({.Name = name, .Index = i, .Type = type});
+        }
+    }
+
+    std::ranges::sort(referenced, [](const auto& lhs, const auto& rhs) {
+        return lhs.Index < rhs.Index;
+    });
+
+    return TOperatorKernelSpec{
+        .Kind = EOperatorKernelKind::UnaryStreaming,
+        .OperatorName = "filter",
+        .InputSchemas = {std::make_shared<NQumir::NAst::TStructType>(inputType.Fields)},
+        .OutputSchema = std::make_shared<NQumir::NAst::TStructType>(inputType.Fields),
+        .ReferencedColumns = std::move(referenced),
+        .Entrypoints = {
+            {.Name = std::move(entrypointName), .Abi = "void(ref TRowSet)"},
+        },
+        .SourceModules = {"qumirdb"},
+    };
+}
+
+TOperatorKernelSpec BuildProjectKernelSpec(
+    const NQumir::NAst::TStructType& inputType,
+    const std::vector<NQumir::NAst::TExprPtr>& computedExprs,
+    const std::vector<NQumir::NAst::TTypePtr>& computedTypes,
+    std::string entrypointName)
+{
+    std::vector<std::pair<std::string, NQumir::NAst::TTypePtr>> outputFields;
+    outputFields.reserve(computedTypes.size());
+    for (size_t i = 0; i < computedTypes.size(); ++i) {
+        outputFields.emplace_back("computed_" + std::to_string(i), computedTypes[i]);
+    }
+
+    std::unordered_set<std::string> refs;
+    for (const auto& expr : computedExprs) {
+        auto exprRefs = FindUnboundVars(expr);
+        refs.insert(exprRefs.begin(), exprRefs.end());
+    }
+
+    std::vector<TKernelColumnRef> referenced;
+    for (int32_t i = 0; i < static_cast<int32_t>(inputType.Fields.size()); ++i) {
+        const auto& [name, type] = inputType.Fields[i];
+        if (refs.contains(name)) {
+            referenced.push_back({.Name = name, .Index = i, .Type = type});
+        }
+    }
+
+    std::ranges::sort(referenced, [](const auto& lhs, const auto& rhs) {
+        return lhs.Index < rhs.Index;
+    });
+
+    return TOperatorKernelSpec{
+        .Kind = EOperatorKernelKind::UnaryStreaming,
+        .OperatorName = "project-compute",
+        .InputSchemas = {std::make_shared<NQumir::NAst::TStructType>(inputType.Fields)},
+        .OutputSchema = std::make_shared<NQumir::NAst::TStructType>(std::move(outputFields)),
+        .ReferencedColumns = std::move(referenced),
+        .Entrypoints = {
+            {.Name = std::move(entrypointName), .Abi = "void(ref TRowSet, ptr ptr i8)"},
+        },
+        .SourceModules = {"qumirdb"},
+    };
 }
 
 void PrintKernelSpec(std::ostream& out, const TOperatorKernelSpec& spec) {
@@ -101,4 +182,3 @@ void PrintKernelSpec(std::ostream& out, const TOperatorKernelSpec& spec) {
 
 } // namespace NKernel
 } // namespace NQdb
-

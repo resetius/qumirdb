@@ -1,5 +1,6 @@
 #pragma once
 
+#include <qumir/parser/ast.h>
 #include <qumir/parser/type.h>
 
 #include <cstddef>
@@ -46,8 +47,18 @@ struct TOperatorKernelSpec {
 
 std::string_view KernelKindName(EOperatorKernelKind kind);
 
+TOperatorKernelSpec BuildFilterKernelSpec(
+    const NQumir::NAst::TStructType& inputType,
+    const NQumir::NAst::TExprPtr& predicate,
+    std::string entrypointName = "<kernel>");
+
+TOperatorKernelSpec BuildProjectKernelSpec(
+    const NQumir::NAst::TStructType& inputType,
+    const std::vector<NQumir::NAst::TExprPtr>& computedExprs,
+    const std::vector<NQumir::NAst::TTypePtr>& computedTypes,
+    std::string entrypointName = "<project>");
+
 void PrintKernelSpec(std::ostream& out, const TOperatorKernelSpec& spec);
 
 } // namespace NKernel
 } // namespace NQdb
-
