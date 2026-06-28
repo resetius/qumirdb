@@ -14,6 +14,10 @@ int RandomInt(int* seed) {
 struct TRowSet {
     std::vector<std::string> Col;
     std::vector<int> Selection;
+
+    bool Empty() const {
+        return Col.empty();
+    }
 };
 
 void GenerateKey(std::string& key, int* seed) {
@@ -35,16 +39,26 @@ void GenerateRowSet(TRowSet& rowSet, int size, int* seed) {
     }
 }
 
+enum class EState {
+    OK = 0,
+    NEED_DATA = 1,
+    FINISHED = 2,
+};
+
 struct IRuntimeNode {
     virtual ~IRuntimeNode() = default;
     virtual bool Next(TRowSet& rowSet) = 0;
 
     virtual bool Fetch(TRowSet& rowSet) = 0;
-    virtual void Execute() = 0;
+    virtual EState Execute() = 0;
 
     IRuntimeNode* OutputNode_ = nullptr;
     IRuntimeNode* OutputNode() {
         return OutputNode_;
+    }
+
+    virtual IRuntimeNode* InputNode() {
+        return nullptr;
     }
 };
 
@@ -63,9 +77,10 @@ struct TScan : IRuntimeNode {
         , Seed(seed)
     { }
 
-    void Execute() {
+    EState Execute() {
         GenerateRowSet(Output.emplace_back(), Ncols, &Seed);
         SetId ++;
+        return SetId == NSets ? EState::FINISHED : EState::OK;
     }
 
     bool Fetch(TRowSet& rowSet) {
@@ -109,6 +124,10 @@ struct TFilter : IRuntimeNode {
         Input->OutputNode_ = this;
     }
 
+    IRuntimeNode* InputNode() {
+        return Input;
+    }
+
     bool Fetch(TRowSet& rowSet) {
         if (Output.empty() && InputConsumed) {
             return false;
@@ -121,14 +140,20 @@ struct TFilter : IRuntimeNode {
         return true;
     }
 
-    void Execute() {
+    EState Execute() {
         TRowSet rowSet;
         if (InputRowSets.empty()) {
             if (Input->Fetch(rowSet)) {
-                InputRowSets.emplace_back(std::move(rowSet));
+                if (!rowSet.Empty()) {
+                    InputRowSets.emplace_back(std::move(rowSet));
+                }
             } else {
                 InputConsumed = true;
             }
+        }
+
+        if (InputRowSets.empty()) {
+            return InputConsumed ? EState::FINISHED : EState::NEED_DATA;
         }
 
         for (auto&& input : InputRowSets) {
@@ -136,6 +161,8 @@ struct TFilter : IRuntimeNode {
             Output.emplace_back(std::move(input));
         }
         InputRowSets.clear();
+
+        return InputConsumed? EState::FINISHED : EState::OK;
     }
 
     void Filter(TRowSet& rowSet) {
@@ -173,6 +200,10 @@ struct TPrinter : IRuntimeNode {
         Input->OutputNode_ = this;
     }
 
+    IRuntimeNode* InputNode() {
+        return Input;
+    }
+
     bool Fetch(TRowSet& rowSet) {
         if (Output.empty() && InputConsumed) {
             return false;
@@ -185,20 +216,28 @@ struct TPrinter : IRuntimeNode {
         return true;
     }
 
-    void Execute() {
+    EState Execute() {
         TRowSet rowSet;
         if (InputRowSets.empty()) {
             if (Input->Fetch(rowSet)) {
-                InputRowSets.emplace_back(std::move(rowSet));
+                if (!rowSet.Empty()) {
+                    InputRowSets.emplace_back(std::move(rowSet));
+                }
             } else {
                 InputConsumed = true;
             }
         }
 
+        if (InputRowSets.empty()) {
+            return InputConsumed ? EState::FINISHED : EState::NEED_DATA;
+        }
+
         for (auto&& input : InputRowSets) {
-            Print(rowSet);
+            Print(input);
         }
         InputRowSets.clear();
+
+        return InputConsumed ? EState::FINISHED : EState::OK;
     }
 
     void Print(TRowSet& rowSet) {
@@ -228,6 +267,19 @@ struct TScheduler {
             Ready.emplace_back(node);
         }
     }
+
+    void Run() {
+        while (!Ready.empty()) {
+            auto node = Ready.front(); Ready.pop_front();
+            auto state = node->Execute();
+            if (state == EState::NEED_DATA) {
+                Schedule(node->InputNode());
+                Schedule(node);
+            } else if (state == EState::OK) {
+                Schedule(node);
+            }
+        }
+    }
 };
 
 } // namespace
@@ -240,6 +292,17 @@ TEST(Scheduler, Basic) {
 
     TRowSet rowSet;
     while (printer->Next(rowSet));
+}
+
+TEST(Scheduler, Async) {
+    int inputSets = 16;
+    auto scan = std::make_unique<TScan>(inputSets, 42);
+    auto filter = std::make_unique<TFilter>(43, 30, scan.get());
+    auto printer = std::make_unique<TPrinter>(filter.get());
+
+    TScheduler scheduler;
+    scheduler.Schedule(printer.get());
+    scheduler.Run();
 }
 
 int main(int argc, char** argv) {
