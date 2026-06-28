@@ -6,6 +6,7 @@
 #include <qdb/kernel/join_gen.h>
 #include <qdb/kernel/join_key.h>
 #include <qdb/kernel/lib.h>
+#include <qdb/kernel/spec.h>
 #include <qdb/modules/qumirdb.h>
 
 #include <qumir/codegen/llvm/llvm_initializer.h>
@@ -180,6 +181,7 @@ TKernelCompiler::TFilterDispatch TKernelCompiler::CompileFilter(
     const NQumir::NAst::TStructType& inputType,
     const NQumir::NAst::TExprPtr& predicate)
 {
+    const auto spec = NKernel::BuildFilterKernelSpec(inputType, predicate);
     std::unordered_map<std::string, int32_t> fieldIndices;
     for (int32_t i = 0; i < static_cast<int32_t>(inputType.Fields.size()); ++i) {
         fieldIndices[inputType.Fields[i].first] = i;
@@ -201,6 +203,9 @@ TKernelCompiler::TFilterDispatch TKernelCompiler::CompileFilter(
 
     auto runner = std::make_unique<NQumir::TLLVMRunner>(Opts_);
 
+    if (Diagnostics_) {
+        NKernel::PrintKernelSpec(*Diagnostics_, spec);
+    }
     PrintKernelAst(Diagnostics_, "filter", *kernelAst);
 
     std::string err;
@@ -228,6 +233,8 @@ TKernelCompiler::TProjectDispatch TKernelCompiler::CompileProject(
     const std::vector<NQumir::NAst::TExprPtr>& computedExprs,
     const std::vector<NQumir::NAst::TTypePtr>& computedTypes)
 {
+    const auto spec = NKernel::BuildProjectKernelSpec(
+        inputType, computedExprs, computedTypes);
     std::unordered_map<std::string, int32_t> fieldIndices;
     for (int32_t i = 0; i < static_cast<int32_t>(inputType.Fields.size()); ++i) {
         fieldIndices[inputType.Fields[i].first] = i;
@@ -251,6 +258,9 @@ TKernelCompiler::TProjectDispatch TKernelCompiler::CompileProject(
 
     auto runner = std::make_unique<NQumir::TLLVMRunner>(Opts_);
 
+    if (Diagnostics_) {
+        NKernel::PrintKernelSpec(*Diagnostics_, spec);
+    }
     PrintKernelAst(Diagnostics_, "project", kernelAst);
 
     std::string err;
