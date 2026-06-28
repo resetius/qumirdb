@@ -248,7 +248,7 @@ void TTokenStream::Read() {
         }
         In.get();
         auto second = In.peek();
-        In.unget();
+        In.unget(next);
         std::string opStr;
         opStr += (char)next;
         opStr += (char)second;
@@ -262,7 +262,7 @@ void TTokenStream::Read() {
         if (next == '.') {
             In.get();
             auto second = In.peek();
-            In.unget();
+            In.unget(next);
             return std::isdigit(second);
         }
         return false;
@@ -311,7 +311,7 @@ void TTokenStream::Read() {
         if (next == '-') {
             In.get();
             auto second = In.peek();
-            In.unget();
+            In.unget(next);
 
             if (second == '-') {
                 skipLineComment();
@@ -322,7 +322,7 @@ void TTokenStream::Read() {
         if (next == '/') {
             In.get();
             auto second = In.peek();
-            In.unget();
+            In.unget(next);
 
             if (second == '*') {
                 skipBlockComment();
