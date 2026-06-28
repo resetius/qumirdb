@@ -18,6 +18,9 @@ public:
     TFunBuilder& Return(NQumir::NAst::TTypePtr type);
     TFunBuilder& Stmt(NQumir::NAst::TExprPtr stmt);
 
+    TFunBuilder& Var(std::string name, NQumir::NAst::TTypePtr type);
+    TFunBuilder& Assign(std::string name, NQumir::NAst::TExprPtr value);
+
     NQumir::NAst::TExprPtr Build() &&;
 
 private:
@@ -30,6 +33,28 @@ private:
 NQumir::NAst::TExprPtr Ident(std::string name);
 NQumir::NAst::TExprPtr Return(NQumir::NAst::TExprPtr value = nullptr);
 NQumir::NAst::TExprPtr Block(std::vector<NQumir::NAst::TExprPtr> stmts);
+
+NQumir::NAst::TExprPtr Var(std::string name, NQumir::NAst::TTypePtr type);
+NQumir::NAst::TExprPtr Assign(std::string name, NQumir::NAst::TExprPtr value);
+
+NQumir::NAst::TExprPtr Int(int64_t v);
+NQumir::NAst::TExprPtr Float(double v);
+NQumir::NAst::TExprPtr Bool(bool v);
+NQumir::NAst::TExprPtr String(std::string v);
+
+NQumir::NAst::TExprPtr Bin(NQumir::NAst::TOperator op, NQumir::NAst::TExprPtr l, NQumir::NAst::TExprPtr r);
+NQumir::NAst::TExprPtr Add(NQumir::NAst::TExprPtr l, NQumir::NAst::TExprPtr r);
+NQumir::NAst::TExprPtr Sub(NQumir::NAst::TExprPtr l, NQumir::NAst::TExprPtr r);
+NQumir::NAst::TExprPtr Mul(NQumir::NAst::TExprPtr l, NQumir::NAst::TExprPtr r);
+NQumir::NAst::TExprPtr Div(NQumir::NAst::TExprPtr l, NQumir::NAst::TExprPtr r);
+
+NQumir::NAst::TExprPtr Call(std::string name, std::vector<NQumir::NAst::TExprPtr> args = {});
+NQumir::NAst::TExprPtr If(NQumir::NAst::TExprPtr cond, NQumir::NAst::TExprPtr thenBody, NQumir::NAst::TExprPtr elseBody = nullptr);
+
+NQumir::NAst::TExprPtr While(NQumir::NAst::TExprPtr cond, NQumir::NAst::TExprPtr body);
+
+NQumir::NAst::TExprPtr Index(NQumir::NAst::TExprPtr collection, NQumir::NAst::TExprPtr index);
+NQumir::NAst::TExprPtr Index(std::string collection, NQumir::NAst::TExprPtr index);
 
 } // namespace NOz
 } // namespace NKernel
