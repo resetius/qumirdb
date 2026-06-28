@@ -3,7 +3,9 @@
 #include <qdb/plan/ops/aggregate.h>
 #include <qdb/plan/ops/filter.h>
 #include <qdb/plan/ops/join.h>
+#include <qdb/plan/ops/limit.h>
 #include <qdb/plan/ops/project.h>
+#include <qdb/plan/ops/sort.h>
 #include <qdb/plan/ops/source.h>
 
 #include <qumir/parser/ast.h>
@@ -120,6 +122,34 @@ std::shared_ptr<TStructType> QualifyColumnsImpl(const TOperatorPtr& op) {
             QualifyExpr(flt->MutablePredicate(), *childSchema);
         }
         return childSchema;
+    }
+
+    // ── Sort / TopSort / Limit ─────────────────────────────────────────────
+    if (auto maybe = TMaybeOp<TSortOperator>(op)) {
+        auto sort = maybe.Cast();
+        auto childSchema = QualifyColumnsImpl(sort->Input());
+        if (childSchema) {
+            for (auto& key : sort->MutableKeys()) {
+                key.Column = QualifyIdent(*childSchema, key.Column);
+            }
+        }
+        return childSchema;
+    }
+
+    if (auto maybe = TMaybeOp<TTopSortOperator>(op)) {
+        auto topSort = maybe.Cast();
+        auto childSchema = QualifyColumnsImpl(topSort->Input());
+        if (childSchema) {
+            for (auto& key : topSort->MutableKeys()) {
+                key.Column = QualifyIdent(*childSchema, key.Column);
+            }
+        }
+        return childSchema;
+    }
+
+    if (auto maybe = TMaybeOp<TLimitOperator>(op)) {
+        auto limit = maybe.Cast();
+        return QualifyColumnsImpl(limit->Input());
     }
 
     // ── Join ────────────────────────────────────────────────────────────────

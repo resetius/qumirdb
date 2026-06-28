@@ -3,7 +3,9 @@
 #include <qdb/plan/ops/aggregate.h>
 #include <qdb/plan/ops/filter.h>
 #include <qdb/plan/ops/join.h>
+#include <qdb/plan/ops/limit.h>
 #include <qdb/plan/ops/project.h>
+#include <qdb/plan/ops/sort.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/sexp/parser.h>
 #include <qdb/sexp/printer.h>
@@ -207,6 +209,75 @@ TEST(SexpParser, AggregatePrintRoundtrip) {
     EXPECT_EQ(agg.Aggs()[1].Name, "s");
     EXPECT_EQ(agg.Aggs()[1].Func, "sum");
     EXPECT_NE(agg.Aggs()[1].Arg, nullptr);
+
+    auto printed = PrintAst(std::static_pointer_cast<TExpr>(expr), MakePrintOpts());
+    EXPECT_EQ(printed, input);
+}
+
+TEST(SexpParser, SortPrintRoundtrip) {
+    TStubSource src({"x", "y"});
+    const std::string input =
+        "(rel sort (rel source \"data.parquet\") (x desc nulls-default) (y asc nulls-last))";
+
+    TRelParserOptions opts;
+    opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
+        return std::make_shared<TSourceOperator>(src, std::string(path));
+    };
+    auto p = MakeParser(std::move(opts));
+
+    auto expr = Parse(p, input);
+    ASSERT_NE(expr, nullptr);
+
+    auto& sort = static_cast<TSortOperator&>(*expr);
+    ASSERT_EQ(sort.Keys().size(), 2u);
+    EXPECT_EQ(sort.Keys()[0].Column, "x");
+    EXPECT_EQ(sort.Keys()[0].Direction, ESortDirection::Desc);
+    EXPECT_EQ(sort.Keys()[1].Nulls, ESortNulls::Last);
+
+    auto printed = PrintAst(std::static_pointer_cast<TExpr>(expr), MakePrintOpts());
+    EXPECT_EQ(printed, input);
+}
+
+TEST(SexpParser, TopSortPrintRoundtrip) {
+    TStubSource src({"x"});
+    const std::string input =
+        "(rel top-sort (rel source \"data.parquet\") (x desc nulls-default) (limit 10))";
+
+    TRelParserOptions opts;
+    opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
+        return std::make_shared<TSourceOperator>(src, std::string(path));
+    };
+    auto p = MakeParser(std::move(opts));
+
+    auto expr = Parse(p, input);
+    ASSERT_NE(expr, nullptr);
+
+    auto& sort = static_cast<TTopSortOperator&>(*expr);
+    ASSERT_EQ(sort.Keys().size(), 1u);
+    EXPECT_EQ(sort.Keys()[0].Column, "x");
+    EXPECT_EQ(sort.Limit(), 10);
+
+    auto printed = PrintAst(std::static_pointer_cast<TExpr>(expr), MakePrintOpts());
+    EXPECT_EQ(printed, input);
+}
+
+TEST(SexpParser, LimitPrintRoundtrip) {
+    TStubSource src({"x"});
+    const std::string input =
+        "(rel limit (rel source \"data.parquet\") (limit 10) (offset 2))";
+
+    TRelParserOptions opts;
+    opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
+        return std::make_shared<TSourceOperator>(src, std::string(path));
+    };
+    auto p = MakeParser(std::move(opts));
+
+    auto expr = Parse(p, input);
+    ASSERT_NE(expr, nullptr);
+
+    auto& limit = static_cast<TLimitOperator&>(*expr);
+    EXPECT_EQ(limit.Limit(), 10);
+    EXPECT_EQ(limit.Offset(), 2);
 
     auto printed = PrintAst(std::static_pointer_cast<TExpr>(expr), MakePrintOpts());
     EXPECT_EQ(printed, input);

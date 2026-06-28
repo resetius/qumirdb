@@ -9,6 +9,7 @@
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/ops/sort.h>
 #include <qdb/plan/passes/column_pruning.h>
+#include <qdb/plan/passes/qualify_columns.h>
 #include <qdb/plan/passes/top_sort.h>
 #include <qdb/plan/types/nullable.h>
 #include <qdb/sql/parser.h>
@@ -191,6 +192,32 @@ TEST(SortPlan, TopSortPassRewritesLimitOverSort) {
     EXPECT_EQ(topSort.Cast()->Keys()[0].Direction, ESortDirection::Desc);
     auto project = TMaybeOp<TProjectOperator>(topSort.Cast()->Input());
     ASSERT_TRUE(project);
+}
+
+TEST(SortPlan, QualifyColumnsUpdatesTopSortKeys) {
+    auto i64 = std::make_shared<NQumir::NAst::TIntegerType>();
+    TStubSource source({{"s_name", i64}});
+    auto sourceOp = std::make_shared<TSourceOperator>(source, "supplier.parquet");
+    auto aggregate = std::make_shared<TAggregateOperator>(
+        sourceOp,
+        std::vector<std::string>{"s_name"},
+        std::vector<TAggregateSpec>{{.Name = "numwait", .Func = "count"}});
+    auto topSort = std::make_shared<TTopSortOperator>(
+        aggregate,
+        std::vector<TSortKey>{
+            {.Column = "numwait", .Direction = ESortDirection::Desc},
+            {.Column = "s_name", .Direction = ESortDirection::Asc},
+        },
+        100);
+
+    AssignSourceAliases(topSort);
+    QualifyColumns(topSort);
+
+    ASSERT_EQ(aggregate->GroupKeys().size(), 1u);
+    EXPECT_EQ(aggregate->GroupKeys()[0], "supplier.s_name");
+    ASSERT_EQ(topSort->Keys().size(), 2u);
+    EXPECT_EQ(topSort->Keys()[0].Column, "numwait");
+    EXPECT_EQ(topSort->Keys()[1].Column, "supplier.s_name");
 }
 
 TEST(SortPlan, BuildPlanRejectsOrderByExpressionForMvp) {
