@@ -178,13 +178,23 @@ std::string BuildRadixCompositeNullableWrapperSource(
 } // namespace
 
 TKernelCompiler::TFilterDispatch TKernelCompiler::CompileFilter(
-    const NQumir::NAst::TStructType& inputType,
-    const NQumir::NAst::TExprPtr& predicate)
+    const NKernel::TOperatorKernelSpec& spec)
 {
-    const auto spec = NKernel::BuildFilterKernelSpec(inputType, predicate);
+    using namespace NQumir::NAst;
+
+    if (spec.InputSchemas.empty() || spec.Expressions.empty()) {
+        throw std::runtime_error("filter kernel spec is incomplete");
+    }
+    auto inputType = TMaybeType<TStructType>(spec.InputSchemas[0]);
+    if (!inputType) {
+        throw std::runtime_error("filter kernel input must have TStructType");
+    }
+    const auto& fields = inputType.Cast()->Fields;
+    const auto& predicate = spec.Expressions[0];
+
     std::unordered_map<std::string, int32_t> fieldIndices;
-    for (int32_t i = 0; i < static_cast<int32_t>(inputType.Fields.size()); ++i) {
-        fieldIndices[inputType.Fields[i].first] = i;
+    for (int32_t i = 0; i < static_cast<int32_t>(fields.size()); ++i) {
+        fieldIndices[fields[i].first] = i;
     }
 
     auto columnType = QumirDbNamedType("TColumn");
@@ -194,7 +204,7 @@ TKernelCompiler::TFilterDispatch TKernelCompiler::CompileFilter(
     auto literalStorage =
         std::make_shared<std::vector<std::shared_ptr<std::string>>>();
     auto kernelAst = NKernel::BuildFilterProgramAst(
-        ClonePredicate(predicate), inputType, fieldIndices, columnType,
+        ClonePredicate(predicate), *inputType.Cast(), fieldIndices, columnType,
         rowSetType, stringViewType, *literalStorage);
     if (!kernelAst) {
         throw NQumir::TError(
@@ -226,6 +236,13 @@ TKernelCompiler::TFilterDispatch TKernelCompiler::CompileFilter(
         };
 
     return dispatch;
+}
+
+TKernelCompiler::TFilterDispatch TKernelCompiler::CompileFilter(
+    const NQumir::NAst::TStructType& inputType,
+    const NQumir::NAst::TExprPtr& predicate)
+{
+    return CompileFilter(NKernel::BuildFilterKernelSpec(inputType, predicate));
 }
 
 TKernelCompiler::TProjectDispatch TKernelCompiler::CompileProject(
