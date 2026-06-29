@@ -171,24 +171,73 @@ struct THashShuffle : IConnection {
 
 struct IRuntimeNode {
     virtual ~IRuntimeNode() = default;
-    virtual bool Next(TRowSet& rowSet) = 0;
 
     virtual EState Execute() = 0;
 
     virtual bool IsFinished() const = 0;
     virtual void Run(TRowSet& rowSet) = 0;
 
-    virtual IRuntimeNode* InputNode() = 0;
-
     // connections
     virtual void SetInputPort(TInputPort inputPort) = 0;
     virtual void SetOutputPort(TOutputPort outputPort) = 0;
 };
 
+struct TDagNode {
+    std::vector<TDagNode*> Inbound;
+    std::vector<TDagNode*> Outbound;
+    IRuntimeNode* Compute;
+};
+
 struct TGraph {
     std::unordered_map<IRuntimeNode*, std::vector<IRuntimeNode*>> Inbound;
     std::unordered_map<IRuntimeNode*, std::vector<IRuntimeNode*>> Outbound;
-    std::vector<std::unique_ptr<IConnection>> connections;
+    std::vector<std::unique_ptr<IConnection>> Connections;
+
+    std::vector<std::unique_ptr<TDagNode>> DagNodes;
+    std::unordered_map<IRuntimeNode*, TDagNode*> NodeToDagNode;
+    TDagNode* Root = nullptr;
+
+    void Build() {
+        for (auto& [dst, _] : Inbound) {
+            auto dagNode = std::make_unique<TDagNode>();
+            NodeToDagNode[dst] = dagNode.get();
+            dagNode->Compute = dst;
+
+            if (!Outbound.contains(dst)) {
+                Root = dagNode.get();
+            }
+
+            DagNodes.emplace_back(std::move(dagNode));
+        }
+
+        for (auto& [src, _] : Outbound) {
+            if (NodeToDagNode.contains(src)) {
+                continue;
+            }
+
+            auto dagNode = std::make_unique<TDagNode>();
+            dagNode->Compute = src;
+            NodeToDagNode[src] = dagNode.get();
+            DagNodes.emplace_back(std::move(dagNode));
+        }
+
+        for (auto& [dst, srcs] : Inbound) {
+            auto node = NodeToDagNode[dst];
+            for (auto src : srcs) {
+                auto srcNode = NodeToDagNode[src];
+                assert(srcNode);
+                node->Inbound.emplace_back(srcNode);
+            }
+        }
+
+        for (auto& [src, dsts] : Outbound) {
+            auto node = NodeToDagNode[src];
+            for (auto dst : dsts) {
+                auto dstNode = NodeToDagNode[dst];
+                node->Outbound.emplace_back(dstNode);
+            }
+        }
+    }
 
     void Connect(IRuntimeNode* src, IRuntimeNode* dst, EConnectionKind kind)
     {
@@ -197,14 +246,14 @@ struct TGraph {
 
         switch (kind) {
         case EConnectionKind::OneToOne: {
-            // TODO: owner
             auto conn = std::make_unique<TOneToOne>();
             src->SetOutputPort(TOutputPort(conn.get(), 0));
             dst->SetInputPort(TInputPort(conn.get(), 0));
-            connections.emplace_back(std::move(conn));
+            Connections.emplace_back(std::move(conn));
             break;
         }
         default:
+            assert(false);
             break;
         };
     }
@@ -213,10 +262,6 @@ struct TGraph {
 struct TNode : virtual IRuntimeNode {
     TInputPort InputPort_;
     TOutputPort OutputPort_;
-
-    IRuntimeNode* InputNode() override {
-        return nullptr;
-    }
 
     // connection
     void SetInputPort(TInputPort inputPort) override {
@@ -228,25 +273,9 @@ struct TNode : virtual IRuntimeNode {
     }
 };
 
-struct TNodeWithOutput : virtual TNode {
-    bool Next(TRowSet& rowSet) override {
-        if (IsFinished()) {
-            return false;
-        }
-
-        Run(rowSet);
-        return true;
-    }
-};
-
 struct TNodeWithInput : virtual TNode {
-    TNodeWithInput(IRuntimeNode* input)
-        : InputNode_(input)
+    TNodeWithInput()
     { }
-
-    IRuntimeNode* InputNode() override {
-        return InputNode_;
-    }
 
     bool IsFinished() const override {
         return InputConsumed_;
@@ -286,22 +315,11 @@ struct TNodeWithInput : virtual TNode {
         return EState::OK;
     }
 
-    bool Next(TRowSet& rowSet) override {
-        if (!InputNode_->Next(rowSet)) {
-            return false;
-        }
-
-        Run(rowSet);
-
-        return true;
-    }
-
-    IRuntimeNode* InputNode_ = nullptr;
     bool InputConsumed_ = false;
     std::optional<TRowSet> CurrentInput_;
 };
 
-struct TScan : virtual TNodeWithOutput {
+struct TScan : virtual TNode {
     int NSets;
     int Seed;
 
@@ -347,9 +365,8 @@ struct TFilter : virtual TNodeWithInput {
     int Seed;
     int Percent;
 
-    TFilter(int seed, int percent, IRuntimeNode* input)
-        : TNodeWithInput(input)
-        , Seed(seed)
+    TFilter(int seed, int percent)
+        : Seed(seed)
         , Percent(percent)
     { }
 
@@ -366,8 +383,7 @@ struct TFilter : virtual TNodeWithInput {
 };
 
 struct TPrinter : virtual TNodeWithInput {
-    TPrinter(IRuntimeNode* input)
-        : TNodeWithInput(input)
+    TPrinter()
     { }
 
     void Run(TRowSet& rowSet) override {
@@ -379,39 +395,60 @@ struct TPrinter : virtual TNodeWithInput {
     }
 };
 
+struct TNullScheduler {
+    bool Step(TDagNode* node, TRowSet& rowSet) {
+        if (node->Inbound.empty()) {
+            if (node->Compute->IsFinished()) {
+                return false;
+            }
+
+            node->Compute->Run(rowSet);
+            return true;
+        }
+
+        // assume have only 1 input node
+        if (!Step(node->Inbound.front(), rowSet)) {
+            return false;
+        }
+
+        node->Compute->Run(rowSet);
+        return true;
+    }
+
+    void Run(TDagNode* root) {
+        TRowSet rowSet;
+        while (Step(root, rowSet)) {
+        }
+    }
+};
+
 struct TScheduler {
     TGraph& Graph;
-    std::list<IRuntimeNode*> Ready;
-    std::unordered_set<IRuntimeNode*> Scheduled;
+    std::list<TDagNode*> Ready;
+    std::unordered_set<TDagNode*> Scheduled;
 
     TScheduler(TGraph& g)
         : Graph(g)
-    { }
+    {
+        Schedule(g.Root);
+    }
 
-    void Schedule(IRuntimeNode* node) {
-        if (node != nullptr && !Scheduled.contains(node)) {
+    void Schedule(TDagNode* node) {
+        if (!Scheduled.contains(node)) {
             Ready.emplace_back(node);
             Scheduled.emplace(node);
         }
     }
 
-    void ScheduleInput(IRuntimeNode* node) {
-        auto it = Graph.Inbound.find(node);
-        if (it == Graph.Inbound.end()) {
-            return;
-        }
-        for (auto& node : it->second) {
-            Schedule(node);
+    void ScheduleInput(TDagNode* node) {
+        for (auto in : node->Inbound) {
+            Schedule(in);
         }
     }
 
-    void ScheduleOutput(IRuntimeNode* node) {
-        auto it = Graph.Outbound.find(node);
-        if (it == Graph.Outbound.end()) {
-            return;
-        }
-        for (auto& node : it->second) {
-            Schedule(node);
+    void ScheduleOutput(TDagNode* node) {
+        for (auto out : node->Outbound) {
+            Schedule(out);
         }
     }
 
@@ -419,7 +456,7 @@ struct TScheduler {
         while (!Ready.empty()) {
             auto node = Ready.front(); Ready.pop_front();
             Scheduled.erase(node);
-            auto state = node->Execute();
+            auto state = node->Compute->Execute();
             if (state == EState::NEED_DATA) {
                 ScheduleInput(node);
             } else if (state == EState::BLOCKED_OUTPUT || state == EState::FINISHED) {
@@ -437,25 +474,31 @@ struct TScheduler {
 TEST(Scheduler, Basic) {
     int inputSets = 16;
     auto scan = std::make_unique<TScan>(inputSets, 42);
-    auto filter = std::make_unique<TFilter>(43, 30, scan.get());
-    auto printer = std::make_unique<TPrinter>(filter.get());
+    auto filter = std::make_unique<TFilter>(43, 30);
+    auto printer = std::make_unique<TPrinter>();
 
-    TRowSet rowSet;
-    while (printer->Next(rowSet));
+
+    TGraph g;
+    g.Connect(scan.get(), filter.get(), EConnectionKind::OneToOne);
+    g.Connect(filter.get(), printer.get(), EConnectionKind::OneToOne);
+    g.Build();
+
+    TNullScheduler scheduler;
+    scheduler.Run(g.Root);
 }
 
 TEST(Scheduler, Async) {
     int inputSets = 16;
     auto scan = std::make_unique<TScan>(inputSets, 42);
-    auto filter = std::make_unique<TFilter>(43, 30, nullptr);
-    auto printer = std::make_unique<TPrinter>(nullptr);
+    auto filter = std::make_unique<TFilter>(43, 30);
+    auto printer = std::make_unique<TPrinter>();
 
     TGraph g;
     g.Connect(scan.get(), filter.get(), EConnectionKind::OneToOne);
     g.Connect(filter.get(), printer.get(), EConnectionKind::OneToOne);
+    g.Build();
 
     TScheduler scheduler(g);
-    scheduler.Schedule(printer.get());
     scheduler.Run();
 }
 
