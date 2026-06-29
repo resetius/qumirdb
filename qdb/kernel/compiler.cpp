@@ -502,6 +502,50 @@ TKernelCompiler::CompileRadixSortCompositeNullable(
 }
 
 TAggregateKernels TKernelCompiler::CompileAggregate(
+    const NKernel::TOperatorKernelSpec& spec)
+{
+    if (spec.Kind != NKernel::EOperatorKernelKind::UnaryBlocking ||
+        spec.OperatorName != "aggregate") {
+        throw NQumir::TError("CompileAggregate: expected aggregate kernel spec");
+    }
+    if (spec.InputSchemas.size() != 1) {
+        throw NQumir::TError("CompileAggregate: expected one input schema");
+    }
+
+    const auto* inputType = static_cast<NQumir::NAst::TStructType*>(
+        spec.InputSchemas[0].get());
+    if (!inputType) {
+        throw NQumir::TError("CompileAggregate: input schema must be a struct");
+    }
+
+    std::vector<std::string> groupKeys;
+    if (!spec.Keys.empty()) {
+        groupKeys.reserve(spec.Keys[0].Columns.size());
+        for (const auto& column : spec.Keys[0].Columns) {
+            groupKeys.push_back(column.Name);
+        }
+    }
+
+    std::vector<TAggregateSpec> aggs;
+    aggs.reserve(spec.Aggregates.size());
+    for (const auto& agg : spec.Aggregates) {
+        aggs.push_back({
+            .Name = agg.Name,
+            .Func = agg.Func,
+            .Arg = agg.ArgExpr,
+        });
+    }
+
+    if (Diagnostics_) {
+        *Diagnostics_ << "\n========== KERNEL SPEC ==========\n";
+        NKernel::PrintKernelSpec(*Diagnostics_, spec);
+        *Diagnostics_ << "=================================\n";
+    }
+
+    return CompileAggregate(*inputType, groupKeys, aggs);
+}
+
+TAggregateKernels TKernelCompiler::CompileAggregate(
     const NQumir::NAst::TStructType& inputType,
     const std::vector<std::string>& groupKeys,
     const std::vector<TAggregateSpec>& aggs)

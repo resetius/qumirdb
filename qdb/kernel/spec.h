@@ -1,5 +1,7 @@
 #pragma once
 
+#include <qdb/plan/ops/aggregate.h>
+
 #include <qumir/parser/ast.h>
 #include <qumir/parser/type.h>
 
@@ -34,6 +36,14 @@ struct TKernelEntrypointSpec {
     std::string Abi;
 };
 
+struct TKernelAggregateSpec {
+    std::string Name;
+    std::string Func;
+    bool HasArg = false;
+    TKernelColumnRef Arg;
+    NQumir::NAst::TExprPtr ArgExpr;
+};
+
 struct TOperatorKernelSpec {
     EOperatorKernelKind Kind = EOperatorKernelKind::NonCompute;
     std::string OperatorName;
@@ -42,6 +52,7 @@ struct TOperatorKernelSpec {
     std::vector<TKernelColumnRef> ReferencedColumns;
     std::vector<NQumir::NAst::TExprPtr> Expressions;
     std::vector<TKernelKeySpec> Keys;
+    std::vector<TKernelAggregateSpec> Aggregates;
     std::vector<TKernelEntrypointSpec> Entrypoints;
     std::vector<std::string> SourceModules;
 };
@@ -58,6 +69,11 @@ TOperatorKernelSpec BuildProjectKernelSpec(
     const std::vector<NQumir::NAst::TExprPtr>& computedExprs,
     const std::vector<NQumir::NAst::TTypePtr>& computedTypes,
     std::string entrypointName = "<project>");
+
+TOperatorKernelSpec BuildAggregateKernelSpec(
+    const NQumir::NAst::TStructType& inputType,
+    const std::vector<std::string>& groupKeys,
+    const std::vector<TAggregateSpec>& aggs);
 
 void PrintKernelSpec(std::ostream& out, const TOperatorKernelSpec& spec);
 

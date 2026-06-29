@@ -200,6 +200,8 @@ public:
     // - every agg with Arg references the same single integer column;
     // - all reducer states are i64. count(*) aggs (Arg == nullptr) pass 0.
     TAggregateKernels CompileAggregate(
+        const NKernel::TOperatorKernelSpec& spec);
+    TAggregateKernels CompileAggregate(
         const NQumir::NAst::TStructType& inputType,
         const std::vector<std::string>& groupKeys,
         const std::vector<TAggregateSpec>& aggs);

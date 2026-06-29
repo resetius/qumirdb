@@ -61,6 +61,7 @@ TEST(KernelSpec, PrintsStableDebugDescription) {
         "    [0] (> b 0)\n"
         "  keys:\n"
         "    predicate-columns: b#1:i64\n"
+        "  aggregates: []\n"
         "  entrypoints:\n"
         "    qdb_filter_0: void(ref TRowSet)\n"
         "  source-modules:\n"
@@ -139,6 +140,40 @@ TEST(KernelSpec, BuildsProjectSpecFromComputedExpressions) {
     ASSERT_EQ(spec.Entrypoints.size(), 1u);
     EXPECT_EQ(spec.Entrypoints[0].Name, "qdb_project_test");
     EXPECT_EQ(spec.Entrypoints[0].Abi, "void(ref TRowSet, ptr ptr i8)");
+    ASSERT_EQ(spec.SourceModules.size(), 1u);
+    EXPECT_EQ(spec.SourceModules[0], "qumirdb");
+}
+
+TEST(KernelSpec, BuildsAggregateSpecFromGroupKeysAndAggregates) {
+    using namespace NQumir::NAst;
+
+    auto i64 = std::make_shared<TIntegerType>();
+    TStructType input({
+        {"k", i64},
+        {"v", i64},
+    });
+    std::vector<TAggregateSpec> aggs = {{
+        .Name = "sum_v",
+        .Func = "sum",
+        .Arg = std::make_shared<TIdentExpr>(NQumir::TLocation{}, "v"),
+    }};
+
+    auto spec = NKernel::BuildAggregateKernelSpec(input, {"k"}, aggs);
+
+    EXPECT_EQ(spec.Kind, NKernel::EOperatorKernelKind::UnaryBlocking);
+    EXPECT_EQ(spec.OperatorName, "aggregate");
+    ASSERT_EQ(spec.InputSchemas.size(), 1u);
+    ASSERT_EQ(spec.Keys.size(), 1u);
+    EXPECT_EQ(spec.Keys[0].Name, "group-keys");
+    ASSERT_EQ(spec.Keys[0].Columns.size(), 1u);
+    EXPECT_EQ(spec.Keys[0].Columns[0].Name, "k");
+    ASSERT_EQ(spec.Aggregates.size(), 1u);
+    EXPECT_EQ(spec.Aggregates[0].Name, "sum_v");
+    EXPECT_EQ(spec.Aggregates[0].Func, "sum");
+    EXPECT_TRUE(spec.Aggregates[0].HasArg);
+    EXPECT_EQ(spec.Aggregates[0].Arg.Name, "v");
+    ASSERT_EQ(spec.Entrypoints.size(), 3u);
+    EXPECT_EQ(spec.Entrypoints[0].Name, "agg_dispatch");
     ASSERT_EQ(spec.SourceModules.size(), 1u);
     EXPECT_EQ(spec.SourceModules[0], "qumirdb");
 }
