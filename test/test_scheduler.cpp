@@ -43,7 +43,8 @@ void GenerateRowSet(TRowSet& rowSet, int size, int* seed) {
 enum class EState {
     OK = 0,
     NEED_DATA = 1,
-    FINISHED = 2,
+    BLOCKED_OUTPUT = 2,
+    FINISHED = 3,
 };
 
 enum class EFetchState {
@@ -65,6 +66,7 @@ struct IRuntimeNode {
     virtual IRuntimeNode* InputNode() = 0;
     virtual IRuntimeNode* OutputNode() = 0;
 
+    virtual bool CanPushOutput() = 0;
     virtual void PushOutput(TRowSet&& rowSet) = 0;
     virtual void SetOutputNode(IRuntimeNode* node) = 0;
 };
@@ -76,6 +78,10 @@ struct TNode : virtual IRuntimeNode {
 
     IRuntimeNode* OutputNode() override {
         return nullptr;
+    }
+
+    bool CanPushOutput() override {
+        return true;
     }
 
     void PushOutput(TRowSet&& rowSet) override
@@ -103,6 +109,10 @@ struct TNodeWithOutput : virtual TNode {
         return IsFinished() ? EFetchState::FINISHED : EFetchState::NO_DATA;
     }
 
+    bool CanPushOutput() override {
+        return Output_.size() < MaxOutput_;
+    }
+
     void PushOutput(TRowSet&& rowSet) override
     {
         Output_.emplace_back(std::move(rowSet));
@@ -118,6 +128,7 @@ struct TNodeWithOutput : virtual TNode {
     }
 
     IRuntimeNode* OutputNode_ = nullptr;
+    const bool MaxOutput_ = 1; // TODO
     std::deque<TRowSet> Output_;
 };
 
@@ -153,11 +164,15 @@ struct TNodeWithInput : virtual TNode {
             return InputConsumed_ ? EState::FINISHED : EState::NEED_DATA;
         }
 
-        for (auto&& input : Input_) {
-            Run(input);
-            PushOutput(std::move(input));
+        rowSet = std::move(Input_.front()); Input_.pop_front();
+        Run(rowSet);
+
+        if (CanPushOutput()) {
+            PushOutput(std::move(rowSet));
+        } else {
+            Input_.emplace_front(std::move(rowSet));
+            return EState::BLOCKED_OUTPUT;
         }
-        Input_.clear();
 
         return InputConsumed_ ? EState::FINISHED : EState::OK;
     }
@@ -215,6 +230,12 @@ struct TScan : virtual TNodeWithOutput {
     }
 
     EState Execute() override {
+        if (IsFinished()) {
+            return EState::FINISHED;
+        }
+        if (!CanPushOutput()) {
+            return EState::BLOCKED_OUTPUT;
+        }
         Run(Output_.emplace_back());
         return IsFinished() ? EState::FINISHED : EState::OK;
     }
@@ -248,7 +269,9 @@ struct TFilter : virtual TNodeWithInputOutput {
 struct TPrinter : virtual TNodeWithInput {
     TPrinter(IRuntimeNode* input)
         : TNodeWithInput(input)
-    { }
+    {
+        InputNode_->SetOutputNode(this);
+    }
 
     void Run(TRowSet& rowSet) override {
         for (int i = 0; i < rowSet.Col.size(); ++i) {
@@ -279,9 +302,11 @@ struct TScheduler {
             auto state = node->Execute();
             if (state == EState::NEED_DATA) {
                 Schedule(node->InputNode());
-                Schedule(node);
+            } else if (state == EState::BLOCKED_OUTPUT || state == EState::FINISHED) {
+                Schedule(node->OutputNode());
             } else if (state == EState::OK) {
                 Schedule(node);
+                Schedule(node->OutputNode());
             }
         }
     }
