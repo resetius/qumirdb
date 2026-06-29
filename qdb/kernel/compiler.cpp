@@ -238,13 +238,6 @@ TKernelCompiler::TFilterDispatch TKernelCompiler::CompileFilter(
     return dispatch;
 }
 
-TKernelCompiler::TFilterDispatch TKernelCompiler::CompileFilter(
-    const NQumir::NAst::TStructType& inputType,
-    const NQumir::NAst::TExprPtr& predicate)
-{
-    return CompileFilter(NKernel::BuildFilterKernelSpec(inputType, predicate));
-}
-
 TKernelCompiler::TProjectDispatch TKernelCompiler::CompileProject(
     const NKernel::TOperatorKernelSpec& spec)
 {
@@ -308,15 +301,6 @@ TKernelCompiler::TProjectDispatch TKernelCompiler::CompileProject(
     return [fnPtr, sharedRunner, literalStorage](TRowSet* in, void** outBuffers) {
         reinterpret_cast<TProjectFn>(fnPtr)(in, outBuffers);
     };
-}
-
-TKernelCompiler::TProjectDispatch TKernelCompiler::CompileProject(
-    const NQumir::NAst::TStructType& inputType,
-    const std::vector<NQumir::NAst::TExprPtr>& computedExprs,
-    const std::vector<NQumir::NAst::TTypePtr>& computedTypes)
-{
-    return CompileProject(NKernel::BuildProjectKernelSpec(
-        inputType, computedExprs, computedTypes));
 }
 
 TKernelCompiler::TSortRadixDispatch TKernelCompiler::CompileRadixSortIndices(

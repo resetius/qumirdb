@@ -53,7 +53,8 @@ TEST(CompileProject, ComputesF64AndI64Columns) {
     ASSERT_TRUE(TMaybeType<TIntegerType>(types[1]));
 
     TKernelCompiler compiler;
-    auto dispatch = compiler.CompileProject(inputType, exprs, types);
+    auto dispatch = compiler.CompileProject(
+        NKernel::BuildProjectKernelSpec(inputType, exprs, types));
 
     std::array<double, 3> p = {100.0, 200.0, 50.0};
     std::array<double, 3> d = {0.1, 0.05, 0.2};

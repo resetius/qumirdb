@@ -61,7 +61,8 @@ std::array<uint8_t, 4> RunStringLiteralFilter(
         (literalFirst ? binary->Left : binary->Right) = std::move(cast);
     }
 
-    auto dispatch = TKernelCompiler().CompileFilter(inputType, predicate);
+    auto dispatch = TKernelCompiler().CompileFilter(
+        NKernel::BuildFilterKernelSpec(inputType, predicate));
     std::array<uint8_t, 4> selection{};
     TRowSet rowSet{
         .Columns = columns.data(),
@@ -92,7 +93,8 @@ std::array<uint8_t, 6> RunNullableIntegerFilter(
         {"right", std::make_shared<TNullable>(std::make_shared<TIntegerType>())},
     });
     auto dispatch = TKernelCompiler().CompileFilter(
-        inputType, ParsePredicate(predicateSource));
+        NKernel::BuildFilterKernelSpec(
+            inputType, ParsePredicate(predicateSource)));
     std::array<uint8_t, 6> selection{};
     TRowSet rowSet{
         .Columns = columns.data(),
@@ -132,7 +134,8 @@ TEST(FilterKernel, ComparesStringColumnsWithoutMutatingLogicalPredicate) {
         auto predicate = ParsePredicate(
             "(" + std::string(op) + " left right)");
         const std::string logical = NCore::PrintAst(predicate);
-        auto dispatch = TKernelCompiler().CompileFilter(inputType, predicate);
+        auto dispatch = TKernelCompiler().CompileFilter(
+            NKernel::BuildFilterKernelSpec(inputType, predicate));
         std::array<uint8_t, 4> selection{};
         TRowSet rowSet{
             .Columns = columns.data(),
@@ -216,8 +219,8 @@ TEST(FilterKernel, SkipsThreeValuedLogicForNonNullablePredicate) {
     });
     std::ostringstream diagnostics;
     TKernelCompiler compiler(&diagnostics);
-    auto dispatch = compiler.CompileFilter(
-        inputType, ParsePredicate("(== plain 1)"));
+    auto dispatch = compiler.CompileFilter(NKernel::BuildFilterKernelSpec(
+        inputType, ParsePredicate("(== plain 1)")));
     ASSERT_TRUE(dispatch);
     EXPECT_EQ(diagnostics.str().find("qdb_sql_bool_"), std::string::npos);
     EXPECT_EQ(diagnostics.str().find("filter_truth_state"), std::string::npos);
