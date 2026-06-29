@@ -1,6 +1,7 @@
 #pragma once
 
 #include <qdb/io/io.h>
+#include <qdb/kernel/spec.h>
 #include <qdb/plan/ops/aggregate.h>
 #include <qdb/plan/ops/join.h>
 
@@ -174,6 +175,7 @@ public:
 
     // Compiles a filter kernel for the given input struct type and predicate.
     // Returns a dispatch lambda that calls the compiled kernel.
+    TFilterDispatch CompileFilter(const NKernel::TOperatorKernelSpec& spec);
     TFilterDispatch CompileFilter(
         const NQumir::NAst::TStructType& inputType,
         const NQumir::NAst::TExprPtr& predicate);
