@@ -246,15 +246,31 @@ TKernelCompiler::TFilterDispatch TKernelCompiler::CompileFilter(
 }
 
 TKernelCompiler::TProjectDispatch TKernelCompiler::CompileProject(
-    const NQumir::NAst::TStructType& inputType,
-    const std::vector<NQumir::NAst::TExprPtr>& computedExprs,
-    const std::vector<NQumir::NAst::TTypePtr>& computedTypes)
+    const NKernel::TOperatorKernelSpec& spec)
 {
-    const auto spec = NKernel::BuildProjectKernelSpec(
-        inputType, computedExprs, computedTypes);
+    using namespace NQumir::NAst;
+
+    if (spec.InputSchemas.empty()) {
+        throw std::runtime_error("project kernel spec is missing input schema");
+    }
+    auto inputType = TMaybeType<TStructType>(spec.InputSchemas[0]);
+    if (!inputType) {
+        throw std::runtime_error("project kernel input must have TStructType");
+    }
+    auto outputType = TMaybeType<TStructType>(spec.OutputSchema);
+    if (!outputType) {
+        throw std::runtime_error("project kernel output must have TStructType");
+    }
+    const auto& fields = inputType.Cast()->Fields;
+    std::vector<NQumir::NAst::TTypePtr> computedTypes;
+    computedTypes.reserve(outputType.Cast()->Fields.size());
+    for (const auto& field : outputType.Cast()->Fields) {
+        computedTypes.push_back(field.second);
+    }
+
     std::unordered_map<std::string, int32_t> fieldIndices;
-    for (int32_t i = 0; i < static_cast<int32_t>(inputType.Fields.size()); ++i) {
-        fieldIndices[inputType.Fields[i].first] = i;
+    for (int32_t i = 0; i < static_cast<int32_t>(fields.size()); ++i) {
+        fieldIndices[fields[i].first] = i;
     }
 
     auto columnType = QumirDbNamedType("TColumn");
@@ -264,13 +280,13 @@ TKernelCompiler::TProjectDispatch TKernelCompiler::CompileProject(
     auto literalStorage =
         std::make_shared<std::vector<std::shared_ptr<std::string>>>();
     std::vector<NQumir::NAst::TExprPtr> cloned;
-    cloned.reserve(computedExprs.size());
-    for (const auto& expr : computedExprs) {
+    cloned.reserve(spec.Expressions.size());
+    for (const auto& expr : spec.Expressions) {
         cloned.push_back(ClonePredicate(expr));
     }
 
     auto kernelAst = NKernel::GenProjectKernelAst(
-        std::move(cloned), computedTypes, inputType, fieldIndices,
+        std::move(cloned), computedTypes, *inputType.Cast(), fieldIndices,
         columnType, rowSetType, stringViewType, *literalStorage);
 
     auto runner = std::make_unique<NQumir::TLLVMRunner>(Opts_);
@@ -292,6 +308,15 @@ TKernelCompiler::TProjectDispatch TKernelCompiler::CompileProject(
     return [fnPtr, sharedRunner, literalStorage](TRowSet* in, void** outBuffers) {
         reinterpret_cast<TProjectFn>(fnPtr)(in, outBuffers);
     };
+}
+
+TKernelCompiler::TProjectDispatch TKernelCompiler::CompileProject(
+    const NQumir::NAst::TStructType& inputType,
+    const std::vector<NQumir::NAst::TExprPtr>& computedExprs,
+    const std::vector<NQumir::NAst::TTypePtr>& computedTypes)
+{
+    return CompileProject(NKernel::BuildProjectKernelSpec(
+        inputType, computedExprs, computedTypes));
 }
 
 TKernelCompiler::TSortRadixDispatch TKernelCompiler::CompileRadixSortIndices(
