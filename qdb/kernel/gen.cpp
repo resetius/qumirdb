@@ -1,7 +1,7 @@
 #include <qdb/kernel/gen.h>
-#include <qdb/plan/types/nullable.h>
-
+#include <qdb/kernel/builder.h>
 #include <qdb/kernel/column_value.h>
+#include <qdb/plan/types/nullable.h>
 
 #include <qumir/parser/ast.h>
 #include <qumir/parser/operator.h>
@@ -823,30 +823,27 @@ NQumir::NAst::TExprPtr GenFilterKernelAst(
 
     // Single param: (var rowSet <ref TRowSet>) — raw struct type, no TNamedType wrapper
     auto rowSetRefType = std::make_shared<TReferenceType>(rowSetType);
-    std::vector<TParam> params = {
-        std::make_shared<TVarStmt>(loc, "rowSet", rowSetRefType),
-    };
 
     std::vector<TExprPtr> bodyStmts;
-    auto identRowSet = std::make_shared<TIdentExpr>(loc, "rowSet");
+    auto identRowSet = NOz::Ident("rowSet");
 
     auto fieldOf = [&](const std::string& name) {
         return std::make_shared<TFieldAccessExpr>(loc, identRowSet, name);
     };
 
     // Extract n, selection, cols from rowSet
-    bodyStmts.push_back(std::make_shared<TVarStmt>(loc, "n", std::make_shared<TIntegerType>()));
-    bodyStmts.push_back(std::make_shared<TAssignExpr>(loc, "n", fieldOf("RowCount")));
+    bodyStmts.push_back(NOz::Var("n", std::make_shared<TIntegerType>()));
+    bodyStmts.push_back(NOz::Assign("n", fieldOf("RowCount")));
 
     auto ptrU8Type = std::make_shared<TPointerType>(
         std::make_shared<TIntegerType>(TIntegerType::U8));
-    bodyStmts.push_back(std::make_shared<TVarStmt>(loc, "selection", ptrU8Type));
-    bodyStmts.push_back(std::make_shared<TAssignExpr>(loc, "selection", fieldOf("Selection")));
+    bodyStmts.push_back(NOz::Var("selection", ptrU8Type));
+    bodyStmts.push_back(NOz::Assign("selection", fieldOf("Selection")));
 
     auto ptrColumnType = ColumnPointerType(columnType, rowSetType);
     auto columnValueType = PointerPointeeOr(ptrColumnType, columnType);
-    bodyStmts.push_back(std::make_shared<TVarStmt>(loc, "cols", ptrColumnType));
-    bodyStmts.push_back(std::make_shared<TAssignExpr>(loc, "cols", fieldOf("Columns")));
+    bodyStmts.push_back(NOz::Var("cols", ptrColumnType));
+    bodyStmts.push_back(NOz::Assign("cols", fieldOf("Columns")));
 
     // Bind every input field through the common nullable column materializer.
     std::vector<TExprPtr> loopSetup;
@@ -856,8 +853,8 @@ NQumir::NAst::TExprPtr GenFilterKernelAst(
         auto colElem = std::make_shared<TIndexExpr>(loc,
             std::make_shared<TIdentExpr>(loc, "cols"),
             std::make_shared<TNumberExpr>(loc, int64_t(idx)));
-        bodyStmts.push_back(std::make_shared<TVarStmt>(loc, name, columnValueType));
-        bodyStmts.push_back(std::make_shared<TAssignExpr>(loc, name, colElem));
+        bodyStmts.push_back(NOz::Var(name, columnValueType));
+        bodyStmts.push_back(NOz::Assign(name, colElem));
         const std::string prefix = name + "_filter";
         auto materialized = BuildColumnValueAst(
             name, "i", prefix, type, stringViewType);
@@ -871,15 +868,13 @@ NQumir::NAst::TExprPtr GenFilterKernelAst(
         if (IsNullableType(type)) {
             validityNames.emplace(valueName, prefix + "_valid");
         }
-        loopSetup.push_back(std::make_shared<TVarStmt>(
-            loc, valueName, materialized.ValueType));
-        loopSetup.push_back(std::make_shared<TAssignExpr>(
-            loc, valueName, std::move(materialized.Value)));
+        loopSetup.push_back(NOz::Var(valueName, materialized.ValueType));
+        loopSetup.push_back(NOz::Assign(valueName, std::move(materialized.Value)));
     }
 
     // Loop
-    auto varI = std::make_shared<TVarStmt>(loc, "i", std::make_shared<TIntegerType>());
-    auto initI = std::make_shared<TAssignExpr>(loc, "i",
+    auto varI = NOz::Var("i", std::make_shared<TIntegerType>());
+    auto initI = NOz::Assign("i",
         std::make_shared<TNumberExpr>(loc, int64_t(0)));
     auto cond = std::make_shared<TBinaryExpr>(loc, TOperator("<"),
         std::make_shared<TIdentExpr>(loc, "i"),
@@ -900,7 +895,7 @@ NQumir::NAst::TExprPtr GenFilterKernelAst(
     auto writeSel = std::make_shared<TArrayAssignExpr>(loc, "selection",
         std::vector<TExprPtr>{std::make_shared<TIdentExpr>(loc, "i")},
         castedPred);
-    auto incrI = std::make_shared<TAssignExpr>(loc, "i",
+    auto incrI = NOz::Assign("i",
         std::make_shared<TBinaryExpr>(loc, TOperator("+"),
             std::make_shared<TIdentExpr>(loc, "i"),
             std::make_shared<TNumberExpr>(loc, int64_t(1))));
@@ -912,9 +907,13 @@ NQumir::NAst::TExprPtr GenFilterKernelAst(
     bodyStmts.push_back(std::make_shared<TWhileStmtExpr>(loc, cond,
         std::make_shared<TBlockExpr>(loc, std::move(loopSetup))));
 
-    auto funBody = std::make_shared<TBlockExpr>(loc, std::move(bodyStmts));
-    auto funDecl = std::make_shared<TFunDecl>(loc, "<kernel>",
-        std::move(params), funBody, std::make_shared<TVoidType>());
+    auto builder = NOz::TFunBuilder("<kernel>")
+        .Param("rowSet", rowSetRefType)
+        .Return(std::make_shared<TVoidType>());
+    for (auto& stmt : bodyStmts) {
+        builder.Stmt(std::move(stmt));
+    }
+    auto funDecl = std::move(builder).Build();
 
     return std::make_shared<TBlockExpr>(loc, std::vector<TExprPtr>{funDecl});
 }
