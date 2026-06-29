@@ -40,6 +40,15 @@ void GenerateRowSet(TRowSet& rowSet, int size, int* seed) {
     }
 }
 
+enum class EConnectionKind {
+    OneToOne,    // i -> i
+    Gather,      // many -> one, unordered
+    Merge,       // many -> one, sorted
+    HashShuffle, // many -> many split by hash(keys)
+    Broadcast,   // one/many -> all
+    RoundRobin,  // many -> many in random order
+};
+
 enum class EState {
     OK = 0,
     NEED_DATA = 1,
@@ -53,71 +62,163 @@ enum class EFetchState {
     FINISHED = 2,
 };
 
+struct IConnection {
+    virtual ~IConnection() = default;
+
+    // output side
+    virtual bool CanPush(int src_id) const = 0;
+    virtual void Push(int src_id, TRowSet&& rowSet) = 0;
+    virtual void Finish(int src_id) = 0;
+
+    // input side
+    virtual EFetchState Fetch(int dst_id, TRowSet& batch) = 0;
+};
+
+struct TInputPort {
+    IConnection* Conn = nullptr;
+    int DstId = 0;
+
+    EFetchState Fetch(TRowSet& batch) {
+        return Conn->Fetch(DstId, batch);
+    }
+};
+
+struct TOutputPort {
+    IConnection* Conn = nullptr;
+    int SrcId = 0;
+
+    bool CanPush() const {
+        if (!Conn) {
+            return true;
+        }
+        return Conn->CanPush(SrcId);
+    }
+
+    void Push(TRowSet&& rowSet) {
+        if (Conn) {
+            Conn->Push(SrcId, std::move(rowSet));
+        }
+    }
+
+    void Finish() {
+        if (Conn) {
+            Conn->Finish(SrcId);
+        }
+    }
+};
+
+static constexpr int MaxOutput = 1;
+
+struct TOneToOne : IConnection {
+    // Output
+    bool CanPush(int src_id) const override {
+        assert(src_id == 0);
+        return (Output_.size() < MaxOutput);
+    }
+
+    void Push(int src_id, TRowSet&& rowSet) override {
+        assert(src_id == 0);
+        Output_.emplace_back(std::move(rowSet));
+    }
+
+    void Finish(int src_id) override {
+        assert(src_id == 0);
+        Finished_ = true;
+    }
+
+    // Input
+    EFetchState Fetch(int dst_id, TRowSet& rowSet) override {
+        assert(dst_id == 0);
+        if (!Output_.empty()) {
+            rowSet = std::move(Output_.front()); Output_.pop_front();
+            return EFetchState::OK;
+        }
+
+        return Finished_ ? EFetchState::FINISHED : EFetchState::NO_DATA;
+    }
+
+    bool Finished_ = false;
+    std::deque<TRowSet> Output_;
+};
+
+struct TGather : IConnection {
+    void Push(int src_id, TRowSet&& rowSet) {
+    }
+
+    EFetchState Fetch(int dst_id, TRowSet& batch) {
+        assert(dst_id == 0);
+    }
+};
+
+struct TMerge : IConnection {
+    void Push(int src_id, TRowSet&& rowSet) {
+    }
+
+    EFetchState Fetch(int dst_id, TRowSet& batch) {
+        assert(dst_id == 0);
+    }
+};
+
+struct THashShuffle : IConnection {
+    THashShuffle() { }
+
+    void Push(int src_id, TRowSet&& rowSet) {
+    }
+
+    EFetchState Fetch(int dst_id, TRowSet& batch) {
+    }
+};
+
 struct IRuntimeNode {
     virtual ~IRuntimeNode() = default;
     virtual bool Next(TRowSet& rowSet) = 0;
 
-    virtual EFetchState Fetch(TRowSet& rowSet) = 0;
     virtual EState Execute() = 0;
 
     virtual bool IsFinished() const = 0;
     virtual void Run(TRowSet& rowSet) = 0;
 
     virtual IRuntimeNode* InputNode() = 0;
-    virtual IRuntimeNode* OutputNode() = 0;
 
-    virtual bool CanPushOutput() = 0;
-    virtual void PushOutput(TRowSet&& rowSet) = 0;
-    virtual void SetOutputNode(IRuntimeNode* node) = 0;
+    // connections
+    virtual void SetInputPort(TInputPort inputPort) = 0;
+    virtual void SetOutputPort(TOutputPort outputPort) = 0;
 };
 
+void Connect(IRuntimeNode* src, IRuntimeNode* dst, EConnectionKind kind)
+{
+    switch (kind) {
+    case EConnectionKind::OneToOne: {
+        // TODO: owner
+        auto* conn = new TOneToOne();
+        src->SetOutputPort(TOutputPort(conn, 0));
+        dst->SetInputPort(TInputPort(conn, 0));
+        break;
+    }
+    default:
+        break;
+    };
+}
+
 struct TNode : virtual IRuntimeNode {
+    TInputPort InputPort_;
+    TOutputPort OutputPort_;
+
     IRuntimeNode* InputNode() override {
         return nullptr;
     }
 
-    IRuntimeNode* OutputNode() override {
-        return nullptr;
+    // connection
+    void SetInputPort(TInputPort inputPort) override {
+        InputPort_ = std::move(inputPort);
     }
 
-    bool CanPushOutput() override {
-        return true;
+    void SetOutputPort(TOutputPort outputPort) override {
+        OutputPort_ = std::move(outputPort);
     }
-
-    void PushOutput(TRowSet&& rowSet) override
-    { }
-
-    void SetOutputNode(IRuntimeNode* node)  override
-    { }
 };
 
 struct TNodeWithOutput : virtual TNode {
-    IRuntimeNode* OutputNode() override {
-        return OutputNode_;
-    }
-
-    void SetOutputNode(IRuntimeNode* node) override {
-        OutputNode_ = node;
-    }
-
-    EFetchState Fetch(TRowSet& rowSet) override {
-        if (!Output_.empty()) {
-            rowSet = std::move(Output_.front()); Output_.pop_front();
-            return EFetchState::OK;
-        }
-
-        return IsFinished() ? EFetchState::FINISHED : EFetchState::NO_DATA;
-    }
-
-    bool CanPushOutput() override {
-        return Output_.size() < MaxOutput_;
-    }
-
-    void PushOutput(TRowSet&& rowSet) override
-    {
-        Output_.emplace_back(std::move(rowSet));
-    }
-
     bool Next(TRowSet& rowSet) override {
         if (IsFinished()) {
             return false;
@@ -126,10 +227,6 @@ struct TNodeWithOutput : virtual TNode {
         Run(rowSet);
         return true;
     }
-
-    IRuntimeNode* OutputNode_ = nullptr;
-    const bool MaxOutput_ = 1; // TODO
-    std::deque<TRowSet> Output_;
 };
 
 struct TNodeWithInput : virtual TNode {
@@ -141,38 +238,42 @@ struct TNodeWithInput : virtual TNode {
         return InputNode_;
     }
 
-    EFetchState Fetch(TRowSet& rowSet) override {
-        return IsFinished() ? EFetchState::FINISHED : EFetchState::NO_DATA;
-    }
-
     bool IsFinished() const override {
         return InputConsumed_;
     }
 
     EState Execute() override {
         TRowSet rowSet;
-        if (Input_.empty()) {
-            auto state = InputNode_->Fetch(rowSet);
+        if (!CurrentInput_) {
+            auto state = InputPort_.Fetch(rowSet);
             if (state == EFetchState::OK) {
-                Input_.emplace_back(std::move(rowSet));
+                CurrentInput_.emplace(std::move(rowSet));
             } else if (state == EFetchState::FINISHED) {
                 InputConsumed_ = true;
             }
         }
 
-        if (Input_.empty()) {
-            return InputConsumed_ ? EState::FINISHED : EState::NEED_DATA;
+        if (!CurrentInput_) {
+            if (InputConsumed_) {
+                OutputPort_.Finish();
+                return EState::FINISHED;
+            }
+            return EState::NEED_DATA;
         }
 
-        if (!CanPushOutput()) {
+        if (!OutputPort_.CanPush()) {
             return EState::BLOCKED_OUTPUT;
         }
 
-        rowSet = std::move(Input_.front()); Input_.pop_front();
+        rowSet = std::move(*CurrentInput_); CurrentInput_ = std::nullopt;
         Run(rowSet);
-        PushOutput(std::move(rowSet));
+        OutputPort_.Push(std::move(rowSet));
 
-        return InputConsumed_ ? EState::FINISHED : EState::OK;
+        if (InputConsumed_) {
+            OutputPort_.Finish();
+            return EState::FINISHED;
+        }
+        return EState::OK;
     }
 
     bool Next(TRowSet& rowSet) override {
@@ -187,7 +288,7 @@ struct TNodeWithInput : virtual TNode {
 
     IRuntimeNode* InputNode_ = nullptr;
     bool InputConsumed_ = false;
-    std::deque<TRowSet> Input_;
+    std::optional<TRowSet> CurrentInput_;
 };
 
 struct TNodeWithInputOutput : virtual TNodeWithInput, virtual TNodeWithOutput {
@@ -198,10 +299,6 @@ struct TNodeWithInputOutput : virtual TNodeWithInput, virtual TNodeWithOutput {
 
     bool Next(TRowSet& rowSet) override {
         return TNodeWithInput::Next(rowSet);
-    }
-
-    EFetchState Fetch(TRowSet& rowSet) override {
-        return TNodeWithOutput::Fetch(rowSet);
     }
 };
 
@@ -229,15 +326,21 @@ struct TScan : virtual TNodeWithOutput {
 
     EState Execute() override {
         if (IsFinished()) {
+            OutputPort_.Finish();
             return EState::FINISHED;
         }
-        if (!CanPushOutput()) {
+        if (!OutputPort_.CanPush()) {
             return EState::BLOCKED_OUTPUT;
         }
         TRowSet rowSet;
         Run(rowSet);
-        PushOutput(std::move(rowSet));
-        return IsFinished() ? EState::FINISHED : EState::OK;
+        OutputPort_.Push(std::move(rowSet));
+
+        if (IsFinished()) {
+            OutputPort_.Finish();
+            return EState::FINISHED;
+        }
+        return EState::OK;
     }
 };
 
@@ -250,9 +353,7 @@ struct TFilter : virtual TNodeWithInputOutput {
         , TNodeWithInputOutput(input)
         , Seed(seed)
         , Percent(percent)
-    {
-        InputNode_->SetOutputNode(this);
-    }
+    { }
 
     void Run(TRowSet& rowSet) override {
         for (int i = 0; i < rowSet.Col.size(); ++i) {
@@ -269,9 +370,7 @@ struct TFilter : virtual TNodeWithInputOutput {
 struct TPrinter : virtual TNodeWithInput {
     TPrinter(IRuntimeNode* input)
         : TNodeWithInput(input)
-    {
-        InputNode_->SetOutputNode(this);
-    }
+    { }
 
     void Run(TRowSet& rowSet) override {
         for (int i = 0; i < rowSet.Col.size(); ++i) {
@@ -285,13 +384,40 @@ struct TPrinter : virtual TNodeWithInput {
 struct TScheduler {
     std::list<IRuntimeNode*> Ready;
     std::unordered_set<IRuntimeNode*> Scheduled;
+    std::unordered_map<IRuntimeNode*, std::vector<IRuntimeNode*>> Inbound;
+    std::unordered_map<IRuntimeNode*, std::vector<IRuntimeNode*>> Outbound;
 
-    TScheduler() { }
+    TScheduler(
+        std::unordered_map<IRuntimeNode*, std::vector<IRuntimeNode*>> inbound,
+        std::unordered_map<IRuntimeNode*, std::vector<IRuntimeNode*>> outbound)
+        : Inbound(std::move(inbound))
+        , Outbound(std::move(outbound))
+    { }
 
     void Schedule(IRuntimeNode* node) {
         if (node != nullptr && !Scheduled.contains(node)) {
             Ready.emplace_back(node);
             Scheduled.emplace(node);
+        }
+    }
+
+    void ScheduleInput(IRuntimeNode* node) {
+        auto it = Inbound.find(node);
+        if (it == Inbound.end()) {
+            return;
+        }
+        for (auto& node : it->second) {
+            Schedule(node);
+        }
+    }
+
+    void ScheduleOutput(IRuntimeNode* node) {
+        auto it = Outbound.find(node);
+        if (it == Outbound.end()) {
+            return;
+        }
+        for (auto& node : it->second) {
+            Schedule(node);
         }
     }
 
@@ -301,12 +427,12 @@ struct TScheduler {
             Scheduled.erase(node);
             auto state = node->Execute();
             if (state == EState::NEED_DATA) {
-                Schedule(node->InputNode());
+                ScheduleInput(node);
             } else if (state == EState::BLOCKED_OUTPUT || state == EState::FINISHED) {
-                Schedule(node->OutputNode());
+                ScheduleOutput(node);
             } else if (state == EState::OK) {
                 Schedule(node);
-                Schedule(node->OutputNode());
+                ScheduleOutput(node);
             }
         }
     }
@@ -327,10 +453,22 @@ TEST(Scheduler, Basic) {
 TEST(Scheduler, Async) {
     int inputSets = 16;
     auto scan = std::make_unique<TScan>(inputSets, 42);
-    auto filter = std::make_unique<TFilter>(43, 30, scan.get());
-    auto printer = std::make_unique<TPrinter>(filter.get());
+    auto filter = std::make_unique<TFilter>(43, 30, nullptr);
+    auto printer = std::make_unique<TPrinter>(nullptr);
 
-    TScheduler scheduler;
+    Connect(scan.get(), filter.get(), EConnectionKind::OneToOne);
+    Connect(filter.get(), printer.get(), EConnectionKind::OneToOne);
+
+    std::unordered_map<IRuntimeNode*, std::vector<IRuntimeNode*>> Inbound;
+    std::unordered_map<IRuntimeNode*, std::vector<IRuntimeNode*>> Outbound;
+
+    Inbound[filter.get()].push_back(scan.get());
+    Inbound[printer.get()].push_back(filter.get());
+
+    Outbound[scan.get()].push_back(filter.get());
+    Outbound[filter.get()].push_back(printer.get());
+
+    TScheduler scheduler(Inbound, Outbound);
     scheduler.Schedule(printer.get());
     scheduler.Run();
 }
