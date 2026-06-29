@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <memory>
 #include <ostream>
+#include <stdexcept>
 #include <string>
 #include <unordered_set>
 #include <utility>
@@ -191,6 +192,46 @@ TOperatorKernelSpec BuildAggregateKernelSpec(
     };
 }
 
+TOperatorKernelSpec BuildSortKernelSpec(
+    const NQumir::NAst::TStructType& inputType,
+    const std::vector<TSortKey>& keys,
+    std::string operatorName)
+{
+    auto columnRef = [&](const std::string& name) -> TKernelColumnRef {
+        for (int32_t i = 0; i < static_cast<int32_t>(inputType.Fields.size()); ++i) {
+            const auto& [fieldName, type] = inputType.Fields[i];
+            if (fieldName == name) {
+                return {.Name = name, .Index = i, .Type = type};
+            }
+        }
+        throw std::runtime_error(operatorName + " column not found: " + name);
+    };
+
+    std::vector<TKernelSortKeySpec> sortKeys;
+    sortKeys.reserve(keys.size());
+    std::vector<TKernelColumnRef> referenced;
+    referenced.reserve(keys.size());
+    for (const auto& key : keys) {
+        auto ref = columnRef(key.Column);
+        referenced.push_back(ref);
+        sortKeys.push_back({
+            .Column = std::move(ref),
+            .Direction = key.Direction,
+            .Nulls = key.Nulls,
+        });
+    }
+
+    return TOperatorKernelSpec{
+        .Kind = EOperatorKernelKind::UnaryBlocking,
+        .OperatorName = std::move(operatorName),
+        .InputSchemas = {std::make_shared<NQumir::NAst::TStructType>(inputType.Fields)},
+        .OutputSchema = std::make_shared<NQumir::NAst::TStructType>(inputType.Fields),
+        .ReferencedColumns = std::move(referenced),
+        .SortKeys = std::move(sortKeys),
+        .SourceModules = {"qumirdb"},
+    };
+}
+
 void PrintKernelSpec(std::ostream& out, const TOperatorKernelSpec& spec) {
     out << "kernel-spec " << spec.OperatorName << "\n";
     out << "  kind: " << KernelKindName(spec.Kind) << "\n";
@@ -269,6 +310,19 @@ void PrintKernelSpec(std::ostream& out, const TOperatorKernelSpec& spec) {
                 out << "*";
             }
             out << ")\n";
+        }
+    }
+
+    out << "  sort-keys:";
+    if (spec.SortKeys.empty()) {
+        out << " []\n";
+    } else {
+        out << "\n";
+        for (const auto& key : spec.SortKeys) {
+            out << "    ";
+            PrintColumn(out, key.Column);
+            out << " " << SortDirectionName(key.Direction)
+                << " nulls " << SortNullsName(key.Nulls) << "\n";
         }
     }
 

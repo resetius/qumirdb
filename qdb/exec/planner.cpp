@@ -68,6 +68,37 @@ bool IsRadixSortableType(const NQumir::NAst::TTypePtr& type) {
         static_cast<bool>(TMaybeType<TFloatType>(inner));
 }
 
+struct TSortKernelInputs {
+    std::vector<TSortColumnRef> KeyColumns;
+    std::vector<NQumir::NAst::TTypePtr> RadixTypes;
+    bool AllKeysRadixSortable = true;
+};
+
+TSortKernelInputs BuildSortKernelInputs(const NKernel::TOperatorKernelSpec& spec) {
+    TSortKernelInputs inputs;
+    inputs.KeyColumns.reserve(spec.SortKeys.size());
+    inputs.RadixTypes.reserve(spec.SortKeys.size());
+    for (const auto& key : spec.SortKeys) {
+        inputs.AllKeysRadixSortable =
+            inputs.AllKeysRadixSortable && IsRadixSortableType(key.Column.Type);
+        inputs.RadixTypes.push_back(key.Column.Type);
+        inputs.KeyColumns.push_back({
+            .Index = key.Column.Index,
+            .Type = key.Column.Type,
+        });
+    }
+    return inputs;
+}
+
+void PrintKernelSpec(std::ostream* out, const NKernel::TOperatorKernelSpec& spec) {
+    if (!out) {
+        return;
+    }
+    *out << "\n========== KERNEL SPEC ==========\n";
+    NKernel::PrintKernelSpec(*out, spec);
+    *out << "=================================\n";
+}
+
 } // namespace
 
 void TPhysicalPlanner::PrintRuntimePlan(const TOperatorPtr& root) const {
@@ -364,35 +395,17 @@ std::unique_ptr<IRuntimeNode> TPhysicalPlanner::Build(const TOperatorPtr& root) 
             throw std::runtime_error("sort input must have TStructType");
         }
 
-        std::vector<TSortColumnRef> keyColumns;
-        std::vector<NQumir::NAst::TTypePtr> radixTypes;
+        auto spec = NKernel::BuildSortKernelSpec(*inputType, sort->Keys());
+        PrintKernelSpec(Diagnostics_, spec);
+        auto sortInputs = BuildSortKernelInputs(spec);
         TSortRadixKernel radixKernel;
-        keyColumns.reserve(sort->Keys().size());
-        radixTypes.reserve(sort->Keys().size());
-        bool allKeysRadixSortable = true;
-        for (const auto& key : sort->Keys()) {
-            auto it = std::find_if(inputType->Fields.begin(), inputType->Fields.end(),
-                [&](const auto& field) { return field.first == key.Column; });
-            if (it == inputType->Fields.end()) {
-                throw std::runtime_error("sort column not found: " + key.Column);
-            }
-            allKeysRadixSortable = allKeysRadixSortable && IsRadixSortableType(it->second);
-            radixTypes.push_back(it->second);
-        }
-        for (const auto& key : sort->Keys()) {
-            auto it = std::find_if(inputType->Fields.begin(), inputType->Fields.end(),
-                [&](const auto& field) { return field.first == key.Column; });
-            keyColumns.push_back({
-                .Index = static_cast<int32_t>(std::distance(inputType->Fields.begin(), it)),
-                .Type = it->second,
-            });
-        }
-        if (allKeysRadixSortable && !radixTypes.empty()) {
+        if (sortInputs.AllKeysRadixSortable && !sortInputs.RadixTypes.empty()) {
             TKernelCompiler compiler(Diagnostics_);
             radixKernel = {
                 .Enabled = true,
-                .Dispatch = compiler.CompileRadixSortComposite(radixTypes),
-                .NullableDispatch = compiler.CompileRadixSortCompositeNullable(radixTypes),
+                .Dispatch = compiler.CompileRadixSortComposite(sortInputs.RadixTypes),
+                .NullableDispatch = compiler.CompileRadixSortCompositeNullable(
+                    sortInputs.RadixTypes),
             };
         }
 
@@ -400,7 +413,7 @@ std::unique_ptr<IRuntimeNode> TPhysicalPlanner::Build(const TOperatorPtr& root) 
             std::move(input),
             input->OutputType(),
             sort->Keys(),
-            std::move(keyColumns),
+            std::move(sortInputs.KeyColumns),
             std::move(radixKernel));
     }
 
@@ -412,31 +425,17 @@ std::unique_ptr<IRuntimeNode> TPhysicalPlanner::Build(const TOperatorPtr& root) 
             throw std::runtime_error("top-sort input must have TStructType");
         }
 
-        std::vector<TSortColumnRef> keyColumns;
-        std::vector<NQumir::NAst::TTypePtr> radixTypes;
+        auto spec = NKernel::BuildSortKernelSpec(*inputType, sort->Keys(), "top-sort");
+        PrintKernelSpec(Diagnostics_, spec);
+        auto sortInputs = BuildSortKernelInputs(spec);
         TSortRadixKernel radixKernel;
-        keyColumns.reserve(sort->Keys().size());
-        radixTypes.reserve(sort->Keys().size());
-        bool allKeysRadixSortable = true;
-        for (const auto& key : sort->Keys()) {
-            auto it = std::find_if(inputType->Fields.begin(), inputType->Fields.end(),
-                [&](const auto& field) { return field.first == key.Column; });
-            if (it == inputType->Fields.end()) {
-                throw std::runtime_error("top-sort column not found: " + key.Column);
-            }
-            allKeysRadixSortable = allKeysRadixSortable && IsRadixSortableType(it->second);
-            radixTypes.push_back(it->second);
-            keyColumns.push_back({
-                .Index = static_cast<int32_t>(std::distance(inputType->Fields.begin(), it)),
-                .Type = it->second,
-            });
-        }
-        if (allKeysRadixSortable && !radixTypes.empty()) {
+        if (sortInputs.AllKeysRadixSortable && !sortInputs.RadixTypes.empty()) {
             TKernelCompiler compiler(Diagnostics_);
             radixKernel = {
                 .Enabled = true,
-                .Dispatch = compiler.CompileRadixSortComposite(radixTypes),
-                .NullableDispatch = compiler.CompileRadixSortCompositeNullable(radixTypes),
+                .Dispatch = compiler.CompileRadixSortComposite(sortInputs.RadixTypes),
+                .NullableDispatch = compiler.CompileRadixSortCompositeNullable(
+                    sortInputs.RadixTypes),
             };
         }
 
@@ -444,7 +443,7 @@ std::unique_ptr<IRuntimeNode> TPhysicalPlanner::Build(const TOperatorPtr& root) 
             std::move(input),
             input->OutputType(),
             sort->Keys(),
-            std::move(keyColumns),
+            std::move(sortInputs.KeyColumns),
             std::move(radixKernel),
             sort->Limit());
     }
