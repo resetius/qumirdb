@@ -2,6 +2,8 @@
 
 #include <qdb/plan/passes/unbound_vars.h>
 
+#include <qumir/parser/core/printer.h>
+
 #include <algorithm>
 #include <memory>
 #include <ostream>
@@ -62,6 +64,7 @@ TOperatorKernelSpec BuildFilterKernelSpec(
         .InputSchemas = {std::make_shared<NQumir::NAst::TStructType>(inputType.Fields)},
         .OutputSchema = std::make_shared<NQumir::NAst::TStructType>(inputType.Fields),
         .ReferencedColumns = std::move(referenced),
+        .Expressions = {predicate},
         .Entrypoints = {
             {.Name = std::move(entrypointName), .Abi = "void(ref TRowSet)"},
         },
@@ -105,6 +108,7 @@ TOperatorKernelSpec BuildProjectKernelSpec(
         .InputSchemas = {std::make_shared<NQumir::NAst::TStructType>(inputType.Fields)},
         .OutputSchema = std::make_shared<NQumir::NAst::TStructType>(std::move(outputFields)),
         .ReferencedColumns = std::move(referenced),
+        .Expressions = computedExprs,
         .Entrypoints = {
             {.Name = std::move(entrypointName), .Abi = "void(ref TRowSet, ptr ptr i8)"},
         },
@@ -136,6 +140,24 @@ void PrintKernelSpec(std::ostream& out, const TOperatorKernelSpec& spec) {
         for (const auto& column : spec.ReferencedColumns) {
             out << "    ";
             PrintColumn(out, column);
+            out << "\n";
+        }
+    }
+
+    out << "  expressions:";
+    if (spec.Expressions.empty()) {
+        out << " []\n";
+    } else {
+        out << "\n";
+        for (size_t i = 0; i < spec.Expressions.size(); ++i) {
+            out << "    [" << i << "] ";
+            if (spec.Expressions[i]) {
+                out << NQumir::NAst::NCore::PrintAst(
+                    spec.Expressions[i],
+                    NQumir::NAst::NCore::TPrintOptions{.Pretty = false});
+            } else {
+                out << "<null>";
+            }
             out << "\n";
         }
     }
