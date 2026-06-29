@@ -409,12 +409,15 @@ std::unique_ptr<IRuntimeNode> TPhysicalPlanner::Build(const TOperatorPtr& root) 
             };
         }
 
-        return std::make_unique<TRuntimeSort>(
+        auto outputType = input->OutputType();
+        return std::make_unique<TRuntimeUnaryBlockingKernel>(
             std::move(input),
-            input->OutputType(),
-            sort->Keys(),
-            std::move(sortInputs.KeyColumns),
-            std::move(radixKernel));
+            outputType,
+            MakeSortProcess(
+                outputType,
+                sort->Keys(),
+                std::move(sortInputs.KeyColumns),
+                std::move(radixKernel)));
     }
 
     if (auto maybe = TMaybeOp<TTopSortOperator>(root)) {

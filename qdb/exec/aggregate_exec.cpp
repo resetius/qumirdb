@@ -69,7 +69,15 @@ void DestroyAggregateRowSet(TRowSet* rowSet) {
 TRuntimeUnaryBlockingKernel::TProcess MakeAggregateProcess(
     TAggregateKernels kernels)
 {
-    return [kernels = std::move(kernels)](IRuntimeNode& input, TRowSet& rowSet) {
+    return [
+        kernels = std::move(kernels),
+        done = false](IRuntimeNode& input, TRowSet& rowSet) mutable
+    {
+        if (done) {
+            return false;
+        }
+        done = true;
+
         std::array<uint8_t, TKernelCompiler::kHashTableSize> ht{};
         kernels.Dispatch(ht.data(), nullptr, kInitialCapacity, kOpInit);
 

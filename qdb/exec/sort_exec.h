@@ -2,6 +2,7 @@
 
 #include <qdb/exec/executor.h>
 #include <qdb/exec/join_exec.h>
+#include <qdb/exec/unary_block_exec.h>
 #include <qdb/kernel/compiler.h>
 #include <qdb/plan/ops/sort.h>
 
@@ -25,34 +26,12 @@ struct TSortRadixKernel {
     TKernelCompiler::TSortRadixCompositeNullableDispatch NullableDispatch;
 };
 
-class TRuntimeSort : public IRuntimeNode {
-public:
-    TRuntimeSort(std::unique_ptr<IRuntimeNode> input,
-        NQumir::NAst::TTypePtr outputType,
-        std::vector<TSortKey> keys,
-        std::vector<TSortColumnRef> keyColumns,
-        TSortRadixKernel radixKernel,
-        int64_t batchRows = kJoinOutputBatchRows);
-
-    NQumir::NAst::TTypePtr OutputType() const override { return OutputType_; }
-    bool Next(TRowSet& rowSet) override;
-
-private:
-    void Materialize();
-    bool TryRadixSort();
-
-    std::unique_ptr<IRuntimeNode> Input_;
-    NQumir::NAst::TTypePtr OutputType_;
-    std::vector<TSortKey> Keys_;
-    std::vector<TSortColumnRef> KeyColumns_;
-    TSortRadixKernel RadixKernel_;
-    int64_t BatchRows_ = kJoinOutputBatchRows;
-
-    bool Materialized_ = false;
-    TRowStore Store_;
-    std::vector<TRowId> Rows_;
-    size_t Cursor_ = 0;
-};
+TRuntimeUnaryBlockingKernel::TProcess MakeSortProcess(
+    NQumir::NAst::TTypePtr outputType,
+    std::vector<TSortKey> keys,
+    std::vector<TSortColumnRef> keyColumns,
+    TSortRadixKernel radixKernel,
+    int64_t batchRows = kJoinOutputBatchRows);
 
 class TRuntimeTopSort : public IRuntimeNode {
 public:
