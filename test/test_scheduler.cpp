@@ -185,20 +185,30 @@ struct IRuntimeNode {
     virtual void SetOutputPort(TOutputPort outputPort) = 0;
 };
 
-void Connect(IRuntimeNode* src, IRuntimeNode* dst, EConnectionKind kind)
-{
-    switch (kind) {
-    case EConnectionKind::OneToOne: {
-        // TODO: owner
-        auto* conn = new TOneToOne();
-        src->SetOutputPort(TOutputPort(conn, 0));
-        dst->SetInputPort(TInputPort(conn, 0));
-        break;
+struct TGraph {
+    std::unordered_map<IRuntimeNode*, std::vector<IRuntimeNode*>> Inbound;
+    std::unordered_map<IRuntimeNode*, std::vector<IRuntimeNode*>> Outbound;
+    std::vector<std::unique_ptr<IConnection>> connections;
+
+    void Connect(IRuntimeNode* src, IRuntimeNode* dst, EConnectionKind kind)
+    {
+        Inbound[dst].push_back(src);
+        Outbound[src].push_back(dst);
+
+        switch (kind) {
+        case EConnectionKind::OneToOne: {
+            // TODO: owner
+            auto conn = std::make_unique<TOneToOne>();
+            src->SetOutputPort(TOutputPort(conn.get(), 0));
+            dst->SetInputPort(TInputPort(conn.get(), 0));
+            connections.emplace_back(std::move(conn));
+            break;
+        }
+        default:
+            break;
+        };
     }
-    default:
-        break;
-    };
-}
+};
 
 struct TNode : virtual IRuntimeNode {
     TInputPort InputPort_;
@@ -291,17 +301,6 @@ struct TNodeWithInput : virtual TNode {
     std::optional<TRowSet> CurrentInput_;
 };
 
-struct TNodeWithInputOutput : virtual TNodeWithInput, virtual TNodeWithOutput {
-    TNodeWithInputOutput(IRuntimeNode* input)
-    {
-        InputNode_ = input;
-    }
-
-    bool Next(TRowSet& rowSet) override {
-        return TNodeWithInput::Next(rowSet);
-    }
-};
-
 struct TScan : virtual TNodeWithOutput {
     int NSets;
     int Seed;
@@ -344,13 +343,12 @@ struct TScan : virtual TNodeWithOutput {
     }
 };
 
-struct TFilter : virtual TNodeWithInputOutput {
+struct TFilter : virtual TNodeWithInput {
     int Seed;
     int Percent;
 
     TFilter(int seed, int percent, IRuntimeNode* input)
         : TNodeWithInput(input)
-        , TNodeWithInputOutput(input)
         , Seed(seed)
         , Percent(percent)
     { }
@@ -382,16 +380,12 @@ struct TPrinter : virtual TNodeWithInput {
 };
 
 struct TScheduler {
+    TGraph& Graph;
     std::list<IRuntimeNode*> Ready;
     std::unordered_set<IRuntimeNode*> Scheduled;
-    std::unordered_map<IRuntimeNode*, std::vector<IRuntimeNode*>> Inbound;
-    std::unordered_map<IRuntimeNode*, std::vector<IRuntimeNode*>> Outbound;
 
-    TScheduler(
-        std::unordered_map<IRuntimeNode*, std::vector<IRuntimeNode*>> inbound,
-        std::unordered_map<IRuntimeNode*, std::vector<IRuntimeNode*>> outbound)
-        : Inbound(std::move(inbound))
-        , Outbound(std::move(outbound))
+    TScheduler(TGraph& g)
+        : Graph(g)
     { }
 
     void Schedule(IRuntimeNode* node) {
@@ -402,8 +396,8 @@ struct TScheduler {
     }
 
     void ScheduleInput(IRuntimeNode* node) {
-        auto it = Inbound.find(node);
-        if (it == Inbound.end()) {
+        auto it = Graph.Inbound.find(node);
+        if (it == Graph.Inbound.end()) {
             return;
         }
         for (auto& node : it->second) {
@@ -412,8 +406,8 @@ struct TScheduler {
     }
 
     void ScheduleOutput(IRuntimeNode* node) {
-        auto it = Outbound.find(node);
-        if (it == Outbound.end()) {
+        auto it = Graph.Outbound.find(node);
+        if (it == Graph.Outbound.end()) {
             return;
         }
         for (auto& node : it->second) {
@@ -456,19 +450,11 @@ TEST(Scheduler, Async) {
     auto filter = std::make_unique<TFilter>(43, 30, nullptr);
     auto printer = std::make_unique<TPrinter>(nullptr);
 
-    Connect(scan.get(), filter.get(), EConnectionKind::OneToOne);
-    Connect(filter.get(), printer.get(), EConnectionKind::OneToOne);
+    TGraph g;
+    g.Connect(scan.get(), filter.get(), EConnectionKind::OneToOne);
+    g.Connect(filter.get(), printer.get(), EConnectionKind::OneToOne);
 
-    std::unordered_map<IRuntimeNode*, std::vector<IRuntimeNode*>> Inbound;
-    std::unordered_map<IRuntimeNode*, std::vector<IRuntimeNode*>> Outbound;
-
-    Inbound[filter.get()].push_back(scan.get());
-    Inbound[printer.get()].push_back(filter.get());
-
-    Outbound[scan.get()].push_back(filter.get());
-    Outbound[filter.get()].push_back(printer.get());
-
-    TScheduler scheduler(Inbound, Outbound);
+    TScheduler scheduler(g);
     scheduler.Schedule(printer.get());
     scheduler.Run();
 }
