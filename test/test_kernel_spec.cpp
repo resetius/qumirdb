@@ -30,6 +30,12 @@ TEST(KernelSpec, PrintsStableDebugDescription) {
         .ReferencedColumns = {
             {.Name = "b", .Index = 1, .Type = i64},
         },
+        .Expressions = {
+            std::make_shared<TBinaryExpr>(
+                NQumir::TLocation{}, TOperator(">"),
+                std::make_shared<TIdentExpr>(NQumir::TLocation{}, "b"),
+                std::make_shared<TNumberExpr>(NQumir::TLocation{}, int64_t(0))),
+        },
         .Keys = {
             {.Name = "predicate-columns",
              .Columns = {{.Name = "b", .Index = 1, .Type = i64}}},
@@ -51,6 +57,8 @@ TEST(KernelSpec, PrintsStableDebugDescription) {
         "  output: struct { a: Int; }\n"
         "  referenced:\n"
         "    b#1:i64\n"
+        "  expressions:\n"
+        "    [0] (> b 0)\n"
         "  keys:\n"
         "    predicate-columns: b#1:i64\n"
         "  entrypoints:\n"
@@ -83,6 +91,8 @@ TEST(KernelSpec, BuildsFilterSpecFromPredicate) {
     EXPECT_EQ(spec.ReferencedColumns[0].Index, 0);
     EXPECT_EQ(spec.ReferencedColumns[1].Name, "c");
     EXPECT_EQ(spec.ReferencedColumns[1].Index, 2);
+    ASSERT_EQ(spec.Expressions.size(), 1u);
+    EXPECT_EQ(spec.Expressions[0], predicate);
     ASSERT_EQ(spec.Entrypoints.size(), 1u);
     EXPECT_EQ(spec.Entrypoints[0].Name, "qdb_filter_test");
     EXPECT_EQ(spec.Entrypoints[0].Abi, "void(ref TRowSet)");
@@ -119,6 +129,8 @@ TEST(KernelSpec, BuildsProjectSpecFromComputedExpressions) {
     EXPECT_EQ(spec.ReferencedColumns[0].Index, 0);
     EXPECT_EQ(spec.ReferencedColumns[1].Name, "b");
     EXPECT_EQ(spec.ReferencedColumns[1].Index, 1);
+    ASSERT_EQ(spec.Expressions.size(), 1u);
+    EXPECT_EQ(spec.Expressions[0], exprs[0]);
     auto* output = static_cast<TStructType*>(spec.OutputSchema.get());
     ASSERT_NE(output, nullptr);
     ASSERT_EQ(output->Fields.size(), 1u);

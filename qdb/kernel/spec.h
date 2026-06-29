@@ -40,6 +40,7 @@ struct TOperatorKernelSpec {
     std::vector<NQumir::NAst::TTypePtr> InputSchemas;
     NQumir::NAst::TTypePtr OutputSchema;
     std::vector<TKernelColumnRef> ReferencedColumns;
+    std::vector<NQumir::NAst::TExprPtr> Expressions;
     std::vector<TKernelKeySpec> Keys;
     std::vector<TKernelEntrypointSpec> Entrypoints;
     std::vector<std::string> SourceModules;
