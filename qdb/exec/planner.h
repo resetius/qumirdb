@@ -15,7 +15,7 @@ namespace NQdb {
 //   - TSourceOperator    → TRuntimeSource    ✓
 //   - TFilterOperator    → TRuntimeUnaryStreamingKernel ✓
 //   - TProjectOperator   → TRuntimeUnaryStreamingKernel ✓
-//   - TAggregateOperator → TRuntimeAggregate ✓
+//   - TAggregateOperator → TRuntimeUnaryBlockingKernel ✓
 class TPhysicalPlanner {
 public:
     explicit TPhysicalPlanner(std::ostream* diagnostics = nullptr)
