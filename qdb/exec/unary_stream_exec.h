@@ -1,7 +1,6 @@
 #pragma once
 
 #include <qdb/exec/executor.h>
-#include <qdb/kernel/compiler.h>
 
 #include <functional>
 #include <memory>
@@ -9,12 +8,18 @@
 
 namespace NQdb {
 
-class TRuntimeFilter : public IRuntimeNode {
+struct TUnaryStreamingKernelState {
+    std::vector<uint8_t> Selection;
+};
+
+class TRuntimeUnaryStreamingKernel : public IRuntimeNode {
 public:
-    TRuntimeFilter(
+    using TProcess = std::function<void(TRowSet&, TUnaryStreamingKernelState&)>;
+
+    TRuntimeUnaryStreamingKernel(
         std::unique_ptr<IRuntimeNode> input,
         NQumir::NAst::TTypePtr outputType,
-        TKernelCompiler::TFilterDispatch dispatch);
+        TProcess process);
 
     NQumir::NAst::TTypePtr OutputType() const override { return OutputType_; }
     bool Next(TRowSet& rowSet) override;
@@ -22,8 +27,8 @@ public:
 private:
     std::unique_ptr<IRuntimeNode> Input_;
     NQumir::NAst::TTypePtr OutputType_;
-    TKernelCompiler::TFilterDispatch Dispatch_;
-    std::vector<uint8_t> SelectionBuf_;
+    TProcess Process_;
+    TUnaryStreamingKernelState State_;
 };
 
 } // namespace NQdb
