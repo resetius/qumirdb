@@ -2,6 +2,7 @@
 
 #include <qdb/io/io.h>
 #include <qdb/kernel/compiler.h>
+#include <qdb/kernel/spec.h>
 #include <qdb/plan/types/nullable.h>
 
 #include <qumir/codegen/llvm/llvm_initializer.h>
@@ -180,6 +181,31 @@ TEST(FilterKernel, AppliesSqlThreeValuedLogicToNullableColumns) {
         (std::array<uint8_t, 6>{0, 0xff, 0, 0xff, 0xff, 0}));
     EXPECT_EQ(RunNullableIntegerFilter("(! (== left 1))"),
         (std::array<uint8_t, 6>{0xff, 0, 0, 0, 0, 0xff}));
+}
+
+TEST(FilterKernel, CompilesFromKernelSpec) {
+    std::array<int64_t, 4> values = {0, 1, 2, 3};
+    std::array<TColumn, 1> columns = {
+        TColumn{.Data = reinterpret_cast<char*>(values.data())},
+    };
+    TStructType inputType({
+        {"value", std::make_shared<TIntegerType>()},
+    });
+    auto spec = NKernel::BuildFilterKernelSpec(
+        inputType, ParsePredicate("(> value 1)"));
+    auto dispatch = TKernelCompiler().CompileFilter(spec);
+    std::array<uint8_t, 4> selection{};
+    TRowSet rowSet{
+        .Columns = columns.data(),
+        .ColumnCount = static_cast<int64_t>(columns.size()),
+        .RowCount = static_cast<int64_t>(selection.size()),
+        .Selection = selection.data(),
+        .RefCount = 1,
+    };
+
+    dispatch(rowSet);
+
+    EXPECT_EQ(selection, (std::array<uint8_t, 4>{0, 0, 0xff, 0xff}));
 }
 
 TEST(FilterKernel, SkipsThreeValuedLogicForNonNullablePredicate) {

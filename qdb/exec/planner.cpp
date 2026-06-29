@@ -14,6 +14,7 @@
 #include <qdb/plan/ops/sort.h>
 
 #include <qdb/kernel/project_type.h>
+#include <qdb/kernel/spec.h>
 #include <qdb/plan/types/nullable.h>
 
 #include <qumir/parser/type.h>
@@ -179,8 +180,9 @@ std::unique_ptr<IRuntimeNode> TPhysicalPlanner::Build(const TOperatorPtr& root) 
         if (!inputType) {
             throw std::runtime_error("filter input must have TStructType");
         }
+        auto spec = NKernel::BuildFilterKernelSpec(*inputType, filter->Predicate());
         TKernelCompiler compiler(Diagnostics_);
-        auto dispatch = compiler.CompileFilter(*inputType, filter->Predicate());
+        auto dispatch = compiler.CompileFilter(spec);
         return std::make_unique<TRuntimeFilter>(
             std::move(input),
             input->OutputType(),
