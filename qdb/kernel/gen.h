@@ -102,7 +102,7 @@ NQumir::NAst::TExprPtr GenJoinResidualFilterAst(
 // Signature: void <kernel>(rowSet: <ref TRowSet>, out: <ptr <ptr i8>>) — for each
 // row i and each computed projection k: out[k][i] = (cast) <expr_k>. Output
 // buffer k holds values of computedTypes[k]; the explicit cast pins the buffer
-// type. ident projections are NOT here (handled zero-copy by TRuntimeProject).
+// type. ident projections are NOT here (handled zero-copy by project_exec).
 NQumir::NAst::TExprPtr GenProjectKernelAst(
     std::vector<NQumir::NAst::TExprPtr> computedExprs,
     const std::vector<NQumir::NAst::TTypePtr>& computedTypes,

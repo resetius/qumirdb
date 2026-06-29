@@ -249,11 +249,14 @@ std::unique_ptr<IRuntimeNode> TPhysicalPlanner::Build(const TOperatorPtr& root) 
             dispatch = compiler.CompileProject(spec);
         }
 
-        return std::make_unique<TRuntimeProject>(
+        return std::make_unique<TRuntimeUnaryStreamingKernel>(
             std::move(input),
             std::make_shared<NQumir::NAst::TStructType>(std::move(outFields)),
-            std::move(columns), std::move(dispatch),
-            std::move(computedWidths), std::move(computedIsString));
+            MakeProjectProcess(
+                std::move(columns),
+                std::move(dispatch),
+                std::move(computedWidths),
+                std::move(computedIsString)));
     }
 
     if (auto maybe = TMaybeOp<TAggregateOperator>(root)) {
