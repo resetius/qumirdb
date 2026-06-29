@@ -3,6 +3,7 @@
 #include <qdb/io/io.h>
 #include <qdb/kernel/compiler.h>
 #include <qdb/kernel/project_type.h>
+#include <qdb/kernel/spec.h>
 
 #include <qumir/codegen/llvm/llvm_initializer.h>
 #include <qumir/parser/core/lexer.h>
@@ -73,6 +74,30 @@ TEST(CompileProject, ComputesF64AndI64Columns) {
         EXPECT_DOUBLE_EQ(outDisc[i], p[i] * (1.0 - d[i]));
         EXPECT_EQ(outBumped[i], k[i] + 100);
     }
+}
+
+TEST(CompileProject, CompilesFromKernelSpec) {
+    TStructType inputType({
+        {"value", std::make_shared<TIntegerType>(TIntegerType::I64)},
+    });
+    std::vector<TExprPtr> exprs = {Parse("(+ value 10)")};
+    std::vector<TTypePtr> types = {
+        NKernel::InferProjectExprType(exprs[0], inputType),
+    };
+    auto spec = NKernel::BuildProjectKernelSpec(inputType, exprs, types);
+    auto dispatch = TKernelCompiler().CompileProject(spec);
+
+    std::array<int64_t, 3> values = {1, 2, 3};
+    std::array<TColumn, 1> cols = {
+        TColumn{.Data = reinterpret_cast<char*>(values.data())},
+    };
+    TRowSet batch{.Columns = cols.data(), .ColumnCount = 1, .RowCount = 3, .RefCount = 1};
+    std::array<int64_t, 3> output{};
+    std::array<void*, 1> outBuffers = {output.data()};
+
+    dispatch(&batch, outBuffers.data());
+
+    EXPECT_EQ(output, (std::array<int64_t, 3>{11, 12, 13}));
 }
 
 int main(int argc, char** argv) {

@@ -236,8 +236,10 @@ std::unique_ptr<IRuntimeNode> TPhysicalPlanner::Build(const TOperatorPtr& root) 
 
         TKernelCompiler::TProjectDispatch dispatch;
         if (!computedExprs.empty()) {
+            auto spec = NKernel::BuildProjectKernelSpec(
+                *inputType, computedExprs, computedJitTypes);
             TKernelCompiler compiler(Diagnostics_);
-            dispatch = compiler.CompileProject(*inputType, computedExprs, computedJitTypes);
+            dispatch = compiler.CompileProject(spec);
         }
 
         return std::make_unique<TRuntimeProject>(

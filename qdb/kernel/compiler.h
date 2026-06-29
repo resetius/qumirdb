@@ -184,6 +184,7 @@ public:
     // computedExprs and computedTypes are parallel; computedTypes[k] is the
     // inferred output type of computedExprs[k] (see InferProjectExprType). The
     // kernel writes each expression to its output buffer, casting to that type.
+    TProjectDispatch CompileProject(const NKernel::TOperatorKernelSpec& spec);
     TProjectDispatch CompileProject(
         const NQumir::NAst::TStructType& inputType,
         const std::vector<NQumir::NAst::TExprPtr>& computedExprs,
