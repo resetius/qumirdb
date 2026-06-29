@@ -62,6 +62,7 @@ TEST(KernelSpec, PrintsStableDebugDescription) {
         "  keys:\n"
         "    predicate-columns: b#1:i64\n"
         "  aggregates: []\n"
+        "  sort-keys: []\n"
         "  entrypoints:\n"
         "    qdb_filter_0: void(ref TRowSet)\n"
         "  source-modules:\n"
@@ -174,6 +175,36 @@ TEST(KernelSpec, BuildsAggregateSpecFromGroupKeysAndAggregates) {
     EXPECT_EQ(spec.Aggregates[0].Arg.Name, "v");
     ASSERT_EQ(spec.Entrypoints.size(), 3u);
     EXPECT_EQ(spec.Entrypoints[0].Name, "agg_dispatch");
+    ASSERT_EQ(spec.SourceModules.size(), 1u);
+    EXPECT_EQ(spec.SourceModules[0], "qumirdb");
+}
+
+TEST(KernelSpec, BuildsSortSpecFromSortKeys) {
+    using namespace NQumir::NAst;
+
+    auto i64 = std::make_shared<TIntegerType>();
+    auto str = std::make_shared<TStringType>();
+    TStructType input({
+        {"id", i64},
+        {"name", str},
+    });
+
+    auto spec = NKernel::BuildSortKernelSpec(
+        input,
+        {{.Column = "name",
+          .Direction = ESortDirection::Desc,
+          .Nulls = ESortNulls::First}});
+
+    EXPECT_EQ(spec.Kind, NKernel::EOperatorKernelKind::UnaryBlocking);
+    EXPECT_EQ(spec.OperatorName, "sort");
+    ASSERT_EQ(spec.InputSchemas.size(), 1u);
+    ASSERT_EQ(spec.ReferencedColumns.size(), 1u);
+    EXPECT_EQ(spec.ReferencedColumns[0].Name, "name");
+    EXPECT_EQ(spec.ReferencedColumns[0].Index, 1);
+    ASSERT_EQ(spec.SortKeys.size(), 1u);
+    EXPECT_EQ(spec.SortKeys[0].Column.Name, "name");
+    EXPECT_EQ(spec.SortKeys[0].Direction, ESortDirection::Desc);
+    EXPECT_EQ(spec.SortKeys[0].Nulls, ESortNulls::First);
     ASSERT_EQ(spec.SourceModules.size(), 1u);
     EXPECT_EQ(spec.SourceModules[0], "qumirdb");
 }
