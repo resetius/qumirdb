@@ -993,8 +993,9 @@ TEST(AggregateE2E, CompilesNullableReducerArgumentWithUnwrappedAstType) {
         .Func = "sum",
         .Arg = std::make_shared<TIdentExpr>(loc, "v"),
     }};
+    auto spec = NQdb::NKernel::BuildAggregateKernelSpec(inputType, {"k"}, aggs);
     EXPECT_NO_THROW(
-        NQdb::TKernelCompiler().CompileAggregate(inputType, {"k"}, aggs));
+        NQdb::TKernelCompiler().CompileAggregate(spec));
 }
 
 // M13.8: a nullable reducer argument must distinguish count(*) (every row) from
