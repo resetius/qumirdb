@@ -23,7 +23,6 @@ private:
     std::unique_ptr<IRuntimeNode> Input_;
     NQumir::NAst::TTypePtr OutputType_;
     TProcess Process_;
-    bool Done_ = false;
 };
 
 } // namespace NQdb

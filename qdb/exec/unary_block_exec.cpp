@@ -14,10 +14,6 @@ TRuntimeUnaryBlockingKernel::TRuntimeUnaryBlockingKernel(
 {}
 
 bool TRuntimeUnaryBlockingKernel::Next(TRowSet& rowSet) {
-    if (Done_) {
-        return false;
-    }
-    Done_ = true;
     return Process_(*Input_, rowSet);
 }
 
