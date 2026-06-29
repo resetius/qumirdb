@@ -164,15 +164,13 @@ struct TNodeWithInput : virtual TNode {
             return InputConsumed_ ? EState::FINISHED : EState::NEED_DATA;
         }
 
-        rowSet = std::move(Input_.front()); Input_.pop_front();
-        Run(rowSet);
-
-        if (CanPushOutput()) {
-            PushOutput(std::move(rowSet));
-        } else {
-            Input_.emplace_front(std::move(rowSet));
+        if (!CanPushOutput()) {
             return EState::BLOCKED_OUTPUT;
         }
+
+        rowSet = std::move(Input_.front()); Input_.pop_front();
+        Run(rowSet);
+        PushOutput(std::move(rowSet));
 
         return InputConsumed_ ? EState::FINISHED : EState::OK;
     }
@@ -236,7 +234,9 @@ struct TScan : virtual TNodeWithOutput {
         if (!CanPushOutput()) {
             return EState::BLOCKED_OUTPUT;
         }
-        Run(Output_.emplace_back());
+        TRowSet rowSet;
+        Run(rowSet);
+        PushOutput(std::move(rowSet));
         return IsFinished() ? EState::FINISHED : EState::OK;
     }
 };
