@@ -45,7 +45,7 @@ add_library(qumirdb
     kernel/lib.cpp
     kernel/compiler.cpp
     exec/source_exec.cpp
-    exec/filter_exec.cpp
+    exec/unary_stream_exec.cpp
     exec/project_exec.cpp
     exec/aggregate_exec.cpp
     exec/join_exec.cpp

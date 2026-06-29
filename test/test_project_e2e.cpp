@@ -113,6 +113,26 @@ TEST(ProjectE2E, IdentZeroCopyPlusComputed) {
     EXPECT_FALSE(plan->Next(out));
 }
 
+TEST(FilterE2E, PublishesSelectionFromUnaryStreamingShell) {
+    std::array<int64_t, 4> values = {0, 1, 2, 3};
+    std::array<TColumn, 1> cols = {
+        TColumn{.Data = reinterpret_cast<char*>(values.data())},
+    };
+    TRowSet batch{.Columns = cols.data(), .ColumnCount = 1, .RowCount = 4, .RefCount = 1};
+    TStubSource src({"value"}, {std::make_shared<TIntegerType>()}, {batch});
+
+    auto plan = Plan("(rel filter (rel source \"L\") (> value 1))", src);
+
+    TRowSet out{};
+    ASSERT_TRUE(plan->Next(out));
+    ASSERT_NE(out.Selection, nullptr);
+    EXPECT_EQ(
+        std::vector<uint8_t>(out.Selection, out.Selection + out.RowCount),
+        (std::vector<uint8_t>{0, 0, 0xff, 0xff}));
+    Release(&out);
+    EXPECT_FALSE(plan->Next(out));
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     NQumir::NCodeGen::TLLVMInitializer initializer;
