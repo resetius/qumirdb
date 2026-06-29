@@ -512,11 +512,12 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
         throw NQumir::TError("CompileAggregate: expected one input schema");
     }
 
-    const auto* inputType = static_cast<NQumir::NAst::TStructType*>(
+    const auto* inputTypePtr = static_cast<NQumir::NAst::TStructType*>(
         spec.InputSchemas[0].get());
-    if (!inputType) {
+    if (!inputTypePtr) {
         throw NQumir::TError("CompileAggregate: input schema must be a struct");
     }
+    const auto& inputType = *inputTypePtr;
 
     std::vector<std::string> groupKeys;
     if (!spec.Keys.empty()) {
@@ -542,14 +543,6 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
         *Diagnostics_ << "=================================\n";
     }
 
-    return CompileAggregate(*inputType, groupKeys, aggs);
-}
-
-TAggregateKernels TKernelCompiler::CompileAggregate(
-    const NQumir::NAst::TStructType& inputType,
-    const std::vector<std::string>& groupKeys,
-    const std::vector<TAggregateSpec>& aggs)
-{
     using namespace NQumir::NAst;
 
     auto fieldType = [&](const std::string& name) -> TTypePtr {
