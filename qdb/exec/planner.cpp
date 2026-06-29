@@ -261,8 +261,10 @@ std::unique_ptr<IRuntimeNode> TPhysicalPlanner::Build(const TOperatorPtr& root) 
             throw std::runtime_error("aggregate input must have TStructType");
         }
 
+        auto spec = NKernel::BuildAggregateKernelSpec(
+            *inputType, agg->GroupKeys(), agg->Aggs());
         TKernelCompiler compiler(Diagnostics_);
-        auto kernels = compiler.CompileAggregate(*inputType, agg->GroupKeys(), agg->Aggs());
+        auto kernels = compiler.CompileAggregate(spec);
 
         // Output type from the physical (pruned) input type, not the logical
         // OutputColumns() (which was computed from the pre-pruning schema).

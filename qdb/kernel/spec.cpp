@@ -9,6 +9,7 @@
 #include <ostream>
 #include <string>
 #include <unordered_set>
+#include <utility>
 
 namespace NQdb {
 namespace NKernel {
@@ -116,6 +117,80 @@ TOperatorKernelSpec BuildProjectKernelSpec(
     };
 }
 
+TOperatorKernelSpec BuildAggregateKernelSpec(
+    const NQumir::NAst::TStructType& inputType,
+    const std::vector<std::string>& groupKeys,
+    const std::vector<TAggregateSpec>& aggs)
+{
+    auto columnRef = [&](const std::string& name) -> TKernelColumnRef {
+        for (int32_t i = 0; i < static_cast<int32_t>(inputType.Fields.size()); ++i) {
+            const auto& [fieldName, type] = inputType.Fields[i];
+            if (fieldName == name) {
+                return {.Name = name, .Index = i, .Type = type};
+            }
+        }
+        return {.Name = name};
+    };
+
+    std::vector<TKernelColumnRef> groupColumns;
+    groupColumns.reserve(groupKeys.size());
+    for (const auto& name : groupKeys) {
+        groupColumns.push_back(columnRef(name));
+    }
+
+    std::vector<TKernelAggregateSpec> aggregateSpecs;
+    aggregateSpecs.reserve(aggs.size());
+    for (const auto& agg : aggs) {
+        TKernelAggregateSpec spec{
+            .Name = agg.Name,
+            .Func = agg.Func,
+            .ArgExpr = agg.Arg,
+        };
+        if (agg.Arg) {
+            auto ident = NQumir::NAst::TMaybeNode<NQumir::NAst::TIdentExpr>(agg.Arg);
+            if (ident) {
+                spec.HasArg = true;
+                spec.Arg = columnRef(ident.Cast()->Name);
+            }
+        }
+        aggregateSpecs.push_back(std::move(spec));
+    }
+
+    std::vector<TKernelColumnRef> referenced = groupColumns;
+    for (const auto& agg : aggregateSpecs) {
+        if (agg.HasArg) {
+            referenced.push_back(agg.Arg);
+        }
+    }
+    std::ranges::sort(referenced, [](const auto& lhs, const auto& rhs) {
+        return lhs.Index < rhs.Index;
+    });
+    referenced.erase(std::unique(
+        referenced.begin(), referenced.end(),
+        [](const auto& lhs, const auto& rhs) { return lhs.Index == rhs.Index; }),
+        referenced.end());
+
+    return TOperatorKernelSpec{
+        .Kind = EOperatorKernelKind::UnaryBlocking,
+        .OperatorName = "aggregate",
+        .InputSchemas = {std::make_shared<NQumir::NAst::TStructType>(inputType.Fields)},
+        .OutputSchema = ComputeAggregateOutputType(
+            std::make_shared<NQumir::NAst::TStructType>(inputType.Fields),
+            groupKeys, aggs),
+        .ReferencedColumns = std::move(referenced),
+        .Keys = {
+            {.Name = "group-keys", .Columns = std::move(groupColumns)},
+        },
+        .Aggregates = std::move(aggregateSpecs),
+        .Entrypoints = {
+            {.Name = "agg_dispatch", .Abi = "i64(ptr HashTable, ptr TRowSet, i64, i64)"},
+            {.Name = "agg_measure_keys", .Abi = "i64(ptr HashTable, ptr i64, i64)"},
+            {.Name = "agg_finalize", .Abi = "i64(ptr HashTable, ptr ptr TColumn, ptr ptr i64, ptr ptr u8, i64)"},
+        },
+        .SourceModules = {"qumirdb"},
+    };
+}
+
 void PrintKernelSpec(std::ostream& out, const TOperatorKernelSpec& spec) {
     out << "kernel-spec " << spec.OperatorName << "\n";
     out << "  kind: " << KernelKindName(spec.Kind) << "\n";
@@ -178,6 +253,22 @@ void PrintKernelSpec(std::ostream& out, const TOperatorKernelSpec& spec) {
                 }
             }
             out << "\n";
+        }
+    }
+
+    out << "  aggregates:";
+    if (spec.Aggregates.empty()) {
+        out << " []\n";
+    } else {
+        out << "\n";
+        for (const auto& agg : spec.Aggregates) {
+            out << "    " << agg.Name << ": " << agg.Func << "(";
+            if (agg.HasArg) {
+                PrintColumn(out, agg.Arg);
+            } else {
+                out << "*";
+            }
+            out << ")\n";
         }
     }
 
