@@ -201,10 +201,6 @@ public:
     // - all reducer states are i64. count(*) aggs (Arg == nullptr) pass 0.
     TAggregateKernels CompileAggregate(
         const NKernel::TOperatorKernelSpec& spec);
-    TAggregateKernels CompileAggregate(
-        const NQumir::NAst::TStructType& inputType,
-        const std::vector<std::string>& groupKeys,
-        const std::vector<TAggregateSpec>& aggs);
 
     // Compiles the symmetric hash join kernels for the equi-key pairs `keys`
     // (parallel left/right column names) over rows of leftType/rightType.
