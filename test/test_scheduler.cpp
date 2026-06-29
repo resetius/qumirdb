@@ -164,6 +164,7 @@ struct TGather : IConnection {
         assert(dst_id == 0);
 
         auto from = (FetchId_ + 1) % Size_;
+        FetchId_ = from;
         for (size_t i = 0; i < Size_; ++i) {
             auto index = (from + i) % Size_;
             if (!Outputs_[index].empty()) {
@@ -185,23 +186,81 @@ struct TGather : IConnection {
     std::vector<std::deque<TRowSet>> Outputs_;
 };
 
+// many -> one
+// assume records are sorted
 struct TMerge : IConnection {
+    bool CanPush(int src_id) {
+        return Outputs_[src_id].size() < MaxOutput;
+    }
+
+    void Finish(int src_id) {
+        if (Flags_[src_id] == 0) {
+            NFinished_ ++;
+        }
+        Flags_[src_id] = 1;
+    }
+
     void Push(int src_id, TRowSet&& rowSet) {
+        Outputs_[src_id].emplace_back(std::move(rowSet));
     }
 
     EFetchState Fetch(int dst_id, TRowSet& batch) {
         assert(dst_id == 0);
     }
+
+    size_t Size_;
+    size_t FetchId_ = 0;
+    size_t NFinished_ = 0;
+    std::vector<int> Flags_;
+    std::vector<std::deque<TRowSet>> Outputs_;
 };
 
 struct THashShuffle : IConnection {
-    THashShuffle() { }
+    bool CanPush(int src_id) {
+        // return Outputs_[src_id].size() < MaxOutput;
+        // TODO: check size in bytes
+        return true;
+    }
+
+    void Finish(int src_id) {
+        if (Flags_[src_id] == 0) {
+            NFinished_ ++;
+        }
+        Flags_[src_id] = 1;
+    }
 
     void Push(int src_id, TRowSet&& rowSet) {
+        // compute hash => distribute accrose outputs
+        // hash() % DstSize
     }
 
     EFetchState Fetch(int dst_id, TRowSet& batch) {
+        auto from = (FetchIds_[dst_id] + 1) % SrcSize_;
+        FetchIds_[dst_id] = from;
+        for (size_t i = 0; i < SrcSize_; ++i) {
+            auto index = (from + i) % SrcSize_;
+            if (!Outputs_[index].empty()) {
+                batch = std::move(Outputs_[index][dst_id].front());
+                Outputs_[index][dst_id].pop_front();
+                return EFetchState::OK;
+            }
+        }
+
+        return NFinished_ == SrcSize_
+            ? EFetchState::FINISHED
+            : EFetchState::NO_DATA;
     }
+
+    size_t SrcSize_;
+    size_t DstSize_;
+    size_t NFinished_ = 0;
+
+    // FetchIds_.size() == DstSize_
+    std::vector<size_t> FetchIds_; // src id to fetch start from
+    std::vector<int> Flags_;
+
+    // src_id -> dst_id -> queue
+    std::vector<std::vector<std::deque<TRowSet>>> Outputs_;
 };
 
 struct IRuntimeNode {
