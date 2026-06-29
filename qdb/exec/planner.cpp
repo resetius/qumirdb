@@ -1,5 +1,6 @@
 #include <qdb/exec/planner.h>
 #include <qdb/exec/aggregate_exec.h>
+#include <qdb/exec/filter_exec.h>
 #include <qdb/exec/join_exec.h>
 #include <qdb/exec/project_exec.h>
 #include <qdb/exec/sort_exec.h>
@@ -186,14 +187,7 @@ std::unique_ptr<IRuntimeNode> TPhysicalPlanner::Build(const TOperatorPtr& root) 
         return std::make_unique<TRuntimeUnaryStreamingKernel>(
             std::move(input),
             input->OutputType(),
-            [dispatch = std::move(dispatch)](
-                TRowSet& rowSet,
-                TUnaryStreamingKernelState& state)
-            {
-                state.Selection.resize(rowSet.RowCount);
-                rowSet.Selection = state.Selection.data();
-                dispatch(rowSet);
-            });
+            MakeFilterProcess(std::move(dispatch)));
     }
 
     if (auto maybe = TMaybeOp<TProjectOperator>(root)) {
