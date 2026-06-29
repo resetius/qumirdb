@@ -765,15 +765,41 @@ TRuntimeUnaryBlockingKernel::TProcess MakeSortProcess(
     };
 }
 
-TRuntimeTopSort::TRuntimeTopSort(std::unique_ptr<IRuntimeNode> input,
+struct TTopSortProcessState {
+    TTopSortProcessState(
+        TTypePtr outputType,
+        std::vector<TSortKey> keys,
+        std::vector<TSortColumnRef> keyColumns,
+        TSortRadixKernel radixKernel,
+        int64_t limit,
+        int64_t batchRows);
+
+    bool Next(IRuntimeNode& input, TRowSet& rowSet);
+
+private:
+    void Materialize(IRuntimeNode& input);
+    bool TryRadixSortBatch(const TRowSet& batch, std::vector<uint32_t>& rows);
+
+    TTypePtr OutputType_;
+    std::vector<TSortKey> Keys_;
+    std::vector<TSortColumnRef> KeyColumns_;
+    TSortRadixKernel RadixKernel_;
+    int64_t Limit_ = 0;
+    int64_t BatchRows_ = kJoinOutputBatchRows;
+
+    bool Materialized_ = false;
+    std::unique_ptr<TTopSortScratch> Scratch_;
+    size_t Cursor_ = 0;
+};
+
+TTopSortProcessState::TTopSortProcessState(
     TTypePtr outputType,
     std::vector<TSortKey> keys,
     std::vector<TSortColumnRef> keyColumns,
     TSortRadixKernel radixKernel,
     int64_t limit,
     int64_t batchRows)
-    : Input_(std::move(input))
-    , OutputType_(std::move(outputType))
+    : OutputType_(std::move(outputType))
     , Keys_(std::move(keys))
     , KeyColumns_(std::move(keyColumns))
     , RadixKernel_(std::move(radixKernel))
@@ -782,9 +808,10 @@ TRuntimeTopSort::TRuntimeTopSort(std::unique_ptr<IRuntimeNode> input,
     , Scratch_(std::make_unique<TTopSortScratch>())
 {}
 
-TRuntimeTopSort::~TRuntimeTopSort() = default;
-
-bool TRuntimeTopSort::TryRadixSortBatch(const TRowSet& batch, std::vector<uint32_t>& rows) {
+bool TTopSortProcessState::TryRadixSortBatch(
+    const TRowSet& batch,
+    std::vector<uint32_t>& rows)
+{
     if (rows.empty()) {
         return true;
     }
@@ -848,7 +875,7 @@ bool TRuntimeTopSort::TryRadixSortBatch(const TRowSet& batch, std::vector<uint32
     return true;
 }
 
-void TRuntimeTopSort::Materialize() {
+void TTopSortProcessState::Materialize(IRuntimeNode& input) {
     if (Materialized_) {
         return;
     }
@@ -863,7 +890,7 @@ void TRuntimeTopSort::Materialize() {
     }
 
     TRowSet batch{};
-    while (Input_->Next(batch)) {
+    while (input.Next(batch)) {
         auto& tempRows = Scratch_->TempRows;
         auto& picks = Scratch_->Picks;
         tempRows.clear();
@@ -929,8 +956,8 @@ void TRuntimeTopSort::Materialize() {
     Materialized_ = true;
 }
 
-bool TRuntimeTopSort::Next(TRowSet& rowSet) {
-    Materialize();
+bool TTopSortProcessState::Next(IRuntimeNode& input, TRowSet& rowSet) {
+    Materialize(input);
     if (!Scratch_ || !Scratch_->State ||
         Cursor_ >= static_cast<size_t>(Scratch_->State->RowCount)) {
         return false;
@@ -965,6 +992,26 @@ bool TRuntimeTopSort::Next(TRowSet& rowSet) {
     };
     Cursor_ += n;
     return true;
+}
+
+TRuntimeUnaryBlockingKernel::TProcess MakeTopSortProcess(
+    TTypePtr outputType,
+    std::vector<TSortKey> keys,
+    std::vector<TSortColumnRef> keyColumns,
+    TSortRadixKernel radixKernel,
+    int64_t limit,
+    int64_t batchRows)
+{
+    auto state = std::make_shared<TTopSortProcessState>(
+        std::move(outputType),
+        std::move(keys),
+        std::move(keyColumns),
+        std::move(radixKernel),
+        limit,
+        batchRows);
+    return [state = std::move(state)](IRuntimeNode& input, TRowSet& rowSet) {
+        return state->Next(input, rowSet);
+    };
 }
 
 TRuntimeLimit::TRuntimeLimit(std::unique_ptr<IRuntimeNode> input,
