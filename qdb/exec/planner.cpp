@@ -1,10 +1,10 @@
 #include <qdb/exec/planner.h>
 #include <qdb/exec/aggregate_exec.h>
-#include <qdb/exec/filter_exec.h>
 #include <qdb/exec/join_exec.h>
 #include <qdb/exec/project_exec.h>
 #include <qdb/exec/sort_exec.h>
 #include <qdb/exec/source_exec.h>
+#include <qdb/exec/unary_stream_exec.h>
 #include <qdb/plan/ops/aggregate.h>
 #include <qdb/plan/ops/limit.h>
 #include <qdb/plan/ops/source.h>
@@ -183,10 +183,17 @@ std::unique_ptr<IRuntimeNode> TPhysicalPlanner::Build(const TOperatorPtr& root) 
         auto spec = NKernel::BuildFilterKernelSpec(*inputType, filter->Predicate());
         TKernelCompiler compiler(Diagnostics_);
         auto dispatch = compiler.CompileFilter(spec);
-        return std::make_unique<TRuntimeFilter>(
+        return std::make_unique<TRuntimeUnaryStreamingKernel>(
             std::move(input),
             input->OutputType(),
-            std::move(dispatch));
+            [dispatch = std::move(dispatch)](
+                TRowSet& rowSet,
+                TUnaryStreamingKernelState& state)
+            {
+                state.Selection.resize(rowSet.RowCount);
+                rowSet.Selection = state.Selection.data();
+                dispatch(rowSet);
+            });
     }
 
     if (auto maybe = TMaybeOp<TProjectOperator>(root)) {

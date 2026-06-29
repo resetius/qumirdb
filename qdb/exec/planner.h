@@ -13,7 +13,7 @@ namespace NQdb {
 //
 // Current status:
 //   - TSourceOperator    → TRuntimeSource    ✓
-//   - TFilterOperator    → TRuntimeFilter    ✓
+//   - TFilterOperator    → TRuntimeUnaryStreamingKernel ✓
 //   - TProjectOperator   → column selection if exprs are identifiers, else TODO
 //   - TAggregateOperator → TRuntimeAggregate ✓
 class TPhysicalPlanner {
