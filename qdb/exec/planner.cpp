@@ -5,6 +5,7 @@
 #include <qdb/exec/project_exec.h>
 #include <qdb/exec/sort_exec.h>
 #include <qdb/exec/source_exec.h>
+#include <qdb/exec/unary_block_exec.h>
 #include <qdb/exec/unary_stream_exec.h>
 #include <qdb/plan/ops/aggregate.h>
 #include <qdb/plan/ops/limit.h>
@@ -270,10 +271,10 @@ std::unique_ptr<IRuntimeNode> TPhysicalPlanner::Build(const TOperatorPtr& root) 
         // OutputColumns() (which was computed from the pre-pruning schema).
         auto outputType = ComputeAggregateOutputType(input->OutputType(), agg->GroupKeys(), agg->Aggs());
 
-        return std::make_unique<TRuntimeAggregate>(
+        return std::make_unique<TRuntimeUnaryBlockingKernel>(
             std::move(input),
             std::move(outputType),
-            std::move(kernels));
+            MakeAggregateProcess(std::move(kernels)));
     }
 
     if (auto maybe = TMaybeOp<TJoinOperator>(root)) {
