@@ -66,11 +66,13 @@ struct IConnection {
     virtual ~IConnection() = default;
 
     // output side
+    // src_id - номер партиции группы входных тасок
     virtual bool CanPush(int src_id) const = 0;
     virtual void Push(int src_id, TRowSet&& rowSet) = 0;
     virtual void Finish(int src_id) = 0;
 
     // input side
+    // dst_id - номер партиции группы выходных тасок
     virtual EFetchState Fetch(int dst_id, TRowSet& batch) = 0;
 };
 
@@ -141,13 +143,46 @@ struct TOneToOne : IConnection {
     std::deque<TRowSet> Output_;
 };
 
+// many -> one
 struct TGather : IConnection {
+    bool CanPush(int src_id) {
+        return Outputs_[src_id].size() < MaxOutput;
+    }
+
+    void Finish(int src_id) {
+        if (Flags_[src_id] == 0) {
+            NFinished_ ++;
+        }
+        Flags_[src_id] = 1;
+    }
+
     void Push(int src_id, TRowSet&& rowSet) {
+        Outputs_[src_id].emplace_back(std::move(rowSet));
     }
 
     EFetchState Fetch(int dst_id, TRowSet& batch) {
         assert(dst_id == 0);
+
+        auto from = (FetchId_ + 1) % Size_;
+        for (size_t i = 0; i < Size_; ++i) {
+            auto index = (from + i) % Size_;
+            if (!Outputs_[index].empty()) {
+                batch = std::move(Outputs_[index].front());
+                Outputs_[index].pop_front();
+                return EFetchState::OK;
+            }
+        }
+
+        return NFinished_ == Size_
+            ? EFetchState::FINISHED
+            : EFetchState::NO_DATA;
     }
+
+    size_t Size_;
+    size_t FetchId_ = 0;
+    size_t NFinished_ = 0;
+    std::vector<int> Flags_;
+    std::vector<std::deque<TRowSet>> Outputs_;
 };
 
 struct TMerge : IConnection {
@@ -273,7 +308,7 @@ struct TNode : virtual IRuntimeNode {
     }
 };
 
-struct TNodeWithInput : virtual TNode {
+struct TNodeWithInput : TNode {
     TNodeWithInput()
     { }
 
@@ -319,7 +354,7 @@ struct TNodeWithInput : virtual TNode {
     std::optional<TRowSet> CurrentInput_;
 };
 
-struct TScan : virtual TNode {
+struct TScan : TNode {
     int NSets;
     int Seed;
 
@@ -361,7 +396,7 @@ struct TScan : virtual TNode {
     }
 };
 
-struct TFilter : virtual TNodeWithInput {
+struct TFilter : TNodeWithInput {
     int Seed;
     int Percent;
 
@@ -382,7 +417,7 @@ struct TFilter : virtual TNodeWithInput {
     }
 };
 
-struct TPrinter : virtual TNodeWithInput {
+struct TPrinter : TNodeWithInput {
     TPrinter()
     { }
 
