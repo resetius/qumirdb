@@ -450,6 +450,36 @@ void TRuntimeJoin::DrainStreamingPairs(const TRowSet& streamBatch, EJoinSide str
     PairBuffer_.Count = 0;
 }
 
+void TRuntimeJoin::FinalizeSemiAntiJoin() {
+    // Phase 1: consume all left batches -> LeftTable_ + LeftRows_.
+    // Right table is still empty so jt_emit_and_insert finds no matches
+    // and emits no pairs; left row IDs accumulate in LeftTable_ buckets.
+    TRowSet batch{};
+    while (Left_->Next(batch)) {
+        int32_t idx = LeftRows_.PushBatch(batch);
+        Kernels_.ProcessLeft(LeftTable_.data(), RightTable_.data(),
+            const_cast<TRowSet*>(&LeftRows_.Batch(idx)), idx, &PairBuffer_,
+            const_cast<TRowSet*>(LeftRows_.Data()),
+            const_cast<TRowSet*>(RightRows_.Data()));
+        PairBuffer_.Count = 0;
+    }
+    // Phase 2: consume all right batches -> RightTable_ (keys only,
+    // no row IDs). Batches are released immediately; no RightRows_ store.
+    while (Right_->Next(batch)) {
+        Kernels_.InsertKeyOnly(RightTable_.data(), nullptr,
+            &batch, 0, &PairBuffer_);
+        Release(&batch);
+        PairBuffer_.Count = 0;
+    }
+    // Phase 3: finalize; scan left table, probe right table, emit.
+    Kernels_.FinalizeAntiSemi(LeftTable_.data(), RightTable_.data(), &PairBuffer_);
+    for (int64_t i = 0; i < PairBuffer_.Count; ++i) {
+        Builder_->AddPair(PairBuffer_.Data[2 * i], PairBuffer_.Data[2 * i + 1]);
+    }
+    PairBuffer_.Count = 0;
+    SemiAntiFinalized_ = true;
+}
+
 void TRuntimeJoin::FinalizeOuterJoin() {
     if (JoinType_ == EJoinType::Left) {
         Kernels_.FinalizeOuter(LeftTable_.data(), RightTable_.data(), &PairBuffer_);
@@ -668,33 +698,7 @@ bool TRuntimeJoin::Next(TRowSet& rowSet) {
 
     if (JoinType_ == EJoinType::LeftSemi || JoinType_ == EJoinType::LeftAnti) {
         if (!SemiAntiFinalized_) {
-            // Phase 1: consume all left batches → LeftTable_ + LeftRows_.
-            // Right table is still empty so jt_emit_and_insert finds no matches
-            // and emits no pairs — left row IDs accumulate in LeftTable_ buckets.
-            TRowSet batch{};
-            while (Left_->Next(batch)) {
-                int32_t idx = LeftRows_.PushBatch(batch);
-                Kernels_.ProcessLeft(LeftTable_.data(), RightTable_.data(),
-                    const_cast<TRowSet*>(&LeftRows_.Batch(idx)), idx, &PairBuffer_,
-                    const_cast<TRowSet*>(LeftRows_.Data()),
-                    const_cast<TRowSet*>(RightRows_.Data()));
-                PairBuffer_.Count = 0;
-            }
-            // Phase 2: consume all right batches → RightTable_ (keys only,
-            // no row IDs). Batches are released immediately; no RightRows_ store.
-            while (Right_->Next(batch)) {
-                Kernels_.InsertKeyOnly(RightTable_.data(), nullptr,
-                    &batch, 0, &PairBuffer_);
-                Release(&batch);
-                PairBuffer_.Count = 0;
-            }
-            // Phase 3: finalize — scan left table, probe right table, emit.
-            Kernels_.FinalizeAntiSemi(LeftTable_.data(), RightTable_.data(), &PairBuffer_);
-            for (int64_t i = 0; i < PairBuffer_.Count; ++i) {
-                Builder_->AddPair(PairBuffer_.Data[2 * i], PairBuffer_.Data[2 * i + 1]);
-            }
-            PairBuffer_.Count = 0;
-            SemiAntiFinalized_ = true;
+            FinalizeSemiAntiJoin();
         }
         return DrainBuilder(*Builder_, rowSet);
     }
