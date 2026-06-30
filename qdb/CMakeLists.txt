@@ -47,6 +47,7 @@ add_library(qumirdb
     exec/source_exec.cpp
     exec/unary_stream_exec.cpp
     exec/unary_block_exec.cpp
+    exec/binary_exec.cpp
     exec/filter_exec.cpp
     exec/project_exec.cpp
     exec/aggregate_exec.cpp
