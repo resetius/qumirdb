@@ -221,6 +221,7 @@ private:
     bool DrainReadyOutput(TRowSet& rowSet);
     void DrainKernelPairs();
     void DrainStreamingPairs(const TRowSet& streamBatch, EJoinSide streamSide);
+    void FinalizeResidualSemiAntiJoin();
     void FinalizeSemiAntiJoin();
     void FinalizeOuterJoin();
     // Residual LeftSemi/LeftAnti: collect the (already filter-pruned) left row

@@ -450,6 +450,40 @@ void TRuntimeJoin::DrainStreamingPairs(const TRowSet& streamBatch, EJoinSide str
     PairBuffer_.Count = 0;
 }
 
+void TRuntimeJoin::FinalizeResidualSemiAntiJoin() {
+    // Phase 1: drain all inputs; pairs are filtered inside the kernel.
+    TRowSet batch{};
+    while (Left_->Next(batch)) {
+        int32_t bi = LeftRows_.PushBatch(batch);
+        Kernels_.ProcessLeft(LeftTable_.data(), RightTable_.data(),
+            const_cast<TRowSet*>(&LeftRows_.Batch(bi)), bi, &PairBuffer_,
+            const_cast<TRowSet*>(LeftRows_.Data()),
+            const_cast<TRowSet*>(RightRows_.Data()));
+        CollectMatchedLeftIds();
+    }
+    while (Right_->Next(batch)) {
+        Kernels_.ProbeRightStream(LeftTable_.data(), &batch, -1, &PairBuffer_,
+            const_cast<TRowSet*>(LeftRows_.Data()),
+            const_cast<TRowSet*>(RightRows_.Data()));
+        CollectMatchedLeftIds();
+        Release(&batch);
+    }
+
+    // Phase 2: emit each left row once based on match membership.
+    for (int32_t b = 0; b < LeftRows_.BatchCount(); ++b) {
+        const int32_t cnt = LeftRows_.Batch(b).RowCount;
+        for (int32_t r = 0; r < cnt; ++r) {
+            const TRowId id = MakeRowId(b, r);
+            const bool matched = MatchedLeftIds_.count(id) > 0;
+            if ((JoinType_ == EJoinType::LeftSemi && matched) ||
+                (JoinType_ == EJoinType::LeftAnti && !matched)) {
+                Builder_->AddPair(id, kNullRowId);
+            }
+        }
+    }
+    ResidualSemiAntiDone_ = true;
+}
+
 void TRuntimeJoin::FinalizeSemiAntiJoin() {
     // Phase 1: consume all left batches -> LeftTable_ + LeftRows_.
     // Right table is still empty so jt_emit_and_insert finds no matches
@@ -661,37 +695,7 @@ bool TRuntimeJoin::Next(TRowSet& rowSet) {
         && HasResidual_)
     {
         if (!ResidualSemiAntiDone_) {
-            // Phase 1: drain all inputs; pairs are filtered inside the kernel.
-            TRowSet batch{};
-            while (Left_->Next(batch)) {
-                int32_t bi = LeftRows_.PushBatch(batch);
-                Kernels_.ProcessLeft(LeftTable_.data(), RightTable_.data(),
-                    const_cast<TRowSet*>(&LeftRows_.Batch(bi)), bi, &PairBuffer_,
-                    const_cast<TRowSet*>(LeftRows_.Data()),
-                    const_cast<TRowSet*>(RightRows_.Data()));
-                CollectMatchedLeftIds();
-            }
-            while (Right_->Next(batch)) {
-                Kernels_.ProbeRightStream(LeftTable_.data(), &batch, -1, &PairBuffer_,
-                    const_cast<TRowSet*>(LeftRows_.Data()),
-                    const_cast<TRowSet*>(RightRows_.Data()));
-                CollectMatchedLeftIds();
-                Release(&batch);
-            }
-
-            // Phase 2: emit each left row once based on match membership.
-            for (int32_t b = 0; b < LeftRows_.BatchCount(); ++b) {
-                const int32_t cnt = LeftRows_.Batch(b).RowCount;
-                for (int32_t r = 0; r < cnt; ++r) {
-                    const TRowId id = MakeRowId(b, r);
-                    const bool matched = MatchedLeftIds_.count(id) > 0;
-                    if ((JoinType_ == EJoinType::LeftSemi && matched) ||
-                        (JoinType_ == EJoinType::LeftAnti && !matched)) {
-                        Builder_->AddPair(id, kNullRowId);
-                    }
-                }
-            }
-            ResidualSemiAntiDone_ = true;
+            FinalizeResidualSemiAntiJoin();
         }
         return DrainBuilder(*Builder_, rowSet);
     }
