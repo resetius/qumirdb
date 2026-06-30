@@ -56,6 +56,7 @@ add_library(qumirdb
     exec/planner.cpp
     scheduler/connection.cpp
     scheduler/graph.cpp
+    scheduler/runtime_adapter.cpp
     scheduler/single_threaded_scheduler.cpp
     scheduler/threaded_scheduler.cpp
 )
