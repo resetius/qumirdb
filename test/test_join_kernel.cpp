@@ -181,7 +181,9 @@ TEST(CompileJoin, ProducesWorkingInnerJoinKernels) {
     TStructType rightType({{"rk", i64()}, {"rv", i64()}});
 
     TKernelCompiler compiler;
-    auto kernels = compiler.CompileJoin(leftType, rightType, {{"lk", "rk"}}, EJoinType::Inner);
+    auto spec = NKernel::BuildJoinKernelSpec(
+        leftType, rightType, {{"lk", "rk"}}, EJoinType::Inner);
+    auto kernels = compiler.CompileJoin(spec);
 
     std::vector<int64_t> lkeys = {1, 2, 1};
     std::vector<int64_t> rkeys = {1, 1, 3};
@@ -225,7 +227,9 @@ TEST(CompileJoin, ProbeOnlyStreamsWithoutInserting) {
     TStructType rightType({{"rk", i64()}, {"rv", i64()}});
 
     TKernelCompiler compiler;
-    auto kernels = compiler.CompileJoin(leftType, rightType, {{"lk", "rk"}}, EJoinType::Inner);
+    auto spec = NKernel::BuildJoinKernelSpec(
+        leftType, rightType, {{"lk", "rk"}}, EJoinType::Inner);
+    auto kernels = compiler.CompileJoin(spec);
 
     std::vector<int64_t> lkeys = {1, 2, 1};
     std::vector<int64_t> rkeys = {1, 1, 3};
@@ -287,20 +291,24 @@ TEST(CompileJoin, RejectsStringKeyNonInnerAndIncompatible) {
     // String keys are not supported yet (fixed-key scope).
     TStructType strLeft({{"lk", std::make_shared<TStringType>()}});
     TStructType strRight({{"rk", std::make_shared<TStringType>()}});
-    EXPECT_THROW(compiler.CompileJoin(strLeft, strRight, {{"lk", "rk"}}, EJoinType::Inner),
-                 NQumir::TError);
+    auto stringSpec = NKernel::BuildJoinKernelSpec(
+        strLeft, strRight, {{"lk", "rk"}}, EJoinType::Inner);
+    EXPECT_THROW(compiler.CompileJoin(stringSpec), NQumir::TError);
 
     TStructType leftType({{"lk", i64()}});
     TStructType rightType({{"rk", i64()}});
     // Unsupported join type (Full not implemented yet).
-    EXPECT_THROW(compiler.CompileJoin(leftType, rightType, {{"lk", "rk"}}, EJoinType::Full),
-                 NQumir::TError);
+    auto fullSpec = NKernel::BuildJoinKernelSpec(
+        leftType, rightType, {{"lk", "rk"}}, EJoinType::Full);
+    EXPECT_THROW(compiler.CompileJoin(fullSpec), NQumir::TError);
     // Missing column.
-    EXPECT_THROW(compiler.CompileJoin(leftType, rightType, {{"missing", "rk"}}, EJoinType::Inner),
-                 NQumir::TError);
+    EXPECT_THROW(NKernel::BuildJoinKernelSpec(
+        leftType, rightType, {{"missing", "rk"}}, EJoinType::Inner),
+        std::runtime_error);
     // Incompatible key types (i64 vs string).
-    EXPECT_THROW(compiler.CompileJoin(leftType, strRight, {{"lk", "rk"}}, EJoinType::Inner),
-                 NQumir::TError);
+    auto incompatibleSpec = NKernel::BuildJoinKernelSpec(
+        leftType, strRight, {{"lk", "rk"}}, EJoinType::Inner);
+    EXPECT_THROW(compiler.CompileJoin(incompatibleSpec), NQumir::TError);
 }
 
 namespace {
