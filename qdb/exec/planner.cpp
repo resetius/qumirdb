@@ -332,61 +332,13 @@ std::unique_ptr<IRuntimeNode> TPhysicalPlanner::Build(const TOperatorPtr& root) 
 
         auto spec = NKernel::BuildJoinKernelSpec(
             *leftType, *rightType, join->Keys(), join->JoinType(), join->Filter());
-        PrintKernelSpec(Diagnostics_, spec);
-
-        std::vector<std::pair<std::string, std::string>> keys;
-        keys.reserve(spec.JoinKeys.size());
-        for (const auto& key : spec.JoinKeys) {
-            keys.emplace_back(key.Left.Name, key.Right.Name);
-        }
-
-        // Residual filter: supported for Inner, LeftSemi, LeftAnti. The predicate
-        // is injected into the join kernels as jt_residual_filter (evaluated
-        // in-kernel before each emit) — see CompileJoin.
-        TTypePtr innerOutputType;  // keeps innerSt alive through CompileJoin
-        TStructType* innerSt = nullptr;
-        size_t leftFieldCount = 0;
-        if (join->Filter()) {
-            const auto jt = join->JoinType();
-            if (jt != EJoinType::Inner &&
-                jt != EJoinType::LeftSemi &&
-                jt != EJoinType::LeftAnti) {
-                throw std::runtime_error(
-                    "join residual filter is not yet supported for this join type");
-            }
-            auto innerOut = ComputeJoinOutputType(
-                left->OutputType(), right->OutputType(), EJoinType::Inner);
-            if (!innerOut) {
-                throw std::runtime_error(
-                    "residual filter: " + innerOut.error().ToString());
-            }
-            innerOutputType = *innerOut;
-            innerSt = static_cast<TStructType*>(innerOutputType.get());
-            leftFieldCount = leftType->Fields.size();
-        }
-
-        // For LeftSemi/LeftAnti + residual: compile INNER process kernels (they
-        // emit pairs; the executor dedups matched left IDs).
-        const EJoinType kernelType =
-            (join->Filter() &&
-             (join->JoinType() == EJoinType::LeftSemi ||
-              join->JoinType() == EJoinType::LeftAnti))
-            ? EJoinType::Inner
-            : join->JoinType();
 
         TKernelCompiler compiler(Diagnostics_);
-        auto kernels = compiler.CompileJoin(*leftType, *rightType, keys, kernelType,
-            join->Filter(), innerSt, leftFieldCount);
-
-        // Output type from the physical (pruned) input types.
-        auto outputType = ComputeJoinOutputType(
-            left->OutputType(), right->OutputType(), join->JoinType());
-        if (!outputType) {
-            throw std::runtime_error("join: " + outputType.error().ToString());
-        }
+        auto kernels = compiler.CompileJoin(spec);
 
         return std::make_unique<TRuntimeJoin>(
-            std::move(left), std::move(right), std::move(*outputType), std::move(kernels),
+            std::move(left), std::move(right), std::move(spec.OutputSchema),
+            std::move(kernels),
             join->JoinType(),
             /*hasResidual=*/join->Filter() != nullptr);
     }

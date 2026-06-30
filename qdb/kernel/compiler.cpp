@@ -630,6 +630,74 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
 }
 
 TJoinKernels TKernelCompiler::CompileJoin(
+    const NKernel::TOperatorKernelSpec& spec)
+{
+    using namespace NQumir::NAst;
+
+    if (spec.Kind != NKernel::EOperatorKernelKind::Binary ||
+        spec.OperatorName != "join") {
+        throw NQumir::TError("CompileJoin: expected join kernel spec");
+    }
+    if (spec.InputSchemas.size() != 2) {
+        throw NQumir::TError("CompileJoin: expected two input schemas");
+    }
+
+    auto leftType = TMaybeType<TStructType>(spec.InputSchemas[0]);
+    auto rightType = TMaybeType<TStructType>(spec.InputSchemas[1]);
+    if (!leftType || !rightType) {
+        throw NQumir::TError("CompileJoin: input schemas must be structs");
+    }
+
+    std::vector<std::pair<std::string, std::string>> keys;
+    keys.reserve(spec.JoinKeys.size());
+    for (const auto& key : spec.JoinKeys) {
+        keys.emplace_back(key.Left.Name, key.Right.Name);
+    }
+
+    const TExprPtr residualPredicate =
+        spec.Expressions.empty() ? nullptr : spec.Expressions[0];
+    if (residualPredicate &&
+        spec.JoinType != EJoinType::Inner &&
+        spec.JoinType != EJoinType::LeftSemi &&
+        spec.JoinType != EJoinType::LeftAnti) {
+        throw NQumir::TError(
+            "CompileJoin: residual filter is not yet supported for this join type");
+    }
+
+    TTypePtr innerOutputType;
+    TStructType* innerType = nullptr;
+    size_t leftFieldCount = 0;
+    if (residualPredicate) {
+        auto innerOutput = ComputeJoinOutputType(
+            spec.InputSchemas[0], spec.InputSchemas[1], EJoinType::Inner);
+        if (!innerOutput) {
+            throw NQumir::TError(
+                "CompileJoin: residual filter: " + innerOutput.error().ToString());
+        }
+        innerOutputType = *innerOutput;
+        innerType = static_cast<TStructType*>(innerOutputType.get());
+        leftFieldCount = leftType.Cast()->Fields.size();
+    }
+
+    const EJoinType kernelType =
+        (residualPredicate &&
+         (spec.JoinType == EJoinType::LeftSemi ||
+          spec.JoinType == EJoinType::LeftAnti))
+        ? EJoinType::Inner
+        : spec.JoinType;
+
+    if (Diagnostics_) {
+        *Diagnostics_ << "\n========== KERNEL SPEC ==========\n";
+        NKernel::PrintKernelSpec(*Diagnostics_, spec);
+        *Diagnostics_ << "=================================\n";
+    }
+
+    return CompileJoin(
+        *leftType.Cast(), *rightType.Cast(), keys, kernelType,
+        residualPredicate, innerType, leftFieldCount);
+}
+
+TJoinKernels TKernelCompiler::CompileJoin(
     const NQumir::NAst::TStructType& leftType,
     const NQumir::NAst::TStructType& rightType,
     const std::vector<std::pair<std::string, std::string>>& keys,
