@@ -205,6 +205,8 @@ public:
     // residual predicate the process functions are generated as INNER (they emit
     // pairs); the executor dedups matched left IDs.
     TJoinKernels CompileJoin(
+        const NKernel::TOperatorKernelSpec& spec);
+    TJoinKernels CompileJoin(
         const NQumir::NAst::TStructType& leftType,
         const NQumir::NAst::TStructType& rightType,
         const std::vector<std::pair<std::string, std::string>>& keys,
