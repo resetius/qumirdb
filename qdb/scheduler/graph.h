@@ -3,6 +3,7 @@
 #include <qdb/scheduler/connection.h>
 #include <qdb/scheduler/state.h>
 
+#include <atomic>
 #include <cstddef>
 #include <memory>
 #include <string>
@@ -17,6 +18,7 @@ struct TTaskNode {
     ITaskNode* Task = nullptr;
     std::vector<TTaskEdge*> Inbound;
     std::vector<TTaskEdge*> Outbound;
+    std::atomic<ETaskState> State = ETaskState::Idle;
 };
 
 struct TTaskEdge {

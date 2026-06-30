@@ -55,6 +55,7 @@ void TTaskGraph::Build() {
     for (auto& node : Nodes_) {
         node->Inbound.clear();
         node->Outbound.clear();
+        node->State.store(ETaskState::Idle, std::memory_order_release);
     }
 
     for (auto& edge : Edges_) {
