@@ -11,6 +11,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <thread>
 
 namespace {
 
@@ -463,6 +464,7 @@ struct TGraph {
     std::unordered_map<IRuntimeNode*, TDagNode*> NodeToDagNode;
     TDagNode* Root = nullptr;
     std::vector<TDagNode*> Leaves;
+    int Size = 0;
 
     void Build() {
         DagNodes.clear();
@@ -514,6 +516,8 @@ struct TGraph {
                 node->Outbound.emplace_back(dstNode);
             }
         }
+
+        Size = DagNodes.size();
     }
 
     IConnection& GetConnection(IRuntimeNode* src, IRuntimeNode* dst) const {
@@ -875,6 +879,84 @@ struct TScheduler {
     }
 };
 
+struct TThreadedScheduler {
+    TGraph& Graph;
+    std::list<TDagNode*> Ready;
+    std::unordered_set<TDagNode*> Scheduled;
+    std::unordered_set<TDagNode*> Finished;
+    std::mutex Mutex;
+
+    std::atomic<int> NFinished = 0;
+    int NThreads;
+
+    TThreadedScheduler(TGraph& g, int nthreads = 2)
+        : Graph(g)
+        , NThreads(nthreads)
+    {
+        Schedule(Graph.Root);
+    }
+
+    void Schedule(TDagNode* node) {
+        if (!Scheduled.contains(node)) {
+            Ready.emplace_back(node);
+            Scheduled.emplace(node);
+        }
+    }
+
+    void ScheduleInput(TDagNode* node) {
+        for (auto in : node->Inbound) {
+            Schedule(in);
+        }
+    }
+
+    void ScheduleOutput(TDagNode* node) {
+        for (auto out : node->Outbound) {
+            Schedule(out);
+        }
+    }
+
+    void Run() {
+        std::vector<std::unique_ptr<std::thread>> threads;
+        threads.reserve(NThreads);
+        for (int i = 0; i < NThreads; ++i) {
+            threads.emplace_back(
+                std::make_unique<std::thread>([&](){ Work(); })
+            );
+        }
+        for (int i = 0; i < NThreads; ++i) {
+            threads[i]->join();
+        }
+    }
+
+    void Work() {
+        while (NFinished != Graph.Size) {
+            TDagNode* node;
+            {
+                std::scoped_lock lock(Mutex);
+                node = Ready.front(); Ready.pop_front();
+                Scheduled.erase(node);
+            }
+            auto state = node->Compute->Execute();
+
+            std::scoped_lock lock(Mutex);
+            if (state == EState::NEED_DATA) {
+                ScheduleInput(node);
+            } else if (state == EState::BLOCKED_OUTPUT) {
+                ScheduleOutput(node);
+            } else if (state == EState::FINISHED) {
+                if (!Finished.contains(node)) {
+                    Finished.insert(node);
+                    ++NFinished;
+                }
+                ScheduleOutput(node);
+            } else if (state == EState::OK) {
+                Schedule(node);
+                ScheduleOutput(node);
+            }
+        }
+    }
+};
+
 } // namespace
 
 TEST(Scheduler, Basic) {
@@ -910,6 +992,26 @@ TEST(Scheduler, Async) {
     ASSERT_NE(pg->Root, nullptr);
 
     TScheduler scheduler(*pg);
+    scheduler.Run();
+}
+
+TEST(Scheduler, AsyncThreads) {
+    int inputSets = 16;
+    auto scan = std::make_unique<TScan>(inputSets, 42);
+    auto filter = std::make_unique<TFilter>(43, 30);
+    auto printer = std::make_unique<TPrinter>();
+
+    TGraph g;
+    g.Connect(scan.get(), filter.get(), EConnectionKind::OneToOne);
+    g.Connect(filter.get(), printer.get(), EConnectionKind::Gather);
+    g.Build();
+
+    auto pg = g.Partition();
+    ASSERT_NE(pg, nullptr);
+    EXPECT_EQ(pg->Leaves.size(), 2u);
+    ASSERT_NE(pg->Root, nullptr);
+
+    TThreadedScheduler scheduler(*pg);
     scheduler.Run();
 }
 
