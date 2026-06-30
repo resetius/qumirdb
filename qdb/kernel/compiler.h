@@ -147,13 +147,6 @@ public:
     // type). Only computed (non-ident) columns go through this kernel.
     using TProjectDispatch = std::function<void(TRowSet* in, void** outBuffers)>;
 
-    // Radix sort dispatch over a contiguous key array. `values` points to an
-    // array whose concrete element type is selected by CompileRadixSortIndices.
-    // `indices` is sorted in place, preserving equal-key order.
-    using TSortRadixDispatch = std::function<void(
-        void* values, uint32_t* indices, uint32_t* work, uint32_t* counts,
-        int64_t n, bool desc)>;
-
     using TSortRadixCompositeDispatch = std::function<void(
         void** values, uint32_t* indices, uint32_t* work, uint32_t* counts,
         int64_t n, bool* descs)>;
@@ -182,9 +175,6 @@ public:
     // inferred output type of computedExprs[k] (see InferProjectExprType). The
     // kernel writes each expression to its output buffer, casting to that type.
     TProjectDispatch CompileProject(const NKernel::TOperatorKernelSpec& spec);
-
-    TSortRadixDispatch CompileRadixSortIndices(
-        const NQumir::NAst::TTypePtr& type);
 
     TSortRadixCompositeDispatch CompileRadixSortComposite(
         const std::vector<NQumir::NAst::TTypePtr>& types);
