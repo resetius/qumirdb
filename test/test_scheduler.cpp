@@ -1,8 +1,15 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <cassert>
 #include <deque>
+#include <iostream>
 #include <vector>
 #include <list>
+#include <memory>
+#include <optional>
+#include <string>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace {
@@ -65,6 +72,9 @@ enum class EFetchState {
 struct IConnection {
     virtual ~IConnection() = default;
 
+    virtual EConnectionKind Kind() const = 0;
+    virtual void Resize(size_t srcSize, size_t dstSize) = 0;
+
     // output side
     // src_id - номер партиции группы входных тасок
     virtual bool CanPush(int src_id) const = 0;
@@ -112,44 +122,74 @@ struct TOutputPort {
 static constexpr int MaxOutput = 1;
 
 struct TOneToOne : IConnection {
+    TOneToOne() {
+        Resize(1, 1);
+    }
+
+    EConnectionKind Kind() const override {
+        return EConnectionKind::OneToOne;
+    }
+
+    void Resize(size_t srcSize, size_t dstSize) override {
+        assert(srcSize == dstSize);
+        Size_ = srcSize;
+        Finished_.assign(Size_, 0);
+        Outputs_.clear();
+        Outputs_.resize(Size_);
+    }
+
     // Output
     bool CanPush(int src_id) const override {
-        assert(src_id == 0);
-        return (Output_.size() < MaxOutput);
+        assert(src_id >= 0 && static_cast<size_t>(src_id) < Size_);
+        return (Outputs_[src_id].size() < MaxOutput);
     }
 
     void Push(int src_id, TRowSet&& rowSet) override {
-        assert(src_id == 0);
-        Output_.emplace_back(std::move(rowSet));
+        assert(src_id >= 0 && static_cast<size_t>(src_id) < Size_);
+        Outputs_[src_id].emplace_back(std::move(rowSet));
     }
 
     void Finish(int src_id) override {
-        assert(src_id == 0);
-        Finished_ = true;
+        assert(src_id >= 0 && static_cast<size_t>(src_id) < Size_);
+        Finished_[src_id] = 1;
     }
 
     // Input
     EFetchState Fetch(int dst_id, TRowSet& rowSet) override {
-        assert(dst_id == 0);
-        if (!Output_.empty()) {
-            rowSet = std::move(Output_.front()); Output_.pop_front();
+        assert(dst_id >= 0 && static_cast<size_t>(dst_id) < Size_);
+        if (!Outputs_[dst_id].empty()) {
+            rowSet = std::move(Outputs_[dst_id].front()); Outputs_[dst_id].pop_front();
             return EFetchState::OK;
         }
 
-        return Finished_ ? EFetchState::FINISHED : EFetchState::NO_DATA;
+        return Finished_[dst_id] ? EFetchState::FINISHED : EFetchState::NO_DATA;
     }
 
-    bool Finished_ = false;
-    std::deque<TRowSet> Output_;
+    size_t Size_ = 0;
+    std::vector<int> Finished_;
+    std::vector<std::deque<TRowSet>> Outputs_;
 };
 
 // many -> one
 struct TGather : IConnection {
     TGather(size_t partitions = 1)
-        : Size_(partitions)
-        , Flags_(Size_)
-        , Outputs_(Size_)
-    { }
+    {
+        Resize(partitions, 1);
+    }
+
+    EConnectionKind Kind() const override {
+        return EConnectionKind::Gather;
+    }
+
+    void Resize(size_t srcSize, size_t dstSize) override {
+        assert(dstSize == 1);
+        Size_ = srcSize;
+        FetchId_ = 0;
+        NFinished_ = 0;
+        Flags_.assign(Size_, 0);
+        Outputs_.clear();
+        Outputs_.resize(Size_);
+    }
 
     bool CanPush(int src_id) const override {
         return Outputs_[src_id].size() < MaxOutput;
@@ -195,23 +235,38 @@ struct TGather : IConnection {
 // many -> one
 // assume records are sorted
 struct TMerge : IConnection {
-    bool CanPush(int src_id) {
+    EConnectionKind Kind() const override {
+        return EConnectionKind::Merge;
+    }
+
+    void Resize(size_t srcSize, size_t dstSize) override {
+        assert(dstSize == 1);
+        Size_ = srcSize;
+        FetchId_ = 0;
+        NFinished_ = 0;
+        Flags_.assign(Size_, 0);
+        Outputs_.clear();
+        Outputs_.resize(Size_);
+    }
+
+    bool CanPush(int src_id) const override {
         return Outputs_[src_id].size() < MaxOutput;
     }
 
-    void Finish(int src_id) {
+    void Finish(int src_id) override {
         if (Flags_[src_id] == 0) {
             NFinished_ ++;
         }
         Flags_[src_id] = 1;
     }
 
-    void Push(int src_id, TRowSet&& rowSet) {
+    void Push(int src_id, TRowSet&& rowSet) override {
         Outputs_[src_id].emplace_back(std::move(rowSet));
     }
 
-    EFetchState Fetch(int dst_id, TRowSet& batch) {
+    EFetchState Fetch(int dst_id, TRowSet& batch) override {
         assert(dst_id == 0);
+        return EFetchState::NO_DATA;
     }
 
     size_t Size_;
@@ -222,25 +277,42 @@ struct TMerge : IConnection {
 };
 
 struct THashShuffle : IConnection {
-    bool CanPush(int src_id) {
+    EConnectionKind Kind() const override {
+        return EConnectionKind::HashShuffle;
+    }
+
+    void Resize(size_t srcSize, size_t dstSize) override {
+        SrcSize_ = srcSize;
+        DstSize_ = dstSize;
+        NFinished_ = 0;
+        FetchIds_.assign(DstSize_, 0);
+        Flags_.assign(SrcSize_, 0);
+        Outputs_.clear();
+        Outputs_.resize(SrcSize_);
+        for (auto& output : Outputs_) {
+            output.resize(DstSize_);
+        }
+    }
+
+    bool CanPush(int src_id) const override {
         // return Outputs_[src_id].size() < MaxOutput;
         // TODO: check size in bytes
         return true;
     }
 
-    void Finish(int src_id) {
+    void Finish(int src_id) override {
         if (Flags_[src_id] == 0) {
             NFinished_ ++;
         }
         Flags_[src_id] = 1;
     }
 
-    void Push(int src_id, TRowSet&& rowSet) {
+    void Push(int src_id, TRowSet&& rowSet) override {
         // compute hash => distribute accrose outputs
         // hash() % DstSize
     }
 
-    EFetchState Fetch(int dst_id, TRowSet& batch) {
+    EFetchState Fetch(int dst_id, TRowSet& batch) override {
         auto from = (FetchIds_[dst_id] + 1) % SrcSize_;
         FetchIds_[dst_id] = from;
         for (size_t i = 0; i < SrcSize_; ++i) {
@@ -296,18 +368,43 @@ struct TDagNode {
     std::vector<TDagNode*> Inbound;
     std::vector<TDagNode*> Outbound;
     IRuntimeNode* Compute;
+    int Partitions = 1;
+};
+
+struct TEdgeKey {
+    IRuntimeNode* Src = nullptr;
+    IRuntimeNode* Dst = nullptr;
+
+    bool operator==(const TEdgeKey& other) const {
+        return Src == other.Src && Dst == other.Dst;
+    }
+};
+
+struct TEdgeKeyHash {
+    size_t operator()(const TEdgeKey& key) const {
+        auto src = std::hash<IRuntimeNode*>{}(key.Src);
+        auto dst = std::hash<IRuntimeNode*>{}(key.Dst);
+        return src ^ (dst + 0x9e3779b97f4a7c15ULL + (src << 6) + (src >> 2));
+    }
 };
 
 struct TGraph {
     std::unordered_map<IRuntimeNode*, std::vector<IRuntimeNode*>> Inbound;
     std::unordered_map<IRuntimeNode*, std::vector<IRuntimeNode*>> Outbound;
-    std::vector<std::unique_ptr<IConnection>> Connections;
+    std::unordered_map<TEdgeKey, std::unique_ptr<IConnection>, TEdgeKeyHash> Connections;
 
+    std::vector<std::unique_ptr<IRuntimeNode>> OwnedNodes;
     std::vector<std::unique_ptr<TDagNode>> DagNodes;
     std::unordered_map<IRuntimeNode*, TDagNode*> NodeToDagNode;
     TDagNode* Root = nullptr;
+    std::vector<TDagNode*> Leaves;
 
     void Build() {
+        DagNodes.clear();
+        NodeToDagNode.clear();
+        Root = nullptr;
+        Leaves.clear();
+
         for (auto& [dst, _] : Inbound) {
             auto dagNode = std::make_unique<TDagNode>();
             NodeToDagNode[dst] = dagNode.get();
@@ -328,6 +425,11 @@ struct TGraph {
             auto dagNode = std::make_unique<TDagNode>();
             dagNode->Compute = src;
             NodeToDagNode[src] = dagNode.get();
+
+            if (!Inbound.contains(src)) {
+                Leaves.push_back(dagNode.get());
+            }
+
             DagNodes.emplace_back(std::move(dagNode));
         }
 
@@ -349,6 +451,116 @@ struct TGraph {
         }
     }
 
+    IConnection& GetConnection(IRuntimeNode* src, IRuntimeNode* dst) const {
+        auto it = Connections.find({src, dst});
+        assert(it != Connections.end());
+        return *it->second;
+    }
+
+    std::unique_ptr<IConnection> MakeConnection(EConnectionKind kind) const {
+        switch (kind) {
+        case EConnectionKind::OneToOne:
+            return std::make_unique<TOneToOne>();
+        case EConnectionKind::Gather:
+            return std::make_unique<TGather>();
+        default:
+            assert(false);
+            return {};
+        }
+    }
+
+    void InferPartitions() {
+        std::unordered_set<TDagNode*> visited;
+        for (auto node : Leaves) {
+            InferPartitions(node, visited);
+        }
+    }
+
+    void InferPartitions(TDagNode* node, std::unordered_set<TDagNode*>& visited) {
+        if (visited.contains(node)) {
+            return;
+        }
+        visited.emplace(node);
+
+        if (node->Inbound.empty()) {
+            if (node->Partitions <= 1) {
+                node->Partitions = 2;
+            }
+        } else {
+            bool gathersInput = false;
+            int partitions = 1;
+            for (auto in : node->Inbound) {
+                auto& conn = GetConnection(in->Compute, node->Compute);
+                if (conn.Kind() == EConnectionKind::Gather ||
+                    conn.Kind() == EConnectionKind::Merge) {
+                    gathersInput = true;
+                } else {
+                    partitions = std::max(partitions, in->Partitions);
+                }
+            }
+            if (node->Partitions <= 1) {
+                node->Partitions = gathersInput ? 1 : partitions;
+            }
+        }
+
+        for (auto out : node->Outbound) {
+            InferPartitions(out, visited);
+        }
+    }
+
+    std::unique_ptr<TGraph> Partition() {
+        InferPartitions();
+
+        auto out = std::make_unique<TGraph>();
+        std::unordered_map<TDagNode*, std::vector<IRuntimeNode*>> clones;
+        for (auto& node : DagNodes) {
+            auto& nodeClones = clones[node.get()];
+            nodeClones.reserve(node->Partitions);
+            for (int i = 0; i < node->Partitions; ++i) {
+                std::unique_ptr<IRuntimeNode> clone(node->Compute->Clone());
+                nodeClones.push_back(clone.get());
+                out->OwnedNodes.emplace_back(std::move(clone));
+            }
+        }
+
+        for (auto& [edge, conn] : Connections) {
+            auto srcNode = NodeToDagNode[edge.Src];
+            auto dstNode = NodeToDagNode[edge.Dst];
+            auto& srcClones = clones[srcNode];
+            auto& dstClones = clones[dstNode];
+
+            auto newConn = MakeConnection(conn->Kind());
+            newConn->Resize(srcClones.size(), dstClones.size());
+            auto* connPtr = newConn.get();
+
+            if (conn->Kind() == EConnectionKind::OneToOne) {
+                assert(srcClones.size() == dstClones.size());
+                for (size_t i = 0; i < srcClones.size(); ++i) {
+                    srcClones[i]->SetOutputPort(TOutputPort(connPtr, static_cast<int>(i)));
+                    dstClones[i]->SetInputPort(TInputPort(connPtr, static_cast<int>(i)));
+                    out->Outbound[srcClones[i]].push_back(dstClones[i]);
+                    out->Inbound[dstClones[i]].push_back(srcClones[i]);
+                }
+            } else if (conn->Kind() == EConnectionKind::Gather) {
+                assert(dstClones.size() == 1);
+                for (size_t i = 0; i < srcClones.size(); ++i) {
+                    srcClones[i]->SetOutputPort(TOutputPort(connPtr, static_cast<int>(i)));
+                    out->Outbound[srcClones[i]].push_back(dstClones[0]);
+                    out->Inbound[dstClones[0]].push_back(srcClones[i]);
+                }
+                dstClones[0]->SetInputPort(TInputPort(connPtr, 0));
+            } else {
+                assert(false);
+            }
+
+            out->Connections.emplace(
+                TEdgeKey{srcClones.front(), dstClones.front()}, std::move(newConn));
+        }
+
+        out->Build();
+        return out;
+    }
+
     void Connect(IRuntimeNode* src, IRuntimeNode* dst, EConnectionKind kind)
     {
         Inbound[dst].push_back(src);
@@ -359,14 +571,14 @@ struct TGraph {
             auto conn = std::make_unique<TOneToOne>();
             src->SetOutputPort(TOutputPort(conn.get(), 0));
             dst->SetInputPort(TInputPort(conn.get(), 0));
-            Connections.emplace_back(std::move(conn));
+            Connections.emplace(TEdgeKey{src, dst}, std::move(conn));
             break;
         }
         case EConnectionKind::Gather: {
             auto conn = std::make_unique<TGather>();
             src->SetOutputPort(TOutputPort(conn.get(), 0));
             dst->SetInputPort(TInputPort(conn.get(), 0));
-            Connections.emplace_back(std::move(conn));
+            Connections.emplace(TEdgeKey{src, dst}, std::move(conn));
             break;
         }
         default:
@@ -627,7 +839,12 @@ TEST(Scheduler, Async) {
     g.Connect(filter.get(), printer.get(), EConnectionKind::Gather);
     g.Build();
 
-    TScheduler scheduler(g);
+    auto pg = g.Partition();
+    ASSERT_NE(pg, nullptr);
+    EXPECT_EQ(pg->Leaves.size(), 2u);
+    ASSERT_NE(pg->Root, nullptr);
+
+    TScheduler scheduler(*pg);
     scheduler.Run();
 }
 
