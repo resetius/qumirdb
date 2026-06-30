@@ -1,0 +1,84 @@
+#pragma once
+
+#include <cstddef>
+
+namespace NQdb {
+namespace NScheduler {
+
+enum class EExecutionMode {
+    Serial = 0,
+    SingleThreadedScheduler = 1,
+    ThreadedScheduler = 2,
+};
+
+enum class EScanSplitStrategy {
+    Auto = 0,
+    RowGroupRange = 1,
+    SerialRead = 2,
+};
+
+struct TSchedulerSettings {
+    EExecutionMode Mode = EExecutionMode::Serial;
+    size_t WorkerCount = 1;
+    size_t ReadyQueueCapacity = 1024;
+};
+
+struct TPartitioningSettings {
+    size_t DefaultPartitionCount = 1;
+    size_t MaxPartitionCount = 1;
+    size_t MinSplitRows = 0;
+    size_t MinSplitBytes = 0;
+};
+
+struct TQueueSettings {
+    size_t RowsetCapacityPerLane = 1;
+    size_t MaxQueuedBytes = 0;
+    bool EnableDebugCounters = false;
+};
+
+struct TScanSplitSettings {
+    EScanSplitStrategy Strategy = EScanSplitStrategy::Auto;
+    size_t TargetRowsPerTask = 0;
+    size_t TargetBytesPerTask = 0;
+    size_t MinRowsPerTask = 0;
+    size_t MaxScanTasks = 1;
+    size_t RowGroupCoalescingFactor = 1;
+    size_t TinyInputRowsThreshold = 0;
+};
+
+struct THashShuffleSettings {
+    size_t PartitionCount = 1;
+    size_t MaxPartitionCount = 1;
+    size_t MaxProducerLanes = 1;
+    size_t MaxQueuedRowsetsPerLane = 1;
+    size_t MaxQueuedBytesPerLane = 0;
+    size_t TargetOutputBatchRows = 0;
+    size_t TargetOutputBatchBytes = 0;
+    size_t SerialFallbackRowsThreshold = 0;
+};
+
+struct TSortSettings {
+    size_t LocalPartitionCount = 1;
+    size_t MergeFanIn = 2;
+    size_t MergeBatchRows = 0;
+    size_t LocalTopLimitMultiplier = 1;
+};
+
+struct TKernelHelperSettings {
+    bool EnableRowsetHashKernel = true;
+    bool EnableCompareKernel = true;
+    size_t ScratchVectorSize = 0;
+};
+
+struct TSettings {
+    TSchedulerSettings Scheduler;
+    TPartitioningSettings Partitioning;
+    TQueueSettings Queue;
+    TScanSplitSettings ScanSplit;
+    THashShuffleSettings HashShuffle;
+    TSortSettings Sort;
+    TKernelHelperSettings KernelHelper;
+};
+
+} // namespace NScheduler
+} // namespace NQdb
