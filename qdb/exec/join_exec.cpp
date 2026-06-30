@@ -682,44 +682,37 @@ void TRuntimeJoin::PullOneInnerInputBatch() {
     }
 }
 
-bool TRuntimeJoin::Next(TRowSet& rowSet) {
-    EnsureInit();
-
-    if (DrainReadyOutput(rowSet)) return true;
-
-    // ── LeftSemi / LeftAnti + residual filter ────────────────────────────────
+bool TRuntimeJoin::NextResidualSemiAnti(TRowSet& rowSet) {
     // The join kernels are compiled as INNER (they emit pairs), and the injected
     // jt_residual_filter prunes pairs in-kernel. We collect the surviving left
     // row IDs, then emit each left row once (SEMI: matched, ANTI: unmatched).
-    if ((JoinType_ == EJoinType::LeftSemi || JoinType_ == EJoinType::LeftAnti)
-        && HasResidual_)
-    {
-        if (!ResidualSemiAntiDone_) {
-            FinalizeResidualSemiAntiJoin();
-        }
-        return DrainBuilder(*Builder_, rowSet);
+    if (!ResidualSemiAntiDone_) {
+        FinalizeResidualSemiAntiJoin();
     }
+    return DrainBuilder(*Builder_, rowSet);
+}
 
-    if (JoinType_ == EJoinType::LeftSemi || JoinType_ == EJoinType::LeftAnti) {
-        if (!SemiAntiFinalized_) {
-            FinalizeSemiAntiJoin();
-        }
-        return DrainBuilder(*Builder_, rowSet);
+bool TRuntimeJoin::NextSemiAnti(TRowSet& rowSet) {
+    if (!SemiAntiFinalized_) {
+        FinalizeSemiAntiJoin();
     }
+    return DrainBuilder(*Builder_, rowSet);
+}
 
+bool TRuntimeJoin::NextOuter(TRowSet& rowSet) {
     // LEFT / RIGHT OUTER: pipelined streaming (same as INNER) + deferred final scan.
-    if (JoinType_ == EJoinType::Left || JoinType_ == EJoinType::Right) {
-        for (;;) {
-            if (DrainBuilder(*Builder_, rowSet)) return true;
-            if (OuterFinalized_) return false;
-            if (!BothDone_) {
-                PullOneInputBatch();
-            } else {
-                FinalizeOuterJoin();
-            }
+    for (;;) {
+        if (DrainBuilder(*Builder_, rowSet)) return true;
+        if (OuterFinalized_) return false;
+        if (!BothDone_) {
+            PullOneInputBatch();
+        } else {
+            FinalizeOuterJoin();
         }
     }
+}
 
+bool TRuntimeJoin::NextInner(TRowSet& rowSet) {
     // INNER join: pipelined — pull one batch per iteration. Residual filtering
     // (if any) already happened in-kernel, so emitted pairs are final.
     for (;;) {
@@ -730,6 +723,27 @@ bool TRuntimeJoin::Next(TRowSet& rowSet) {
         }
         PullOneInnerInputBatch();
     }
+}
+
+bool TRuntimeJoin::Next(TRowSet& rowSet) {
+    EnsureInit();
+
+    if (DrainReadyOutput(rowSet)) return true;
+
+    if ((JoinType_ == EJoinType::LeftSemi || JoinType_ == EJoinType::LeftAnti)
+        && HasResidual_) {
+        return NextResidualSemiAnti(rowSet);
+    }
+
+    if (JoinType_ == EJoinType::LeftSemi || JoinType_ == EJoinType::LeftAnti) {
+        return NextSemiAnti(rowSet);
+    }
+
+    if (JoinType_ == EJoinType::Left || JoinType_ == EJoinType::Right) {
+        return NextOuter(rowSet);
+    }
+
+    return NextInner(rowSet);
 }
 
 } // namespace NQdb
