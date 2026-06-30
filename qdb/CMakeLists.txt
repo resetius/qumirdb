@@ -55,6 +55,8 @@ add_library(qumirdb
     exec/sort_exec.cpp
     exec/planner.cpp
     scheduler/connection.cpp
+    scheduler/graph.cpp
+    scheduler/single_threaded_scheduler.cpp
 )
 target_include_directories(qumirdb PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)
 target_compile_definitions(qumirdb PUBLIC QDB_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")

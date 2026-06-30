@@ -1,0 +1,59 @@
+#pragma once
+
+#include <qdb/scheduler/connection.h>
+#include <qdb/scheduler/state.h>
+
+#include <cstddef>
+#include <memory>
+#include <string>
+#include <vector>
+
+namespace NQdb {
+namespace NScheduler {
+
+struct TTaskEdge;
+
+struct TTaskNode {
+    ITaskNode* Task = nullptr;
+    std::vector<TTaskEdge*> Inbound;
+    std::vector<TTaskEdge*> Outbound;
+};
+
+struct TTaskEdge {
+    TTaskNode* Src = nullptr;
+    TTaskNode* Dst = nullptr;
+    std::unique_ptr<IConnection> Connection;
+    size_t SrcLane = 0;
+    size_t DstLane = 0;
+};
+
+class TTaskGraph {
+public:
+    TTaskNode& AddNode(ITaskNode& task);
+    TTaskNode& AddOwnedNode(std::unique_ptr<ITaskNode> task);
+
+    TTaskEdge& AddEdge(
+        TTaskNode& src,
+        TTaskNode& dst,
+        std::unique_ptr<IConnection> connection,
+        size_t srcLane = 0,
+        size_t dstLane = 0);
+
+    void Build();
+    bool Validate(std::string* error = nullptr) const;
+
+    const std::vector<std::unique_ptr<TTaskNode>>& Nodes() const;
+    const std::vector<std::unique_ptr<TTaskEdge>>& Edges() const;
+    const std::vector<TTaskNode*>& Leaves() const;
+    TTaskNode* Root() const;
+
+private:
+    std::vector<std::unique_ptr<ITaskNode>> OwnedTasks_;
+    std::vector<std::unique_ptr<TTaskNode>> Nodes_;
+    std::vector<std::unique_ptr<TTaskEdge>> Edges_;
+    std::vector<TTaskNode*> Leaves_;
+    TTaskNode* Root_ = nullptr;
+};
+
+} // namespace NScheduler
+} // namespace NQdb
