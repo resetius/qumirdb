@@ -257,9 +257,8 @@ bool TJoinOutputBuilder::NextBatch(TRowSet& out) {
 TRuntimeCrossJoin::TRuntimeCrossJoin(std::unique_ptr<IRuntimeNode> left,
     std::unique_ptr<IRuntimeNode> right,
     TTypePtr outputType)
-    : Left_(std::move(left))
-    , Right_(std::move(right))
-    , OutputType_(std::move(outputType))
+    : TRuntimeBinaryKernel(std::move(left), std::move(right),
+          std::move(outputType))
 {
     std::vector<TJoinColumnRef> columns;
     auto* leftStruct = static_cast<TStructType*>(Left_->OutputType().get());
@@ -328,9 +327,8 @@ TRuntimeJoin::TRuntimeJoin(std::unique_ptr<IRuntimeNode> left,
     NQumir::NAst::TTypePtr outputType, TJoinKernels kernels,
     EJoinType joinType,
     bool hasResidual)
-    : Left_(std::move(left))
-    , Right_(std::move(right))
-    , OutputType_(std::move(outputType))
+    : TRuntimeBinaryKernel(std::move(left), std::move(right),
+          std::move(outputType))
     , Kernels_(std::move(kernels))
     , JoinType_(joinType)
     , HasResidual_(hasResidual)
