@@ -63,6 +63,7 @@ TEST(KernelSpec, PrintsStableDebugDescription) {
         "    predicate-columns: b#1:i64\n"
         "  aggregates: []\n"
         "  sort-keys: []\n"
+        "  join-keys: []\n"
         "  entrypoints:\n"
         "    qdb_filter_0: void(ref TRowSet)\n"
         "  source-modules:\n"
@@ -205,6 +206,37 @@ TEST(KernelSpec, BuildsSortSpecFromSortKeys) {
     EXPECT_EQ(spec.SortKeys[0].Column.Name, "name");
     EXPECT_EQ(spec.SortKeys[0].Direction, ESortDirection::Desc);
     EXPECT_EQ(spec.SortKeys[0].Nulls, ESortNulls::First);
+    ASSERT_EQ(spec.SourceModules.size(), 1u);
+    EXPECT_EQ(spec.SourceModules[0], "qumirdb");
+}
+
+TEST(KernelSpec, BuildsJoinSpecFromEquiKeys) {
+    using namespace NQumir::NAst;
+
+    auto i64 = std::make_shared<TIntegerType>();
+    TStructType left({
+        {"lk", i64},
+        {"lv", i64},
+    });
+    TStructType right({
+        {"rk", i64},
+        {"rv", i64},
+    });
+
+    auto spec = NKernel::BuildJoinKernelSpec(
+        left, right, {{.Left = "lk", .Right = "rk"}}, EJoinType::Inner);
+
+    EXPECT_EQ(spec.Kind, NKernel::EOperatorKernelKind::Binary);
+    EXPECT_EQ(spec.OperatorName, "join");
+    EXPECT_EQ(spec.JoinType, EJoinType::Inner);
+    ASSERT_EQ(spec.InputSchemas.size(), 2u);
+    ASSERT_EQ(spec.JoinKeys.size(), 1u);
+    EXPECT_EQ(spec.JoinKeys[0].Left.Name, "lk");
+    EXPECT_EQ(spec.JoinKeys[0].Left.Index, 0);
+    EXPECT_EQ(spec.JoinKeys[0].Right.Name, "rk");
+    EXPECT_EQ(spec.JoinKeys[0].Right.Index, 0);
+    ASSERT_EQ(spec.Entrypoints.size(), 4u);
+    EXPECT_EQ(spec.Entrypoints[0].Name, "jt_process_left");
     ASSERT_EQ(spec.SourceModules.size(), 1u);
     EXPECT_EQ(spec.SourceModules[0], "qumirdb");
 }
