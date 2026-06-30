@@ -1,6 +1,6 @@
 #pragma once
 
-#include <qdb/exec/executor.h>
+#include <qdb/exec/binary_exec.h>
 #include <qdb/io/io.h>
 #include <qdb/kernel/compiler.h>
 
@@ -169,22 +169,18 @@ private:
 
 // Cartesian product join (no key columns, inner only).
 // Buffers the entire right side, then streams left batches.
-class TRuntimeCrossJoin : public IRuntimeNode {
+class TRuntimeCrossJoin : public TRuntimeBinaryKernel {
 public:
     TRuntimeCrossJoin(std::unique_ptr<IRuntimeNode> left,
         std::unique_ptr<IRuntimeNode> right,
         NQumir::NAst::TTypePtr outputType);
 
-    NQumir::NAst::TTypePtr OutputType() const override { return OutputType_; }
     bool Next(TRowSet& rowSet) override;
 
 private:
     void EnsureRightDrained();
     bool FillNextLeftBatch();
 
-    std::unique_ptr<IRuntimeNode> Left_;
-    std::unique_ptr<IRuntimeNode> Right_;
-    NQumir::NAst::TTypePtr OutputType_;
     TRowStore LeftRows_;
     TRowStore RightRows_;
     std::optional<TJoinOutputBuilder> Builder_;
@@ -198,7 +194,7 @@ private:
 // - LeftSemi/LeftAnti: blocking — consumes all inputs first, then does a final
 //   scan of the left table against the right table to find matching/missing
 //   keys, emitting left rows accordingly (right_row_id = kNullRowId).
-class TRuntimeJoin : public IRuntimeNode {
+class TRuntimeJoin : public TRuntimeBinaryKernel {
 public:
     TRuntimeJoin(std::unique_ptr<IRuntimeNode> left,
         std::unique_ptr<IRuntimeNode> right,
@@ -207,7 +203,6 @@ public:
         bool hasResidual = false);
     ~TRuntimeJoin() override;
 
-    NQumir::NAst::TTypePtr OutputType() const override { return OutputType_; }
     bool Next(TRowSet& rowSet) override;
 
 private:
@@ -229,9 +224,6 @@ private:
     // IDs from PairBuffer_ into MatchedLeftIds_, then reset the buffer.
     void CollectMatchedLeftIds();
 
-    std::unique_ptr<IRuntimeNode> Left_;
-    std::unique_ptr<IRuntimeNode> Right_;
-    NQumir::NAst::TTypePtr OutputType_;
     TJoinKernels Kernels_;
     EJoinType JoinType_;
     TRowStore LeftRows_;
