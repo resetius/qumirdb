@@ -1,6 +1,7 @@
 #pragma once
 
 #include <qdb/plan/ops/aggregate.h>
+#include <qdb/plan/ops/join.h>
 #include <qdb/plan/ops/sort.h>
 
 #include <qumir/parser/ast.h>
@@ -51,6 +52,11 @@ struct TKernelSortKeySpec {
     ESortNulls Nulls = ESortNulls::Default;
 };
 
+struct TKernelJoinKeySpec {
+    TKernelColumnRef Left;
+    TKernelColumnRef Right;
+};
+
 struct TOperatorKernelSpec {
     EOperatorKernelKind Kind = EOperatorKernelKind::NonCompute;
     std::string OperatorName;
@@ -61,6 +67,8 @@ struct TOperatorKernelSpec {
     std::vector<TKernelKeySpec> Keys;
     std::vector<TKernelAggregateSpec> Aggregates;
     std::vector<TKernelSortKeySpec> SortKeys;
+    std::vector<TKernelJoinKeySpec> JoinKeys;
+    EJoinType JoinType = EJoinType::Inner;
     std::vector<TKernelEntrypointSpec> Entrypoints;
     std::vector<std::string> SourceModules;
 };
@@ -87,6 +95,13 @@ TOperatorKernelSpec BuildSortKernelSpec(
     const NQumir::NAst::TStructType& inputType,
     const std::vector<TSortKey>& keys,
     std::string operatorName = "sort");
+
+TOperatorKernelSpec BuildJoinKernelSpec(
+    const NQumir::NAst::TStructType& leftType,
+    const NQumir::NAst::TStructType& rightType,
+    const std::vector<TJoinKey>& keys,
+    EJoinType type,
+    const NQumir::NAst::TExprPtr& residualPredicate = nullptr);
 
 void PrintKernelSpec(std::ostream& out, const TOperatorKernelSpec& spec);
 
