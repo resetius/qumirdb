@@ -503,6 +503,15 @@ EJoinSide TRuntimeJoin::ChooseSymmetricPullSide() const {
     return EJoinSide::Right;
 }
 
+bool TRuntimeJoin::DrainReadyOutput(TRowSet& rowSet) {
+    if (ReadyOutput_.empty()) {
+        return false;
+    }
+    rowSet = ReadyOutput_.front();
+    ReadyOutput_.pop_front();
+    return true;
+}
+
 void TRuntimeJoin::PullOneInnerInputBatch() {
     TRowSet batch = {};
     for (;;) {
@@ -599,11 +608,7 @@ void TRuntimeJoin::PullOneInnerInputBatch() {
 bool TRuntimeJoin::Next(TRowSet& rowSet) {
     EnsureInit();
 
-    if (!ReadyOutput_.empty()) {
-        rowSet = ReadyOutput_.front();
-        ReadyOutput_.pop_front();
-        return true;
-    }
+    if (DrainReadyOutput(rowSet)) return true;
 
     // ── LeftSemi / LeftAnti + residual filter ────────────────────────────────
     // The join kernels are compiled as INNER (they emit pairs), and the injected
@@ -708,11 +713,7 @@ bool TRuntimeJoin::Next(TRowSet& rowSet) {
     // INNER join: pipelined — pull one batch per iteration. Residual filtering
     // (if any) already happened in-kernel, so emitted pairs are final.
     for (;;) {
-        if (!ReadyOutput_.empty()) {
-            rowSet = ReadyOutput_.front();
-            ReadyOutput_.pop_front();
-            return true;
-        }
+        if (DrainReadyOutput(rowSet)) return true;
         if (DrainBuilder(*Builder_, rowSet)) return true;
         if (BothDone_) {
             return false;
