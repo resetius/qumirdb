@@ -1,5 +1,8 @@
 #include "lexer.h"
 
+#include <cctype>
+#include <stdexcept>
+#include <string>
 #include <unordered_set>
 
 #include <qumir/parser/operator.h>
@@ -107,6 +110,14 @@ void TTokenStream::Read() {
         In.get(ch);
         AdvanceLocation(CurrentLocation, ch);
         return ch;
+    };
+
+    auto unget = [](auto& stream, int ch) {
+        if constexpr (requires { stream.unget(ch); }) {
+            stream.unget(ch);
+        } else {
+            stream.unget();
+        }
     };
 
     auto emitOperator = [&](TOperator op, const std::string& rawValue, TLocation location) {
@@ -248,7 +259,7 @@ void TTokenStream::Read() {
         }
         In.get();
         auto second = In.peek();
-        In.unget(next);
+        unget(In, next);
         std::string opStr;
         opStr += (char)next;
         opStr += (char)second;
@@ -262,7 +273,7 @@ void TTokenStream::Read() {
         if (next == '.') {
             In.get();
             auto second = In.peek();
-            In.unget(next);
+            unget(In, next);
             return std::isdigit(second);
         }
         return false;
@@ -311,7 +322,7 @@ void TTokenStream::Read() {
         if (next == '-') {
             In.get();
             auto second = In.peek();
-            In.unget(next);
+            unget(In, next);
 
             if (second == '-') {
                 skipLineComment();
@@ -322,7 +333,7 @@ void TTokenStream::Read() {
         if (next == '/') {
             In.get();
             auto second = In.peek();
-            In.unget(next);
+            unget(In, next);
 
             if (second == '*') {
                 skipBlockComment();
