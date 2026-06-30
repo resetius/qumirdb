@@ -44,6 +44,27 @@ void ClearBit(std::vector<uint8_t>& mask, size_t i) {
     mask[i / 8] &= ~(uint8_t(1) << (i % 8));
 }
 
+std::vector<TJoinColumnRef> BuildJoinColumns(
+    const TTypePtr& leftType,
+    const TTypePtr& rightType,
+    bool includeRight)
+{
+    std::vector<TJoinColumnRef> columns;
+    auto* leftStruct = static_cast<TStructType*>(leftType.get());
+    auto* rightStruct = static_cast<TStructType*>(rightType.get());
+    if (leftStruct) {
+        for (int32_t i = 0; i < static_cast<int32_t>(leftStruct->Fields.size()); ++i) {
+            columns.push_back({EJoinSide::Left, i, leftStruct->Fields[i].second});
+        }
+    }
+    if (rightStruct && includeRight) {
+        for (int32_t j = 0; j < static_cast<int32_t>(rightStruct->Fields.size()); ++j) {
+            columns.push_back({EJoinSide::Right, j, rightStruct->Fields[j].second});
+        }
+    }
+    return columns;
+}
+
 } // namespace
 
 size_t JoinColumnFixedWidth(const TTypePtr& type) {
@@ -260,20 +281,8 @@ TRuntimeCrossJoin::TRuntimeCrossJoin(std::unique_ptr<IRuntimeNode> left,
     : TRuntimeBinaryKernel(std::move(left), std::move(right),
           std::move(outputType))
 {
-    std::vector<TJoinColumnRef> columns;
-    auto* leftStruct = static_cast<TStructType*>(Left_->OutputType().get());
-    auto* rightStruct = static_cast<TStructType*>(Right_->OutputType().get());
-    if (leftStruct) {
-        for (int32_t i = 0; i < static_cast<int32_t>(leftStruct->Fields.size()); ++i) {
-            columns.push_back({EJoinSide::Left, i, leftStruct->Fields[i].second});
-        }
-    }
-    if (rightStruct) {
-        for (int32_t j = 0; j < static_cast<int32_t>(rightStruct->Fields.size()); ++j) {
-            columns.push_back({EJoinSide::Right, j, rightStruct->Fields[j].second});
-        }
-    }
-    Builder_.emplace(&LeftRows_, &RightRows_, std::move(columns));
+    Builder_.emplace(&LeftRows_, &RightRows_,
+        BuildJoinColumns(Left_->OutputType(), Right_->OutputType(), true));
 }
 
 void TRuntimeCrossJoin::EnsureRightDrained() {
@@ -335,22 +344,10 @@ TRuntimeJoin::TRuntimeJoin(std::unique_ptr<IRuntimeNode> left,
 {
     // Output columns follow ComputeJoinOutputType: all left columns, then all
     // right columns (INNER), or only left columns (LeftSemi / LeftAnti).
-    std::vector<TJoinColumnRef> columns;
-    auto* leftStruct = static_cast<TStructType*>(Left_->OutputType().get());
-    auto* rightStruct = static_cast<TStructType*>(Right_->OutputType().get());
-    if (leftStruct) {
-        for (int32_t i = 0; i < static_cast<int32_t>(leftStruct->Fields.size()); ++i) {
-            columns.push_back({EJoinSide::Left, i, leftStruct->Fields[i].second});
-        }
-    }
     const bool isSemiAnti =
         (joinType == EJoinType::LeftSemi || joinType == EJoinType::LeftAnti);
-    if (rightStruct && !isSemiAnti) {
-        for (int32_t j = 0; j < static_cast<int32_t>(rightStruct->Fields.size()); ++j) {
-            columns.push_back({EJoinSide::Right, j, rightStruct->Fields[j].second});
-        }
-    }
-    Builder_.emplace(&LeftRows_, &RightRows_, std::move(columns));
+    Builder_.emplace(&LeftRows_, &RightRows_,
+        BuildJoinColumns(Left_->OutputType(), Right_->OutputType(), !isSemiAnti));
 }
 
 TRuntimeJoin::~TRuntimeJoin() {
@@ -398,19 +395,8 @@ void TRuntimeJoin::DrainStreamingPairs(const TRowSet& streamBatch, EJoinSide str
 
         auto* data = new TJoinedRowSetData;
 
-        std::vector<TJoinColumnRef> columns;
-        auto* leftStruct = static_cast<TStructType*>(Left_->OutputType().get());
-        auto* rightStruct = static_cast<TStructType*>(Right_->OutputType().get());
-        if (leftStruct) {
-            for (int32_t i = 0; i < static_cast<int32_t>(leftStruct->Fields.size()); ++i) {
-                columns.push_back({EJoinSide::Left, i, leftStruct->Fields[i].second});
-            }
-        }
-        if (rightStruct) {
-            for (int32_t j = 0; j < static_cast<int32_t>(rightStruct->Fields.size()); ++j) {
-                columns.push_back({EJoinSide::Right, j, rightStruct->Fields[j].second});
-            }
-        }
+        auto columns = BuildJoinColumns(
+            Left_->OutputType(), Right_->OutputType(), true);
 
         data->Gathered.resize(columns.size());
         data->Columns.resize(columns.size());
