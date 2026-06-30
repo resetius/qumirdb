@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cassert>
+#include <cstdint>
 #include <iostream>
 #include <vector>
 #include <list>
@@ -121,6 +122,14 @@ enum class EFetchState {
     OK = 0,
     NO_DATA = 1,
     FINISHED = 2,
+};
+
+enum class ETaskState {
+    Idle = 0,
+    Queued = 1,
+    Running = 2,
+    Reschedule = 3,
+    Finished = 4,
 };
 
 struct IConnection {
@@ -435,6 +444,80 @@ struct TDagNode {
     std::vector<TDagNode*> Outbound;
     IRuntimeNode* Compute;
     int Partitions = 1;
+    std::atomic<ETaskState> State = ETaskState::Idle;
+};
+
+template <class T>
+class TMPMCQueue {
+public:
+    explicit TMPMCQueue(size_t capacity)
+        : Capacity_(capacity)
+        , Buffer_(Capacity_)
+    {
+        assert(Capacity_ > 0);
+        for (size_t i = 0; i < Capacity_; ++i) {
+            Buffer_[i].Sequence.store(i, std::memory_order_relaxed);
+        }
+    }
+
+    bool TryPush(T value) {
+        auto pos = PushPos_.load(std::memory_order_relaxed);
+        for (;;) {
+            auto& cell = Buffer_[pos % Capacity_];
+            auto seq = cell.Sequence.load(std::memory_order_acquire);
+            auto diff = static_cast<intptr_t>(seq) - static_cast<intptr_t>(pos);
+            if (diff == 0) {
+                if (PushPos_.compare_exchange_weak(
+                        pos,
+                        pos + 1,
+                        std::memory_order_relaxed,
+                        std::memory_order_relaxed)) {
+                    cell.Value = value;
+                    cell.Sequence.store(pos + 1, std::memory_order_release);
+                    return true;
+                }
+            } else if (diff < 0) {
+                return false;
+            } else {
+                pos = PushPos_.load(std::memory_order_relaxed);
+            }
+        }
+    }
+
+    bool TryPop(T& value) {
+        auto pos = PopPos_.load(std::memory_order_relaxed);
+        for (;;) {
+            auto& cell = Buffer_[pos % Capacity_];
+            auto seq = cell.Sequence.load(std::memory_order_acquire);
+            auto diff = static_cast<intptr_t>(seq) - static_cast<intptr_t>(pos + 1);
+            if (diff == 0) {
+                if (PopPos_.compare_exchange_weak(
+                        pos,
+                        pos + 1,
+                        std::memory_order_relaxed,
+                        std::memory_order_relaxed)) {
+                    value = cell.Value;
+                    cell.Sequence.store(pos + Capacity_, std::memory_order_release);
+                    return true;
+                }
+            } else if (diff < 0) {
+                return false;
+            } else {
+                pos = PopPos_.load(std::memory_order_relaxed);
+            }
+        }
+    }
+
+private:
+    struct TCell {
+        std::atomic<size_t> Sequence = 0;
+        T Value = {};
+    };
+
+    size_t Capacity_;
+    std::vector<TCell> Buffer_;
+    std::atomic<size_t> PushPos_ = 0;
+    std::atomic<size_t> PopPos_ = 0;
 };
 
 struct TEdgeKey {
@@ -881,26 +964,50 @@ struct TScheduler {
 
 struct TThreadedScheduler {
     TGraph& Graph;
-    std::list<TDagNode*> Ready;
-    std::unordered_set<TDagNode*> Scheduled;
-    std::unordered_set<TDagNode*> Finished;
-    std::mutex Mutex;
-
+    TMPMCQueue<TDagNode*> Ready;
     std::atomic<int> NFinished = 0;
     int NThreads;
 
     TThreadedScheduler(TGraph& g, int nthreads = 2)
         : Graph(g)
+        , Ready(static_cast<size_t>(std::max(g.Size, 1)))
         , NThreads(nthreads)
     {
         Schedule(Graph.Root);
     }
 
     void Schedule(TDagNode* node) {
-        if (!Scheduled.contains(node)) {
-            Ready.emplace_back(node);
-            Scheduled.emplace(node);
+        auto state = node->State.load(std::memory_order_acquire);
+        for (;;) {
+            if (state == ETaskState::Idle) {
+                if (node->State.compare_exchange_weak(
+                        state,
+                        ETaskState::Queued,
+                        std::memory_order_acq_rel,
+                        std::memory_order_acquire)) {
+                    break;
+                }
+            } else if (state == ETaskState::Running) {
+                if (node->State.compare_exchange_weak(
+                        state,
+                        ETaskState::Reschedule,
+                        std::memory_order_acq_rel,
+                        std::memory_order_acquire)) {
+                    return;
+                }
+            } else {
+                return;
+            }
         }
+
+        auto pushed = Ready.TryPush(node);
+        assert(pushed);
+    }
+
+    TDagNode* PopReady() {
+        TDagNode* node = nullptr;
+        Ready.TryPop(node);
+        return node;
     }
 
     void ScheduleInput(TDagNode* node) {
@@ -930,30 +1037,56 @@ struct TThreadedScheduler {
 
     void Work() {
         while (NFinished != Graph.Size) {
-            TDagNode* node;
-            {
-                std::scoped_lock lock(Mutex);
-                node = Ready.front(); Ready.pop_front();
-                Scheduled.erase(node);
+            auto node = PopReady();
+            if (!node) {
+                std::this_thread::yield();
+                continue;
             }
+
+            auto expected = ETaskState::Queued;
+            if (!node->State.compare_exchange_strong(
+                    expected,
+                    ETaskState::Running,
+                    std::memory_order_acq_rel,
+                    std::memory_order_acquire)) {
+                continue;
+            }
+
             auto state = node->Compute->Execute();
 
-            std::scoped_lock lock(Mutex);
             if (state == EState::NEED_DATA) {
+                auto reschedule = FinishRun(node);
                 ScheduleInput(node);
-            } else if (state == EState::BLOCKED_OUTPUT) {
-                ScheduleOutput(node);
-            } else if (state == EState::FINISHED) {
-                if (!Finished.contains(node)) {
-                    Finished.insert(node);
-                    ++NFinished;
+                if (reschedule) {
+                    Schedule(node);
                 }
+            } else if (state == EState::BLOCKED_OUTPUT) {
+                auto reschedule = FinishRun(node);
+                ScheduleOutput(node);
+                if (reschedule) {
+                    Schedule(node);
+                }
+            } else if (state == EState::FINISHED) {
+                FinishNode(node);
                 ScheduleOutput(node);
             } else if (state == EState::OK) {
+                FinishRun(node);
                 Schedule(node);
                 ScheduleOutput(node);
             }
         }
+    }
+
+    bool FinishRun(TDagNode* node) {
+        auto previous = node->State.exchange(ETaskState::Idle, std::memory_order_acq_rel);
+        assert(previous == ETaskState::Running || previous == ETaskState::Reschedule);
+        return previous == ETaskState::Reschedule;
+    }
+
+    void FinishNode(TDagNode* node) {
+        auto previous = node->State.exchange(ETaskState::Finished, std::memory_order_acq_rel);
+        assert(previous == ETaskState::Running || previous == ETaskState::Reschedule);
+        ++NFinished;
     }
 };
 
