@@ -215,6 +215,10 @@ private:
     static_assert(sizeof(TPairBufferState) == TKernelCompiler::kPairBufferSize);
 
     void EnsureInit();
+    bool NextResidualSemiAnti(TRowSet& rowSet);
+    bool NextSemiAnti(TRowSet& rowSet);
+    bool NextOuter(TRowSet& rowSet);
+    bool NextInner(TRowSet& rowSet);
     void PullOneInputBatch();
     void PullOneInnerInputBatch();
     EJoinSide ChooseSymmetricPullSide() const;
