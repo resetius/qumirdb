@@ -124,6 +124,77 @@ void GenerateColumn(uint32_t* column, int n, int* seed) {
     }
 }
 
+const char* TestRadixWrapperSource = R"(
+(block
+  (fun test_radix_sort_indices_u8
+       ((var values <ptr u8>)
+        (var indices <ptr u32>)
+        (var work <ptr u32>)
+        (var counts <ptr u32>)
+        (var n i64)
+        (var desc bool))
+    (block
+      (call radix_sort_indices values indices work counts n (: 8 i64) desc)))
+
+  (fun test_radix_sort_indices_i8
+       ((var values <ptr i8>)
+        (var indices <ptr u32>)
+        (var work <ptr u32>)
+        (var counts <ptr u32>)
+        (var n i64)
+        (var desc bool))
+    (block
+      (call radix_sort_indices values indices work counts n (: 8 i64) desc)))
+
+  (fun test_radix_sort_indices_u16
+       ((var values <ptr u16>)
+        (var indices <ptr u32>)
+        (var work <ptr u32>)
+        (var counts <ptr u32>)
+        (var n i64)
+        (var desc bool))
+    (block
+      (call radix_sort_indices values indices work counts n (: 16 i64) desc)))
+
+  (fun test_radix_sort_indices_i16
+       ((var values <ptr i16>)
+        (var indices <ptr u32>)
+        (var work <ptr u32>)
+        (var counts <ptr u32>)
+        (var n i64)
+        (var desc bool))
+    (block
+      (call radix_sort_indices values indices work counts n (: 16 i64) desc)))
+
+  (fun test_radix_sort_indices_u32
+       ((var values <ptr u32>)
+        (var indices <ptr u32>)
+        (var work <ptr u32>)
+        (var counts <ptr u32>)
+        (var n i64)
+        (var desc bool))
+    (block
+      (call radix_sort_indices values indices work counts n (: 32 i64) desc)))
+
+  (fun test_radix_sort_indices_i32
+       ((var values <ptr i32>)
+        (var indices <ptr u32>)
+        (var work <ptr u32>)
+        (var counts <ptr u32>)
+        (var n i64)
+        (var desc bool))
+    (block
+      (call radix_sort_indices values indices work counts n (: 32 i64) desc)))
+
+  (fun test_radix_key_i32 ((var value i32)) -> u64
+    (block
+      (return (call qumir_radix_key value))))
+
+  (fun test_radix_key_f64 ((var value f64)) -> u64
+    (block
+      (return (call qumir_radix_key value)))))
+)";
+
 std::unique_ptr<NQumir::TLLVMRunner> CompileRadixOperation(
     const std::string& entryName,
     void*& entry)
@@ -144,9 +215,16 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileRadixOperation(
         }
         return true;
     };
-    if (!addLibrary("radix.oz", false) ||
-        !addLibrary("radix_wrappers.oz", true)) {
+    if (!addLibrary("radix.oz", false)) {
         return {};
+    }
+    auto wrappers = NQdb::NKernel::ParseFunctionLibrary(TestRadixWrapperSource);
+    if (!wrappers) {
+        ADD_FAILURE() << wrappers.error().ToString();
+        return {};
+    }
+    for (auto& stmt : *wrappers) {
+        programStmts.push_back(std::move(stmt));
     }
 
     NQumir::TLLVMRunnerOptions options;
@@ -504,7 +582,7 @@ TEST(SortTopSortOz, MergesAndGathersMultipleColumns) {
 
 TEST(SortRadixOz, NumericKeysMatchPrototype) {
     void* i32Entry = nullptr;
-    auto i32Runner = CompileRadixOperation("qdb_radix_key_i32_test", i32Entry);
+    auto i32Runner = CompileRadixOperation("test_radix_key_i32", i32Entry);
     ASSERT_NE(i32Entry, nullptr);
     auto i32Key = reinterpret_cast<uint64_t(*)(int32_t)>(i32Entry);
     EXPECT_EQ(i32Key(std::numeric_limits<int32_t>::min()), RadixKey(std::numeric_limits<int32_t>::min()));
@@ -514,7 +592,7 @@ TEST(SortRadixOz, NumericKeysMatchPrototype) {
     EXPECT_EQ(i32Key(std::numeric_limits<int32_t>::max()), RadixKey(std::numeric_limits<int32_t>::max()));
 
     void* f64Entry = nullptr;
-    auto f64Runner = CompileRadixOperation("qdb_radix_key_f64_test", f64Entry);
+    auto f64Runner = CompileRadixOperation("test_radix_key_f64", f64Entry);
     ASSERT_NE(f64Entry, nullptr);
     auto f64Key = reinterpret_cast<uint64_t(*)(double)>(f64Entry);
     for (double value : {-2345.6, -0.0, 0.0, 1.2, 555.99}) {
@@ -524,7 +602,7 @@ TEST(SortRadixOz, NumericKeysMatchPrototype) {
 
 TEST(SortRadixOz, SortsU32IndicesAscending) {
     void* entry = nullptr;
-    auto runner = CompileRadixOperation("qdb_radix_sort_indices_u32", entry);
+    auto runner = CompileRadixOperation("test_radix_sort_indices_u32", entry);
     ASSERT_NE(entry, nullptr);
     auto sort = reinterpret_cast<void(*)(uint32_t*, uint32_t*, uint32_t*, uint32_t*, int64_t, bool)>(entry);
 
@@ -540,7 +618,7 @@ TEST(SortRadixOz, SortsU32IndicesAscending) {
 
 TEST(SortRadixOz, SortsU8IndicesAscending) {
     void* entry = nullptr;
-    auto runner = CompileRadixOperation("qdb_radix_sort_indices_u8", entry);
+    auto runner = CompileRadixOperation("test_radix_sort_indices_u8", entry);
     ASSERT_NE(entry, nullptr);
     auto sort = reinterpret_cast<void(*)(uint8_t*, uint32_t*, uint32_t*, uint32_t*, int64_t, bool)>(entry);
 
@@ -556,7 +634,7 @@ TEST(SortRadixOz, SortsU8IndicesAscending) {
 
 TEST(SortRadixOz, SortsI8IndicesAscending) {
     void* entry = nullptr;
-    auto runner = CompileRadixOperation("qdb_radix_sort_indices_i8", entry);
+    auto runner = CompileRadixOperation("test_radix_sort_indices_i8", entry);
     ASSERT_NE(entry, nullptr);
     auto sort = reinterpret_cast<void(*)(int8_t*, uint32_t*, uint32_t*, uint32_t*, int64_t, bool)>(entry);
 
@@ -572,7 +650,7 @@ TEST(SortRadixOz, SortsI8IndicesAscending) {
 
 TEST(SortRadixOz, SortsU16IndicesAscending) {
     void* entry = nullptr;
-    auto runner = CompileRadixOperation("qdb_radix_sort_indices_u16", entry);
+    auto runner = CompileRadixOperation("test_radix_sort_indices_u16", entry);
     ASSERT_NE(entry, nullptr);
     auto sort = reinterpret_cast<void(*)(uint16_t*, uint32_t*, uint32_t*, uint32_t*, int64_t, bool)>(entry);
 
@@ -588,7 +666,7 @@ TEST(SortRadixOz, SortsU16IndicesAscending) {
 
 TEST(SortRadixOz, SortsI16IndicesAscending) {
     void* entry = nullptr;
-    auto runner = CompileRadixOperation("qdb_radix_sort_indices_i16", entry);
+    auto runner = CompileRadixOperation("test_radix_sort_indices_i16", entry);
     ASSERT_NE(entry, nullptr);
     auto sort = reinterpret_cast<void(*)(int16_t*, uint32_t*, uint32_t*, uint32_t*, int64_t, bool)>(entry);
 
@@ -604,7 +682,7 @@ TEST(SortRadixOz, SortsI16IndicesAscending) {
 
 TEST(SortRadixOz, SortsU32IndicesDescendingStably) {
     void* entry = nullptr;
-    auto runner = CompileRadixOperation("qdb_radix_sort_indices_u32", entry);
+    auto runner = CompileRadixOperation("test_radix_sort_indices_u32", entry);
     ASSERT_NE(entry, nullptr);
     auto sort = reinterpret_cast<void(*)(uint32_t*, uint32_t*, uint32_t*, uint32_t*, int64_t, bool)>(entry);
 
@@ -626,7 +704,7 @@ TEST(SortRadixOz, SortsU32IndicesDescendingStably) {
 
 TEST(SortRadixOz, GenericSortUsesI32RadixKeyOverload) {
     void* entry = nullptr;
-    auto runner = CompileRadixOperation("qdb_radix_sort_indices_i32", entry);
+    auto runner = CompileRadixOperation("test_radix_sort_indices_i32", entry);
     ASSERT_NE(entry, nullptr);
     auto sort = reinterpret_cast<void(*)(int32_t*, uint32_t*, uint32_t*, uint32_t*, int64_t, bool)>(entry);
 
