@@ -30,22 +30,50 @@ TTaskNode& TTaskGraph::AddOwnedNode(std::unique_ptr<ITaskNode> task) {
     return AddNode(*ptr);
 }
 
+IConnection& TTaskGraph::AddConnection(std::unique_ptr<IConnection> connection) {
+    auto* ptr = connection.get();
+    OwnedConnections_.push_back(std::move(connection));
+    return *ptr;
+}
+
 TTaskEdge& TTaskGraph::AddEdge(
     TTaskNode& src,
     TTaskNode& dst,
-    std::unique_ptr<IConnection> connection,
+    IConnection& connection,
     size_t srcLane,
     size_t dstLane)
 {
     auto edge = std::make_unique<TTaskEdge>();
     edge->Src = &src;
     edge->Dst = &dst;
-    edge->Connection = std::move(connection);
+    edge->Connection = &connection;
     edge->SrcLane = srcLane;
     edge->DstLane = dstLane;
     auto* ptr = edge.get();
     Edges_.push_back(std::move(edge));
     return *ptr;
+}
+
+TTaskEdge& TTaskGraph::AddOwnedEdge(
+    TTaskNode& src,
+    TTaskNode& dst,
+    std::unique_ptr<IConnection> connection,
+    size_t srcLane,
+    size_t dstLane)
+{
+    if (!connection) {
+        auto edge = std::make_unique<TTaskEdge>();
+        edge->Src = &src;
+        edge->Dst = &dst;
+        edge->SrcLane = srcLane;
+        edge->DstLane = dstLane;
+        auto* ptr = edge.get();
+        Edges_.push_back(std::move(edge));
+        return *ptr;
+    }
+
+    auto& stored = AddConnection(std::move(connection));
+    return AddEdge(src, dst, stored, srcLane, dstLane);
 }
 
 void TTaskGraph::Build() {
@@ -120,11 +148,11 @@ bool TTaskGraph::Validate(std::string* error) const {
             SetError(error, "task graph contains an edge without a connection");
             return false;
         }
-        if (edge->SrcLane >= edge->Src->Outbound.size()) {
+        if (edge->SrcLane >= edge->Connection->SrcCount()) {
             SetError(error, "task graph contains an invalid source lane id");
             return false;
         }
-        if (edge->DstLane >= edge->Dst->Inbound.size()) {
+        if (edge->DstLane >= edge->Connection->DstCount()) {
             SetError(error, "task graph contains an invalid destination lane id");
             return false;
         }

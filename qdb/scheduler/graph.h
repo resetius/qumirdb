@@ -24,7 +24,7 @@ struct TTaskNode {
 struct TTaskEdge {
     TTaskNode* Src = nullptr;
     TTaskNode* Dst = nullptr;
-    std::unique_ptr<IConnection> Connection;
+    IConnection* Connection = nullptr;
     size_t SrcLane = 0;
     size_t DstLane = 0;
 };
@@ -33,8 +33,16 @@ class TTaskGraph {
 public:
     TTaskNode& AddNode(ITaskNode& task);
     TTaskNode& AddOwnedNode(std::unique_ptr<ITaskNode> task);
+    IConnection& AddConnection(std::unique_ptr<IConnection> connection);
 
     TTaskEdge& AddEdge(
+        TTaskNode& src,
+        TTaskNode& dst,
+        IConnection& connection,
+        size_t srcLane = 0,
+        size_t dstLane = 0);
+
+    TTaskEdge& AddOwnedEdge(
         TTaskNode& src,
         TTaskNode& dst,
         std::unique_ptr<IConnection> connection,
@@ -51,6 +59,7 @@ public:
 
 private:
     std::vector<std::unique_ptr<ITaskNode>> OwnedTasks_;
+    std::vector<std::unique_ptr<IConnection>> OwnedConnections_;
     std::vector<std::unique_ptr<TTaskNode>> Nodes_;
     std::vector<std::unique_ptr<TTaskEdge>> Edges_;
     std::vector<TTaskNode*> Leaves_;

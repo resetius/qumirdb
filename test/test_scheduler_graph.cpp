@@ -77,7 +77,7 @@ TEST(SchedulerGraph, BuildsAdjacencyAndValidates) {
     TTaskGraph graph;
     auto& source = graph.AddOwnedNode(std::make_unique<TNoopTask>());
     auto& sink = graph.AddOwnedNode(std::make_unique<TNoopTask>());
-    graph.AddEdge(source, sink, std::make_unique<TOneToOneConnection>());
+    graph.AddOwnedEdge(source, sink, std::make_unique<TOneToOneConnection>());
     graph.Build();
 
     std::string error;
@@ -93,7 +93,7 @@ TEST(SchedulerGraph, RejectsMissingConnection) {
     TTaskGraph graph;
     auto& source = graph.AddOwnedNode(std::make_unique<TNoopTask>());
     auto& sink = graph.AddOwnedNode(std::make_unique<TNoopTask>());
-    graph.AddEdge(source, sink, {});
+    graph.AddOwnedEdge(source, sink, {});
     graph.Build();
 
     std::string error;
@@ -116,7 +116,7 @@ TEST(SchedulerGraph, RejectsInvalidLaneIds) {
     TTaskGraph graph;
     auto& source = graph.AddOwnedNode(std::make_unique<TNoopTask>());
     auto& sink = graph.AddOwnedNode(std::make_unique<TNoopTask>());
-    graph.AddEdge(source, sink, std::make_unique<TOneToOneConnection>(), 1, 0);
+    graph.AddOwnedEdge(source, sink, std::make_unique<TOneToOneConnection>(), 1, 0);
     graph.Build();
 
     std::string error;
@@ -133,7 +133,7 @@ TEST(SchedulerGraph, SingleThreadedSchedulerRunsSmallGraph) {
     TTaskGraph graph;
     auto& source = graph.AddOwnedNode(std::move(sourceTask));
     auto& sink = graph.AddOwnedNode(std::move(sinkTask));
-    graph.AddEdge(source, sink, std::make_unique<TOneToOneConnection>());
+    graph.AddOwnedEdge(source, sink, std::make_unique<TOneToOneConnection>());
     graph.Build();
 
     TSingleThreadedScheduler scheduler(graph);

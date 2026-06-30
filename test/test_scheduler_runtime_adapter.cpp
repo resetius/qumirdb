@@ -133,9 +133,9 @@ TPipeline MakePipeline() {
         out.SinkState,
         TInputPort{.Connection = projectToSinkPtr}));
 
-    out.Graph->AddEdge(source, filter, std::move(sourceToFilter));
-    out.Graph->AddEdge(filter, project, std::move(filterToProject));
-    out.Graph->AddEdge(project, sink, std::move(projectToSink));
+    out.Graph->AddOwnedEdge(source, filter, std::move(sourceToFilter));
+    out.Graph->AddOwnedEdge(filter, project, std::move(filterToProject));
+    out.Graph->AddOwnedEdge(project, sink, std::move(projectToSink));
     out.Graph->Build();
     return out;
 }
