@@ -218,6 +218,7 @@ private:
     void PullOneInputBatch();
     void PullOneInnerInputBatch();
     EJoinSide ChooseSymmetricPullSide() const;
+    bool DrainReadyOutput(TRowSet& rowSet);
     void DrainKernelPairs();
     void DrainStreamingPairs(const TRowSet& streamBatch, EJoinSide streamSide);
     // Residual LeftSemi/LeftAnti: collect the (already filter-pruned) left row
