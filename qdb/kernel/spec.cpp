@@ -232,6 +232,68 @@ TOperatorKernelSpec BuildSortKernelSpec(
     };
 }
 
+TOperatorKernelSpec BuildJoinKernelSpec(
+    const NQumir::NAst::TStructType& leftType,
+    const NQumir::NAst::TStructType& rightType,
+    const std::vector<TJoinKey>& keys,
+    EJoinType type,
+    const NQumir::NAst::TExprPtr& residualPredicate)
+{
+    auto columnRef = [](const NQumir::NAst::TStructType& inputType,
+        const std::string& name) -> TKernelColumnRef
+    {
+        for (int32_t i = 0; i < static_cast<int32_t>(inputType.Fields.size()); ++i) {
+            const auto& [fieldName, fieldType] = inputType.Fields[i];
+            if (fieldName == name) {
+                return {.Name = name, .Index = i, .Type = fieldType};
+            }
+        }
+        throw std::runtime_error("join column not found: " + name);
+    };
+
+    std::vector<TKernelJoinKeySpec> joinKeys;
+    joinKeys.reserve(keys.size());
+    for (const auto& key : keys) {
+        joinKeys.push_back({
+            .Left = columnRef(leftType, key.Left),
+            .Right = columnRef(rightType, key.Right),
+        });
+    }
+
+    std::vector<NQumir::NAst::TExprPtr> expressions;
+    if (residualPredicate) {
+        expressions.push_back(residualPredicate);
+    }
+
+    auto outputType = ComputeJoinOutputType(
+        std::make_shared<NQumir::NAst::TStructType>(leftType.Fields),
+        std::make_shared<NQumir::NAst::TStructType>(rightType.Fields),
+        type);
+    if (!outputType) {
+        throw std::runtime_error("join kernel spec: " + outputType.error().ToString());
+    }
+
+    return TOperatorKernelSpec{
+        .Kind = EOperatorKernelKind::Binary,
+        .OperatorName = "join",
+        .InputSchemas = {
+            std::make_shared<NQumir::NAst::TStructType>(leftType.Fields),
+            std::make_shared<NQumir::NAst::TStructType>(rightType.Fields),
+        },
+        .OutputSchema = std::move(*outputType),
+        .Expressions = std::move(expressions),
+        .JoinKeys = std::move(joinKeys),
+        .JoinType = type,
+        .Entrypoints = {
+            {.Name = "jt_process_left", .Abi = "bool(ptr HashTable, ptr TRowSet, ptr PairBuffer)"},
+            {.Name = "jt_process_right", .Abi = "bool(ptr HashTable, ptr TRowSet, ptr PairBuffer)"},
+            {.Name = "jt_probe_left_stream", .Abi = "bool(ptr HashTable, ptr TRowSet, ptr PairBuffer)"},
+            {.Name = "jt_probe_right_stream", .Abi = "bool(ptr HashTable, ptr TRowSet, ptr PairBuffer)"},
+        },
+        .SourceModules = {"qumirdb"},
+    };
+}
+
 void PrintKernelSpec(std::ostream& out, const TOperatorKernelSpec& spec) {
     out << "kernel-spec " << spec.OperatorName << "\n";
     out << "  kind: " << KernelKindName(spec.Kind) << "\n";
@@ -324,6 +386,24 @@ void PrintKernelSpec(std::ostream& out, const TOperatorKernelSpec& spec) {
             out << " " << SortDirectionName(key.Direction)
                 << " nulls " << SortNullsName(key.Nulls) << "\n";
         }
+    }
+
+    out << "  join-keys:";
+    if (spec.JoinKeys.empty()) {
+        out << " []\n";
+    } else {
+        out << "\n";
+        for (const auto& key : spec.JoinKeys) {
+            out << "    ";
+            PrintColumn(out, key.Left);
+            out << " = ";
+            PrintColumn(out, key.Right);
+            out << "\n";
+        }
+    }
+
+    if (spec.Kind == EOperatorKernelKind::Binary && spec.OperatorName == "join") {
+        out << "  join-type: " << JoinTypeName(spec.JoinType) << "\n";
     }
 
     out << "  entrypoints:";

@@ -330,10 +330,14 @@ std::unique_ptr<IRuntimeNode> TPhysicalPlanner::Build(const TOperatorPtr& root) 
                 std::move(left), std::move(right), std::move(*outputType));
         }
 
+        auto spec = NKernel::BuildJoinKernelSpec(
+            *leftType, *rightType, join->Keys(), join->JoinType(), join->Filter());
+        PrintKernelSpec(Diagnostics_, spec);
+
         std::vector<std::pair<std::string, std::string>> keys;
-        keys.reserve(join->Keys().size());
-        for (const auto& key : join->Keys()) {
-            keys.emplace_back(key.Left, key.Right);
+        keys.reserve(spec.JoinKeys.size());
+        for (const auto& key : spec.JoinKeys) {
+            keys.emplace_back(key.Left.Name, key.Right.Name);
         }
 
         // Residual filter: supported for Inner, LeftSemi, LeftAnti. The predicate
