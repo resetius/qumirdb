@@ -450,6 +450,19 @@ void TRuntimeJoin::DrainStreamingPairs(const TRowSet& streamBatch, EJoinSide str
     PairBuffer_.Count = 0;
 }
 
+void TRuntimeJoin::FinalizeOuterJoin() {
+    if (JoinType_ == EJoinType::Left) {
+        Kernels_.FinalizeOuter(LeftTable_.data(), RightTable_.data(), &PairBuffer_);
+    } else {
+        Kernels_.FinalizeOuter(RightTable_.data(), LeftTable_.data(), &PairBuffer_);
+        for (int64_t i = 0; i < PairBuffer_.Count; ++i) {
+            std::swap(PairBuffer_.Data[2 * i], PairBuffer_.Data[2 * i + 1]);
+        }
+    }
+    DrainKernelPairs();
+    OuterFinalized_ = true;
+}
+
 void TRuntimeJoin::PullOneInputBatch() {
     TRowSet batch = {};
     if (!LeftDone_) {
@@ -694,18 +707,7 @@ bool TRuntimeJoin::Next(TRowSet& rowSet) {
             if (!BothDone_) {
                 PullOneInputBatch();
             } else {
-                // Scan the unmatched side: for Left, scan LeftTable_ vs RightTable_;
-                // for Right, scan RightTable_ vs LeftTable_ (pairs come out as
-                // (rightRowId, -1) and are swapped to (-1, rightRowId) below).
-                if (JoinType_ == EJoinType::Left) {
-                    Kernels_.FinalizeOuter(LeftTable_.data(), RightTable_.data(), &PairBuffer_);
-                } else {
-                    Kernels_.FinalizeOuter(RightTable_.data(), LeftTable_.data(), &PairBuffer_);
-                    for (int64_t i = 0; i < PairBuffer_.Count; ++i)
-                        std::swap(PairBuffer_.Data[2 * i], PairBuffer_.Data[2 * i + 1]);
-                }
-                DrainKernelPairs();
-                OuterFinalized_ = true;
+                FinalizeOuterJoin();
             }
         }
     }
