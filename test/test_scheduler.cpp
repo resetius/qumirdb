@@ -1,8 +1,8 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cassert>
-#include <deque>
 #include <iostream>
 #include <vector>
 #include <list>
@@ -46,6 +46,59 @@ void GenerateRowSet(TRowSet& rowSet, int size, int* seed) {
         rowSet.Selection.push_back(1);
     }
 }
+
+template <class T>
+class TSPSC {
+public:
+    explicit TSPSC(size_t capacity)
+        : Capacity_(capacity + 1)
+        , Buffer_(Capacity_)
+    {
+        assert(capacity > 0);
+    }
+
+    bool CanPush() const {
+        auto tail = Tail_.load(std::memory_order_relaxed);
+        auto next = Next(tail);
+        auto head = Head_.load(std::memory_order_acquire);
+        return next != head;
+    }
+
+    bool TryPush(T&& value) {
+        auto tail = Tail_.load(std::memory_order_relaxed);
+        auto next = Next(tail);
+        if (next == Head_.load(std::memory_order_acquire)) {
+            return false;
+        }
+
+        Buffer_[tail].emplace(std::move(value));
+        Tail_.store(next, std::memory_order_release);
+        return true;
+    }
+
+    bool TryPop(T& value) {
+        auto head = Head_.load(std::memory_order_relaxed);
+        if (head == Tail_.load(std::memory_order_acquire)) {
+            return false;
+        }
+
+        value = std::move(*Buffer_[head]);
+        Buffer_[head].reset();
+        Head_.store(Next(head), std::memory_order_release);
+        return true;
+    }
+
+private:
+    size_t Next(size_t index) const {
+        ++index;
+        return index == Capacity_ ? 0 : index;
+    }
+
+    size_t Capacity_;
+    std::vector<std::optional<T>> Buffer_;
+    std::atomic<size_t> Head_ = 0;
+    std::atomic<size_t> Tail_ = 0;
+};
 
 enum class EConnectionKind {
     OneToOne,    // i -> i
@@ -135,18 +188,22 @@ struct TOneToOne : IConnection {
         Size_ = srcSize;
         Finished_.assign(Size_, 0);
         Outputs_.clear();
-        Outputs_.resize(Size_);
+        Outputs_.reserve(Size_);
+        for (size_t i = 0; i < Size_; ++i) {
+            Outputs_.push_back(std::make_unique<TSPSC<TRowSet>>(MaxOutput));
+        }
     }
 
     // Output
     bool CanPush(int src_id) const override {
         assert(src_id >= 0 && static_cast<size_t>(src_id) < Size_);
-        return (Outputs_[src_id].size() < MaxOutput);
+        return Outputs_[src_id]->CanPush();
     }
 
     void Push(int src_id, TRowSet&& rowSet) override {
         assert(src_id >= 0 && static_cast<size_t>(src_id) < Size_);
-        Outputs_[src_id].emplace_back(std::move(rowSet));
+        auto pushed = Outputs_[src_id]->TryPush(std::move(rowSet));
+        assert(pushed);
     }
 
     void Finish(int src_id) override {
@@ -157,8 +214,7 @@ struct TOneToOne : IConnection {
     // Input
     EFetchState Fetch(int dst_id, TRowSet& rowSet) override {
         assert(dst_id >= 0 && static_cast<size_t>(dst_id) < Size_);
-        if (!Outputs_[dst_id].empty()) {
-            rowSet = std::move(Outputs_[dst_id].front()); Outputs_[dst_id].pop_front();
+        if (Outputs_[dst_id]->TryPop(rowSet)) {
             return EFetchState::OK;
         }
 
@@ -167,7 +223,7 @@ struct TOneToOne : IConnection {
 
     size_t Size_ = 0;
     std::vector<int> Finished_;
-    std::vector<std::deque<TRowSet>> Outputs_;
+    std::vector<std::unique_ptr<TSPSC<TRowSet>>> Outputs_;
 };
 
 // many -> one
@@ -188,11 +244,14 @@ struct TGather : IConnection {
         NFinished_ = 0;
         Flags_.assign(Size_, 0);
         Outputs_.clear();
-        Outputs_.resize(Size_);
+        Outputs_.reserve(Size_);
+        for (size_t i = 0; i < Size_; ++i) {
+            Outputs_.push_back(std::make_unique<TSPSC<TRowSet>>(MaxOutput));
+        }
     }
 
     bool CanPush(int src_id) const override {
-        return Outputs_[src_id].size() < MaxOutput;
+        return Outputs_[src_id]->CanPush();
     }
 
     void Finish(int src_id) override {
@@ -203,7 +262,8 @@ struct TGather : IConnection {
     }
 
     void Push(int src_id, TRowSet&& rowSet) override {
-        Outputs_[src_id].emplace_back(std::move(rowSet));
+        auto pushed = Outputs_[src_id]->TryPush(std::move(rowSet));
+        assert(pushed);
     }
 
     EFetchState Fetch(int dst_id, TRowSet& batch) override {
@@ -213,9 +273,7 @@ struct TGather : IConnection {
         FetchId_ = from;
         for (size_t i = 0; i < Size_; ++i) {
             auto index = (from + i) % Size_;
-            if (!Outputs_[index].empty()) {
-                batch = std::move(Outputs_[index].front());
-                Outputs_[index].pop_front();
+            if (Outputs_[index]->TryPop(batch)) {
                 return EFetchState::OK;
             }
         }
@@ -229,7 +287,7 @@ struct TGather : IConnection {
     size_t FetchId_ = 0;
     size_t NFinished_ = 0;
     std::vector<int> Flags_;
-    std::vector<std::deque<TRowSet>> Outputs_;
+    std::vector<std::unique_ptr<TSPSC<TRowSet>>> Outputs_;
 };
 
 // many -> one
@@ -246,11 +304,14 @@ struct TMerge : IConnection {
         NFinished_ = 0;
         Flags_.assign(Size_, 0);
         Outputs_.clear();
-        Outputs_.resize(Size_);
+        Outputs_.reserve(Size_);
+        for (size_t i = 0; i < Size_; ++i) {
+            Outputs_.push_back(std::make_unique<TSPSC<TRowSet>>(MaxOutput));
+        }
     }
 
     bool CanPush(int src_id) const override {
-        return Outputs_[src_id].size() < MaxOutput;
+        return Outputs_[src_id]->CanPush();
     }
 
     void Finish(int src_id) override {
@@ -261,7 +322,8 @@ struct TMerge : IConnection {
     }
 
     void Push(int src_id, TRowSet&& rowSet) override {
-        Outputs_[src_id].emplace_back(std::move(rowSet));
+        auto pushed = Outputs_[src_id]->TryPush(std::move(rowSet));
+        assert(pushed);
     }
 
     EFetchState Fetch(int dst_id, TRowSet& batch) override {
@@ -273,7 +335,7 @@ struct TMerge : IConnection {
     size_t FetchId_ = 0;
     size_t NFinished_ = 0;
     std::vector<int> Flags_;
-    std::vector<std::deque<TRowSet>> Outputs_;
+    std::vector<std::unique_ptr<TSPSC<TRowSet>>> Outputs_;
 };
 
 struct THashShuffle : IConnection {
@@ -288,9 +350,14 @@ struct THashShuffle : IConnection {
         FetchIds_.assign(DstSize_, 0);
         Flags_.assign(SrcSize_, 0);
         Outputs_.clear();
-        Outputs_.resize(SrcSize_);
-        for (auto& output : Outputs_) {
-            output.resize(DstSize_);
+        Outputs_.reserve(SrcSize_);
+        for (size_t src = 0; src < SrcSize_; ++src) {
+            Outputs_.emplace_back();
+            auto& output = Outputs_.back();
+            output.reserve(DstSize_);
+            for (size_t dst = 0; dst < DstSize_; ++dst) {
+                output.push_back(std::make_unique<TSPSC<TRowSet>>(MaxOutput));
+            }
         }
     }
 
@@ -317,9 +384,7 @@ struct THashShuffle : IConnection {
         FetchIds_[dst_id] = from;
         for (size_t i = 0; i < SrcSize_; ++i) {
             auto index = (from + i) % SrcSize_;
-            if (!Outputs_[index].empty()) {
-                batch = std::move(Outputs_[index][dst_id].front());
-                Outputs_[index][dst_id].pop_front();
+            if (Outputs_[index][dst_id]->TryPop(batch)) {
                 return EFetchState::OK;
             }
         }
@@ -338,7 +403,7 @@ struct THashShuffle : IConnection {
     std::vector<int> Flags_;
 
     // src_id -> dst_id -> queue
-    std::vector<std::vector<std::deque<TRowSet>>> Outputs_;
+    std::vector<std::vector<std::unique_ptr<TSPSC<TRowSet>>>> Outputs_;
 };
 
 // this is not IRuntimeNode from qdb
