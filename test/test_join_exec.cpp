@@ -342,6 +342,19 @@ struct TOut4 {
     auto operator<=>(const TOut4&) const = default;
 };
 
+TJoinKernels CompileJoin(TKernelCompiler& compiler,
+    const TTypePtr& leftType,
+    const TTypePtr& rightType,
+    EJoinType type,
+    const TExprPtr& residualPredicate = nullptr)
+{
+    auto spec = NKernel::BuildJoinKernelSpec(
+        static_cast<TStructType&>(*leftType),
+        static_cast<TStructType&>(*rightType),
+        {{"lk", "rk"}}, type, residualPredicate);
+    return compiler.CompileJoin(spec);
+}
+
 } // namespace
 
 TEST(RuntimeJoin, InnerJoinEndToEnd) {
@@ -358,9 +371,7 @@ TEST(RuntimeJoin, InnerJoinEndToEnd) {
     auto right = std::make_unique<TVectorRuntimeSource>(rightType, std::move(rbatches));
 
     TKernelCompiler compiler;
-    auto kernels = compiler.CompileJoin(
-        static_cast<TStructType&>(*leftType), static_cast<TStructType&>(*rightType),
-        {{"lk", "rk"}}, EJoinType::Inner);
+    auto kernels = CompileJoin(compiler, leftType, rightType, EJoinType::Inner);
     auto outputType = ComputeJoinOutputType(leftType, rightType, EJoinType::Inner);
     ASSERT_TRUE(outputType);
 
@@ -405,9 +416,7 @@ TEST(RuntimeJoin, InnerJoinStreamsRightAfterLeftEof) {
     auto right = std::make_unique<TVectorRuntimeSource>(rightType, std::move(rbatches));
 
     TKernelCompiler compiler;
-    auto kernels = compiler.CompileJoin(
-        static_cast<TStructType&>(*leftType), static_cast<TStructType&>(*rightType),
-        {{"lk", "rk"}}, EJoinType::Inner);
+    auto kernels = CompileJoin(compiler, leftType, rightType, EJoinType::Inner);
     auto outputType = ComputeJoinOutputType(leftType, rightType, EJoinType::Inner);
     ASSERT_TRUE(outputType);
 
@@ -455,9 +464,7 @@ TEST(RuntimeJoin, InnerJoinStreamsLeftAfterRightEof) {
     auto right = std::make_unique<TVectorRuntimeSource>(rightType, std::move(rbatches));
 
     TKernelCompiler compiler;
-    auto kernels = compiler.CompileJoin(
-        static_cast<TStructType&>(*leftType), static_cast<TStructType&>(*rightType),
-        {{"lk", "rk"}}, EJoinType::Inner);
+    auto kernels = CompileJoin(compiler, leftType, rightType, EJoinType::Inner);
     auto outputType = ComputeJoinOutputType(leftType, rightType, EJoinType::Inner);
     ASSERT_TRUE(outputType);
 
@@ -508,15 +515,10 @@ TEST(RuntimeJoin, InnerJoinResidualReadsStreamBatchAfterEof) {
         NQumir::TLocation{}, TOperator("!="),
         std::make_shared<TIdentExpr>(NQumir::TLocation{}, "lv"),
         std::make_shared<TIdentExpr>(NQumir::TLocation{}, "rv"));
-    TStructType innerType({
-        {"lk", I64Type()}, {"lv", I64Type()},
-        {"rk", I64Type()}, {"rv", I64Type()},
-    });
 
     TKernelCompiler compiler;
-    auto kernels = compiler.CompileJoin(
-        static_cast<TStructType&>(*leftType), static_cast<TStructType&>(*rightType),
-        {{"lk", "rk"}}, EJoinType::Inner, residual, &innerType, 2);
+    auto kernels = CompileJoin(
+        compiler, leftType, rightType, EJoinType::Inner, residual);
     auto outputType = ComputeJoinOutputType(leftType, rightType, EJoinType::Inner);
     ASSERT_TRUE(outputType);
 
@@ -573,9 +575,7 @@ TEST(RuntimeJoin, MultipleBatchesMatchNestedLoop) {
     auto right = std::make_unique<TVectorRuntimeSource>(rightType, std::move(rbatches));
 
     TKernelCompiler compiler;
-    auto kernels = compiler.CompileJoin(
-        static_cast<TStructType&>(*leftType), static_cast<TStructType&>(*rightType),
-        {{"lk", "rk"}}, EJoinType::Inner);
+    auto kernels = CompileJoin(compiler, leftType, rightType, EJoinType::Inner);
     auto outputType = ComputeJoinOutputType(leftType, rightType, EJoinType::Inner);
     ASSERT_TRUE(outputType);
     TRuntimeJoin join(std::move(left), std::move(right), *outputType, std::move(kernels), EJoinType::Inner);
@@ -652,9 +652,7 @@ TEST(RuntimeJoin, LeftSemiScalarKey) {
     auto right = std::make_unique<TVectorRuntimeSource>(rightType, std::move(rbatches));
 
     TKernelCompiler compiler;
-    auto kernels = compiler.CompileJoin(
-        static_cast<TStructType&>(*leftType), static_cast<TStructType&>(*rightType),
-        {{"lk", "rk"}}, EJoinType::LeftSemi);
+    auto kernels = CompileJoin(compiler, leftType, rightType, EJoinType::LeftSemi);
     auto outputType = ComputeJoinOutputType(leftType, rightType, EJoinType::LeftSemi);
     ASSERT_TRUE(outputType);
 
@@ -681,9 +679,7 @@ TEST(RuntimeJoin, LeftAntiScalarKey) {
     auto right = std::make_unique<TVectorRuntimeSource>(rightType, std::move(rbatches));
 
     TKernelCompiler compiler;
-    auto kernels = compiler.CompileJoin(
-        static_cast<TStructType&>(*leftType), static_cast<TStructType&>(*rightType),
-        {{"lk", "rk"}}, EJoinType::LeftAnti);
+    auto kernels = CompileJoin(compiler, leftType, rightType, EJoinType::LeftAnti);
     auto outputType = ComputeJoinOutputType(leftType, rightType, EJoinType::LeftAnti);
     ASSERT_TRUE(outputType);
 
@@ -713,15 +709,10 @@ TEST(RuntimeJoin, LeftSemiResidualStreamsRight) {
         NQumir::TLocation{}, TOperator("!="),
         std::make_shared<TIdentExpr>(NQumir::TLocation{}, "lv"),
         std::make_shared<TIdentExpr>(NQumir::TLocation{}, "rv"));
-    TStructType innerType({
-        {"lk", I64Type()}, {"lv", I64Type()},
-        {"rk", I64Type()}, {"rv", I64Type()},
-    });
 
     TKernelCompiler compiler;
-    auto kernels = compiler.CompileJoin(
-        static_cast<TStructType&>(*leftType), static_cast<TStructType&>(*rightType),
-        {{"lk", "rk"}}, EJoinType::Inner, residual, &innerType, 2);
+    auto kernels = CompileJoin(
+        compiler, leftType, rightType, EJoinType::LeftSemi, residual);
     auto outputType = ComputeJoinOutputType(leftType, rightType, EJoinType::LeftSemi);
     ASSERT_TRUE(outputType);
 
@@ -751,15 +742,10 @@ TEST(RuntimeJoin, LeftAntiResidualStreamsRight) {
         NQumir::TLocation{}, TOperator("!="),
         std::make_shared<TIdentExpr>(NQumir::TLocation{}, "lv"),
         std::make_shared<TIdentExpr>(NQumir::TLocation{}, "rv"));
-    TStructType innerType({
-        {"lk", I64Type()}, {"lv", I64Type()},
-        {"rk", I64Type()}, {"rv", I64Type()},
-    });
 
     TKernelCompiler compiler;
-    auto kernels = compiler.CompileJoin(
-        static_cast<TStructType&>(*leftType), static_cast<TStructType&>(*rightType),
-        {{"lk", "rk"}}, EJoinType::Inner, residual, &innerType, 2);
+    auto kernels = CompileJoin(
+        compiler, leftType, rightType, EJoinType::LeftAnti, residual);
     auto outputType = ComputeJoinOutputType(leftType, rightType, EJoinType::LeftAnti);
     ASSERT_TRUE(outputType);
 
@@ -785,9 +771,7 @@ TEST(RuntimeJoin, LeftSemiEmptyRight) {
     auto right = std::make_unique<TVectorRuntimeSource>(rightType, std::vector<TRowSet>{});
 
     TKernelCompiler compiler;
-    auto kernels = compiler.CompileJoin(
-        static_cast<TStructType&>(*leftType), static_cast<TStructType&>(*rightType),
-        {{"lk", "rk"}}, EJoinType::LeftSemi);
+    auto kernels = CompileJoin(compiler, leftType, rightType, EJoinType::LeftSemi);
     auto outputType = ComputeJoinOutputType(leftType, rightType, EJoinType::LeftSemi);
     ASSERT_TRUE(outputType);
 
@@ -808,9 +792,7 @@ TEST(RuntimeJoin, LeftAntiEmptyRight) {
     auto right = std::make_unique<TVectorRuntimeSource>(rightType, std::vector<TRowSet>{});
 
     TKernelCompiler compiler;
-    auto kernels = compiler.CompileJoin(
-        static_cast<TStructType&>(*leftType), static_cast<TStructType&>(*rightType),
-        {{"lk", "rk"}}, EJoinType::LeftAnti);
+    auto kernels = CompileJoin(compiler, leftType, rightType, EJoinType::LeftAnti);
     auto outputType = ComputeJoinOutputType(leftType, rightType, EJoinType::LeftAnti);
     ASSERT_TRUE(outputType);
 
@@ -847,9 +829,7 @@ TEST(RuntimeJoin, LeftSemiMultiBatch) {
     auto right = std::make_unique<TVectorRuntimeSource>(rightType, split(rk, rv));
 
     TKernelCompiler compiler;
-    auto kernels = compiler.CompileJoin(
-        static_cast<TStructType&>(*leftType), static_cast<TStructType&>(*rightType),
-        {{"lk", "rk"}}, EJoinType::LeftSemi);
+    auto kernels = CompileJoin(compiler, leftType, rightType, EJoinType::LeftSemi);
     auto outputType = ComputeJoinOutputType(leftType, rightType, EJoinType::LeftSemi);
     ASSERT_TRUE(outputType);
 
@@ -886,9 +866,7 @@ TEST(RuntimeJoin, LeftAntiMultiBatch) {
     auto right = std::make_unique<TVectorRuntimeSource>(rightType, split(rk, rv));
 
     TKernelCompiler compiler;
-    auto kernels = compiler.CompileJoin(
-        static_cast<TStructType&>(*leftType), static_cast<TStructType&>(*rightType),
-        {{"lk", "rk"}}, EJoinType::LeftAnti);
+    auto kernels = CompileJoin(compiler, leftType, rightType, EJoinType::LeftAnti);
     auto outputType = ComputeJoinOutputType(leftType, rightType, EJoinType::LeftAnti);
     ASSERT_TRUE(outputType);
 
@@ -974,9 +952,7 @@ TEST(RuntimeJoin, LeftOuterScalarKey) {
     auto right = std::make_unique<TVectorRuntimeSource>(rightType, std::move(rbatches));
 
     TKernelCompiler compiler;
-    auto kernels = compiler.CompileJoin(
-        static_cast<TStructType&>(*leftType), static_cast<TStructType&>(*rightType),
-        {{"lk", "rk"}}, EJoinType::Left);
+    auto kernels = CompileJoin(compiler, leftType, rightType, EJoinType::Left);
     auto outputType = ComputeJoinOutputType(leftType, rightType, EJoinType::Left);
     ASSERT_TRUE(outputType);
 
@@ -1004,9 +980,7 @@ TEST(RuntimeJoin, LeftOuterEmptyRight) {
     auto right = std::make_unique<TVectorRuntimeSource>(rightType, std::move(rbatches));
 
     TKernelCompiler compiler;
-    auto kernels = compiler.CompileJoin(
-        static_cast<TStructType&>(*leftType), static_cast<TStructType&>(*rightType),
-        {{"lk", "rk"}}, EJoinType::Left);
+    auto kernels = CompileJoin(compiler, leftType, rightType, EJoinType::Left);
     auto outputType = ComputeJoinOutputType(leftType, rightType, EJoinType::Left);
     ASSERT_TRUE(outputType);
 
@@ -1044,9 +1018,7 @@ TEST(RuntimeJoin, LeftOuterMultiBatch) {
     auto right = std::make_unique<TVectorRuntimeSource>(rightType, split(rk, rv));
 
     TKernelCompiler compiler;
-    auto kernels = compiler.CompileJoin(
-        static_cast<TStructType&>(*leftType), static_cast<TStructType&>(*rightType),
-        {{"lk", "rk"}}, EJoinType::Left);
+    auto kernels = CompileJoin(compiler, leftType, rightType, EJoinType::Left);
     auto outputType = ComputeJoinOutputType(leftType, rightType, EJoinType::Left);
     ASSERT_TRUE(outputType);
 
@@ -1076,9 +1048,7 @@ TEST(RuntimeJoin, RightOuterScalarKey) {
     auto right = std::make_unique<TVectorRuntimeSource>(rightType, std::move(rbatches));
 
     TKernelCompiler compiler;
-    auto kernels = compiler.CompileJoin(
-        static_cast<TStructType&>(*leftType), static_cast<TStructType&>(*rightType),
-        {{"lk", "rk"}}, EJoinType::Right);
+    auto kernels = CompileJoin(compiler, leftType, rightType, EJoinType::Right);
     auto outputType = ComputeJoinOutputType(leftType, rightType, EJoinType::Right);
     ASSERT_TRUE(outputType);
 
