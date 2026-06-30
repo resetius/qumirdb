@@ -215,6 +215,8 @@ private:
     static_assert(sizeof(TPairBufferState) == TKernelCompiler::kPairBufferSize);
 
     void EnsureInit();
+    bool IsSemiAnti() const;
+    bool IsOuter() const;
     bool NextResidualSemiAnti(TRowSet& rowSet);
     bool NextSemiAnti(TRowSet& rowSet);
     bool NextOuter(TRowSet& rowSet);

@@ -589,6 +589,14 @@ bool TRuntimeJoin::DrainReadyOutput(TRowSet& rowSet) {
     return true;
 }
 
+bool TRuntimeJoin::IsSemiAnti() const {
+    return JoinType_ == EJoinType::LeftSemi || JoinType_ == EJoinType::LeftAnti;
+}
+
+bool TRuntimeJoin::IsOuter() const {
+    return JoinType_ == EJoinType::Left || JoinType_ == EJoinType::Right;
+}
+
 void TRuntimeJoin::PullOneInnerInputBatch() {
     TRowSet batch = {};
     for (;;) {
@@ -730,16 +738,15 @@ bool TRuntimeJoin::Next(TRowSet& rowSet) {
 
     if (DrainReadyOutput(rowSet)) return true;
 
-    if ((JoinType_ == EJoinType::LeftSemi || JoinType_ == EJoinType::LeftAnti)
-        && HasResidual_) {
+    if (IsSemiAnti() && HasResidual_) {
         return NextResidualSemiAnti(rowSet);
     }
 
-    if (JoinType_ == EJoinType::LeftSemi || JoinType_ == EJoinType::LeftAnti) {
+    if (IsSemiAnti()) {
         return NextSemiAnti(rowSet);
     }
 
-    if (JoinType_ == EJoinType::Left || JoinType_ == EJoinType::Right) {
+    if (IsOuter()) {
         return NextOuter(rowSet);
     }
 
