@@ -27,6 +27,8 @@ public:
 
     virtual EConnectionKind Kind() const = 0;
     virtual void Resize(size_t srcCount, size_t dstCount) = 0;
+    virtual size_t SrcCount() const = 0;
+    virtual size_t DstCount() const = 0;
 
     virtual bool CanPush(size_t srcId) const = 0;
     virtual bool Push(size_t srcId, TRowSet&& rowSet) = 0;
@@ -42,6 +44,8 @@ public:
 
     EConnectionKind Kind() const override;
     void Resize(size_t srcCount, size_t dstCount) override;
+    size_t SrcCount() const override;
+    size_t DstCount() const override;
 
     bool CanPush(size_t srcId) const override;
     bool Push(size_t srcId, TRowSet&& rowSet) override;
@@ -64,6 +68,8 @@ public:
 
     EConnectionKind Kind() const override;
     void Resize(size_t srcCount, size_t dstCount) override;
+    size_t SrcCount() const override;
+    size_t DstCount() const override;
 
     bool CanPush(size_t srcId) const override;
     bool Push(size_t srcId, TRowSet&& rowSet) override;
