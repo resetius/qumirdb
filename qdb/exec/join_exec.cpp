@@ -65,6 +65,14 @@ std::vector<TJoinColumnRef> BuildJoinColumns(
     return columns;
 }
 
+bool DrainBuilder(TJoinOutputBuilder& builder, TRowSet& rowSet) {
+    if (builder.NextBatch(rowSet)) {
+        return true;
+    }
+    builder.ClearPairs();
+    return false;
+}
+
 } // namespace
 
 size_t JoinColumnFixedWidth(const TTypePtr& type) {
@@ -319,8 +327,7 @@ bool TRuntimeCrossJoin::FillNextLeftBatch() {
 bool TRuntimeCrossJoin::Next(TRowSet& rowSet) {
     EnsureRightDrained();
     for (;;) {
-        if (Builder_->NextBatch(rowSet)) return true;
-        Builder_->ClearPairs();
+        if (DrainBuilder(*Builder_, rowSet)) return true;
         if (!FillNextLeftBatch()) return false;
     }
 }
@@ -638,9 +645,7 @@ bool TRuntimeJoin::Next(TRowSet& rowSet) {
             }
             ResidualSemiAntiDone_ = true;
         }
-        if (Builder_->NextBatch(rowSet)) return true;
-        Builder_->ClearPairs();
-        return false;
+        return DrainBuilder(*Builder_, rowSet);
     }
 
     if (JoinType_ == EJoinType::LeftSemi || JoinType_ == EJoinType::LeftAnti) {
@@ -673,18 +678,13 @@ bool TRuntimeJoin::Next(TRowSet& rowSet) {
             PairBuffer_.Count = 0;
             SemiAntiFinalized_ = true;
         }
-        if (Builder_->NextBatch(rowSet)) {
-            return true;
-        }
-        Builder_->ClearPairs();
-        return false;
+        return DrainBuilder(*Builder_, rowSet);
     }
 
     // LEFT / RIGHT OUTER: pipelined streaming (same as INNER) + deferred final scan.
     if (JoinType_ == EJoinType::Left || JoinType_ == EJoinType::Right) {
         for (;;) {
-            if (Builder_->NextBatch(rowSet)) return true;
-            Builder_->ClearPairs();
+            if (DrainBuilder(*Builder_, rowSet)) return true;
             if (OuterFinalized_) return false;
             if (!BothDone_) {
                 PullOneInputBatch();
@@ -713,10 +713,7 @@ bool TRuntimeJoin::Next(TRowSet& rowSet) {
             ReadyOutput_.pop_front();
             return true;
         }
-        if (Builder_->NextBatch(rowSet)) {
-            return true;
-        }
-        Builder_->ClearPairs();
+        if (DrainBuilder(*Builder_, rowSet)) return true;
         if (BothDone_) {
             return false;
         }
