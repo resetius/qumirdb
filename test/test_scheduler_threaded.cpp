@@ -141,7 +141,7 @@ TEST(SchedulerThreaded, RunsSmallGraph) {
     TTaskGraph graph;
     auto& source = graph.AddOwnedNode(std::move(sourceTask));
     auto& sink = graph.AddOwnedNode(std::move(sinkTask));
-    graph.AddEdge(source, sink, std::make_unique<TOneToOneConnection>());
+    graph.AddOwnedEdge(source, sink, std::make_unique<TOneToOneConnection>());
     graph.Build();
 
     TThreadedScheduler scheduler(graph, 4);
@@ -178,7 +178,7 @@ TEST(SchedulerThreaded, StressProducerConsumerWakeups) {
     TTaskGraph graph;
     auto& source = graph.AddOwnedNode(std::move(sourceTask));
     auto& sink = graph.AddOwnedNode(std::move(sinkTask));
-    graph.AddEdge(source, sink, std::make_unique<TOneToOneConnection>());
+    graph.AddOwnedEdge(source, sink, std::make_unique<TOneToOneConnection>());
     graph.Build();
 
     TThreadedScheduler scheduler(graph, 4);

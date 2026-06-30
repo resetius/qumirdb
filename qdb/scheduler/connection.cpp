@@ -56,6 +56,14 @@ void TOneToOneConnection::Resize(size_t srcCount, size_t dstCount) {
     }
 }
 
+size_t TOneToOneConnection::SrcCount() const {
+    return Size_;
+}
+
+size_t TOneToOneConnection::DstCount() const {
+    return Size_;
+}
+
 bool TOneToOneConnection::CanPush(size_t srcId) const {
     assert(srcId < Size_);
     return Lanes_[srcId]->Queue.CanPush();
@@ -125,6 +133,14 @@ void TGatherConnection::Resize(size_t srcCount, size_t dstCount) {
     for (size_t i = 0; i < Size_; ++i) {
         Lanes_.push_back(std::make_unique<TLane>(Capacity_));
     }
+}
+
+size_t TGatherConnection::SrcCount() const {
+    return Size_;
+}
+
+size_t TGatherConnection::DstCount() const {
+    return 1;
 }
 
 bool TGatherConnection::CanPush(size_t srcId) const {
