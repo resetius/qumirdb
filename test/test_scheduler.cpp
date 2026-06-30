@@ -145,22 +145,28 @@ struct TOneToOne : IConnection {
 
 // many -> one
 struct TGather : IConnection {
-    bool CanPush(int src_id) {
+    TGather(size_t partitions = 1)
+        : Size_(partitions)
+        , Flags_(Size_)
+        , Outputs_(Size_)
+    { }
+
+    bool CanPush(int src_id) const override {
         return Outputs_[src_id].size() < MaxOutput;
     }
 
-    void Finish(int src_id) {
+    void Finish(int src_id) override {
         if (Flags_[src_id] == 0) {
             NFinished_ ++;
         }
         Flags_[src_id] = 1;
     }
 
-    void Push(int src_id, TRowSet&& rowSet) {
+    void Push(int src_id, TRowSet&& rowSet) override {
         Outputs_[src_id].emplace_back(std::move(rowSet));
     }
 
-    EFetchState Fetch(int dst_id, TRowSet& batch) {
+    EFetchState Fetch(int dst_id, TRowSet& batch) override {
         assert(dst_id == 0);
 
         auto from = (FetchId_ + 1) % Size_;
@@ -263,6 +269,10 @@ struct THashShuffle : IConnection {
     std::vector<std::vector<std::deque<TRowSet>>> Outputs_;
 };
 
+// this is not IRuntimeNode from qdb
+// this should be called smth like ITask maybe?
+// this should hold light-weight node with kernel+dispatch logic (w/o state), state, params
+// e.g. this runtime node efficientely is qdb::IRuntimeNode+task/shard-local mutable state+task/shard-local mutable params
 struct IRuntimeNode {
     virtual ~IRuntimeNode() = default;
 
@@ -274,6 +284,12 @@ struct IRuntimeNode {
     // connections
     virtual void SetInputPort(TInputPort inputPort) = 0;
     virtual void SetOutputPort(TOutputPort outputPort) = 0;
+
+    // hack
+    // for real use we need to create this task node on partition state
+    // then wrap qdb::IRuntimeNode + attach state+params + attach PartitionId + attach InputId
+    //
+    virtual IRuntimeNode* Clone() = 0;
 };
 
 struct TDagNode {
@@ -341,6 +357,13 @@ struct TGraph {
         switch (kind) {
         case EConnectionKind::OneToOne: {
             auto conn = std::make_unique<TOneToOne>();
+            src->SetOutputPort(TOutputPort(conn.get(), 0));
+            dst->SetInputPort(TInputPort(conn.get(), 0));
+            Connections.emplace_back(std::move(conn));
+            break;
+        }
+        case EConnectionKind::Gather: {
+            auto conn = std::make_unique<TGather>();
             src->SetOutputPort(TOutputPort(conn.get(), 0));
             dst->SetInputPort(TInputPort(conn.get(), 0));
             Connections.emplace_back(std::move(conn));
@@ -453,6 +476,10 @@ struct TScan : TNode {
         }
         return EState::OK;
     }
+
+    IRuntimeNode* Clone() override {
+        return new TScan(NSets, Seed);
+    }
 };
 
 struct TFilter : TNodeWithInput {
@@ -474,6 +501,10 @@ struct TFilter : TNodeWithInput {
             }
         }
     }
+
+    IRuntimeNode* Clone() override {
+        return new TFilter(Seed, Percent);
+    }
 };
 
 struct TPrinter : TNodeWithInput {
@@ -486,6 +517,10 @@ struct TPrinter : TNodeWithInput {
                 std::cout << rowSet.Col[i] << "\n";
             }
         }
+    }
+
+    IRuntimeNode* Clone() override {
+        return new TPrinter();
     }
 };
 
@@ -589,7 +624,7 @@ TEST(Scheduler, Async) {
 
     TGraph g;
     g.Connect(scan.get(), filter.get(), EConnectionKind::OneToOne);
-    g.Connect(filter.get(), printer.get(), EConnectionKind::OneToOne);
+    g.Connect(filter.get(), printer.get(), EConnectionKind::Gather);
     g.Build();
 
     TScheduler scheduler(g);
