@@ -192,11 +192,13 @@ public:
     TAggregateKernels CompileAggregate(
         const NKernel::TOperatorKernelSpec& spec);
 
-    // Compiles the symmetric hash join kernels for the equi-key pairs `keys`
-    // (parallel left/right column names) over rows of leftType/rightType.
-    // Constraints (NQumir::TError if violated): type == Inner; key components
-    // are fixed-width (integer/f64/composite) and type-compatible across sides.
-    // String keys are not supported yet.
+    // Compiles the symmetric hash join kernels described by `spec`.
+    TJoinKernels CompileJoin(
+        const NKernel::TOperatorKernelSpec& spec);
+
+private:
+    // Implementation for the equi-key pairs `keys` (parallel left/right column
+    // names) over rows of leftType/rightType. String keys are not supported yet.
     //
     // Optional residual filter: when `residualPredicate` is set, it is compiled
     // into the injected `jt_residual_filter` (evaluated per matched pair before
@@ -204,8 +206,6 @@ public:
     // right fields, split at `leftFieldCount`). For LeftSemi/LeftAnti with a
     // residual predicate the process functions are generated as INNER (they emit
     // pairs); the executor dedups matched left IDs.
-    TJoinKernels CompileJoin(
-        const NKernel::TOperatorKernelSpec& spec);
     TJoinKernels CompileJoin(
         const NQumir::NAst::TStructType& leftType,
         const NQumir::NAst::TStructType& rightType,
@@ -215,7 +215,6 @@ public:
         const NQumir::NAst::TStructType* innerType = nullptr,
         size_t leftFieldCount = 0);
 
-private:
     std::ostream* Diagnostics_ = nullptr;
     NQumir::TLLVMRunnerOptions Opts_;
 };
