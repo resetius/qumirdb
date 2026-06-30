@@ -28,7 +28,7 @@ jobs:
     - name: apt-get update
       run: sudo apt-get update
     - name: Install packages
-      run: sudo apt-get install -y cmake ninja-build pkg-config llvm-20-dev lld libgtest-dev libarrow-dev libparquet-dev g++-14
+      run: sudo apt-get install -y cmake ninja-build pkg-config llvm-20-dev lld libgtest-dev libarrow-dev libparquet-dev libreadline-dev g++-14
     - name: Configure
       run: |
         cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug \
