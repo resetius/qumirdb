@@ -18,8 +18,13 @@ TBufferedSchedulerOutput::~TBufferedSchedulerOutput()
 
 void TBufferedSchedulerOutput::Add(const TRowSet& rowSet)
 {
-    auto copy = rowSet;
-    Retain(&copy);
+    // RefCount is stored in TRowSet itself, so retain the sink-owned instance
+    // before TSinkTask releases it and keep a single-owner buffered copy.
+    auto* retained = const_cast<TRowSet*>(&rowSet);
+    Retain(retained);
+
+    auto copy = *retained;
+    copy.RefCount = 1;
     RowSets_.push_back(copy);
 }
 
@@ -41,6 +46,31 @@ std::shared_ptr<TSinkCode> MakeBufferedSchedulerSinkCode()
             auto* output = static_cast<TBufferedSchedulerOutput*>(state);
             output->Add(rowSet);
         });
+}
+
+std::unique_ptr<IRuntimeNode> BuildBufferedSchedulerRuntimePipeline(
+    TPipelinePartitionSpec spec,
+    NQumir::NAst::TTypePtr outputType,
+    std::string* error)
+{
+    auto output = std::make_shared<TBufferedSchedulerOutput>();
+    spec.Sink = TSinkPartitionSpec{
+        .Code = MakeBufferedSchedulerSinkCode(),
+        .MakeState = [output]() {
+            return output;
+        },
+    };
+
+    auto partitioned = TPipelinePartitioner::Build(spec, error);
+    if (!partitioned.Graph) {
+        return {};
+    }
+
+    return std::make_unique<TRuntimeSchedulerPipeline>(
+        std::move(partitioned.Graph),
+        spec.Settings,
+        std::move(outputType),
+        std::move(output));
 }
 
 TRuntimeSchedulerPipeline::TRuntimeSchedulerPipeline(

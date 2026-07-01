@@ -7,6 +7,7 @@
 #include <qdb/exec/source_exec.h>
 #include <qdb/exec/unary_block_exec.h>
 #include <qdb/exec/unary_stream_exec.h>
+#include <qdb/scheduler/runtime_node.h>
 #include <qdb/plan/ops/aggregate.h>
 #include <qdb/plan/ops/limit.h>
 #include <qdb/plan/ops/source.h>
@@ -23,10 +24,26 @@
 
 #include <algorithm>
 #include <stdexcept>
+#include <unordered_map>
+#include <unordered_set>
 
 namespace NQdb {
 
 namespace {
+
+struct TSchedulerSourceState {
+    ISource* Source = nullptr;
+};
+
+struct TSchedulerUnaryStage {
+    NScheduler::TUnaryPartitionSpec Spec;
+    NQumir::NAst::TTypePtr OutputType;
+};
+
+struct TUnaryRuntimeProcess {
+    TRuntimeUnaryStreamingKernel::TProcess Process;
+    NQumir::NAst::TTypePtr OutputType;
+};
 
 // Byte width of the kernel output buffer per row for a computed column.
 // For TStringType (string computed columns), the JIT kernel writes one
@@ -99,6 +116,258 @@ void PrintKernelSpec(std::ostream* out, const NKernel::TOperatorKernelSpec& spec
     *out << "=================================\n";
 }
 
+NQumir::NAst::TTypePtr BuildSourceRuntimeType(TSourceOperator& src)
+{
+    if (auto required = src.RequiredColumns()) {
+        auto* st = static_cast<NQumir::NAst::TStructType*>(required.get());
+        std::unordered_set<std::string> cols;
+        for (auto& [name, _] : st->Fields) {
+            auto dot = name.rfind('.');
+            cols.insert(dot != std::string::npos ? name.substr(dot + 1) : name);
+        }
+        src.GetSource().RestrictColumns(cols);
+    }
+
+    auto* qualSt = static_cast<NQumir::NAst::TStructType*>(
+        src.OutputColumns().get());
+    std::unordered_map<std::string,
+        std::pair<std::string, NQumir::NAst::TTypePtr>> bareToQual;
+    if (qualSt) {
+        for (const auto& [qname, ftype] : qualSt->Fields) {
+            auto dot = qname.rfind('.');
+            auto bare = dot != std::string::npos ? qname.substr(dot + 1) : qname;
+            bareToQual.try_emplace(bare, qname, ftype);
+        }
+    }
+
+    std::vector<std::pair<std::string, NQumir::NAst::TTypePtr>> fields;
+    for (const auto& col : src.GetSource().Schema().Columns) {
+        auto bare = std::string(col.Name);
+        auto it = bareToQual.find(bare);
+        if (it != bareToQual.end()) {
+            fields.emplace_back(it->second.first, it->second.second);
+        } else {
+            fields.emplace_back(bare, col.Type);
+        }
+    }
+    return std::make_shared<NQumir::NAst::TStructType>(std::move(fields));
+}
+
+TUnaryRuntimeProcess BuildFilterRuntimeProcess(
+    TFilterOperator& filter,
+    const NQumir::NAst::TTypePtr& inputType,
+    std::ostream* diagnostics)
+{
+    auto* inputStruct = static_cast<NQumir::NAst::TStructType*>(inputType.get());
+    if (!inputStruct) {
+        throw std::runtime_error("filter input must have TStructType");
+    }
+
+    auto spec = NKernel::BuildFilterKernelSpec(*inputStruct, filter.Predicate());
+    TKernelCompiler compiler(diagnostics);
+    return {
+        .Process = MakeFilterProcess(compiler.CompileFilter(spec)),
+        .OutputType = inputType,
+    };
+}
+
+TSchedulerUnaryStage BuildSchedulerFilterStage(
+    TFilterOperator& filter,
+    const NQumir::NAst::TTypePtr& inputType,
+    std::ostream* diagnostics)
+{
+    auto runtime = BuildFilterRuntimeProcess(filter, inputType, diagnostics);
+    auto code = std::make_shared<NScheduler::TUnaryCode>(
+        [process = std::move(runtime.Process)](void* state, TRowSet& rowSet) {
+            auto* kernelState = static_cast<TUnaryStreamingKernelState*>(state);
+            process(rowSet, *kernelState);
+        });
+    return {
+        .Spec = {
+            .Code = std::move(code),
+            .MakeState = [](size_t) {
+                return std::make_shared<TUnaryStreamingKernelState>();
+            },
+        },
+        .OutputType = std::move(runtime.OutputType),
+    };
+}
+
+TUnaryRuntimeProcess BuildProjectRuntimeProcess(
+    TProjectOperator& project,
+    const NQumir::NAst::TTypePtr& inputType,
+    std::ostream* diagnostics)
+{
+    auto* inputStruct = static_cast<NQumir::NAst::TStructType*>(inputType.get());
+    if (!inputStruct) {
+        throw std::runtime_error("project input must have TStructType");
+    }
+
+    std::vector<TProjectColumn> columns;
+    std::vector<NQumir::NAst::TExprPtr> computedExprs;
+    std::vector<NQumir::NAst::TTypePtr> computedJitTypes;
+    std::vector<size_t> computedWidths;
+    std::vector<bool> computedIsString;
+    std::vector<std::pair<std::string, NQumir::NAst::TTypePtr>> outFields;
+    for (const auto& projection : project.Projections()) {
+        if (auto identNode = NQumir::NAst::TMaybeNode<NQumir::NAst::TIdentExpr>(
+                projection.Expression)) {
+            const std::string& exprName = identNode.Cast()->Name;
+            auto it = std::find_if(
+                inputStruct->Fields.begin(), inputStruct->Fields.end(),
+                [&](const auto& field) { return field.first == exprName; });
+            if (it == inputStruct->Fields.end()) {
+                throw std::runtime_error("project column not found: " + exprName);
+            }
+            columns.push_back({
+                .Computed = false,
+                .Index = static_cast<int32_t>(
+                    std::distance(inputStruct->Fields.begin(), it)),
+            });
+            outFields.emplace_back(projection.Name, it->second);
+        } else {
+            auto outType = NKernel::InferProjectExprType(
+                projection.Expression,
+                *inputStruct);
+            auto jitType = ProjectJitType(outType);
+            using namespace NQumir::NAst;
+            bool isStr = static_cast<bool>(TMaybeType<TStringType>(
+                UnwrapNamedType(UnwrapNullableType(outType))));
+            columns.push_back({
+                .Computed = true,
+                .Index = static_cast<int32_t>(computedExprs.size()),
+            });
+            computedExprs.push_back(projection.Expression);
+            computedJitTypes.push_back(jitType);
+            computedWidths.push_back(ProjectColumnWidth(outType));
+            computedIsString.push_back(isStr);
+            outFields.emplace_back(projection.Name, outType);
+        }
+    }
+
+    TKernelCompiler::TProjectDispatch dispatch;
+    if (!computedExprs.empty()) {
+        auto spec = NKernel::BuildProjectKernelSpec(
+            *inputStruct,
+            computedExprs,
+            computedJitTypes);
+        TKernelCompiler compiler(diagnostics);
+        dispatch = compiler.CompileProject(spec);
+    }
+
+    auto process = MakeProjectProcess(
+        std::move(columns),
+        std::move(dispatch),
+        std::move(computedWidths),
+        std::move(computedIsString));
+
+    return {
+        .Process = std::move(process),
+        .OutputType = std::make_shared<NQumir::NAst::TStructType>(
+            std::move(outFields)),
+    };
+}
+
+TSchedulerUnaryStage BuildSchedulerProjectStage(
+    TProjectOperator& project,
+    const NQumir::NAst::TTypePtr& inputType,
+    std::ostream* diagnostics)
+{
+    auto runtime = BuildProjectRuntimeProcess(project, inputType, diagnostics);
+    auto code = std::make_shared<NScheduler::TUnaryCode>(
+        [process = std::move(runtime.Process)](void* state, TRowSet& rowSet) {
+            auto* kernelState = static_cast<TUnaryStreamingKernelState*>(state);
+            process(rowSet, *kernelState);
+        });
+
+    return {
+        .Spec = {
+            .Code = std::move(code),
+            .MakeState = [](size_t) {
+                return std::make_shared<TUnaryStreamingKernelState>();
+            },
+        },
+        .OutputType = std::move(runtime.OutputType),
+    };
+}
+
+std::unique_ptr<IRuntimeNode> TryBuildSchedulerUnaryPipeline(
+    const TOperatorPtr& root,
+    NScheduler::TSettings settings,
+    std::ostream* diagnostics)
+{
+    std::vector<TOperatorPtr> stages;
+    auto current = root;
+    while (current) {
+        if (auto filter = TMaybeOp<TFilterOperator>(current)) {
+            stages.push_back(current);
+            current = filter.Cast()->Input();
+        } else if (auto project = TMaybeOp<TProjectOperator>(current)) {
+            stages.push_back(current);
+            current = project.Cast()->Input();
+        } else {
+            break;
+        }
+    }
+
+    auto source = TMaybeOp<TSourceOperator>(current);
+    if (!source) {
+        return {};
+    }
+
+    auto outputType = BuildSourceRuntimeType(*source.Cast());
+    auto sourceCode = std::make_shared<NScheduler::TSourceCode>(
+        [](void* state, TRowSet& rowSet) {
+            auto* sourceState = static_cast<TSchedulerSourceState*>(state);
+            return sourceState->Source->Next(rowSet);
+        });
+
+    NScheduler::TPipelinePartitionSpec spec;
+    spec.Source = NScheduler::TSourcePartitionSpec{
+        .Code = std::move(sourceCode),
+        .MakeState = [source = &source.Cast()->GetSource()](
+            size_t,
+            const NScheduler::TScanSplit*)
+        {
+            return std::make_shared<TSchedulerSourceState>(TSchedulerSourceState{
+                .Source = source,
+            });
+        },
+    };
+
+    for (auto it = stages.rbegin(); it != stages.rend(); ++it) {
+        if (auto filter = TMaybeOp<TFilterOperator>(*it)) {
+            auto stage = BuildSchedulerFilterStage(
+                *filter.Cast(),
+                outputType,
+                diagnostics);
+            outputType = std::move(stage.OutputType);
+            spec.UnaryStages.push_back(std::move(stage.Spec));
+        } else if (auto project = TMaybeOp<TProjectOperator>(*it)) {
+            auto stage = BuildSchedulerProjectStage(
+                *project.Cast(),
+                outputType,
+                diagnostics);
+            outputType = std::move(stage.OutputType);
+            spec.UnaryStages.push_back(std::move(stage.Spec));
+        }
+    }
+
+    spec.Settings = settings;
+    spec.Settings.Partitioning.DefaultPartitionCount = 1;
+    spec.Settings.Partitioning.MaxPartitionCount = 1;
+
+    std::string error;
+    auto runtime = NScheduler::BuildBufferedSchedulerRuntimePipeline(
+        std::move(spec),
+        outputType,
+        &error);
+    if (!runtime) {
+        throw std::runtime_error(error);
+    }
+    return runtime;
+}
+
 } // namespace
 
 void TPhysicalPlanner::PrintRuntimePlan(const TOperatorPtr& root) const {
@@ -158,131 +427,47 @@ void TPhysicalPlanner::PrintRuntimePlan(const TOperatorPtr& root, int depth) con
 }
 
 std::unique_ptr<IRuntimeNode> TPhysicalPlanner::Build(const TOperatorPtr& root) {
+    if (SchedulerSettings_.Scheduler.Mode != NScheduler::EExecutionMode::Serial) {
+        if (auto runtime = TryBuildSchedulerUnaryPipeline(
+                root,
+                SchedulerSettings_,
+                Diagnostics_))
+        {
+            return runtime;
+        }
+    }
+
     if (auto maybe = TMaybeOp<TSourceOperator>(root)) {
         auto src = maybe.Cast();
-        // After column pruning, RequiredColumns() holds the narrowed struct.
-        // Column names may be qualified ("alias.col") after QualifyColumns —
-        // strip the prefix so the physical source gets bare column names.
-        if (auto required = src->RequiredColumns()) {
-            auto* st = static_cast<NQumir::NAst::TStructType*>(required.get());
-            std::unordered_set<std::string> cols;
-            for (auto& [name, _] : st->Fields) {
-                auto dot = name.rfind('.');
-                cols.insert(dot != std::string::npos ? name.substr(dot + 1) : name);
-            }
-            src->GetSource().RestrictColumns(cols);
-        }
-        // Build a runtime type that uses qualified names (so kernel variable names
-        // match predicate idents) but in physical column ORDER (post-RestrictColumns).
-        // The physical and logical orders may differ for mock sources in tests.
-        {
-            auto* qualSt = static_cast<NQumir::NAst::TStructType*>(
-                src->OutputColumns().get());
-            // Map bare name → (qualified name, type)
-            std::unordered_map<std::string,
-                std::pair<std::string, NQumir::NAst::TTypePtr>> bareToQual;
-            if (qualSt) {
-                for (const auto& [qname, ftype] : qualSt->Fields) {
-                    auto dot = qname.rfind('.');
-                    auto bare = (dot != std::string::npos)
-                        ? qname.substr(dot + 1) : qname;
-                    bareToQual.try_emplace(bare, qname, ftype);
-                }
-            }
-            std::vector<std::pair<std::string, NQumir::NAst::TTypePtr>> fields;
-            for (const auto& col : src->GetSource().Schema().Columns) {
-                auto bare = std::string(col.Name);
-                auto it = bareToQual.find(bare);
-                if (it != bareToQual.end()) {
-                    fields.emplace_back(it->second.first, it->second.second);
-                } else {
-                    fields.emplace_back(bare, col.Type);
-                }
-            }
-            auto actualType = std::make_shared<NQumir::NAst::TStructType>(
-                std::move(fields));
-            return std::make_unique<TRuntimeSource>(src->GetSource(), actualType);
-        }
+        return std::make_unique<TRuntimeSource>(
+            src->GetSource(),
+            BuildSourceRuntimeType(*src));
     }
 
     if (auto maybe = TMaybeOp<TFilterOperator>(root)) {
         auto filter = maybe.Cast();
         auto input = Build(filter->Input());
-        // Use the physical (pruned) type, not the logical type.
-        auto* inputType = static_cast<NQumir::NAst::TStructType*>(input->OutputType().get());
-        if (!inputType) {
-            throw std::runtime_error("filter input must have TStructType");
-        }
-        auto spec = NKernel::BuildFilterKernelSpec(*inputType, filter->Predicate());
-        TKernelCompiler compiler(Diagnostics_);
-        auto dispatch = compiler.CompileFilter(spec);
+        auto runtime = BuildFilterRuntimeProcess(
+            *filter,
+            input->OutputType(),
+            Diagnostics_);
         return std::make_unique<TRuntimeUnaryStreamingKernel>(
             std::move(input),
-            input->OutputType(),
-            MakeFilterProcess(std::move(dispatch)));
+            std::move(runtime.OutputType),
+            std::move(runtime.Process));
     }
 
     if (auto maybe = TMaybeOp<TProjectOperator>(root)) {
         auto project = maybe.Cast();
         auto input = Build(project->Input());
-        auto* inputType = static_cast<NQumir::NAst::TStructType*>(input->OutputType().get());
-        if (!inputType) {
-            throw std::runtime_error("project input must have TStructType");
-        }
-
-        // Hybrid: ident projections stay zero-copy; computed projections go
-        // through the project kernel into owned buffers.
-        std::vector<TProjectColumn> columns;
-        std::vector<NQumir::NAst::TExprPtr> computedExprs;
-        std::vector<NQumir::NAst::TTypePtr> computedJitTypes;
-        std::vector<size_t> computedWidths;
-        std::vector<bool> computedIsString;
-        std::vector<std::pair<std::string, NQumir::NAst::TTypePtr>> outFields;
-        for (const auto& projection : project->Projections()) {
-            if (auto identNode = NQumir::NAst::TMaybeNode<NQumir::NAst::TIdentExpr>(
-                    projection.Expression)) {
-                const std::string& exprName = identNode.Cast()->Name;
-                auto it = std::find_if(
-                    inputType->Fields.begin(), inputType->Fields.end(),
-                    [&](const auto& field) { return field.first == exprName; });
-                if (it == inputType->Fields.end()) {
-                    throw std::runtime_error("project column not found: " + exprName);
-                }
-                columns.push_back({.Computed = false,
-                    .Index = static_cast<int32_t>(std::distance(inputType->Fields.begin(), it))});
-                outFields.emplace_back(projection.Name, it->second);
-            } else {
-                auto outType = NKernel::InferProjectExprType(projection.Expression, *inputType);
-                auto jitType = ProjectJitType(outType);
-                using namespace NQumir::NAst;
-                bool isStr = static_cast<bool>(TMaybeType<TStringType>(
-                    UnwrapNamedType(UnwrapNullableType(outType))));
-                columns.push_back({.Computed = true,
-                    .Index = static_cast<int32_t>(computedExprs.size())});
-                computedExprs.push_back(projection.Expression);
-                computedJitTypes.push_back(jitType);
-                computedWidths.push_back(ProjectColumnWidth(outType));
-                computedIsString.push_back(isStr);
-                outFields.emplace_back(projection.Name, outType);
-            }
-        }
-
-        TKernelCompiler::TProjectDispatch dispatch;
-        if (!computedExprs.empty()) {
-            auto spec = NKernel::BuildProjectKernelSpec(
-                *inputType, computedExprs, computedJitTypes);
-            TKernelCompiler compiler(Diagnostics_);
-            dispatch = compiler.CompileProject(spec);
-        }
-
+        auto runtime = BuildProjectRuntimeProcess(
+            *project,
+            input->OutputType(),
+            Diagnostics_);
         return std::make_unique<TRuntimeUnaryStreamingKernel>(
             std::move(input),
-            std::make_shared<NQumir::NAst::TStructType>(std::move(outFields)),
-            MakeProjectProcess(
-                std::move(columns),
-                std::move(dispatch),
-                std::move(computedWidths),
-                std::move(computedIsString)));
+            std::move(runtime.OutputType),
+            std::move(runtime.Process));
     }
 
     if (auto maybe = TMaybeOp<TAggregateOperator>(root)) {
