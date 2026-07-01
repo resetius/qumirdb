@@ -36,6 +36,7 @@ bool TThreadedScheduler::Run(std::string* error) {
     }
     HasRun_ = true;
 
+    Graph_.Build();
     if (!Graph_.Validate(error)) {
         return false;
     }

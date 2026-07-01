@@ -55,6 +55,7 @@ add_library(qumirdb
     exec/sort_exec.cpp
     exec/planner.cpp
     scheduler/connection.cpp
+    scheduler/executor.cpp
     scheduler/graph.cpp
     scheduler/partitioner.cpp
     scheduler/runtime_adapter.cpp
