@@ -112,6 +112,20 @@ struct TTopSortBlockingState {
     bool InputFinished = false;
 };
 
+struct TSchedulerInnerJoinState {
+    TSchedulerInnerJoinState(
+        NQumir::NAst::TTypePtr leftType,
+        NQumir::NAst::TTypePtr rightType,
+        TJoinKernels kernels)
+        : Processor(
+            std::move(leftType),
+            std::move(rightType),
+            std::move(kernels))
+    {}
+
+    TInnerJoinProcessor Processor;
+};
+
 // Byte width of the kernel output buffer per row for a computed column.
 // For TStringType (string computed columns), the JIT kernel writes one
 // TStringView struct (16 bytes) per row; the executor post-converts those.
@@ -491,6 +505,40 @@ std::unique_ptr<IRuntimeNode> BuildSchedulerRuntimePipeline(
     return runtime;
 }
 
+NScheduler::TPipelineSidePartitionSpec TakePipelineSide(TSchedulerPipelineBuild& build)
+{
+    return NScheduler::TPipelineSidePartitionSpec{
+        .Source = std::move(build.Spec.Source),
+        .UnaryStages = std::move(build.Spec.UnaryStages),
+    };
+}
+
+EJoinFetchResult MapJoinFetch(NScheduler::EFetchResult result)
+{
+    switch (result) {
+        case NScheduler::EFetchResult::OK:
+            return EJoinFetchResult::OK;
+        case NScheduler::EFetchResult::NO_DATA:
+            return EJoinFetchResult::NO_DATA;
+        case NScheduler::EFetchResult::FINISHED:
+            return EJoinFetchResult::FINISHED;
+    }
+    return EJoinFetchResult::FINISHED;
+}
+
+NScheduler::ETaskResult MapJoinProcessResult(EJoinProcessorResult result)
+{
+    switch (result) {
+        case EJoinProcessorResult::OK:
+            return NScheduler::ETaskResult::OK;
+        case EJoinProcessorResult::NEED_DATA:
+            return NScheduler::ETaskResult::NEED_DATA;
+        case EJoinProcessorResult::FINISHED:
+            return NScheduler::ETaskResult::FINISHED;
+    }
+    return NScheduler::ETaskResult::FINISHED;
+}
+
 std::unique_ptr<IRuntimeNode> TryBuildSchedulerUnaryPipeline(
     const TOperatorPtr& root,
     NScheduler::TSettings settings,
@@ -501,6 +549,124 @@ std::unique_ptr<IRuntimeNode> TryBuildSchedulerUnaryPipeline(
         return {};
     }
     return BuildSchedulerRuntimePipeline(std::move(*build));
+}
+
+std::unique_ptr<IRuntimeNode> TryBuildSchedulerJoinPipeline(
+    TJoinOperator& join,
+    NScheduler::TSettings settings,
+    std::ostream* diagnostics)
+{
+    using namespace NQumir::NAst;
+
+    if (join.JoinType() != EJoinType::Inner || join.Keys().empty()) {
+        return {};
+    }
+
+    auto left = BuildSchedulerUnarySpec(
+        join.Left(),
+        settings,
+        diagnostics);
+    if (!left) {
+        return {};
+    }
+    auto right = BuildSchedulerUnarySpec(
+        join.Right(),
+        settings,
+        diagnostics);
+    if (!right) {
+        return {};
+    }
+
+    auto leftType = left->OutputType;
+    auto rightType = right->OutputType;
+    auto* leftStruct = static_cast<TStructType*>(leftType.get());
+    auto* rightStruct = static_cast<TStructType*>(rightType.get());
+    if (!leftStruct || !rightStruct) {
+        throw std::runtime_error("scheduler join inputs must have TStructType");
+    }
+
+    auto kernelSpec = NKernel::BuildJoinKernelSpec(
+        *leftStruct,
+        *rightStruct,
+        join.Keys(),
+        join.JoinType(),
+        join.Filter());
+    TKernelCompiler compiler(diagnostics);
+    auto joinKernels = std::make_shared<TJoinKernels>(
+        compiler.CompileJoin(kernelSpec));
+    auto hashKernels = compiler.CompileJoinHash(kernelSpec);
+
+    if (left->Spec.Source.Splits.empty() || right->Spec.Source.Splits.empty()) {
+        settings.Partitioning.DefaultPartitionCount = 1;
+        settings.Partitioning.MaxPartitionCount = 1;
+    }
+    if (settings.HashShuffle.PartitionCount <= 1) {
+        settings.HashShuffle.PartitionCount = std::max<size_t>(
+            settings.Partitioning.DefaultPartitionCount,
+            1);
+    }
+    if (settings.HashShuffle.MaxPartitionCount <= 1) {
+        settings.HashShuffle.MaxPartitionCount = std::max<size_t>(
+            settings.Partitioning.MaxPartitionCount,
+            settings.HashShuffle.PartitionCount);
+    }
+
+    auto code = std::make_shared<NScheduler::TBinaryBlockingCode>(
+        [](void* state,
+           NScheduler::TInputPort& left,
+           NScheduler::TInputPort& right,
+           TRowSet& output)
+        {
+            auto* joinState = static_cast<TSchedulerInnerJoinState*>(state);
+            auto fetchLeft = [&](TRowSet& rowSet) {
+                return MapJoinFetch(left.Fetch(rowSet));
+            };
+            auto fetchRight = [&](TRowSet& rowSet) {
+                return MapJoinFetch(right.Fetch(rowSet));
+            };
+            return MapJoinProcessResult(
+                joinState->Processor.Process(fetchLeft, fetchRight, output));
+        });
+
+    NScheduler::TJoinPipelinePartitionSpec spec;
+    spec.Left = TakePipelineSide(*left);
+    spec.Right = TakePipelineSide(*right);
+    spec.LeftShuffle = NScheduler::THashShufflePartitionSpec{
+        .Code = std::make_shared<NScheduler::THashShuffleCode>(hashKernels.Left),
+        .MakeState = [](size_t) {
+            return std::make_shared<int>(0);
+        },
+    };
+    spec.RightShuffle = NScheduler::THashShufflePartitionSpec{
+        .Code = std::make_shared<NScheduler::THashShuffleCode>(hashKernels.Right),
+        .MakeState = [](size_t) {
+            return std::make_shared<int>(0);
+        },
+    };
+    spec.Join = NScheduler::TBinaryPartitionSpec{
+        .Code = std::move(code),
+        .MakeState = [
+            leftType,
+            rightType,
+            joinKernels](size_t)
+        {
+            return std::make_shared<TSchedulerInnerJoinState>(
+                leftType,
+                rightType,
+                *joinKernels);
+        },
+    };
+    spec.Settings = settings;
+
+    std::string error;
+    auto runtime = NScheduler::BuildBufferedSchedulerJoinRuntimePipeline(
+        std::move(spec),
+        std::move(kernelSpec.OutputSchema),
+        &error);
+    if (!runtime) {
+        throw std::runtime_error(error);
+    }
+    return runtime;
 }
 
 std::unique_ptr<IRuntimeNode> TryBuildSchedulerAggregatePipeline(
@@ -858,6 +1024,15 @@ std::unique_ptr<IRuntimeNode> TPhysicalPlanner::Build(const TOperatorPtr& root) 
         }
         if (auto maybe = TMaybeOp<TTopSortOperator>(root)) {
             if (auto runtime = TryBuildSchedulerTopSortPipeline(
+                    *maybe.Cast(),
+                    SchedulerSettings_,
+                    Diagnostics_))
+            {
+                return runtime;
+            }
+        }
+        if (auto maybe = TMaybeOp<TJoinOperator>(root)) {
+            if (auto runtime = TryBuildSchedulerJoinPipeline(
                     *maybe.Cast(),
                     SchedulerSettings_,
                     Diagnostics_))
