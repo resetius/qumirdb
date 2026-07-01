@@ -39,6 +39,10 @@ TSinkCode::TSinkCode(TWrite write)
     : Write(std::move(write))
 {}
 
+TBlockingCode::TBlockingCode(TProcess process)
+    : Process(std::move(process))
+{}
+
 TSourceTask::TSourceTask(
     std::shared_ptr<const TSourceCode> code,
     std::shared_ptr<void> state,
@@ -172,6 +176,62 @@ const std::shared_ptr<const TSinkCode>& TSinkTask::Code() const {
 }
 
 const std::shared_ptr<void>& TSinkTask::State() const {
+    return State_;
+}
+
+TBlockingTask::TBlockingTask(
+    std::shared_ptr<const TBlockingCode> code,
+    std::shared_ptr<void> state,
+    TInputPort input,
+    TOutputPort output)
+    : Code_(std::move(code))
+    , State_(std::move(state))
+    , Input_(input)
+    , Output_(output)
+{}
+
+TBlockingTask::~TBlockingTask() {
+    if (HasOutput_) {
+        Release(&CurrentOutput_);
+    }
+}
+
+ETaskResult TBlockingTask::Execute() {
+    if (OutputFinished_) {
+        return ETaskResult::FINISHED;
+    }
+
+    if (HasOutput_) {
+        if (!Output_.CanPush()) {
+            return ETaskResult::BLOCKED_OUTPUT;
+        }
+        if (!Output_.Push(std::move(CurrentOutput_))) {
+            return ETaskResult::BLOCKED_OUTPUT;
+        }
+        CurrentOutput_ = {};
+        HasOutput_ = false;
+        OutputFinished_ = true;
+        Output_.Finish();
+        return ETaskResult::FINISHED;
+    }
+
+    auto result = Code_->Process(State_.get(), Input_, CurrentOutput_);
+    if (result == ETaskResult::OK) {
+        HasOutput_ = true;
+        return ETaskResult::OK;
+    }
+    if (result == ETaskResult::FINISHED) {
+        OutputFinished_ = true;
+        Output_.Finish();
+    }
+    return result;
+}
+
+const std::shared_ptr<const TBlockingCode>& TBlockingTask::Code() const {
+    return Code_;
+}
+
+const std::shared_ptr<void>& TBlockingTask::State() const {
     return State_;
 }
 

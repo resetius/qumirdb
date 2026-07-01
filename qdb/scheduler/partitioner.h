@@ -34,9 +34,15 @@ struct TSinkPartitionSpec {
     std::function<std::shared_ptr<void>()> MakeState;
 };
 
+struct TBlockingPartitionSpec {
+    std::shared_ptr<const TBlockingCode> Code;
+    std::function<std::shared_ptr<void>()> MakeState;
+};
+
 struct TPipelinePartitionSpec {
     TSourcePartitionSpec Source;
     std::vector<TUnaryPartitionSpec> UnaryStages;
+    TBlockingPartitionSpec BlockingTail;
     TSinkPartitionSpec Sink;
     TSettings Settings;
 };
