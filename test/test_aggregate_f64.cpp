@@ -48,7 +48,11 @@ struct TStubSource : ISource {
     }
 };
 
-std::unique_ptr<IRuntimeNode> Plan(const std::string& sexp, ISource& src) {
+std::unique_ptr<IRuntimeNode> Plan(
+    const std::string& sexp,
+    ISource& src,
+    NScheduler::TSettings schedulerSettings = {})
+{
     TRelParserOptions opts;
     opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
         return std::make_shared<TSourceOperator>(src, std::string(path));
@@ -62,7 +66,7 @@ std::unique_ptr<IRuntimeNode> Plan(const std::string& sexp, ISource& src) {
     auto root = std::static_pointer_cast<IOperator>(*parsed);
     AnnotateTypes(root);
     ApplyColumnPruning(root);
-    TPhysicalPlanner planner;
+    TPhysicalPlanner planner(nullptr, schedulerSettings);
     return planner.Build(root);
 }
 
@@ -161,6 +165,53 @@ TEST(AggregateF64, MultipleDistinctColumns) {
     EXPECT_DOUBLE_EQ(got[2].sb, 100.25);
     EXPECT_EQ(got[2].mxa, 7);
     EXPECT_EQ(got[2].cnt, 2);
+}
+
+TEST(AggregateF64, SchedulerUnaryPrefixFeedsAggregate) {
+    std::array<int64_t, 4> k = {1, 1, 2, 2};
+    std::array<double, 4> v = {0.5, 1.5, 2.0, 0.25};
+    std::array<TColumn, 2> cols = {
+        TColumn{.Data = reinterpret_cast<char*>(k.data())},
+        TColumn{.Data = reinterpret_cast<char*>(v.data())},
+    };
+    TRowSet batch{
+        .Columns = cols.data(),
+        .ColumnCount = 2,
+        .RowCount = 4,
+        .RefCount = 1,
+    };
+    TStubSource src(
+        {"k", "v"},
+        {std::make_shared<TIntegerType>(TIntegerType::I64),
+         std::make_shared<TFloatType>()},
+        {batch});
+    NScheduler::TSettings settings;
+    settings.Scheduler.Mode = NScheduler::EExecutionMode::ThreadedScheduler;
+    settings.Scheduler.WorkerCount = 2;
+
+    auto plan = Plan(
+        "(rel aggregate "
+        "(rel project "
+        "(rel filter (rel source \"L\") (> v (: 1.0 f64))) "
+        "(k k) (w (* v (: 2.0 f64)))) "
+        "(keys k) (agg s sum w))",
+        src,
+        settings);
+
+    std::map<int64_t, double> got;
+    TRowSet out{};
+    while (plan->Next(out)) {
+        const auto* keys = reinterpret_cast<const int64_t*>(out.Columns[0].Data);
+        const auto* sums = reinterpret_cast<const double*>(out.Columns[1].Data);
+        for (int64_t i = 0; i < out.RowCount; ++i) {
+            got[keys[i]] = sums[i];
+        }
+        Release(&out);
+    }
+
+    ASSERT_EQ(got.size(), 2u);
+    EXPECT_DOUBLE_EQ(got[1], 3.0);
+    EXPECT_DOUBLE_EQ(got[2], 4.0);
 }
 
 int main(int argc, char** argv) {
