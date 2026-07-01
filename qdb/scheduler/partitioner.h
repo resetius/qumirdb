@@ -14,10 +14,13 @@ namespace NQdb {
 namespace NScheduler {
 
 using TPartitionStateFactory = std::function<std::shared_ptr<void>(size_t)>;
+using TSourcePartitionStateFactory = std::function<std::shared_ptr<void>(
+    size_t,
+    const TScanSplit*)>;
 
 struct TSourcePartitionSpec {
     std::shared_ptr<const TSourceCode> Code;
-    TPartitionStateFactory MakeState;
+    TSourcePartitionStateFactory MakeState;
     std::vector<TScanSplit> Splits;
 };
 
