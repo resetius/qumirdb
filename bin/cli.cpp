@@ -586,6 +586,8 @@ void PrintHelp() {
         "  --scheduler <mode>           Execution mode: serial, single, threaded\n"
         "  --scheduler-workers <n>      Worker count for threaded scheduler\n"
         "  --scan-tasks <n>             Maximum parquet scan tasks for scheduler mode\n"
+        "  --shuffle-partitions <n>     Hash shuffle partition count\n"
+        "  --shuffle-queue <n>          Rowset queue capacity per shuffle lane\n"
         "  --verbose                    Print the logical and runtime plans\n"
         "  --help|-h                    Show this help message\n"
         "\n"
@@ -671,6 +673,32 @@ int main(int argc, char** argv) {
                 return 1;
             }
             config.Scheduler.ScanSplit.MaxScanTasks = static_cast<size_t>(tasks);
+        } else if (!std::strcmp(argv[i], "--shuffle-partitions")) {
+            if (i + 1 >= argc) {
+                std::cerr << "--shuffle-partitions requires an argument\n";
+                return 1;
+            }
+            auto partitions = std::atoi(argv[++i]);
+            if (partitions <= 0) {
+                std::cerr << "--shuffle-partitions requires a positive integer\n";
+                return 1;
+            }
+            config.Scheduler.HashShuffle.PartitionCount =
+                static_cast<size_t>(partitions);
+            config.Scheduler.HashShuffle.MaxPartitionCount =
+                static_cast<size_t>(partitions);
+        } else if (!std::strcmp(argv[i], "--shuffle-queue")) {
+            if (i + 1 >= argc) {
+                std::cerr << "--shuffle-queue requires an argument\n";
+                return 1;
+            }
+            auto capacity = std::atoi(argv[++i]);
+            if (capacity <= 0) {
+                std::cerr << "--shuffle-queue requires a positive integer\n";
+                return 1;
+            }
+            config.Scheduler.HashShuffle.MaxQueuedRowsetsPerLane =
+                static_cast<size_t>(capacity);
         } else if (!std::strcmp(argv[i], "--verbose")) {
             config.Verbose = true;
         } else if (!std::strcmp(argv[i], "--help") || !std::strcmp(argv[i], "-h")) {
