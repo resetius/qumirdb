@@ -70,7 +70,7 @@ TFixture MakeSpec(EExecutionMode mode) {
 
     out.Spec.Source = TSourcePartitionSpec{
         .Code = sourceCode,
-        .MakeState = [&out](size_t) {
+        .MakeState = [&out](size_t, const TScanSplit*) {
             return std::make_shared<TSourceState>(TSourceState{
                 .DestroyCount = out.DestroyCount.get(),
             });

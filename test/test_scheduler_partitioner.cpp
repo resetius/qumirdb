@@ -101,9 +101,11 @@ TSpecFixture MakeSpec(size_t partitions) {
 
     out.Spec.Source = TSourcePartitionSpec{
         .Code = out.SourceCode,
-        .MakeState = [&out](size_t partition) {
+        .MakeState = [&out](size_t partition, const TScanSplit* split) {
+            EXPECT_EQ(split, nullptr);
             auto state = std::make_shared<TSourceState>(TSourceState{
                 .Partition = partition,
+                .Split = split ? *split : TScanSplit{},
                 .DestroyCount = out.DestroyCount.get(),
             });
             out.SourceStates.push_back(state);
@@ -243,10 +245,14 @@ TEST(SchedulerPartitioner, UsesScanSplitsForSourcePartitionCount) {
             .RowCount = 50,
         },
     };
-    fixture.Spec.Source.MakeState = [&fixture](size_t partition) {
+    fixture.Spec.Source.MakeState = [&fixture](
+        size_t partition,
+        const TScanSplit* split)
+    {
+        EXPECT_NE(split, nullptr);
         auto state = std::make_shared<TSourceState>(TSourceState{
             .Partition = partition,
-            .Split = fixture.Spec.Source.Splits[partition],
+            .Split = *split,
             .DestroyCount = fixture.DestroyCount.get(),
         });
         fixture.SourceStates.push_back(state);
