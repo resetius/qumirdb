@@ -35,6 +35,15 @@ struct TBlockingState {
     std::atomic<int>* DestroyCount = nullptr;
 };
 
+struct TJoinState {
+    int LeftRows = 0;
+    int RightRows = 0;
+    bool LeftDone = false;
+    bool RightDone = false;
+    bool Done = false;
+    std::atomic<int>* DestroyCount = nullptr;
+};
+
 struct TSinkState {
     int Rows = 0;
     int Batches = 0;
@@ -326,6 +335,158 @@ TEST(SchedulerPartitioner, RunsBlockingTailBeforeSink) {
     EXPECT_EQ(
         fixture.DestroyCount->load(std::memory_order_relaxed),
         static_cast<int>(partitions * 2 + 1));
+}
+
+TEST(SchedulerPartitioner, BuildsHashShuffleJoinPipeline) {
+    constexpr size_t partitions = 2;
+
+    TJoinPipelinePartitionSpec spec;
+    auto destroyCount = std::make_shared<std::atomic<int>>(0);
+    std::vector<std::shared_ptr<TSourceState>> leftSourceStates;
+    std::vector<std::shared_ptr<TSourceState>> rightSourceStates;
+    std::vector<std::shared_ptr<TJoinState>> joinStates;
+    auto sinkState = std::make_shared<TSinkState>();
+
+    auto sourceCode = std::make_shared<TSourceCode>(
+        [destroyCount](void* state, TRowSet& rowSet) {
+            auto* source = static_cast<TSourceState*>(state);
+            if (source->Next > source->End) {
+                return false;
+            }
+            rowSet = MakeRowSet(
+                static_cast<int64_t>(source->Partition * 10 + source->Next),
+                destroyCount.get());
+            ++source->Next;
+            return true;
+        });
+    auto hashCode = std::make_shared<THashShuffleCode>(
+        [](TRowSet* batch, uint64_t* hashes) {
+            for (int64_t i = 0; i < batch->RowCount; ++i) {
+                hashes[i] = static_cast<uint64_t>(batch->RowCount);
+            }
+            return true;
+        });
+    auto joinCode = std::make_shared<TBinaryBlockingCode>(
+        [](void* state, TInputPort& left, TInputPort& right, TRowSet& output) {
+            auto* join = static_cast<TJoinState*>(state);
+            TRowSet rowSet{};
+            while (!join->LeftDone) {
+                auto fetch = left.Fetch(rowSet);
+                if (fetch == EFetchResult::NO_DATA) {
+                    break;
+                }
+                if (fetch == EFetchResult::FINISHED) {
+                    join->LeftDone = true;
+                    break;
+                }
+                join->LeftRows += static_cast<int>(rowSet.RowCount);
+                Release(&rowSet);
+                rowSet = {};
+            }
+            while (!join->RightDone) {
+                auto fetch = right.Fetch(rowSet);
+                if (fetch == EFetchResult::NO_DATA) {
+                    break;
+                }
+                if (fetch == EFetchResult::FINISHED) {
+                    join->RightDone = true;
+                    break;
+                }
+                join->RightRows += static_cast<int>(rowSet.RowCount);
+                Release(&rowSet);
+                rowSet = {};
+            }
+            if (!join->LeftDone || !join->RightDone) {
+                return ETaskResult::NEED_DATA;
+            }
+            if (join->Done) {
+                return ETaskResult::FINISHED;
+            }
+            output = MakeRowSet(
+                join->LeftRows * 100 + join->RightRows,
+                join->DestroyCount);
+            join->Done = true;
+            return ETaskResult::OK;
+        });
+    auto sinkCode = std::make_shared<TSinkCode>(
+        [](void* state, const TRowSet& rowSet) {
+            auto* sink = static_cast<TSinkState*>(state);
+            sink->Rows += static_cast<int>(rowSet.RowCount);
+            ++sink->Batches;
+        });
+
+    spec.Left.Source = TSourcePartitionSpec{
+        .Code = sourceCode,
+        .MakeState = [&](size_t partition, const TScanSplit* split) {
+            EXPECT_EQ(split, nullptr);
+            auto state = std::make_shared<TSourceState>(TSourceState{
+                .Partition = partition,
+            });
+            leftSourceStates.push_back(state);
+            return state;
+        },
+    };
+    spec.Right.Source = TSourcePartitionSpec{
+        .Code = sourceCode,
+        .MakeState = [&](size_t partition, const TScanSplit* split) {
+            EXPECT_EQ(split, nullptr);
+            auto state = std::make_shared<TSourceState>(TSourceState{
+                .Partition = partition,
+            });
+            rightSourceStates.push_back(state);
+            return state;
+        },
+    };
+    spec.LeftShuffle = THashShufflePartitionSpec{
+        .Code = hashCode,
+        .MakeState = [](size_t) {
+            return std::make_shared<int>(0);
+        },
+    };
+    spec.RightShuffle = THashShufflePartitionSpec{
+        .Code = hashCode,
+        .MakeState = [](size_t) {
+            return std::make_shared<int>(0);
+        },
+    };
+    spec.Join = TBinaryPartitionSpec{
+        .Code = joinCode,
+        .MakeState = [&](size_t) {
+            auto state = std::make_shared<TJoinState>(TJoinState{
+                .DestroyCount = destroyCount.get(),
+            });
+            joinStates.push_back(state);
+            return state;
+        },
+    };
+    spec.Sink = TSinkPartitionSpec{
+        .Code = sinkCode,
+        .MakeState = [&]() {
+            return sinkState;
+        },
+    };
+    spec.Settings.Partitioning.DefaultPartitionCount = partitions;
+    spec.Settings.Partitioning.MaxPartitionCount = partitions;
+    spec.Settings.HashShuffle.PartitionCount = partitions;
+    spec.Settings.HashShuffle.MaxPartitionCount = partitions;
+    spec.Settings.Queue.RowsetCapacityPerLane = 1;
+
+    std::string error;
+    auto partitioned = TJoinPipelinePartitioner::Build(spec, &error);
+    ASSERT_NE(partitioned.Graph, nullptr) << error;
+    EXPECT_EQ(partitioned.Graph->Leaves().size(), partitions * 2);
+    EXPECT_NE(partitioned.Debug.find("edge HashShuffle"), std::string::npos);
+
+    TThreadedScheduler scheduler(*partitioned.Graph, 4);
+    ASSERT_TRUE(scheduler.Run(&error)) << error;
+    ASSERT_EQ(joinStates.size(), partitions);
+    EXPECT_EQ(joinStates[0]->LeftRows, 14);
+    EXPECT_EQ(joinStates[0]->RightRows, 14);
+    EXPECT_EQ(joinStates[1]->LeftRows, 12);
+    EXPECT_EQ(joinStates[1]->RightRows, 12);
+    EXPECT_EQ(sinkState->Batches, 2);
+    EXPECT_EQ(sinkState->Rows, 1414 + 1212);
+    EXPECT_EQ(destroyCount->load(std::memory_order_relaxed), 10);
 }
 
 } // namespace

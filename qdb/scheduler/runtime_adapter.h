@@ -4,8 +4,10 @@
 #include <qdb/scheduler/connection.h>
 #include <qdb/scheduler/state.h>
 
+#include <cstdint>
 #include <functional>
 #include <memory>
+#include <vector>
 
 namespace NQdb {
 namespace NScheduler {
@@ -68,6 +70,14 @@ struct TBinaryBlockingCode {
     explicit TBinaryBlockingCode(TProcess process);
 
     TProcess Process;
+};
+
+struct THashShuffleCode {
+    using THash = std::function<bool(TRowSet*, uint64_t*)>;
+
+    explicit THashShuffleCode(THash hash);
+
+    THash Hash;
 };
 
 class TSourceTask final : public ITaskNode {
@@ -180,6 +190,40 @@ private:
     TOutputPort Output_;
     TRowSet CurrentOutput_ = {};
     bool HasOutput_ = false;
+    bool OutputFinished_ = false;
+};
+
+class THashShuffleTask final : public ITaskNode {
+public:
+    THashShuffleTask(
+        std::shared_ptr<const THashShuffleCode> code,
+        std::shared_ptr<void> state,
+        TInputPort input,
+        THashShuffleConnection& output,
+        size_t sourceLane);
+    ~THashShuffleTask() override;
+
+    ETaskResult Execute() override;
+
+    const std::shared_ptr<const THashShuffleCode>& Code() const;
+    const std::shared_ptr<void>& State() const;
+
+private:
+    struct TPendingOutput;
+
+    void Scatter(TRowSet& rowSet);
+    ETaskResult PushPending();
+    void ClearPending();
+
+private:
+    std::shared_ptr<const THashShuffleCode> Code_;
+    std::shared_ptr<void> State_;
+    TInputPort Input_;
+    THashShuffleConnection* Output_ = nullptr;
+    size_t SourceLane_ = 0;
+    std::vector<uint64_t> Hashes_;
+    std::vector<TPendingOutput> Pending_;
+    size_t PendingIndex_ = 0;
     bool OutputFinished_ = false;
 };
 

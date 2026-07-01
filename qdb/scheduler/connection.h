@@ -13,6 +13,7 @@ namespace NScheduler {
 enum class EConnectionKind {
     OneToOne = 0,
     Gather = 1,
+    HashShuffle = 2,
 };
 
 enum class EFetchResult {
@@ -85,6 +86,40 @@ private:
     size_t FetchId_ = 0;
     std::atomic<size_t> FinishedCount_ = 0;
     std::vector<std::unique_ptr<TLane>> Lanes_;
+};
+
+class THashShuffleConnection : public IConnection {
+public:
+    explicit THashShuffleConnection(size_t capacity = 1);
+    ~THashShuffleConnection() override;
+
+    EConnectionKind Kind() const override;
+    void Resize(size_t srcCount, size_t dstCount) override;
+    size_t SrcCount() const override;
+    size_t DstCount() const override;
+
+    bool CanPush(size_t srcId) const override;
+    bool Push(size_t srcId, TRowSet&& rowSet) override;
+    void Finish(size_t srcId) override;
+
+    bool CanPushTo(size_t srcId, size_t dstId) const;
+    bool PushTo(size_t srcId, size_t dstId, TRowSet&& rowSet);
+
+    EFetchResult Fetch(size_t dstId, TRowSet& rowSet) override;
+
+private:
+    struct TLane;
+
+    size_t LaneIndex(size_t srcId, size_t dstId) const;
+
+private:
+    size_t Capacity_;
+    size_t SrcCount_ = 0;
+    size_t DstCount_ = 0;
+    std::vector<std::unique_ptr<TLane>> Lanes_;
+    std::vector<std::unique_ptr<std::atomic<bool>>> Finished_;
+    std::atomic<size_t> FinishedCount_ = 0;
+    std::vector<size_t> FetchIds_;
 };
 
 } // namespace NScheduler

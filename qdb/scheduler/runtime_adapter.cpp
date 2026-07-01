@@ -1,9 +1,34 @@
 #include <qdb/scheduler/runtime_adapter.h>
 
+#include <memory>
+#include <stdexcept>
 #include <utility>
+#include <vector>
 
 namespace NQdb {
 namespace NScheduler {
+namespace {
+
+struct THashShuffleRowSetData {
+    std::shared_ptr<TRowSet> Input;
+    std::vector<uint8_t> Selection;
+};
+
+void DestroyHashShuffleRowSet(TRowSet* rowSet) {
+    auto* data = static_cast<THashShuffleRowSetData*>(rowSet->Private);
+    delete data;
+}
+
+void DestroySharedRowSet(TRowSet* rowSet) {
+    Release(rowSet);
+    delete rowSet;
+}
+
+bool RowSelected(const TRowSet& rowSet, int64_t row) {
+    return !rowSet.Selection || rowSet.Selection[row] != 0;
+}
+
+} // namespace
 
 EFetchResult TInputPort::Fetch(TRowSet& rowSet) const {
     return Connection
@@ -45,6 +70,10 @@ TBlockingCode::TBlockingCode(TProcess process)
 
 TBinaryBlockingCode::TBinaryBlockingCode(TProcess process)
     : Process(std::move(process))
+{}
+
+THashShuffleCode::THashShuffleCode(THash hash)
+    : Hash(std::move(hash))
 {}
 
 TSourceTask::TSourceTask(
@@ -291,6 +320,140 @@ const std::shared_ptr<const TBinaryBlockingCode>& TBinaryBlockingTask::Code() co
 
 const std::shared_ptr<void>& TBinaryBlockingTask::State() const {
     return State_;
+}
+
+struct THashShuffleTask::TPendingOutput {
+    size_t DstLane = 0;
+    TRowSet RowSet = {};
+};
+
+THashShuffleTask::THashShuffleTask(
+    std::shared_ptr<const THashShuffleCode> code,
+    std::shared_ptr<void> state,
+    TInputPort input,
+    THashShuffleConnection& output,
+    size_t sourceLane)
+    : Code_(std::move(code))
+    , State_(std::move(state))
+    , Input_(input)
+    , Output_(&output)
+    , SourceLane_(sourceLane)
+{}
+
+THashShuffleTask::~THashShuffleTask() {
+    ClearPending();
+}
+
+ETaskResult THashShuffleTask::Execute() {
+    if (OutputFinished_) {
+        return ETaskResult::FINISHED;
+    }
+
+    if (PendingIndex_ < Pending_.size()) {
+        return PushPending();
+    }
+
+    TRowSet rowSet{};
+    auto fetch = Input_.Fetch(rowSet);
+    if (fetch == EFetchResult::NO_DATA) {
+        return ETaskResult::NEED_DATA;
+    }
+    if (fetch == EFetchResult::FINISHED) {
+        OutputFinished_ = true;
+        Output_->Finish(SourceLane_);
+        return ETaskResult::FINISHED;
+    }
+
+    Scatter(rowSet);
+    if (rowSet.RefCount) {
+        Release(&rowSet);
+    }
+    return PushPending();
+}
+
+const std::shared_ptr<const THashShuffleCode>& THashShuffleTask::Code() const {
+    return Code_;
+}
+
+const std::shared_ptr<void>& THashShuffleTask::State() const {
+    return State_;
+}
+
+void THashShuffleTask::Scatter(TRowSet& rowSet) {
+    const size_t partitions = Output_->DstCount();
+    if (partitions == 0 || rowSet.RowCount <= 0) {
+        return;
+    }
+
+    Hashes_.assign(static_cast<size_t>(rowSet.RowCount), 0);
+    if (!Code_->Hash(&rowSet, Hashes_.data())) {
+        throw std::runtime_error("hash shuffle hash kernel failed");
+    }
+
+    std::vector<std::vector<uint8_t>> selections(partitions);
+    std::vector<size_t> counts(partitions, 0);
+    for (auto& selection : selections) {
+        selection.assign(static_cast<size_t>(rowSet.RowCount), uint8_t{0});
+    }
+    for (int64_t row = 0; row < rowSet.RowCount; ++row) {
+        if (!RowSelected(rowSet, row)) {
+            continue;
+        }
+        const size_t dst = static_cast<size_t>(Hashes_[static_cast<size_t>(row)] % partitions);
+        selections[dst][static_cast<size_t>(row)] = 0xff;
+        ++counts[dst];
+    }
+
+    ClearPending();
+    auto input = std::shared_ptr<TRowSet>(new TRowSet(rowSet), DestroySharedRowSet);
+    rowSet = {};
+
+    Pending_.reserve(partitions);
+    for (size_t dst = 0; dst < partitions; ++dst) {
+        if (counts[dst] == 0) {
+            continue;
+        }
+        auto* data = new THashShuffleRowSetData;
+        data->Input = input;
+        data->Selection = std::move(selections[dst]);
+        Pending_.push_back(TPendingOutput{
+            .DstLane = dst,
+            .RowSet = TRowSet{
+                .Columns = input->Columns,
+                .ColumnCount = input->ColumnCount,
+                .RowCount = input->RowCount,
+                .Selection = data->Selection.data(),
+                .Destroy = DestroyHashShuffleRowSet,
+                .Private = data,
+                .RefCount = 1,
+            },
+        });
+    }
+}
+
+ETaskResult THashShuffleTask::PushPending() {
+    while (PendingIndex_ < Pending_.size()) {
+        auto& pending = Pending_[PendingIndex_];
+        if (!Output_->CanPushTo(SourceLane_, pending.DstLane)) {
+            return ETaskResult::BLOCKED_OUTPUT;
+        }
+        if (!Output_->PushTo(SourceLane_, pending.DstLane, std::move(pending.RowSet))) {
+            return ETaskResult::BLOCKED_OUTPUT;
+        }
+        ++PendingIndex_;
+    }
+    ClearPending();
+    return ETaskResult::OK;
+}
+
+void THashShuffleTask::ClearPending() {
+    for (size_t i = PendingIndex_; i < Pending_.size(); ++i) {
+        if (Pending_[i].RowSet.RefCount) {
+            Release(&Pending_[i].RowSet);
+        }
+    }
+    Pending_.clear();
+    PendingIndex_ = 0;
 }
 
 } // namespace NScheduler
