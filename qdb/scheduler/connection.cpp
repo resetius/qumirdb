@@ -90,9 +90,12 @@ EFetchResult TOneToOneConnection::Fetch(size_t dstId, TRowSet& rowSet) {
         return EFetchResult::OK;
     }
 
-    return Lanes_[dstId]->Finished.load(std::memory_order_acquire)
-        ? EFetchResult::FINISHED
-        : EFetchResult::NO_DATA;
+    if (!Lanes_[dstId]->Finished.load(std::memory_order_acquire)) {
+        return EFetchResult::NO_DATA;
+    }
+    return Lanes_[dstId]->Queue.TryPop(rowSet)
+        ? EFetchResult::OK
+        : EFetchResult::FINISHED;
 }
 
 struct TGatherConnection::TLane {
@@ -171,18 +174,26 @@ EFetchResult TGatherConnection::Fetch(size_t dstId, TRowSet& rowSet) {
         return EFetchResult::FINISHED;
     }
 
-    auto from = (FetchId_ + 1) % Size_;
-    FetchId_ = from;
-    for (size_t i = 0; i < Size_; ++i) {
-        auto index = (from + i) % Size_;
-        if (Lanes_[index]->Queue.TryPop(rowSet)) {
-            return EFetchResult::OK;
+    auto fetch = [&]() {
+        auto from = (FetchId_ + 1) % Size_;
+        FetchId_ = from;
+        for (size_t i = 0; i < Size_; ++i) {
+            auto index = (from + i) % Size_;
+            if (Lanes_[index]->Queue.TryPop(rowSet)) {
+                return true;
+            }
         }
+        return false;
+    };
+
+    if (fetch()) {
+        return EFetchResult::OK;
     }
 
-    return (FinishedCount_.load(std::memory_order_acquire) == Size_)
-        ? EFetchResult::FINISHED
-        : EFetchResult::NO_DATA;
+    if (FinishedCount_.load(std::memory_order_acquire) != Size_) {
+        return EFetchResult::NO_DATA;
+    }
+    return fetch() ? EFetchResult::OK : EFetchResult::FINISHED;
 }
 
 struct THashShuffleConnection::TLane {
@@ -277,18 +288,26 @@ EFetchResult THashShuffleConnection::Fetch(size_t dstId, TRowSet& rowSet) {
         return EFetchResult::FINISHED;
     }
 
-    auto from = (FetchIds_[dstId] + 1) % SrcCount_;
-    FetchIds_[dstId] = from;
-    for (size_t i = 0; i < SrcCount_; ++i) {
-        auto srcId = (from + i) % SrcCount_;
-        if (Lanes_[LaneIndex(srcId, dstId)]->Queue.TryPop(rowSet)) {
-            return EFetchResult::OK;
+    auto fetch = [&]() {
+        auto from = (FetchIds_[dstId] + 1) % SrcCount_;
+        FetchIds_[dstId] = from;
+        for (size_t i = 0; i < SrcCount_; ++i) {
+            auto srcId = (from + i) % SrcCount_;
+            if (Lanes_[LaneIndex(srcId, dstId)]->Queue.TryPop(rowSet)) {
+                return true;
+            }
         }
+        return false;
+    };
+
+    if (fetch()) {
+        return EFetchResult::OK;
     }
 
-    return (FinishedCount_.load(std::memory_order_acquire) == SrcCount_)
-        ? EFetchResult::FINISHED
-        : EFetchResult::NO_DATA;
+    if (FinishedCount_.load(std::memory_order_acquire) != SrcCount_) {
+        return EFetchResult::NO_DATA;
+    }
+    return fetch() ? EFetchResult::OK : EFetchResult::FINISHED;
 }
 
 size_t THashShuffleConnection::LaneIndex(size_t srcId, size_t dstId) const {

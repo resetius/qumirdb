@@ -53,11 +53,13 @@ add_library(qumirdb
     exec/aggregate_exec.cpp
     exec/join_exec.cpp
     exec/sort_exec.cpp
+    exec/planner_helpers.cpp
     exec/planner.cpp
     scheduler/connection.cpp
     scheduler/executor.cpp
     scheduler/graph.cpp
     scheduler/partitioner.cpp
+    scheduler/plan_lowerer.cpp
     scheduler/runtime_adapter.cpp
     scheduler/runtime_node.cpp
     scheduler/scan_split.cpp
