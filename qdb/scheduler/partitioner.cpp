@@ -124,7 +124,10 @@ TPartitionedPipeline TPipelinePartitioner::Build(
     std::vector<TTaskNode*> previous;
     previous.reserve(partitionCount);
     for (size_t partition = 0; partition < partitionCount; ++partition) {
-        auto state = spec.Source.MakeState(partition);
+        const auto* split = spec.Source.Splits.empty()
+            ? nullptr
+            : &spec.Source.Splits[partition];
+        auto state = spec.Source.MakeState(partition, split);
         auto task = std::make_unique<TSourceTask>(
             spec.Source.Code,
             std::move(state),
