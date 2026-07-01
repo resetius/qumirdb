@@ -41,6 +41,20 @@ TRuntimeUnaryBlockingKernel::TProcess MakeTopSortProcess(
     int64_t limit,
     int64_t batchRows = kJoinOutputBatchRows);
 
+class TLimitProcessor {
+public:
+    TLimitProcessor(int64_t limit, int64_t offset);
+
+    bool Finished() const;
+    bool Process(TRowSet& input, TRowSet& rowSet);
+
+private:
+    int64_t Limit_ = 0;
+    int64_t Offset_ = 0;
+    int64_t Skipped_ = 0;
+    int64_t Emitted_ = 0;
+};
+
 class TRuntimeLimit : public IRuntimeNode {
 public:
     TRuntimeLimit(std::unique_ptr<IRuntimeNode> input,
@@ -55,11 +69,7 @@ public:
 private:
     std::unique_ptr<IRuntimeNode> Input_;
     NQumir::NAst::TTypePtr OutputType_;
-    int64_t Limit_ = 0;
-    int64_t Offset_ = 0;
-    int64_t BatchRows_ = kJoinOutputBatchRows;
-    int64_t Skipped_ = 0;
-    int64_t Emitted_ = 0;
+    TLimitProcessor Processor_;
 };
 
 } // namespace NQdb

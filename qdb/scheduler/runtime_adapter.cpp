@@ -210,9 +210,7 @@ ETaskResult TBlockingTask::Execute() {
         }
         CurrentOutput_ = {};
         HasOutput_ = false;
-        OutputFinished_ = true;
-        Output_.Finish();
-        return ETaskResult::FINISHED;
+        return ETaskResult::OK;
     }
 
     auto result = Code_->Process(State_.get(), Input_, CurrentOutput_);
