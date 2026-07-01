@@ -49,7 +49,11 @@ struct TStubSource : ISource {
     }
 };
 
-std::unique_ptr<IRuntimeNode> Plan(const std::string& sexp, ISource& src) {
+std::unique_ptr<IRuntimeNode> Plan(
+    const std::string& sexp,
+    ISource& src,
+    NScheduler::TSettings schedulerSettings = {})
+{
     TRelParserOptions opts;
     opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
         return std::make_shared<TSourceOperator>(src, std::string(path));
@@ -65,7 +69,7 @@ std::unique_ptr<IRuntimeNode> Plan(const std::string& sexp, ISource& src) {
     auto root = std::static_pointer_cast<IOperator>(*parsed);
     AnnotateTypes(root);
     ApplyColumnPruning(root);
-    TPhysicalPlanner planner;
+    TPhysicalPlanner planner(nullptr, schedulerSettings);
     return planner.Build(root);
 }
 
@@ -129,6 +133,51 @@ TEST(FilterE2E, PublishesSelectionFromUnaryStreamingShell) {
     EXPECT_EQ(
         std::vector<uint8_t>(out.Selection, out.Selection + out.RowCount),
         (std::vector<uint8_t>{0, 0, 0xff, 0xff}));
+    Release(&out);
+    EXPECT_FALSE(plan->Next(out));
+}
+
+TEST(ProjectE2E, SchedulerRuntimeRunsUnaryPipeline) {
+    std::array<int64_t, 4> values = {0, 1, 2, 3};
+    std::array<int64_t, 4> payload = {10, 11, 12, 13};
+    std::array<TColumn, 2> cols = {
+        TColumn{.Data = reinterpret_cast<char*>(values.data())},
+        TColumn{.Data = reinterpret_cast<char*>(payload.data())},
+    };
+    TRowSet batch{
+        .Columns = cols.data(),
+        .ColumnCount = 2,
+        .RowCount = 4,
+        .RefCount = 1,
+    };
+    TStubSource src(
+        {"value", "payload"},
+        {std::make_shared<TIntegerType>(), std::make_shared<TIntegerType>()},
+        {batch});
+    NScheduler::TSettings settings;
+    settings.Scheduler.Mode = NScheduler::EExecutionMode::ThreadedScheduler;
+    settings.Scheduler.WorkerCount = 2;
+
+    auto plan = Plan(
+        "(rel project (rel filter (rel source \"L\") (> value 1)) "
+        "(value value) (shifted (+ payload 100)))",
+        src,
+        settings);
+
+    TRowSet out{};
+    ASSERT_TRUE(plan->Next(out));
+    ASSERT_EQ(out.ColumnCount, 2);
+    ASSERT_EQ(out.RowCount, 4);
+    ASSERT_NE(out.Selection, nullptr);
+    EXPECT_EQ(
+        std::vector<uint8_t>(out.Selection, out.Selection + out.RowCount),
+        (std::vector<uint8_t>{0, 0, 0xff, 0xff}));
+    const auto* outValue = reinterpret_cast<const int64_t*>(out.Columns[0].Data);
+    const auto* shifted = reinterpret_cast<const int64_t*>(out.Columns[1].Data);
+    for (int i = 0; i < 4; ++i) {
+        EXPECT_EQ(outValue[i], values[i]);
+        EXPECT_EQ(shifted[i], payload[i] + 100);
+    }
     Release(&out);
     EXPECT_FALSE(plan->Next(out));
 }

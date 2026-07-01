@@ -1,6 +1,5 @@
 #include <gtest/gtest.h>
 
-#include <qdb/scheduler/partitioner.h>
 #include <qdb/scheduler/runtime_node.h>
 
 #include <atomic>
@@ -44,7 +43,6 @@ TRowSet MakeRowSet(int64_t rows, std::atomic<int>* destroyCount)
 std::unique_ptr<IRuntimeNode> MakeRuntimeNode(
     std::shared_ptr<std::atomic<int>> destroyCount)
 {
-    auto output = std::make_shared<TBufferedSchedulerOutput>();
     auto sourceCode = std::make_shared<TSourceCode>(
         [](void* state, TRowSet& rowSet) {
             auto* source = static_cast<TSourceState*>(state);
@@ -76,26 +74,18 @@ std::unique_ptr<IRuntimeNode> MakeRuntimeNode(
             return std::make_shared<TUnaryState>();
         },
     });
-    spec.Sink = TSinkPartitionSpec{
-        .Code = MakeBufferedSchedulerSinkCode(),
-        .MakeState = [output]() {
-            return output;
-        },
-    };
     spec.Settings.Scheduler.Mode = EExecutionMode::ThreadedScheduler;
     spec.Settings.Scheduler.WorkerCount = 2;
     spec.Settings.Partitioning.DefaultPartitionCount = 2;
     spec.Settings.Partitioning.MaxPartitionCount = 2;
 
     std::string error;
-    auto partitioned = TPipelinePartitioner::Build(spec, &error);
-    EXPECT_NE(partitioned.Graph, nullptr) << error;
-
-    return std::make_unique<TRuntimeSchedulerPipeline>(
-        std::move(partitioned.Graph),
-        spec.Settings,
+    auto node = BuildBufferedSchedulerRuntimePipeline(
+        std::move(spec),
         NQumir::NAst::TTypePtr{},
-        output);
+        &error);
+    EXPECT_NE(node, nullptr) << error;
+    return node;
 }
 
 TEST(SchedulerRuntimeNode, RunsSchedulerGraphBehindRuntimeNode)

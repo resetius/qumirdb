@@ -2,10 +2,12 @@
 
 #include <qdb/exec/executor.h>
 #include <qdb/scheduler/executor.h>
+#include <qdb/scheduler/partitioner.h>
 #include <qdb/scheduler/runtime_adapter.h>
 
 #include <cstddef>
 #include <memory>
+#include <string>
 #include <vector>
 
 namespace NQdb {
@@ -24,6 +26,11 @@ private:
 };
 
 std::shared_ptr<TSinkCode> MakeBufferedSchedulerSinkCode();
+
+std::unique_ptr<IRuntimeNode> BuildBufferedSchedulerRuntimePipeline(
+    TPipelinePartitionSpec spec,
+    NQumir::NAst::TTypePtr outputType,
+    std::string* error = nullptr);
 
 class TRuntimeSchedulerPipeline final : public IRuntimeNode {
 public:
