@@ -362,6 +362,12 @@ private:
             1);
     }
 
+    size_t ShuffleQueueCapacity() const {
+        return std::max<size_t>(
+            Settings_.HashShuffle.MaxQueuedRowsetsPerLane,
+            1);
+    }
+
     TLoweredOutput LowerSource(
         TSourceOperator& src,
         NScheduler::IConnection& outConn)
@@ -780,7 +786,7 @@ private:
         std::shared_ptr<NScheduler::THashShuffleCode> hashCode)
     {
         auto shuffle = std::make_unique<NScheduler::THashShuffleConnection>(
-            QueueCapacity());
+            ShuffleQueueCapacity());
         shuffle->Resize(inputLanes, joinParts);
         auto* shufPtr = shuffle.get();
         Graph_.AddConnection(std::move(shuffle));
@@ -854,6 +860,8 @@ std::unique_ptr<IRuntimeNode> BuildSchedulerPlanPipeline(
             << " rowset_queue=" << settings.Queue.RowsetCapacityPerLane
             << " scan_tasks=" << settings.ScanSplit.MaxScanTasks
             << " shuffle_parts=" << settings.HashShuffle.PartitionCount
+            << " shuffle_queue="
+            << settings.HashShuffle.MaxQueuedRowsetsPerLane
             << "\n";
         graph->Print(*diagnostics);
         *diagnostics << "=====================================\n";
