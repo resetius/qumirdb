@@ -584,33 +584,7 @@ std::vector<uint8_t> MaterializeRadixValidity(const TRowSet& batch,
 
 } // namespace
 
-struct TSortProcessState {
-    TSortProcessState(
-        TTypePtr outputType,
-        std::vector<TSortKey> keys,
-        std::vector<TSortColumnRef> keyColumns,
-        TSortRadixKernel radixKernel,
-        int64_t batchRows);
-
-    bool Next(IRuntimeNode& input, TRowSet& rowSet);
-
-private:
-    void Materialize(IRuntimeNode& input);
-    bool TryRadixSort();
-
-    TTypePtr OutputType_;
-    std::vector<TSortKey> Keys_;
-    std::vector<TSortColumnRef> KeyColumns_;
-    TSortRadixKernel RadixKernel_;
-    int64_t BatchRows_ = kJoinOutputBatchRows;
-
-    bool Materialized_ = false;
-    TRowStore Store_;
-    std::vector<TRowId> Rows_;
-    size_t Cursor_ = 0;
-};
-
-TSortProcessState::TSortProcessState(
+TSortProcessor::TSortProcessor(
     TTypePtr outputType,
     std::vector<TSortKey> keys,
     std::vector<TSortColumnRef> keyColumns,
@@ -623,7 +597,8 @@ TSortProcessState::TSortProcessState(
     , BatchRows_(batchRows)
 {}
 
-bool TSortProcessState::TryRadixSort() {
+bool TSortProcessor::TryRadixSort()
+{
     if (Rows_.empty()) {
         return true;
     }
@@ -688,20 +663,26 @@ bool TSortProcessState::TryRadixSort() {
     return true;
 }
 
-void TSortProcessState::Materialize(IRuntimeNode& input) {
+void TSortProcessor::Add(TRowSet& rowSet)
+{
+    if (Materialized_) {
+        throw std::runtime_error("sort processor is already finished");
+    }
+
+    const int32_t batchIdx = Store_.PushBatch(rowSet);
+    for (int32_t row = 0; row < rowSet.RowCount; ++row) {
+        if (RowSelected(rowSet, row)) {
+            Rows_.push_back(MakeRowId(batchIdx, row));
+        }
+    }
+    rowSet = {};
+}
+
+void TSortProcessor::Finish()
+{
     if (Materialized_) {
         return;
     }
-    TRowSet batch{};
-    while (input.Next(batch)) {
-        const int32_t batchIdx = Store_.PushBatch(batch);
-        for (int32_t row = 0; row < batch.RowCount; ++row) {
-            if (RowSelected(batch, row)) {
-                Rows_.push_back(MakeRowId(batchIdx, row));
-            }
-        }
-    }
-
     if (!TryRadixSort()) {
         std::stable_sort(Rows_.begin(), Rows_.end(),
             [&](TRowId leftId, TRowId rightId) {
@@ -712,8 +693,9 @@ void TSortProcessState::Materialize(IRuntimeNode& input) {
     Materialized_ = true;
 }
 
-bool TSortProcessState::Next(IRuntimeNode& input, TRowSet& rowSet) {
-    Materialize(input);
+bool TSortProcessor::Next(TRowSet& rowSet)
+{
+    Finish();
     if (Cursor_ >= Rows_.size()) {
         return false;
     }
@@ -754,14 +736,18 @@ TRuntimeUnaryBlockingKernel::TProcess MakeSortProcess(
     TSortRadixKernel radixKernel,
     int64_t batchRows)
 {
-    auto state = std::make_shared<TSortProcessState>(
+    auto state = std::make_shared<TSortProcessor>(
         std::move(outputType),
         std::move(keys),
         std::move(keyColumns),
         std::move(radixKernel),
         batchRows);
     return [state = std::move(state)](IRuntimeNode& input, TRowSet& rowSet) {
-        return state->Next(input, rowSet);
+        TRowSet batch{};
+        while (input.Next(batch)) {
+            state->Add(batch);
+        }
+        return state->Next(rowSet);
     };
 }
 
