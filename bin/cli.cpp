@@ -585,6 +585,7 @@ void PrintHelp() {
         "  --rowsets <n>                Stop after n rowsets\n"
         "  --scheduler <mode>           Execution mode: serial, single, threaded\n"
         "  --scheduler-workers <n>      Worker count for threaded scheduler\n"
+        "  --scan-tasks <n>             Maximum parquet scan tasks for scheduler mode\n"
         "  --verbose                    Print the logical and runtime plans\n"
         "  --help|-h                    Show this help message\n"
         "\n"
@@ -659,6 +660,17 @@ int main(int argc, char** argv) {
                 return 1;
             }
             config.Scheduler.Scheduler.WorkerCount = static_cast<size_t>(workers);
+        } else if (!std::strcmp(argv[i], "--scan-tasks")) {
+            if (i + 1 >= argc) {
+                std::cerr << "--scan-tasks requires an argument\n";
+                return 1;
+            }
+            auto tasks = std::atoi(argv[++i]);
+            if (tasks <= 0) {
+                std::cerr << "--scan-tasks requires a positive integer\n";
+                return 1;
+            }
+            config.Scheduler.ScanSplit.MaxScanTasks = static_cast<size_t>(tasks);
         } else if (!std::strcmp(argv[i], "--verbose")) {
             config.Verbose = true;
         } else if (!std::strcmp(argv[i], "--help") || !std::strcmp(argv[i], "-h")) {

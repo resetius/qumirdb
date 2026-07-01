@@ -1,8 +1,8 @@
 #include <qdb/io/parquet/source.h>
 #include <qdb/plan/types/nullable.h>
 
-#include <stdexcept>
 #include <cstdlib>
+#include <stdexcept>
 
 #include <arrow/api.h>
 #include <arrow/io/api.h>
@@ -10,6 +10,7 @@
 #include <parquet/arrow/reader.h>
 
 #include <numeric>
+#include <utility>
 
 #include <qumir/parser/type.h>
 
@@ -101,8 +102,23 @@ arrow::MemoryPool* GetMemoryPool() {
 
 } // namespace
 
-TParquetSource::TParquetSource(const std::string& path) {
-    auto infileResult = arrow::io::ReadableFile::Open(path);
+TParquetSource::TParquetSource(const std::string& path)
+    : TParquetSource(path, {})
+{}
+
+TParquetSource::TParquetSource(
+    const std::string& path,
+    std::vector<int> rowGroups)
+    : Path_(path)
+    , RowGroups_(std::move(rowGroups))
+{
+    Open();
+    ResetReader();
+}
+
+void TParquetSource::Open()
+{
+    auto infileResult = arrow::io::ReadableFile::Open(Path_);
     if (!infileResult.ok()) {
         throw std::runtime_error(infileResult.status().ToString());
     }
@@ -123,14 +139,55 @@ TParquetSource::TParquetSource(const std::string& path) {
         throw std::runtime_error(fileReaderResult.status().ToString());
     }
     FileReader_ = std::move(*fileReaderResult);
+}
 
-    auto batchReaderResult = FileReader_->GetRecordBatchReader();
+std::vector<int> TParquetSource::EffectiveRowGroups() const
+{
+    if (!RowGroups_.empty()) {
+        return RowGroups_;
+    }
+
+    int numRgs = FileReader_->parquet_reader()->metadata()->num_row_groups();
+    std::vector<int> rowGroups(numRgs);
+    std::iota(rowGroups.begin(), rowGroups.end(), 0);
+    return rowGroups;
+}
+
+void TParquetSource::ResetReader()
+{
+    auto rowGroups = EffectiveRowGroups();
+    auto indices = EffectiveColumnIndices();
+    auto batchReaderResult = indices.empty()
+        ? FileReader_->GetRecordBatchReader(rowGroups)
+        : FileReader_->GetRecordBatchReader(rowGroups, indices);
     if (!batchReaderResult.ok()) {
         throw std::runtime_error(batchReaderResult.status().ToString());
     }
     Reader_ = std::move(*batchReaderResult);
 
+    RefreshSchema();
+}
+
+std::vector<int> TParquetSource::EffectiveColumnIndices() const
+{
+    if (RestrictedColumns_.empty()) {
+        return {};
+    }
+
+    std::vector<int> indices;
+    for (int i = 0; i < static_cast<int>(Names_.size()); ++i) {
+        if (RestrictedColumns_.count(Names_[i])) {
+            indices.push_back(i);
+        }
+    }
+    return indices;
+}
+
+void TParquetSource::RefreshSchema()
+{
     int numFields = Reader_->schema()->num_fields();
+    Names_.clear();
+    Columns_.clear();
     Names_.reserve(numFields);
     Columns_.reserve(numFields);
     for (const auto& field : Reader_->schema()->fields()) {
@@ -150,33 +207,41 @@ void TParquetSource::RestrictColumns(const std::unordered_set<std::string>& name
         return;
     }
 
-    std::vector<int> indices;
-    for (int i = 0; i < static_cast<int>(Names_.size()); ++i) {
-        if (names.count(Names_[i])) {
-            indices.push_back(i);
-        }
-    }
+    RestrictedColumns_ = names;
+    ResetReader();
+}
 
-    int numRgs = FileReader_->parquet_reader()->metadata()->num_row_groups();
-    std::vector<int> rowGroups(numRgs);
-    std::iota(rowGroups.begin(), rowGroups.end(), 0);
-
-    auto result = FileReader_->GetRecordBatchReader(rowGroups, indices);
-    if (!result.ok()) {
-        throw std::runtime_error(result.status().ToString());
-    }
-    Reader_ = std::move(*result);
-
-    Names_.clear();
-    Columns_.clear();
-    for (const auto& field : Reader_->schema()->fields()) {
-        Names_.push_back(field->name());
-        Columns_.push_back({
-            .Name = Names_.back(),
-            .Type = ArrowFieldToQumir(field),
+std::vector<NScheduler::TScanRowGroup> TParquetSource::ScanRowGroups() const
+{
+    auto metadata = FileReader_->parquet_reader()->metadata();
+    std::vector<NScheduler::TScanRowGroup> rowGroups;
+    rowGroups.reserve(static_cast<size_t>(metadata->num_row_groups()));
+    for (int i = 0; i < metadata->num_row_groups(); ++i) {
+        auto rowGroup = metadata->RowGroup(i);
+        rowGroups.push_back({
+            .RowGroup = static_cast<size_t>(i),
+            .RowCount = rowGroup->num_rows(),
+            .ByteSize = rowGroup->total_byte_size(),
         });
     }
-    Schema_ = TSchema{std::span<const TColumnSchema>(Columns_)};
+    return rowGroups;
+}
+
+std::unique_ptr<TParquetSource> TParquetSource::MakeRowGroupRangeSource(
+    size_t firstRowGroup,
+    size_t rowGroupCount) const
+{
+    std::vector<int> rowGroups;
+    rowGroups.reserve(rowGroupCount);
+    for (size_t i = 0; i < rowGroupCount; ++i) {
+        rowGroups.push_back(static_cast<int>(firstRowGroup + i));
+    }
+    auto source = std::unique_ptr<TParquetSource>(
+        new TParquetSource(Path_, std::move(rowGroups)));
+    if (!RestrictedColumns_.empty()) {
+        source->RestrictColumns(RestrictedColumns_);
+    }
+    return source;
 }
 
 const TSchema& TParquetSource::Schema() const {

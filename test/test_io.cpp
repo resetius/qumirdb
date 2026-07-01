@@ -18,12 +18,13 @@ namespace {
 
 void WriteParquet(
     const std::string& path,
-    std::shared_ptr<arrow::RecordBatch> batch)
+    std::shared_ptr<arrow::RecordBatch> batch,
+    int64_t chunkSize = 1024)
 {
     auto outfile = arrow::io::FileOutputStream::Open(path).ValueOrDie();
     auto table = arrow::Table::FromRecordBatches({batch}).ValueOrDie();
     auto status = parquet::arrow::WriteTable(
-        *table, arrow::default_memory_pool(), outfile, /*chunk_size=*/1024);
+        *table, arrow::default_memory_pool(), outfile, chunkSize);
     ASSERT_TRUE(status.ok()) << status.ToString();
 }
 
@@ -130,6 +131,46 @@ TEST(IOTest, NullsInColumn) {
     EXPECT_NE(out.str().find("NULL"), std::string::npos);
 
     NQdb::Release(&rowSet);
+}
+
+TEST(IOTest, ParquetRowGroupRangeSource) {
+    const std::string path = "/tmp/test_io_qdb_rowgroups.parquet";
+
+    arrow::Int64Builder ids;
+    arrow::Int64Builder payload;
+    (void)ids.AppendValues({1, 2, 3, 4, 5});
+    (void)payload.AppendValues({10, 20, 30, 40, 50});
+
+    auto schema = arrow::schema({
+        arrow::field("id", arrow::int64(), false),
+        arrow::field("payload", arrow::int64(), false),
+    });
+    auto batch = arrow::RecordBatch::Make(schema, 5, {
+        ids.Finish().ValueOrDie(),
+        payload.Finish().ValueOrDie(),
+    });
+    WriteParquet(path, batch, 2);
+
+    NQdb::TParquetSource source(path);
+    auto rowGroups = source.ScanRowGroups();
+    ASSERT_EQ(rowGroups.size(), 3u);
+    EXPECT_EQ(rowGroups[0].RowCount, 2);
+    EXPECT_EQ(rowGroups[1].RowCount, 2);
+    EXPECT_EQ(rowGroups[2].RowCount, 1);
+
+    source.RestrictColumns({"id"});
+    auto split = source.MakeRowGroupRangeSource(1, 1);
+    TRowSet rowSet = {};
+    ASSERT_TRUE(split->Next(rowSet));
+    ASSERT_EQ(rowSet.RowCount, 2);
+    ASSERT_EQ(rowSet.ColumnCount, 1);
+    ASSERT_EQ(split->Schema().Columns.size(), 1u);
+    EXPECT_EQ(split->Schema().Columns[0].Name, "id");
+    const auto* values = reinterpret_cast<const int64_t*>(rowSet.Columns[0].Data);
+    EXPECT_EQ(values[0], 3);
+    EXPECT_EQ(values[1], 4);
+    NQdb::Release(&rowSet);
+    EXPECT_FALSE(split->Next(rowSet));
 }
 
 int main(int argc, char** argv) {
