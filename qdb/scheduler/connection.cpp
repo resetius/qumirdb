@@ -185,5 +185,115 @@ EFetchResult TGatherConnection::Fetch(size_t dstId, TRowSet& rowSet) {
         : EFetchResult::NO_DATA;
 }
 
+struct THashShuffleConnection::TLane {
+    explicit TLane(size_t capacity)
+        : Queue(capacity)
+    {}
+
+    ~TLane() {
+        TRowSet rowSet{};
+        while (Queue.TryPop(rowSet)) {
+            Release(&rowSet);
+        }
+    }
+
+    TSPSC<TRowSet> Queue;
+};
+
+THashShuffleConnection::THashShuffleConnection(size_t capacity)
+    : Capacity_(capacity)
+{
+    Resize(1, 1);
+}
+
+THashShuffleConnection::~THashShuffleConnection() = default;
+
+EConnectionKind THashShuffleConnection::Kind() const {
+    return EConnectionKind::HashShuffle;
+}
+
+void THashShuffleConnection::Resize(size_t srcCount, size_t dstCount) {
+    SrcCount_ = srcCount;
+    DstCount_ = dstCount;
+    FinishedCount_.store(0, std::memory_order_release);
+    Lanes_.clear();
+    Lanes_.reserve(SrcCount_ * DstCount_);
+    for (size_t i = 0; i < SrcCount_ * DstCount_; ++i) {
+        Lanes_.push_back(std::make_unique<TLane>(Capacity_));
+    }
+    Finished_.clear();
+    Finished_.reserve(SrcCount_);
+    for (size_t i = 0; i < SrcCount_; ++i) {
+        Finished_.push_back(std::make_unique<std::atomic<bool>>(false));
+    }
+    FetchIds_.assign(DstCount_, 0);
+}
+
+size_t THashShuffleConnection::SrcCount() const {
+    return SrcCount_;
+}
+
+size_t THashShuffleConnection::DstCount() const {
+    return DstCount_;
+}
+
+bool THashShuffleConnection::CanPush(size_t srcId) const {
+    assert(DstCount_ == 1);
+    return CanPushTo(srcId, 0);
+}
+
+bool THashShuffleConnection::Push(size_t srcId, TRowSet&& rowSet) {
+    assert(DstCount_ == 1);
+    return PushTo(srcId, 0, std::move(rowSet));
+}
+
+void THashShuffleConnection::Finish(size_t srcId) {
+    assert(srcId < SrcCount_);
+    if (!Finished_[srcId]->exchange(true, std::memory_order_acq_rel)) {
+        FinishedCount_.fetch_add(1, std::memory_order_acq_rel);
+    }
+}
+
+bool THashShuffleConnection::CanPushTo(size_t srcId, size_t dstId) const {
+    assert(srcId < SrcCount_);
+    assert(dstId < DstCount_);
+    return Lanes_[LaneIndex(srcId, dstId)]->Queue.CanPush();
+}
+
+bool THashShuffleConnection::PushTo(size_t srcId, size_t dstId, TRowSet&& rowSet) {
+    assert(srcId < SrcCount_);
+    assert(dstId < DstCount_);
+    auto moved = TakeRowSet(rowSet);
+    if (Lanes_[LaneIndex(srcId, dstId)]->Queue.TryPush(std::move(moved))) {
+        return true;
+    }
+    rowSet = TakeRowSet(moved);
+    return false;
+}
+
+EFetchResult THashShuffleConnection::Fetch(size_t dstId, TRowSet& rowSet) {
+    assert(dstId < DstCount_);
+    if (SrcCount_ == 0) {
+        return EFetchResult::FINISHED;
+    }
+
+    auto from = (FetchIds_[dstId] + 1) % SrcCount_;
+    FetchIds_[dstId] = from;
+    for (size_t i = 0; i < SrcCount_; ++i) {
+        auto srcId = (from + i) % SrcCount_;
+        if (Lanes_[LaneIndex(srcId, dstId)]->Queue.TryPop(rowSet)) {
+            return EFetchResult::OK;
+        }
+    }
+
+    return (FinishedCount_.load(std::memory_order_acquire) == SrcCount_)
+        ? EFetchResult::FINISHED
+        : EFetchResult::NO_DATA;
+}
+
+size_t THashShuffleConnection::LaneIndex(size_t srcId, size_t dstId) const {
+    return srcId * DstCount_ + dstId;
+}
+
 } // namespace NScheduler
 } // namespace NQdb

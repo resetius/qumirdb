@@ -47,6 +47,31 @@ struct TPipelinePartitionSpec {
     TSettings Settings;
 };
 
+struct TPipelineSidePartitionSpec {
+    TSourcePartitionSpec Source;
+    std::vector<TUnaryPartitionSpec> UnaryStages;
+};
+
+struct THashShufflePartitionSpec {
+    std::shared_ptr<const THashShuffleCode> Code;
+    TPartitionStateFactory MakeState;
+};
+
+struct TBinaryPartitionSpec {
+    std::shared_ptr<const TBinaryBlockingCode> Code;
+    TPartitionStateFactory MakeState;
+};
+
+struct TJoinPipelinePartitionSpec {
+    TPipelineSidePartitionSpec Left;
+    TPipelineSidePartitionSpec Right;
+    THashShufflePartitionSpec LeftShuffle;
+    THashShufflePartitionSpec RightShuffle;
+    TBinaryPartitionSpec Join;
+    TSinkPartitionSpec Sink;
+    TSettings Settings;
+};
+
 struct TPartitionedPipeline {
     std::unique_ptr<TTaskGraph> Graph;
     std::string Debug;
@@ -56,6 +81,13 @@ class TPipelinePartitioner {
 public:
     static TPartitionedPipeline Build(
         const TPipelinePartitionSpec& spec,
+        std::string* error = nullptr);
+};
+
+class TJoinPipelinePartitioner {
+public:
+    static TPartitionedPipeline Build(
+        const TJoinPipelinePartitionSpec& spec,
         std::string* error = nullptr);
 };
 

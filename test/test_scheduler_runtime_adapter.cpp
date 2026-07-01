@@ -321,6 +321,59 @@ TEST(SchedulerRuntimeAdapter, RunsBinaryBlockingTask) {
     EXPECT_EQ(destroyCount->load(std::memory_order_relaxed), 5);
 }
 
+TEST(SchedulerRuntimeAdapter, HashShuffleTaskScattersSelectedRows) {
+    std::atomic<int> destroyCount = 0;
+    TOneToOneConnection input(1);
+    THashShuffleConnection output(2);
+    output.Resize(1, 2);
+
+    std::vector<uint8_t> selection = {0xff, 0, 0xff, 0xff};
+    auto rowSet = MakeRowSet(4, &destroyCount);
+    rowSet.Selection = selection.data();
+    ASSERT_TRUE(input.Push(0, std::move(rowSet)));
+    input.Finish(0);
+
+    auto code = std::make_shared<THashShuffleCode>(
+        [](TRowSet* batch, uint64_t* hashes) {
+            EXPECT_EQ(batch->RowCount, 4);
+            hashes[0] = 0;
+            hashes[1] = 1;
+            hashes[2] = 1;
+            hashes[3] = 0;
+            return true;
+        });
+    auto state = std::make_shared<int>(0);
+    THashShuffleTask task(
+        code,
+        state,
+        TInputPort{.Connection = &input},
+        output,
+        0);
+
+    EXPECT_EQ(task.Execute(), ETaskResult::OK);
+
+    TRowSet left{};
+    ASSERT_EQ(output.Fetch(0, left), EFetchResult::OK);
+    ASSERT_NE(left.Selection, nullptr);
+    EXPECT_EQ(
+        std::vector<uint8_t>(left.Selection, left.Selection + left.RowCount),
+        (std::vector<uint8_t>{0xff, 0, 0, 0xff}));
+    Release(&left);
+
+    TRowSet right{};
+    ASSERT_EQ(output.Fetch(1, right), EFetchResult::OK);
+    ASSERT_NE(right.Selection, nullptr);
+    EXPECT_EQ(
+        std::vector<uint8_t>(right.Selection, right.Selection + right.RowCount),
+        (std::vector<uint8_t>{0, 0, 0xff, 0}));
+    Release(&right);
+
+    EXPECT_EQ(task.Execute(), ETaskResult::FINISHED);
+    EXPECT_EQ(output.Fetch(0, left), EFetchResult::FINISHED);
+    EXPECT_EQ(output.Fetch(1, right), EFetchResult::FINISHED);
+    EXPECT_EQ(destroyCount.load(std::memory_order_relaxed), 1);
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
