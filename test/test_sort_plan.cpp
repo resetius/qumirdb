@@ -12,6 +12,7 @@
 #include <qdb/plan/passes/qualify_columns.h>
 #include <qdb/plan/passes/top_sort.h>
 #include <qdb/plan/types/nullable.h>
+#include <qdb/scheduler/runtime_node.h>
 #include <qdb/sql/parser.h>
 
 #include <qumir/codegen/llvm/llvm_initializer.h>
@@ -319,6 +320,49 @@ TEST(SortExec, SortsCompositeNumericKeysWithFusedRadixKernel) {
 
     TPhysicalPlanner planner;
     auto runtime = planner.Build(root);
+
+    TRowSet out{};
+    ASSERT_TRUE(runtime->Next(out));
+    ASSERT_EQ(out.RowCount, 5);
+    auto* outA = reinterpret_cast<int64_t*>(out.Columns[0].Data);
+    auto* outB = reinterpret_cast<int64_t*>(out.Columns[1].Data);
+    EXPECT_EQ(std::vector<int64_t>(outA, outA + out.RowCount),
+        (std::vector<int64_t>{1, 1, 2, 2, 2}));
+    EXPECT_EQ(std::vector<int64_t>(outB, outB + out.RowCount),
+        (std::vector<int64_t>{7, 5, 30, 20, 10}));
+    Release(&out);
+}
+
+TEST(SortExec, SchedulerRuntimeRunsSortTail) {
+    using namespace NQumir::NAst;
+
+    int64_t a1[] = {2, 1, 2};
+    int64_t b1[] = {10, 5, 30};
+    std::vector<TColumn> columns1;
+    TRowSet batch1 = MakeI64I64Batch(a1, b1, 3, columns1);
+
+    int64_t a2[] = {1, 2};
+    int64_t b2[] = {7, 20};
+    std::vector<TColumn> columns2;
+    TRowSet batch2 = MakeI64I64Batch(a2, b2, 2, columns2);
+
+    auto i64 = std::make_shared<TIntegerType>();
+    TVectorSource source(
+        {{"a", i64}, {"b", i64}},
+        {batch1, batch2});
+
+    auto sourceOp = std::make_shared<TSourceOperator>(source, "t");
+    auto root = std::make_shared<TSortOperator>(sourceOp, std::vector<TSortKey>{
+        {.Column = "a", .Direction = ESortDirection::Asc},
+        {.Column = "b", .Direction = ESortDirection::Desc},
+    });
+    NScheduler::TSettings settings;
+    settings.Scheduler.Mode = NScheduler::EExecutionMode::ThreadedScheduler;
+    settings.Scheduler.WorkerCount = 2;
+
+    TPhysicalPlanner planner(nullptr, settings);
+    auto runtime = planner.Build(root);
+    ASSERT_NE(dynamic_cast<NScheduler::TRuntimeSchedulerPipeline*>(runtime.get()), nullptr);
 
     TRowSet out{};
     ASSERT_TRUE(runtime->Next(out));

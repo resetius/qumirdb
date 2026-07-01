@@ -26,6 +26,34 @@ struct TSortRadixKernel {
     TKernelCompiler::TSortRadixCompositeNullableDispatch NullableDispatch;
 };
 
+class TSortProcessor {
+public:
+    TSortProcessor(
+        NQumir::NAst::TTypePtr outputType,
+        std::vector<TSortKey> keys,
+        std::vector<TSortColumnRef> keyColumns,
+        TSortRadixKernel radixKernel,
+        int64_t batchRows = kJoinOutputBatchRows);
+
+    void Add(TRowSet& rowSet);
+    void Finish();
+    bool Next(TRowSet& rowSet);
+
+private:
+    bool TryRadixSort();
+
+    NQumir::NAst::TTypePtr OutputType_;
+    std::vector<TSortKey> Keys_;
+    std::vector<TSortColumnRef> KeyColumns_;
+    TSortRadixKernel RadixKernel_;
+    int64_t BatchRows_ = kJoinOutputBatchRows;
+
+    bool Materialized_ = false;
+    TRowStore Store_;
+    std::vector<TRowId> Rows_;
+    size_t Cursor_ = 0;
+};
+
 TRuntimeUnaryBlockingKernel::TProcess MakeSortProcess(
     NQumir::NAst::TTypePtr outputType,
     std::vector<TSortKey> keys,
