@@ -11,6 +11,7 @@
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/passes/column_pruning.h>
 #include <qdb/plan/passes/typing.h>
+#include <qdb/scheduler/runtime_node.h>
 #include <qdb/sexp/parser.h>
 
 #include <algorithm>
@@ -63,7 +64,11 @@ TRowSet KeyValBatch(int64_t* keys, int64_t* vals, int64_t rows, std::vector<TCol
 // Parses `sexp`, wiring "L" -> left source, anything else -> right source, then
 // runs the full logical pipeline + physical planner.
 std::unique_ptr<IRuntimeNode> PlanJoin(
-    const std::string& sexp, ISource& left, ISource& right) {
+    const std::string& sexp,
+    ISource& left,
+    ISource& right,
+    NScheduler::TSettings schedulerSettings = {})
+{
     TRelParserOptions opts;
     opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
         ISource& src = (path == "L") ? left : right;
@@ -80,7 +85,7 @@ std::unique_ptr<IRuntimeNode> PlanJoin(
     auto root = std::static_pointer_cast<IOperator>(*parsed);
     AnnotateTypes(root);
     ApplyColumnPruning(root);
-    TPhysicalPlanner planner;
+    TPhysicalPlanner planner(nullptr, schedulerSettings);
     return planner.Build(root);
 }
 
@@ -113,6 +118,49 @@ TEST(JoinPlanner, InnerJoinE2E) {
 
     std::vector<std::tuple<int64_t, int64_t, int64_t, int64_t>> expected = {
         {1, 10, 1, 100}, {1, 10, 1, 200}, {1, 30, 1, 100}, {1, 30, 1, 200}};
+    std::sort(got.begin(), got.end());
+    std::sort(expected.begin(), expected.end());
+    EXPECT_EQ(got, expected);
+}
+
+TEST(JoinPlanner, SchedulerThreadedInnerJoinE2E) {
+    std::vector<int64_t> lk = {1, 2, 1, 3}, lv = {10, 20, 30, 40};
+    std::vector<int64_t> rk = {1, 1, 3, 4}, rv = {100, 200, 300, 400};
+    std::vector<TColumn> lcols, rcols;
+    TVectorSource left({"lk", "lv"}, {KeyValBatch(lk.data(), lv.data(), 4, lcols)});
+    TVectorSource right({"rk", "rv"}, {KeyValBatch(rk.data(), rv.data(), 4, rcols)});
+    NScheduler::TSettings settings;
+    settings.Scheduler.Mode = NScheduler::EExecutionMode::ThreadedScheduler;
+    settings.Scheduler.WorkerCount = 2;
+
+    auto plan = PlanJoin(
+        "(rel join (rel source \"L\") (rel source \"R\") ((lk rk)) (inner))",
+        left,
+        right,
+        settings);
+    ASSERT_NE(dynamic_cast<NScheduler::TRuntimeSchedulerPipeline*>(plan.get()), nullptr);
+
+    std::vector<std::tuple<int64_t, int64_t, int64_t, int64_t>> got;
+    TRowSet out{};
+    while (plan->Next(out)) {
+        ASSERT_EQ(out.ColumnCount, 4);
+        for (int64_t i = 0; i < out.RowCount; ++i) {
+            got.emplace_back(
+                reinterpret_cast<const int64_t*>(out.Columns[0].Data)[i],
+                reinterpret_cast<const int64_t*>(out.Columns[1].Data)[i],
+                reinterpret_cast<const int64_t*>(out.Columns[2].Data)[i],
+                reinterpret_cast<const int64_t*>(out.Columns[3].Data)[i]);
+        }
+        Release(&out);
+    }
+
+    std::vector<std::tuple<int64_t, int64_t, int64_t, int64_t>> expected = {
+        {1, 10, 1, 100},
+        {1, 10, 1, 200},
+        {1, 30, 1, 100},
+        {1, 30, 1, 200},
+        {3, 40, 3, 300},
+    };
     std::sort(got.begin(), got.end());
     std::sort(expected.begin(), expected.end());
     EXPECT_EQ(got, expected);
