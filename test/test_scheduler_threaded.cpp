@@ -143,6 +143,24 @@ private:
     bool Requested_ = false;
 };
 
+class TNeedFinishedReplayTask : public ITaskNode {
+public:
+    ETaskResult Execute() override {
+        ++Calls_;
+        if (Calls_ < 3) {
+            return ETaskResult::NEED_DATA;
+        }
+        return ETaskResult::FINISHED;
+    }
+
+    int Calls() const {
+        return Calls_;
+    }
+
+private:
+    int Calls_ = 0;
+};
+
 std::unique_ptr<TTaskGraph> MakeRepeatGraph(TRepeatTask*& task, int repeats) {
     auto graph = std::make_unique<TTaskGraph>();
     auto repeat = std::make_unique<TRepeatTask>(repeats);
@@ -247,6 +265,26 @@ TEST(SchedulerThreaded, ReadyQueueCapacityIsAtLeastNodeCount) {
         /*readyQueueCapacity=*/1);
     std::string error;
     ASSERT_TRUE(scheduler.Run(&error)) << error;
+}
+
+TEST(SchedulerThreaded, RechecksConsumerWhenInputsAlreadyFinished) {
+    auto sourceTask = std::make_unique<TFinishTask>();
+    auto sinkTask = std::make_unique<TNeedFinishedReplayTask>();
+    auto* sinkPtr = sinkTask.get();
+
+    TTaskGraph graph;
+    auto& source = graph.AddOwnedNode(std::move(sourceTask));
+    auto& sink = graph.AddOwnedNode(std::move(sinkTask));
+    graph.AddOwnedEdge(
+        source,
+        sink,
+        std::make_unique<TOneToOneConnection>());
+    graph.Build();
+
+    TThreadedScheduler scheduler(graph, 1);
+    std::string error;
+    ASSERT_TRUE(scheduler.Run(&error)) << error;
+    EXPECT_EQ(sinkPtr->Calls(), 3);
 }
 
 TEST(SchedulerThreaded, CannotRunTwice) {
