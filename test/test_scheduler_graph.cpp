@@ -5,6 +5,7 @@
 #include <qdb/scheduler/single_threaded_scheduler.h>
 
 #include <memory>
+#include <sstream>
 #include <string>
 
 using namespace NQdb::NScheduler;
@@ -122,6 +123,27 @@ TEST(SchedulerGraph, RejectsInvalidLaneIds) {
     std::string error;
     EXPECT_FALSE(graph.Validate(&error));
     EXPECT_NE(error.find("source lane"), std::string::npos);
+}
+
+TEST(SchedulerGraph, PrintsConnectionsAndLaneMapping) {
+    auto connection = std::make_unique<TGatherConnection>();
+    connection->Resize(2, 1);
+
+    TTaskGraph graph;
+    auto& left = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    auto& right = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    auto& sink = graph.AddOwnedNode(std::make_unique<TNoopTask>());
+    auto& conn = graph.AddConnection(std::move(connection));
+    graph.AddEdge(left, sink, conn, 0, 0);
+    graph.AddEdge(right, sink, conn, 1, 0);
+    graph.Build();
+
+    std::stringstream out;
+    graph.Print(out);
+    const auto text = out.str();
+    EXPECT_NE(text.find("conn c0 gather src=2 dst=1"), std::string::npos);
+    EXPECT_NE(text.find("edge e0 n0[0] -> n2[0] via c0"), std::string::npos);
+    EXPECT_NE(text.find("edge e1 n1[1] -> n2[0] via c0"), std::string::npos);
 }
 
 TEST(SchedulerGraph, SingleThreadedSchedulerRunsSmallGraph) {

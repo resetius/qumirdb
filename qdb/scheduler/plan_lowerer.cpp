@@ -22,6 +22,7 @@
 #include <algorithm>
 #include <functional>
 #include <optional>
+#include <ostream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -843,6 +844,19 @@ std::unique_ptr<IRuntimeNode> BuildSchedulerPlanPipeline(
     std::string error;
     if (!graph->Validate(&error)) {
         throw std::runtime_error("scheduler graph invalid: " + error);
+    }
+    if (diagnostics) {
+        *diagnostics << "\n========== SCHEDULER GRAPH ==========\n";
+        *diagnostics << "mode="
+            << static_cast<int>(settings.Scheduler.Mode)
+            << " workers=" << settings.Scheduler.WorkerCount
+            << " ready_queue=" << settings.Scheduler.ReadyQueueCapacity
+            << " rowset_queue=" << settings.Queue.RowsetCapacityPerLane
+            << " scan_tasks=" << settings.ScanSplit.MaxScanTasks
+            << " shuffle_parts=" << settings.HashShuffle.PartitionCount
+            << "\n";
+        graph->Print(*diagnostics);
+        *diagnostics << "=====================================\n";
     }
     return std::make_unique<TRuntimeSchedulerPipeline>(
         std::move(graph),
