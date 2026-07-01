@@ -15,17 +15,28 @@ void SetError(std::string* error, std::string message) {
     }
 }
 
-size_t EffectivePartitionCount(const TSettings& settings) {
-    auto partitions = std::max<size_t>(settings.Partitioning.DefaultPartitionCount, 1);
-    auto maxPartitions = std::max<size_t>(settings.Partitioning.MaxPartitionCount, 1);
+size_t EffectivePartitionCount(const TPipelinePartitionSpec& spec)
+{
+    if (!spec.Source.Splits.empty()) {
+        return spec.Source.Splits.size();
+    }
+
+    auto partitions = std::max<size_t>(
+        spec.Settings.Partitioning.DefaultPartitionCount,
+        1);
+    auto maxPartitions = std::max<size_t>(
+        spec.Settings.Partitioning.MaxPartitionCount,
+        1);
     return std::min(partitions, maxPartitions);
 }
 
-size_t EffectiveQueueCapacity(const TSettings& settings) {
+size_t EffectiveQueueCapacity(const TSettings& settings)
+{
     return std::max<size_t>(settings.Queue.RowsetCapacityPerLane, 1);
 }
 
-bool ValidateSpec(const TPipelinePartitionSpec& spec, std::string* error) {
+bool ValidateSpec(const TPipelinePartitionSpec& spec, std::string* error)
+{
     if (!spec.Source.Code) {
         SetError(error, "pipeline partition spec has no source code");
         return false;
@@ -79,7 +90,7 @@ TPartitionedPipeline TPipelinePartitioner::Build(
         return {};
     }
 
-    const auto partitionCount = EffectivePartitionCount(spec.Settings);
+    const auto partitionCount = EffectivePartitionCount(spec);
     const auto queueCapacity = EffectiveQueueCapacity(spec.Settings);
 
     auto graph = std::make_unique<TTaskGraph>();
