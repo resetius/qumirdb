@@ -279,6 +279,49 @@ TUnaryRuntimeProcess BuildFilterRuntimeProcess(
     };
 }
 
+// Holds a selection buffer owned by a scheduler rowset, chaining destruction to
+// the wrapped rowset's original owner.
+struct TOwnedSelectionData {
+    std::vector<uint8_t> Selection;
+    void (*InnerDestroy)(TRowSet*) = nullptr;
+    void* InnerPrivate = nullptr;
+};
+
+void DestroyOwnedSelectionRowSet(TRowSet* rowSet) {
+    auto* data = static_cast<TOwnedSelectionData*>(rowSet->Private);
+    if (data->InnerDestroy) {
+        TRowSet inner = *rowSet;
+        inner.Selection = nullptr;
+        inner.Destroy = data->InnerDestroy;
+        inner.Private = data->InnerPrivate;
+        inner.RefCount = 1;
+        Release(&inner);
+    }
+    delete data;
+}
+
+// The streaming filter kernel points rowSet.Selection at a buffer it reuses on
+// every batch (TUnaryStreamingKernelState::Selection). That is safe for the
+// serial pipeline where each batch is consumed before the next is produced, but
+// in the scheduler pipeline a filtered rowset can sit in a bounded queue while
+// the filter overwrites the buffer for the next batch. Detach the selection
+// into a rowset-owned copy so the rowset stays self-contained across the edge.
+void DetachSelection(TRowSet& rowSet) {
+    if (!rowSet.Selection || rowSet.RowCount <= 0) {
+        return;
+    }
+    auto* data = new TOwnedSelectionData{
+        .Selection = std::vector<uint8_t>(
+            rowSet.Selection,
+            rowSet.Selection + rowSet.RowCount),
+        .InnerDestroy = rowSet.Destroy,
+        .InnerPrivate = rowSet.Private,
+    };
+    rowSet.Selection = data->Selection.data();
+    rowSet.Destroy = DestroyOwnedSelectionRowSet;
+    rowSet.Private = data;
+}
+
 TSchedulerUnaryStage BuildSchedulerFilterStage(
     TFilterOperator& filter,
     const NQumir::NAst::TTypePtr& inputType,
@@ -289,6 +332,7 @@ TSchedulerUnaryStage BuildSchedulerFilterStage(
         [process = std::move(runtime.Process)](void* state, TRowSet& rowSet) {
             auto* kernelState = static_cast<TUnaryStreamingKernelState*>(state);
             process(rowSet, *kernelState);
+            DetachSelection(rowSet);
         });
     return {
         .Spec = {
