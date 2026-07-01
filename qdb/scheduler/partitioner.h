@@ -2,6 +2,7 @@
 
 #include <qdb/scheduler/graph.h>
 #include <qdb/scheduler/runtime_adapter.h>
+#include <qdb/scheduler/scan_split.h>
 #include <qdb/scheduler/settings.h>
 
 #include <functional>
@@ -17,6 +18,7 @@ using TPartitionStateFactory = std::function<std::shared_ptr<void>(size_t)>;
 struct TSourcePartitionSpec {
     std::shared_ptr<const TSourceCode> Code;
     TPartitionStateFactory MakeState;
+    std::vector<TScanSplit> Splits;
 };
 
 struct TUnaryPartitionSpec {

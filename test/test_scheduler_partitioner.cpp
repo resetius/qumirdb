@@ -19,6 +19,8 @@ struct TSourceState {
     size_t Partition = 0;
     int Next = 1;
     int End = 2;
+    TScanSplit Split;
+    bool SplitDone = false;
     std::atomic<int>* DestroyCount = nullptr;
 };
 
@@ -67,6 +69,14 @@ TSpecFixture MakeSpec(size_t partitions) {
     out.SourceCode = std::make_shared<TSourceCode>(
         [](void* state, TRowSet& rowSet) {
             auto* source = static_cast<TSourceState*>(state);
+            if (source->Split.RowGroupCount) {
+                if (source->SplitDone) {
+                    return false;
+                }
+                rowSet = MakeRowSet(source->Split.RowCount, source->DestroyCount);
+                source->SplitDone = true;
+                return true;
+            }
             if (source->Next > source->End) {
                 return false;
             }
@@ -212,6 +222,47 @@ TEST(SchedulerPartitioner, AppliesPartitionSettingsCap) {
     ASSERT_NE(partitioned.Graph, nullptr) << error;
     EXPECT_EQ(partitioned.Graph->Leaves().size(), 2u);
     EXPECT_NE(partitioned.Debug.find("partition_count=2"), std::string::npos);
+}
+
+TEST(SchedulerPartitioner, UsesScanSplitsForSourcePartitionCount) {
+    auto fixture = MakeSpec(1);
+    fixture.Spec.Source.Splits = {
+        {
+            .FirstRowGroup = 0,
+            .RowGroupCount = 2,
+            .RowCount = 30,
+        },
+        {
+            .FirstRowGroup = 2,
+            .RowGroupCount = 1,
+            .RowCount = 40,
+        },
+        {
+            .FirstRowGroup = 3,
+            .RowGroupCount = 1,
+            .RowCount = 50,
+        },
+    };
+    fixture.Spec.Source.MakeState = [&fixture](size_t partition) {
+        auto state = std::make_shared<TSourceState>(TSourceState{
+            .Partition = partition,
+            .Split = fixture.Spec.Source.Splits[partition],
+            .DestroyCount = fixture.DestroyCount.get(),
+        });
+        fixture.SourceStates.push_back(state);
+        return state;
+    };
+    std::string error;
+    auto partitioned = TPipelinePartitioner::Build(fixture.Spec, &error);
+    ASSERT_NE(partitioned.Graph, nullptr) << error;
+    EXPECT_EQ(partitioned.Graph->Leaves().size(), 3u);
+    EXPECT_NE(partitioned.Debug.find("partition_count=3"), std::string::npos);
+
+    TThreadedScheduler scheduler(*partitioned.Graph, 3);
+    ASSERT_TRUE(scheduler.Run(&error)) << error;
+    EXPECT_EQ(fixture.SinkState->Batches, 3);
+    EXPECT_EQ(fixture.SinkState->Rows, 30 + 40 + 50 + 3 * 100);
+    EXPECT_EQ(fixture.DestroyCount->load(std::memory_order_relaxed), 3);
 }
 
 } // namespace
