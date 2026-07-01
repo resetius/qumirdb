@@ -26,6 +26,7 @@
 #include <algorithm>
 #include <optional>
 #include <stdexcept>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -48,6 +49,11 @@ struct TUnaryRuntimeProcess {
     NQumir::NAst::TTypePtr OutputType;
 };
 
+struct TSortRuntimeProcess {
+    std::vector<TSortColumnRef> KeyColumns;
+    TSortRadixKernel RadixKernel;
+};
+
 struct TSchedulerPipelineBuild {
     NScheduler::TPipelinePartitionSpec Spec;
     NQumir::NAst::TTypePtr OutputType;
@@ -68,6 +74,23 @@ struct TLimitBlockingState {
     {}
 
     TLimitProcessor Processor;
+};
+
+struct TSortBlockingState {
+    TSortBlockingState(
+        NQumir::NAst::TTypePtr outputType,
+        std::vector<TSortKey> keys,
+        std::vector<TSortColumnRef> keyColumns,
+        TSortRadixKernel radixKernel)
+        : Processor(
+            std::move(outputType),
+            std::move(keys),
+            std::move(keyColumns),
+            std::move(radixKernel))
+    {}
+
+    TSortProcessor Processor;
+    bool InputFinished = false;
 };
 
 // Byte width of the kernel output buffer per row for a computed column.
@@ -130,6 +153,33 @@ TSortKernelInputs BuildSortKernelInputs(const NKernel::TOperatorKernelSpec& spec
         });
     }
     return inputs;
+}
+
+void PrintKernelSpec(std::ostream* out, const NKernel::TOperatorKernelSpec& spec);
+
+TSortRuntimeProcess BuildSortRuntimeProcess(
+    const NQumir::NAst::TStructType& inputType,
+    const std::vector<TSortKey>& keys,
+    std::string_view kernelName,
+    std::ostream* diagnostics)
+{
+    auto spec = NKernel::BuildSortKernelSpec(inputType, keys, std::string(kernelName));
+    PrintKernelSpec(diagnostics, spec);
+    auto sortInputs = BuildSortKernelInputs(spec);
+    TSortRadixKernel radixKernel;
+    if (sortInputs.AllKeysRadixSortable && !sortInputs.RadixTypes.empty()) {
+        TKernelCompiler compiler(diagnostics);
+        radixKernel = {
+            .Enabled = true,
+            .Dispatch = compiler.CompileRadixSortComposite(sortInputs.RadixTypes),
+            .NullableDispatch = compiler.CompileRadixSortCompositeNullable(
+                sortInputs.RadixTypes),
+        };
+    }
+    return {
+        .KeyColumns = std::move(sortInputs.KeyColumns),
+        .RadixKernel = std::move(radixKernel),
+    };
 }
 
 void PrintKernelSpec(std::ostream* out, const NKernel::TOperatorKernelSpec& spec) {
@@ -550,6 +600,76 @@ std::unique_ptr<IRuntimeNode> TryBuildSchedulerLimitPipeline(
     return BuildSchedulerRuntimePipeline(std::move(*build));
 }
 
+std::unique_ptr<IRuntimeNode> TryBuildSchedulerSortPipeline(
+    TSortOperator& sort,
+    NScheduler::TSettings settings,
+    std::ostream* diagnostics)
+{
+    auto build = BuildSchedulerUnarySpec(
+        sort.Input(),
+        std::move(settings),
+        diagnostics);
+    if (!build) {
+        return {};
+    }
+
+    auto* inputType = static_cast<NQumir::NAst::TStructType*>(
+        build->OutputType.get());
+    if (!inputType) {
+        throw std::runtime_error("sort input must have TStructType");
+    }
+
+    auto runtime = BuildSortRuntimeProcess(
+        *inputType,
+        sort.Keys(),
+        "sort",
+        diagnostics);
+    auto outputType = build->OutputType;
+    auto keys = sort.Keys();
+    auto keyColumns = std::move(runtime.KeyColumns);
+    auto radixKernel = std::move(runtime.RadixKernel);
+
+    auto code = std::make_shared<NScheduler::TBlockingCode>(
+        [](void* state, NScheduler::TInputPort& input, TRowSet& output) {
+            auto* sortState = static_cast<TSortBlockingState*>(state);
+            TRowSet rowSet{};
+            while (!sortState->InputFinished) {
+                auto fetch = input.Fetch(rowSet);
+                if (fetch == NScheduler::EFetchResult::NO_DATA) {
+                    return NScheduler::ETaskResult::NEED_DATA;
+                }
+                if (fetch == NScheduler::EFetchResult::FINISHED) {
+                    sortState->InputFinished = true;
+                    break;
+                }
+                sortState->Processor.Add(rowSet);
+                rowSet = {};
+            }
+            if (sortState->Processor.Next(output)) {
+                return NScheduler::ETaskResult::OK;
+            }
+            return NScheduler::ETaskResult::FINISHED;
+        });
+
+    build->Spec.BlockingTail = NScheduler::TBlockingPartitionSpec{
+        .Code = std::move(code),
+        .MakeState = [
+            outputType = std::move(outputType),
+            keys = std::move(keys),
+            keyColumns = std::move(keyColumns),
+            radixKernel = std::move(radixKernel)]()
+        {
+            return std::make_shared<TSortBlockingState>(
+                outputType,
+                keys,
+                keyColumns,
+                radixKernel);
+        },
+    };
+
+    return BuildSchedulerRuntimePipeline(std::move(*build));
+}
+
 } // namespace
 
 void TPhysicalPlanner::PrintRuntimePlan(const TOperatorPtr& root) const {
@@ -628,6 +748,15 @@ std::unique_ptr<IRuntimeNode> TPhysicalPlanner::Build(const TOperatorPtr& root) 
         }
         if (auto maybe = TMaybeOp<TLimitOperator>(root)) {
             if (auto runtime = TryBuildSchedulerLimitPipeline(
+                    *maybe.Cast(),
+                    SchedulerSettings_,
+                    Diagnostics_))
+            {
+                return runtime;
+            }
+        }
+        if (auto maybe = TMaybeOp<TSortOperator>(root)) {
+            if (auto runtime = TryBuildSchedulerSortPipeline(
                     *maybe.Cast(),
                     SchedulerSettings_,
                     Diagnostics_))
@@ -736,19 +865,11 @@ std::unique_ptr<IRuntimeNode> TPhysicalPlanner::Build(const TOperatorPtr& root) 
             throw std::runtime_error("sort input must have TStructType");
         }
 
-        auto spec = NKernel::BuildSortKernelSpec(*inputType, sort->Keys());
-        PrintKernelSpec(Diagnostics_, spec);
-        auto sortInputs = BuildSortKernelInputs(spec);
-        TSortRadixKernel radixKernel;
-        if (sortInputs.AllKeysRadixSortable && !sortInputs.RadixTypes.empty()) {
-            TKernelCompiler compiler(Diagnostics_);
-            radixKernel = {
-                .Enabled = true,
-                .Dispatch = compiler.CompileRadixSortComposite(sortInputs.RadixTypes),
-                .NullableDispatch = compiler.CompileRadixSortCompositeNullable(
-                    sortInputs.RadixTypes),
-            };
-        }
+        auto runtime = BuildSortRuntimeProcess(
+            *inputType,
+            sort->Keys(),
+            "sort",
+            Diagnostics_);
 
         auto outputType = input->OutputType();
         return std::make_unique<TRuntimeUnaryBlockingKernel>(
@@ -757,8 +878,8 @@ std::unique_ptr<IRuntimeNode> TPhysicalPlanner::Build(const TOperatorPtr& root) 
             MakeSortProcess(
                 outputType,
                 sort->Keys(),
-                std::move(sortInputs.KeyColumns),
-                std::move(radixKernel)));
+                std::move(runtime.KeyColumns),
+                std::move(runtime.RadixKernel)));
     }
 
     if (auto maybe = TMaybeOp<TTopSortOperator>(root)) {
@@ -769,19 +890,11 @@ std::unique_ptr<IRuntimeNode> TPhysicalPlanner::Build(const TOperatorPtr& root) 
             throw std::runtime_error("top-sort input must have TStructType");
         }
 
-        auto spec = NKernel::BuildSortKernelSpec(*inputType, sort->Keys(), "top-sort");
-        PrintKernelSpec(Diagnostics_, spec);
-        auto sortInputs = BuildSortKernelInputs(spec);
-        TSortRadixKernel radixKernel;
-        if (sortInputs.AllKeysRadixSortable && !sortInputs.RadixTypes.empty()) {
-            TKernelCompiler compiler(Diagnostics_);
-            radixKernel = {
-                .Enabled = true,
-                .Dispatch = compiler.CompileRadixSortComposite(sortInputs.RadixTypes),
-                .NullableDispatch = compiler.CompileRadixSortCompositeNullable(
-                    sortInputs.RadixTypes),
-            };
-        }
+        auto runtime = BuildSortRuntimeProcess(
+            *inputType,
+            sort->Keys(),
+            "top-sort",
+            Diagnostics_);
 
         auto outputType = input->OutputType();
         return std::make_unique<TRuntimeUnaryBlockingKernel>(
@@ -790,8 +903,8 @@ std::unique_ptr<IRuntimeNode> TPhysicalPlanner::Build(const TOperatorPtr& root) 
             MakeTopSortProcess(
                 outputType,
                 sort->Keys(),
-                std::move(sortInputs.KeyColumns),
-                std::move(radixKernel),
+                std::move(runtime.KeyColumns),
+                std::move(runtime.RadixKernel),
                 sort->Limit()));
     }
 
