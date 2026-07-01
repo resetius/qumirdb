@@ -385,6 +385,29 @@ void THashShuffleTask::Scatter(TRowSet& rowSet) {
         return;
     }
 
+    // Many-to-one shuffle: every row routes to lane 0, so skip hashing and
+    // forward the whole rowset (keeping its existing selection) unchanged.
+    if (partitions == 1) {
+        ClearPending();
+        auto input = std::shared_ptr<TRowSet>(new TRowSet(rowSet), DestroySharedRowSet);
+        rowSet = {};
+        auto* data = new THashShuffleRowSetData;
+        data->Input = input;
+        Pending_.push_back(TPendingOutput{
+            .DstLane = 0,
+            .RowSet = TRowSet{
+                .Columns = input->Columns,
+                .ColumnCount = input->ColumnCount,
+                .RowCount = input->RowCount,
+                .Selection = input->Selection,
+                .Destroy = DestroyHashShuffleRowSet,
+                .Private = data,
+                .RefCount = 1,
+            },
+        });
+        return;
+    }
+
     Hashes_.assign(static_cast<size_t>(rowSet.RowCount), 0);
     if (!Code_->Hash(&rowSet, Hashes_.data())) {
         throw std::runtime_error("hash shuffle hash kernel failed");
