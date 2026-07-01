@@ -73,6 +73,31 @@ std::unique_ptr<IRuntimeNode> BuildBufferedSchedulerRuntimePipeline(
         std::move(output));
 }
 
+std::unique_ptr<IRuntimeNode> BuildBufferedSchedulerJoinRuntimePipeline(
+    TJoinPipelinePartitionSpec spec,
+    NQumir::NAst::TTypePtr outputType,
+    std::string* error)
+{
+    auto output = std::make_shared<TBufferedSchedulerOutput>();
+    spec.Sink = TSinkPartitionSpec{
+        .Code = MakeBufferedSchedulerSinkCode(),
+        .MakeState = [output]() {
+            return output;
+        },
+    };
+
+    auto partitioned = TJoinPipelinePartitioner::Build(spec, error);
+    if (!partitioned.Graph) {
+        return {};
+    }
+
+    return std::make_unique<TRuntimeSchedulerPipeline>(
+        std::move(partitioned.Graph),
+        spec.Settings,
+        std::move(outputType),
+        std::move(output));
+}
+
 TRuntimeSchedulerPipeline::TRuntimeSchedulerPipeline(
     std::unique_ptr<TTaskGraph> graph,
     TSettings settings,

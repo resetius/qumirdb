@@ -42,6 +42,9 @@ private:
     std::unordered_set<std::string> RestrictedColumns_;
     std::unique_ptr<parquet::arrow::FileReader> FileReader_;
     std::shared_ptr<arrow::RecordBatchReader> Reader_;
+    // Full-file column names in file order; stable across restrictions and used
+    // to map RestrictedColumns_ to file column indices.
+    std::vector<std::string> FileNames_;
     std::vector<std::string> Names_;
     std::vector<TColumnSchema> Columns_;
     TSchema Schema_;

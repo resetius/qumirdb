@@ -13,6 +13,8 @@ using namespace NQumir::NAst;
 
 namespace {
 
+constexpr int64_t kJoinInitialCapacity = 256;
+
 // Owns the gathered buffers behind an output TRowSet (one batch).
 struct TJoinedRowSetData {
     std::vector<TGatheredColumn> Gathered;
@@ -283,6 +285,299 @@ bool TJoinOutputBuilder::NextBatch(TRowSet& out) {
     return true;
 }
 
+TInnerJoinProcessor::TInnerJoinProcessor(
+    TTypePtr leftType,
+    TTypePtr rightType,
+    TJoinKernels kernels)
+    : LeftType_(std::move(leftType))
+    , RightType_(std::move(rightType))
+    , Kernels_(std::move(kernels))
+{
+    Builder_.emplace(&LeftRows_, &RightRows_,
+        BuildJoinColumns(LeftType_, RightType_, true));
+}
+
+TInnerJoinProcessor::~TInnerJoinProcessor() {
+    while (!ReadyOutput_.empty()) {
+        Release(&ReadyOutput_.front());
+        ReadyOutput_.pop_front();
+    }
+    if (Initialized_) {
+        Kernels_.DestroyTable(LeftTable_.data());
+        Kernels_.DestroyTable(RightTable_.data());
+    }
+    Kernels_.DestroyPairs(&PairBuffer_);
+}
+
+void TInnerJoinProcessor::EnsureInit() {
+    if (Initialized_) {
+        return;
+    }
+    Initialized_ = true;
+    Kernels_.Init(LeftTable_.data(), kJoinInitialCapacity);
+    Kernels_.Init(RightTable_.data(), kJoinInitialCapacity);
+}
+
+bool TInnerJoinProcessor::DrainReadyOutput(TRowSet& rowSet) {
+    if (ReadyOutput_.empty()) {
+        return false;
+    }
+    rowSet = ReadyOutput_.front();
+    ReadyOutput_.pop_front();
+    return true;
+}
+
+void TInnerJoinProcessor::DrainKernelPairs() {
+    for (int64_t i = 0; i < PairBuffer_.Count; ++i) {
+        Builder_->AddPair(PairBuffer_.Data[2 * i], PairBuffer_.Data[2 * i + 1]);
+    }
+    PairBuffer_.Count = 0;
+}
+
+void TInnerJoinProcessor::DrainStreamingPairs(
+    const TRowSet& streamBatch,
+    EJoinSide streamSide)
+{
+    int64_t cursor = 0;
+    while (cursor < PairBuffer_.Count) {
+        const size_t n = std::min<size_t>(
+            static_cast<size_t>(kJoinOutputBatchRows),
+            static_cast<size_t>(PairBuffer_.Count - cursor));
+
+        auto* data = new TJoinedRowSetData;
+        auto columns = BuildJoinColumns(LeftType_, RightType_, true);
+        data->Gathered.resize(columns.size());
+        data->Columns.resize(columns.size());
+        for (size_t c = 0; c < columns.size(); ++c) {
+            const auto& ref = columns[c];
+            if (ref.Side == streamSide) {
+                std::vector<int32_t> rows;
+                rows.reserve(n);
+                for (size_t i = 0; i < n; ++i) {
+                    const int64_t pairIdx = cursor + static_cast<int64_t>(i);
+                    const TRowId id = (streamSide == EJoinSide::Left)
+                        ? PairBuffer_.Data[2 * pairIdx]
+                        : PairBuffer_.Data[2 * pairIdx + 1];
+                    rows.push_back(RowIndex(id));
+                }
+                TakeColumnFromBatch(
+                    streamBatch,
+                    rows,
+                    ref.SrcColIdx,
+                    ref.Type,
+                    data->Gathered[c]);
+            } else {
+                std::vector<TRowId> ids;
+                ids.reserve(n);
+                for (size_t i = 0; i < n; ++i) {
+                    const int64_t pairIdx = cursor + static_cast<int64_t>(i);
+                    ids.push_back((ref.Side == EJoinSide::Left)
+                        ? PairBuffer_.Data[2 * pairIdx]
+                        : PairBuffer_.Data[2 * pairIdx + 1]);
+                }
+                const TRowStore& store = (ref.Side == EJoinSide::Left)
+                    ? LeftRows_
+                    : RightRows_;
+                TakeColumn(store, ids, ref.SrcColIdx, ref.Type, data->Gathered[c]);
+            }
+            data->Columns[c] = data->Gathered[c].Column;
+        }
+
+        ReadyOutput_.push_back(TRowSet{
+            .Columns = data->Columns.data(),
+            .ColumnCount = static_cast<int64_t>(columns.size()),
+            .RowCount = static_cast<int64_t>(n),
+            .Selection = nullptr,
+            .Destroy = DestroyJoinedRowSet,
+            .Private = data,
+            .RefCount = 1,
+        });
+        cursor += static_cast<int64_t>(n);
+    }
+    PairBuffer_.Count = 0;
+}
+
+EJoinSide TInnerJoinProcessor::ChooseSymmetricPullSide() const {
+    if (StoredLeftRows_ == 0 && StoredRightRows_ == 0) {
+        return EJoinSide::Left;
+    }
+    if (StoredLeftRows_ <= StoredRightRows_) {
+        if (LastLeftBatchRows_ > 0 &&
+            StoredLeftRows_ + LastLeftBatchRows_ >= StoredRightRows_) {
+            return EJoinSide::Right;
+        }
+        return EJoinSide::Left;
+    }
+    if (LastRightBatchRows_ > 0 &&
+        StoredRightRows_ + LastRightBatchRows_ >= StoredLeftRows_) {
+        return EJoinSide::Left;
+    }
+    return EJoinSide::Right;
+}
+
+bool TInnerJoinProcessor::PullOneInputBatch(
+    const TFetch& left,
+    const TFetch& right)
+{
+    auto processLeft = [&]() {
+        TRowSet batch{};
+        auto fetch = left(batch);
+        if (fetch == EJoinFetchResult::NO_DATA) {
+            return false;
+        }
+        if (fetch == EJoinFetchResult::FINISHED) {
+            LeftDone_ = true;
+            return true;
+        }
+
+        StoredLeftRows_ += batch.RowCount;
+        LastLeftBatchRows_ = batch.RowCount;
+        const int32_t batchIdx = LeftRows_.PushBatch(batch);
+        Kernels_.ProcessLeft(
+            LeftTable_.data(),
+            RightTable_.data(),
+            const_cast<TRowSet*>(&LeftRows_.Batch(batchIdx)),
+            batchIdx,
+            &PairBuffer_,
+            const_cast<TRowSet*>(LeftRows_.Data()),
+            const_cast<TRowSet*>(RightRows_.Data()));
+        DrainKernelPairs();
+        return true;
+    };
+
+    auto processRight = [&]() {
+        TRowSet batch{};
+        auto fetch = right(batch);
+        if (fetch == EJoinFetchResult::NO_DATA) {
+            return false;
+        }
+        if (fetch == EJoinFetchResult::FINISHED) {
+            RightDone_ = true;
+            return true;
+        }
+
+        StoredRightRows_ += batch.RowCount;
+        LastRightBatchRows_ = batch.RowCount;
+        const int32_t batchIdx = RightRows_.PushBatch(batch);
+        Kernels_.ProcessRight(
+            RightTable_.data(),
+            LeftTable_.data(),
+            const_cast<TRowSet*>(&RightRows_.Batch(batchIdx)),
+            batchIdx,
+            &PairBuffer_,
+            const_cast<TRowSet*>(LeftRows_.Data()),
+            const_cast<TRowSet*>(RightRows_.Data()));
+        DrainKernelPairs();
+        return true;
+    };
+
+    auto streamLeft = [&]() {
+        TRowSet batch{};
+        auto fetch = left(batch);
+        if (fetch == EJoinFetchResult::NO_DATA) {
+            return false;
+        }
+        if (fetch == EJoinFetchResult::FINISHED) {
+            LeftDone_ = true;
+            BothDone_ = true;
+            return true;
+        }
+
+        Kernels_.ProbeLeftStream(
+            RightTable_.data(),
+            &batch,
+            -1,
+            &PairBuffer_,
+            const_cast<TRowSet*>(LeftRows_.Data()),
+            const_cast<TRowSet*>(RightRows_.Data()));
+        DrainStreamingPairs(batch, EJoinSide::Left);
+        Release(&batch);
+        return true;
+    };
+
+    auto streamRight = [&]() {
+        TRowSet batch{};
+        auto fetch = right(batch);
+        if (fetch == EJoinFetchResult::NO_DATA) {
+            return false;
+        }
+        if (fetch == EJoinFetchResult::FINISHED) {
+            RightDone_ = true;
+            BothDone_ = true;
+            return true;
+        }
+
+        Kernels_.ProbeRightStream(
+            LeftTable_.data(),
+            &batch,
+            -1,
+            &PairBuffer_,
+            const_cast<TRowSet*>(LeftRows_.Data()),
+            const_cast<TRowSet*>(RightRows_.Data()));
+        DrainStreamingPairs(batch, EJoinSide::Right);
+        Release(&batch);
+        return true;
+    };
+
+    for (;;) {
+        if (StreamMode_ == EJoinStreamMode::StreamLeftAgainstRight) {
+            return streamLeft();
+        }
+        if (StreamMode_ == EJoinStreamMode::StreamRightAgainstLeft) {
+            return streamRight();
+        }
+
+        if (LeftDone_ && RightDone_) {
+            BothDone_ = true;
+            return true;
+        }
+        if (LeftDone_) {
+            StreamMode_ = EJoinStreamMode::StreamRightAgainstLeft;
+            continue;
+        }
+        if (RightDone_) {
+            StreamMode_ = EJoinStreamMode::StreamLeftAgainstRight;
+            continue;
+        }
+
+        const auto first = ChooseSymmetricPullSide();
+        if (first == EJoinSide::Left) {
+            if (processLeft()) {
+                return true;
+            }
+            return processRight();
+        }
+        if (processRight()) {
+            return true;
+        }
+        return processLeft();
+    }
+}
+
+EJoinProcessorResult TInnerJoinProcessor::Process(
+    const TFetch& left,
+    const TFetch& right,
+    TRowSet& output)
+{
+    EnsureInit();
+
+    if (DrainReadyOutput(output) || DrainBuilder(*Builder_, output)) {
+        return EJoinProcessorResult::OK;
+    }
+    if (BothDone_) {
+        return EJoinProcessorResult::FINISHED;
+    }
+    if (!PullOneInputBatch(left, right)) {
+        return EJoinProcessorResult::NEED_DATA;
+    }
+    if (DrainReadyOutput(output) || DrainBuilder(*Builder_, output)) {
+        return EJoinProcessorResult::OK;
+    }
+    return BothDone_
+        ? EJoinProcessorResult::FINISHED
+        : EJoinProcessorResult::NEED_DATA;
+}
+
 TRuntimeCrossJoin::TRuntimeCrossJoin(std::unique_ptr<IRuntimeNode> left,
     std::unique_ptr<IRuntimeNode> right,
     TTypePtr outputType)
@@ -331,12 +626,6 @@ bool TRuntimeCrossJoin::Next(TRowSet& rowSet) {
         if (!FillNextLeftBatch()) return false;
     }
 }
-
-namespace {
-
-constexpr int64_t kJoinInitialCapacity = 256;
-
-} // namespace
 
 TRuntimeJoin::TRuntimeJoin(std::unique_ptr<IRuntimeNode> left,
     std::unique_ptr<IRuntimeNode> right,

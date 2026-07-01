@@ -32,6 +32,11 @@ std::unique_ptr<IRuntimeNode> BuildBufferedSchedulerRuntimePipeline(
     NQumir::NAst::TTypePtr outputType,
     std::string* error = nullptr);
 
+std::unique_ptr<IRuntimeNode> BuildBufferedSchedulerJoinRuntimePipeline(
+    TJoinPipelinePartitionSpec spec,
+    NQumir::NAst::TTypePtr outputType,
+    std::string* error = nullptr);
+
 class TRuntimeSchedulerPipeline final : public IRuntimeNode {
 public:
     TRuntimeSchedulerPipeline(

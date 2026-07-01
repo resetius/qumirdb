@@ -398,6 +398,72 @@ TEST(RuntimeJoin, InnerJoinEndToEnd) {
     EXPECT_EQ(got, expected);
 }
 
+TEST(InnerJoinProcessor, ProcessesInputsWithoutRuntimeNext) {
+    std::vector<int64_t> lk = {1, 2, 1}, lv = {10, 20, 30};
+    std::vector<int64_t> rk = {1, 1, 3}, rv = {100, 200, 300};
+    std::vector<TColumn> lcols, rcols;
+
+    auto leftType = KeyValSchema("lk", "lv");
+    auto rightType = KeyValSchema("rk", "rv");
+    auto leftBatch = KeyValBatch(lk.data(), lv.data(), 3, lcols);
+    auto rightBatch = KeyValBatch(rk.data(), rv.data(), 3, rcols);
+
+    TKernelCompiler compiler;
+    auto kernels = CompileJoin(compiler, leftType, rightType, EJoinType::Inner);
+    TInnerJoinProcessor processor(leftType, rightType, std::move(kernels));
+
+    bool leftTemporarilyEmpty = true;
+    bool leftDone = false;
+    bool rightDone = false;
+    auto left = [&](TRowSet& rowSet) {
+        if (leftTemporarilyEmpty) {
+            leftTemporarilyEmpty = false;
+            return EJoinFetchResult::NO_DATA;
+        }
+        if (leftDone) {
+            return EJoinFetchResult::FINISHED;
+        }
+        rowSet = leftBatch;
+        leftDone = true;
+        return EJoinFetchResult::OK;
+    };
+    auto right = [&](TRowSet& rowSet) {
+        if (rightDone) {
+            return EJoinFetchResult::FINISHED;
+        }
+        rowSet = rightBatch;
+        rightDone = true;
+        return EJoinFetchResult::OK;
+    };
+
+    std::vector<TOut4> got;
+    TRowSet out{};
+    for (;;) {
+        auto result = processor.Process(left, right, out);
+        if (result == EJoinProcessorResult::NEED_DATA) {
+            continue;
+        }
+        if (result == EJoinProcessorResult::FINISHED) {
+            break;
+        }
+        ASSERT_EQ(out.ColumnCount, 4);
+        const auto* c0 = reinterpret_cast<const int64_t*>(out.Columns[0].Data);
+        const auto* c1 = reinterpret_cast<const int64_t*>(out.Columns[1].Data);
+        const auto* c2 = reinterpret_cast<const int64_t*>(out.Columns[2].Data);
+        const auto* c3 = reinterpret_cast<const int64_t*>(out.Columns[3].Data);
+        for (int64_t i = 0; i < out.RowCount; ++i) {
+            got.push_back({c0[i], c1[i], c2[i], c3[i]});
+        }
+        Release(&out);
+    }
+
+    std::vector<TOut4> expected = {
+        {1, 10, 1, 100}, {1, 10, 1, 200}, {1, 30, 1, 100}, {1, 30, 1, 200}};
+    std::sort(got.begin(), got.end());
+    std::sort(expected.begin(), expected.end());
+    EXPECT_EQ(got, expected);
+}
+
 TEST(RuntimeJoin, InnerJoinStreamsRightAfterLeftEof) {
     std::vector<int64_t> lk = {1, 2, 1}, lv = {10, 20, 30};
     std::vector<int64_t> rk0 = {2, 3}, rv0 = {200, 300};

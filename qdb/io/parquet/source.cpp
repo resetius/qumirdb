@@ -139,6 +139,17 @@ void TParquetSource::Open()
         throw std::runtime_error(fileReaderResult.status().ToString());
     }
     FileReader_ = std::move(*fileReaderResult);
+
+    std::shared_ptr<arrow::Schema> fileSchema;
+    auto schemaStatus = FileReader_->GetSchema(&fileSchema);
+    if (!schemaStatus.ok()) {
+        throw std::runtime_error(schemaStatus.ToString());
+    }
+    FileNames_.clear();
+    FileNames_.reserve(fileSchema->num_fields());
+    for (const auto& field : fileSchema->fields()) {
+        FileNames_.push_back(field->name());
+    }
 }
 
 std::vector<int> TParquetSource::EffectiveRowGroups() const
@@ -174,9 +185,11 @@ std::vector<int> TParquetSource::EffectiveColumnIndices() const
         return {};
     }
 
+    // Map restricted names to indices into the full file schema (FileNames_),
+    // never the possibly-narrowed Names_, so repeated restrictions stay stable.
     std::vector<int> indices;
-    for (int i = 0; i < static_cast<int>(Names_.size()); ++i) {
-        if (RestrictedColumns_.count(Names_[i])) {
+    for (int i = 0; i < static_cast<int>(FileNames_.size()); ++i) {
+        if (RestrictedColumns_.count(FileNames_[i])) {
             indices.push_back(i);
         }
     }

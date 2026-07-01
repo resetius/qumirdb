@@ -9,6 +9,7 @@
 #include <array>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <unordered_set>
@@ -165,6 +166,73 @@ private:
     std::vector<TRowId> LeftIds_;
     std::vector<TRowId> RightIds_;
     size_t Cursor_ = 0;
+};
+
+enum class EJoinFetchResult {
+    OK = 0,
+    NO_DATA = 1,
+    FINISHED = 2,
+};
+
+enum class EJoinProcessorResult {
+    OK = 0,
+    NEED_DATA = 1,
+    FINISHED = 2,
+};
+
+class TInnerJoinProcessor {
+public:
+    using TFetch = std::function<EJoinFetchResult(TRowSet&)>;
+
+    TInnerJoinProcessor(
+        NQumir::NAst::TTypePtr leftType,
+        NQumir::NAst::TTypePtr rightType,
+        TJoinKernels kernels);
+    TInnerJoinProcessor(const TInnerJoinProcessor&) = delete;
+    TInnerJoinProcessor& operator=(const TInnerJoinProcessor&) = delete;
+    ~TInnerJoinProcessor();
+
+    EJoinProcessorResult Process(
+        const TFetch& left,
+        const TFetch& right,
+        TRowSet& output);
+
+private:
+    // Mirrors the PairBuffer external type (modules/qumirdb.cpp).
+    struct TPairBufferState {
+        int64_t Count = 0;
+        int64_t Capacity = 0;
+        int64_t* Data = nullptr;
+    };
+    static_assert(sizeof(TPairBufferState) == TKernelCompiler::kPairBufferSize);
+
+    void EnsureInit();
+    bool DrainReadyOutput(TRowSet& rowSet);
+    void DrainKernelPairs();
+    void DrainStreamingPairs(const TRowSet& streamBatch, EJoinSide streamSide);
+    bool PullOneInputBatch(const TFetch& left, const TFetch& right);
+    EJoinSide ChooseSymmetricPullSide() const;
+
+private:
+    NQumir::NAst::TTypePtr LeftType_;
+    NQumir::NAst::TTypePtr RightType_;
+    TJoinKernels Kernels_;
+    TRowStore LeftRows_;
+    TRowStore RightRows_;
+    std::array<uint8_t, TKernelCompiler::kHashTableSize> LeftTable_{};
+    std::array<uint8_t, TKernelCompiler::kHashTableSize> RightTable_{};
+    TPairBufferState PairBuffer_;
+    std::optional<TJoinOutputBuilder> Builder_;
+    std::deque<TRowSet> ReadyOutput_;
+    bool Initialized_ = false;
+    bool LeftDone_ = false;
+    bool RightDone_ = false;
+    bool BothDone_ = false;
+    EJoinStreamMode StreamMode_ = EJoinStreamMode::Symmetric;
+    int64_t StoredLeftRows_ = 0;
+    int64_t StoredRightRows_ = 0;
+    int64_t LastLeftBatchRows_ = 0;
+    int64_t LastRightBatchRows_ = 0;
 };
 
 // Cartesian product join (no key columns, inner only).
