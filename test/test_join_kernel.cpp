@@ -220,6 +220,54 @@ TEST(CompileJoin, ProducesWorkingInnerJoinKernels) {
     kernels.DestroyTable(&right);
 }
 
+TEST(CompileJoinHash, ProducesMatchingSideHashes) {
+    using namespace NQumir::NAst;
+    auto i64 = [] { return std::make_shared<TIntegerType>(TIntegerType::I64); };
+    TStructType leftType({{"lk", i64()}, {"lv", i64()}});
+    TStructType rightType({{"rv", i64()}, {"rk", i64()}});
+
+    TKernelCompiler compiler;
+    auto spec = NKernel::BuildJoinKernelSpec(
+        leftType, rightType, {{"lk", "rk"}}, EJoinType::Inner);
+    auto kernels = compiler.CompileJoinHash(spec);
+
+    std::vector<int64_t> lkeys = {1, 2, 1, 4};
+    std::vector<int64_t> lvalues = {10, 20, 30, 40};
+    std::vector<int64_t> rvalues = {100, 200, 300, 400};
+    std::vector<int64_t> rkeys = {1, 3, 2, 1};
+    std::vector<TColumn> lcols = {
+        TColumn{.Data = reinterpret_cast<char*>(lkeys.data())},
+        TColumn{.Data = reinterpret_cast<char*>(lvalues.data())},
+    };
+    std::vector<TColumn> rcols = {
+        TColumn{.Data = reinterpret_cast<char*>(rvalues.data())},
+        TColumn{.Data = reinterpret_cast<char*>(rkeys.data())},
+    };
+    TRowSet lbatch{
+        .Columns = lcols.data(),
+        .ColumnCount = 2,
+        .RowCount = static_cast<int64_t>(lkeys.size()),
+        .RefCount = 1,
+    };
+    TRowSet rbatch{
+        .Columns = rcols.data(),
+        .ColumnCount = 2,
+        .RowCount = static_cast<int64_t>(rkeys.size()),
+        .RefCount = 1,
+    };
+
+    std::vector<uint64_t> leftHashes(lkeys.size(), 0);
+    std::vector<uint64_t> rightHashes(rkeys.size(), 0);
+    ASSERT_TRUE(kernels.Left(&lbatch, leftHashes.data()));
+    ASSERT_TRUE(kernels.Right(&rbatch, rightHashes.data()));
+
+    EXPECT_EQ(leftHashes[0], rightHashes[0]);
+    EXPECT_EQ(leftHashes[1], rightHashes[2]);
+    EXPECT_EQ(leftHashes[2], rightHashes[3]);
+    EXPECT_EQ(leftHashes[0], leftHashes[2]);
+    EXPECT_NE(leftHashes[0], leftHashes[1]);
+}
+
 TEST(CompileJoin, ProbeOnlyStreamsWithoutInserting) {
     using namespace NQumir::NAst;
     auto i64 = [] { return std::make_shared<TIntegerType>(TIntegerType::I64); };
