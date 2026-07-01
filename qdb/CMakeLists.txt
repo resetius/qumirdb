@@ -59,6 +59,7 @@ add_library(qumirdb
     scheduler/graph.cpp
     scheduler/partitioner.cpp
     scheduler/runtime_adapter.cpp
+    scheduler/scan_split.cpp
     scheduler/single_threaded_scheduler.cpp
     scheduler/threaded_scheduler.cpp
 )
