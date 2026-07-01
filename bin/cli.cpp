@@ -108,6 +108,19 @@ TFormatSpec ParseFormat(const std::string& spec) {
     return result;
 }
 
+NQdb::NScheduler::EExecutionMode ParseSchedulerMode(const std::string& mode) {
+    if (mode == "serial") {
+        return NQdb::NScheduler::EExecutionMode::Serial;
+    }
+    if (mode == "single") {
+        return NQdb::NScheduler::EExecutionMode::SingleThreadedScheduler;
+    }
+    if (mode == "threaded") {
+        return NQdb::NScheduler::EExecutionMode::ThreadedScheduler;
+    }
+    throw std::invalid_argument("unknown scheduler mode: " + mode);
+}
+
 NQdb::TSchema SchemaFromType(
     const NQumir::NAst::TTypePtr& type,
     std::vector<std::string>& names,
@@ -136,6 +149,7 @@ struct TConfig {
     TFormatSpec Format;
     int MaxRowSets = -1;
     bool Verbose = false;
+    NQdb::NScheduler::TSettings Scheduler;
 };
 
 std::string ResolveTablePath(const std::string& dataDir, std::string_view table) {
@@ -374,7 +388,9 @@ int RunQuery(ESyntax syntax, std::istream& in, const TConfig& config) {
         return 0;
     }
 
-    NQdb::TPhysicalPlanner planner(config.Verbose ? &std::cerr : nullptr);
+    NQdb::TPhysicalPlanner planner(
+        config.Verbose ? &std::cerr : nullptr,
+        config.Scheduler);
     planner.PrintRuntimePlan(*plan);
     auto executor = planner.Build(*plan);
 
@@ -567,6 +583,8 @@ void PrintHelp() {
         "    <separator=X>csv           CSV with custom separator X\n"
         "    null                       Consume rows without output\n"
         "  --rowsets <n>                Stop after n rowsets\n"
+        "  --scheduler <mode>           Execution mode: serial, single, threaded\n"
+        "  --scheduler-workers <n>      Worker count for threaded scheduler\n"
         "  --verbose                    Print the logical and runtime plans\n"
         "  --help|-h                    Show this help message\n"
         "\n"
@@ -619,6 +637,28 @@ int main(int argc, char** argv) {
                 std::cerr << "--rowsets requires a positive integer\n";
                 return 1;
             }
+        } else if (!std::strcmp(argv[i], "--scheduler")) {
+            if (i + 1 >= argc) {
+                std::cerr << "--scheduler requires an argument\n";
+                return 1;
+            }
+            try {
+                config.Scheduler.Scheduler.Mode = ParseSchedulerMode(argv[++i]);
+            } catch (const std::invalid_argument& e) {
+                std::cerr << e.what() << "\n";
+                return 1;
+            }
+        } else if (!std::strcmp(argv[i], "--scheduler-workers")) {
+            if (i + 1 >= argc) {
+                std::cerr << "--scheduler-workers requires an argument\n";
+                return 1;
+            }
+            auto workers = std::atoi(argv[++i]);
+            if (workers <= 0) {
+                std::cerr << "--scheduler-workers requires a positive integer\n";
+                return 1;
+            }
+            config.Scheduler.Scheduler.WorkerCount = static_cast<size_t>(workers);
         } else if (!std::strcmp(argv[i], "--verbose")) {
             config.Verbose = true;
         } else if (!std::strcmp(argv[i], "--help") || !std::strcmp(argv[i], "-h")) {
