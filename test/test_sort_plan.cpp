@@ -410,6 +410,45 @@ TEST(SortExec, TopSortReturnsLimitFromOneBatch) {
     EXPECT_FALSE(runtime->Next(second));
 }
 
+TEST(SortExec, SchedulerRuntimeRunsTopSortTail) {
+    using namespace NQumir::NAst;
+
+    int64_t keys[] = {5, 1, 3, 2};
+    int64_t payload[] = {50, 10, 30, 20};
+    std::vector<TColumn> columns;
+    TRowSet batch = MakeI64I64Batch(keys, payload, 4, columns);
+
+    auto i64 = std::make_shared<TIntegerType>();
+    TVectorSource source(
+        {{"k", i64}, {"payload", i64}},
+        {batch});
+    auto sourceOp = std::make_shared<TSourceOperator>(source, "t");
+    auto root = std::make_shared<TTopSortOperator>(
+        sourceOp,
+        std::vector<TSortKey>{
+            {.Column = "k", .Direction = ESortDirection::Asc},
+        },
+        2);
+    NScheduler::TSettings settings;
+    settings.Scheduler.Mode = NScheduler::EExecutionMode::ThreadedScheduler;
+    settings.Scheduler.WorkerCount = 2;
+
+    TPhysicalPlanner planner(nullptr, settings);
+    auto runtime = planner.Build(root);
+    ASSERT_NE(dynamic_cast<NScheduler::TRuntimeSchedulerPipeline*>(runtime.get()), nullptr);
+
+    TRowSet out{};
+    ASSERT_TRUE(runtime->Next(out));
+    ASSERT_EQ(out.RowCount, 2);
+    auto* outK = reinterpret_cast<int64_t*>(out.Columns[0].Data);
+    auto* outPayload = reinterpret_cast<int64_t*>(out.Columns[1].Data);
+    EXPECT_EQ(std::vector<int64_t>(outK, outK + out.RowCount),
+        (std::vector<int64_t>{1, 2}));
+    EXPECT_EQ(std::vector<int64_t>(outPayload, outPayload + out.RowCount),
+        (std::vector<int64_t>{10, 20}));
+    Release(&out);
+}
+
 TEST(SortExec, TopSortHonorsDescDirection) {
     using namespace NQumir::NAst;
 
