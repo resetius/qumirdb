@@ -43,6 +43,10 @@ TBlockingCode::TBlockingCode(TProcess process)
     : Process(std::move(process))
 {}
 
+TBinaryBlockingCode::TBinaryBlockingCode(TProcess process)
+    : Process(std::move(process))
+{}
+
 TSourceTask::TSourceTask(
     std::shared_ptr<const TSourceCode> code,
     std::shared_ptr<void> state,
@@ -230,6 +234,62 @@ const std::shared_ptr<const TBlockingCode>& TBlockingTask::Code() const {
 }
 
 const std::shared_ptr<void>& TBlockingTask::State() const {
+    return State_;
+}
+
+TBinaryBlockingTask::TBinaryBlockingTask(
+    std::shared_ptr<const TBinaryBlockingCode> code,
+    std::shared_ptr<void> state,
+    TInputPort left,
+    TInputPort right,
+    TOutputPort output)
+    : Code_(std::move(code))
+    , State_(std::move(state))
+    , Left_(left)
+    , Right_(right)
+    , Output_(output)
+{}
+
+TBinaryBlockingTask::~TBinaryBlockingTask() {
+    if (HasOutput_) {
+        Release(&CurrentOutput_);
+    }
+}
+
+ETaskResult TBinaryBlockingTask::Execute() {
+    if (OutputFinished_) {
+        return ETaskResult::FINISHED;
+    }
+
+    if (HasOutput_) {
+        if (!Output_.CanPush()) {
+            return ETaskResult::BLOCKED_OUTPUT;
+        }
+        if (!Output_.Push(std::move(CurrentOutput_))) {
+            return ETaskResult::BLOCKED_OUTPUT;
+        }
+        CurrentOutput_ = {};
+        HasOutput_ = false;
+        return ETaskResult::OK;
+    }
+
+    auto result = Code_->Process(State_.get(), Left_, Right_, CurrentOutput_);
+    if (result == ETaskResult::OK) {
+        HasOutput_ = true;
+        return ETaskResult::OK;
+    }
+    if (result == ETaskResult::FINISHED) {
+        OutputFinished_ = true;
+        Output_.Finish();
+    }
+    return result;
+}
+
+const std::shared_ptr<const TBinaryBlockingCode>& TBinaryBlockingTask::Code() const {
+    return Code_;
+}
+
+const std::shared_ptr<void>& TBinaryBlockingTask::State() const {
     return State_;
 }
 
