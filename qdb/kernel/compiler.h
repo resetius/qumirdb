@@ -121,6 +121,13 @@ struct TJoinKernels {
     std::function<bool(void* own, void* opp, void* pairs)> FinalizeOuter;
 };
 
+struct TJoinHashKernels {
+    using TDispatch = std::function<bool(TRowSet* batch, uint64_t* hashes)>;
+
+    TDispatch Left;
+    TDispatch Right;
+};
+
 // Compiles qumir core-lang kernel sources to LLVM JIT function pointers.
 class TKernelCompiler {
 public:
@@ -194,6 +201,12 @@ public:
 
     // Compiles the symmetric hash join kernels described by `spec`.
     TJoinKernels CompileJoin(
+        const NKernel::TOperatorKernelSpec& spec);
+
+    // Compiles rowset-wide hash helpers for the join keys described by `spec`.
+    // Each dispatch fills one uint64 hash per physical input row. Selection is
+    // not applied by the helper; callers skip unselected rows during scatter.
+    TJoinHashKernels CompileJoinHash(
         const NKernel::TOperatorKernelSpec& spec);
 
 private:

@@ -697,6 +697,94 @@ TJoinKernels TKernelCompiler::CompileJoin(
         residualPredicate, innerType, leftFieldCount);
 }
 
+TJoinHashKernels TKernelCompiler::CompileJoinHash(
+    const NKernel::TOperatorKernelSpec& spec)
+{
+    using namespace NQumir::NAst;
+
+    if (spec.Kind != NKernel::EOperatorKernelKind::Binary ||
+        spec.OperatorName != "join") {
+        throw NQumir::TError("CompileJoinHash: expected join kernel spec");
+    }
+    if (spec.InputSchemas.size() != 2) {
+        throw NQumir::TError("CompileJoinHash: expected two input schemas");
+    }
+
+    auto leftType = TMaybeType<TStructType>(spec.InputSchemas[0]);
+    auto rightType = TMaybeType<TStructType>(spec.InputSchemas[1]);
+    if (!leftType || !rightType) {
+        throw NQumir::TError("CompileJoinHash: input schemas must be structs");
+    }
+
+    std::vector<std::pair<std::string, std::string>> keys;
+    keys.reserve(spec.JoinKeys.size());
+    for (const auto& key : spec.JoinKeys) {
+        keys.emplace_back(key.Left.Name, key.Right.Name);
+    }
+    const auto keyDesc = NKernel::BuildJoinKeyDescriptor(
+        *leftType.Cast(),
+        *rightType.Cast(),
+        keys);
+
+    auto columnType = QumirDbNamedType("TColumn");
+    auto rowSetType = QumirDbNamedType("TRowSet");
+
+    auto buildProgram = [&]() -> std::vector<TExprPtr> {
+        std::vector<TExprPtr> program;
+        for (auto& f : NKernel::GenJoinKeyTypeDecls(keyDesc)) {
+            program.push_back(std::move(f));
+        }
+        for (auto& f : NKernel::GenJoinKeyOpsFunDecls(keyDesc)) {
+            program.push_back(std::move(f));
+        }
+        program.push_back(NKernel::GenJoinHashBatchAst(
+            keyDesc,
+            /*isLeft=*/true,
+            "jt_hash_left",
+            columnType,
+            rowSetType));
+        program.push_back(NKernel::GenJoinHashBatchAst(
+            keyDesc,
+            /*isLeft=*/false,
+            "jt_hash_right",
+            columnType,
+            rowSetType));
+        return program;
+    };
+
+    auto compileEntry = [&](const std::string& entry)
+        -> std::pair<void*, std::shared_ptr<NQumir::TLLVMRunner>>
+    {
+        auto options = Opts_;
+        options.PrintIr = Diagnostics_ != nullptr;
+        options.PrintLlvm = Diagnostics_ != nullptr;
+        auto runner = std::make_shared<NQumir::TLLVMRunner>(options);
+        auto program = std::make_shared<TBlockExpr>(NQumir::TLocation{}, buildProgram());
+        PrintKernelAst(Diagnostics_, "join_hash." + entry, program);
+        std::string error;
+        void* fn = CompileKernelAst(*runner, program, entry, &error);
+        FinishKernelDiagnostics(Diagnostics_);
+        if (!fn) {
+            throw std::runtime_error(
+                "CompileJoinHash: " + entry + " compilation failed: " + error);
+        }
+        return {fn, std::move(runner)};
+    };
+
+    auto [leftFn, leftRunner] = compileEntry("jt_hash_left");
+    auto [rightFn, rightRunner] = compileEntry("jt_hash_right");
+
+    using THashFn = bool(*)(TRowSet*, uint64_t*);
+    return {
+        .Left = [leftFn, leftRunner](TRowSet* batch, uint64_t* hashes) {
+            return reinterpret_cast<THashFn>(leftFn)(batch, hashes);
+        },
+        .Right = [rightFn, rightRunner](TRowSet* batch, uint64_t* hashes) {
+            return reinterpret_cast<THashFn>(rightFn)(batch, hashes);
+        },
+    };
+}
+
 TJoinKernels TKernelCompiler::CompileJoin(
     const NQumir::NAst::TStructType& leftType,
     const NQumir::NAst::TStructType& rightType,

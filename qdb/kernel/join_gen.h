@@ -65,6 +65,17 @@ NQumir::NAst::TExprPtr GenJoinProbeAst(
     NQumir::NAst::TTypePtr hashTableType,
     NQumir::NAst::TTypePtr pairBufferType);
 
+// Generates one side's rowset hash helper for shuffle:
+//   <funcName>(batch: <ref TRowSet>, hashes: <ptr u64>) -> bool
+// Fills hashes[i] for every physical row i in the batch. Selection is not
+// applied here; shuffle/scatter code must skip unselected rows itself.
+NQumir::NAst::TExprPtr GenJoinHashBatchAst(
+    const TJoinKeyDescriptor& key,
+    bool isLeft,
+    const std::string& funcName,
+    NQumir::NAst::TTypePtr columnType,
+    NQumir::NAst::TTypePtr rowSetType);
+
 // Generates the rh_hash / rh_key_equal overloads for the join key type, reusing
 // the aggregation key-ops generator (GenKeyOperationFunDecls).
 std::vector<NQumir::NAst::TExprPtr> GenJoinKeyOpsFunDecls(const TJoinKeyDescriptor& key);
