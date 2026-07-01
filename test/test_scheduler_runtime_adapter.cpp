@@ -32,6 +32,14 @@ struct TSinkState {
     int Batches = 0;
 };
 
+struct TBinaryState {
+    int LeftRows = 0;
+    int RightRows = 0;
+    bool LeftDone = false;
+    bool RightDone = false;
+    std::atomic<int>* DestroyCount = nullptr;
+};
+
 void CountDestroy(TRowSet* rowSet) {
     auto* counter = static_cast<std::atomic<int>*>(rowSet->Private);
     counter->fetch_add(1, std::memory_order_relaxed);
@@ -194,6 +202,123 @@ TEST(SchedulerRuntimeAdapter, PartitionTasksShareCodeButOwnState) {
     EXPECT_EQ(left.Code().get(), right.Code().get());
     EXPECT_NE(left.State().get(), right.State().get());
     EXPECT_EQ(code.use_count(), 3);
+}
+
+TEST(SchedulerRuntimeAdapter, RunsBinaryBlockingTask) {
+    auto graph = std::make_unique<TTaskGraph>();
+    auto destroyCount = std::make_shared<std::atomic<int>>(0);
+    auto leftState = std::make_shared<TSourceState>(TSourceState{
+        .Next = 1,
+        .End = 2,
+    });
+    auto rightState = std::make_shared<TSourceState>(TSourceState{
+        .Next = 10,
+        .End = 11,
+    });
+    auto binaryState = std::make_shared<TBinaryState>(TBinaryState{
+        .DestroyCount = destroyCount.get(),
+    });
+    auto sinkState = std::make_shared<TSinkState>();
+
+    auto sourceCode = std::make_shared<TSourceCode>(
+        [destroyCount](void* state, TRowSet& rowSet) {
+            auto* source = static_cast<TSourceState*>(state);
+            if (source->Next > source->End) {
+                return false;
+            }
+            rowSet = MakeRowSet(source->Next, destroyCount.get());
+            ++source->Next;
+            return true;
+        });
+    auto binaryCode = std::make_shared<TBinaryBlockingCode>(
+        [](void* state, TInputPort& left, TInputPort& right, TRowSet& output) {
+            auto* binary = static_cast<TBinaryState*>(state);
+            TRowSet rowSet{};
+            while (!binary->LeftDone) {
+                auto fetch = left.Fetch(rowSet);
+                if (fetch == EFetchResult::NO_DATA) {
+                    break;
+                }
+                if (fetch == EFetchResult::FINISHED) {
+                    binary->LeftDone = true;
+                    break;
+                }
+                binary->LeftRows += static_cast<int>(rowSet.RowCount);
+                Release(&rowSet);
+                rowSet = {};
+            }
+            while (!binary->RightDone) {
+                auto fetch = right.Fetch(rowSet);
+                if (fetch == EFetchResult::NO_DATA) {
+                    break;
+                }
+                if (fetch == EFetchResult::FINISHED) {
+                    binary->RightDone = true;
+                    break;
+                }
+                binary->RightRows += static_cast<int>(rowSet.RowCount);
+                Release(&rowSet);
+                rowSet = {};
+            }
+            if (!binary->LeftDone || !binary->RightDone) {
+                return ETaskResult::NEED_DATA;
+            }
+            if (binary->DestroyCount == nullptr) {
+                return ETaskResult::FINISHED;
+            }
+            output = MakeRowSet(
+                binary->LeftRows * 100 + binary->RightRows,
+                binary->DestroyCount);
+            binary->DestroyCount = nullptr;
+            return ETaskResult::OK;
+        });
+    auto sinkCode = std::make_shared<TSinkCode>(
+        [](void* state, const TRowSet& rowSet) {
+            auto* sink = static_cast<TSinkState*>(state);
+            sink->Rows += static_cast<int>(rowSet.RowCount);
+            ++sink->Batches;
+        });
+
+    auto leftToBinary = std::make_unique<TOneToOneConnection>();
+    auto* leftToBinaryPtr = leftToBinary.get();
+    auto rightToBinary = std::make_unique<TOneToOneConnection>();
+    auto* rightToBinaryPtr = rightToBinary.get();
+    auto binaryToSink = std::make_unique<TOneToOneConnection>();
+    auto* binaryToSinkPtr = binaryToSink.get();
+
+    auto& left = graph->AddOwnedNode(std::make_unique<TSourceTask>(
+        sourceCode,
+        leftState,
+        TOutputPort{.Connection = leftToBinaryPtr}));
+    auto& right = graph->AddOwnedNode(std::make_unique<TSourceTask>(
+        sourceCode,
+        rightState,
+        TOutputPort{.Connection = rightToBinaryPtr}));
+    auto& binary = graph->AddOwnedNode(std::make_unique<TBinaryBlockingTask>(
+        binaryCode,
+        binaryState,
+        TInputPort{.Connection = leftToBinaryPtr},
+        TInputPort{.Connection = rightToBinaryPtr},
+        TOutputPort{.Connection = binaryToSinkPtr}));
+    auto& sink = graph->AddOwnedNode(std::make_unique<TSinkTask>(
+        sinkCode,
+        sinkState,
+        TInputPort{.Connection = binaryToSinkPtr}));
+
+    graph->AddOwnedEdge(left, binary, std::move(leftToBinary));
+    graph->AddOwnedEdge(right, binary, std::move(rightToBinary));
+    graph->AddOwnedEdge(binary, sink, std::move(binaryToSink));
+    graph->Build();
+
+    std::string error;
+    ASSERT_TRUE(graph->Validate(&error)) << error;
+    TThreadedScheduler scheduler(*graph, 3);
+    ASSERT_TRUE(scheduler.Run(&error)) << error;
+    EXPECT_EQ(binaryState->LeftRows, 3);
+    EXPECT_EQ(binaryState->RightRows, 21);
+    EXPECT_EQ(sinkState->Batches, 1);
+    EXPECT_EQ(sinkState->Rows, 321);
+    EXPECT_EQ(destroyCount->load(std::memory_order_relaxed), 5);
 }
 
 } // namespace

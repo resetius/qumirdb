@@ -58,6 +58,18 @@ struct TBlockingCode {
     TProcess Process;
 };
 
+struct TBinaryBlockingCode {
+    using TProcess = std::function<ETaskResult(
+        void*,
+        TInputPort&,
+        TInputPort&,
+        TRowSet&)>;
+
+    explicit TBinaryBlockingCode(TProcess process);
+
+    TProcess Process;
+};
+
 class TSourceTask final : public ITaskNode {
 public:
     TSourceTask(
@@ -139,6 +151,32 @@ private:
     std::shared_ptr<const TBlockingCode> Code_;
     std::shared_ptr<void> State_;
     TInputPort Input_;
+    TOutputPort Output_;
+    TRowSet CurrentOutput_ = {};
+    bool HasOutput_ = false;
+    bool OutputFinished_ = false;
+};
+
+class TBinaryBlockingTask final : public ITaskNode {
+public:
+    TBinaryBlockingTask(
+        std::shared_ptr<const TBinaryBlockingCode> code,
+        std::shared_ptr<void> state,
+        TInputPort left,
+        TInputPort right,
+        TOutputPort output);
+    ~TBinaryBlockingTask() override;
+
+    ETaskResult Execute() override;
+
+    const std::shared_ptr<const TBinaryBlockingCode>& Code() const;
+    const std::shared_ptr<void>& State() const;
+
+private:
+    std::shared_ptr<const TBinaryBlockingCode> Code_;
+    std::shared_ptr<void> State_;
+    TInputPort Left_;
+    TInputPort Right_;
     TOutputPort Output_;
     TRowSet CurrentOutput_ = {};
     bool HasOutput_ = false;
