@@ -1,6 +1,8 @@
 #include <qdb/scheduler/graph.h>
 
 #include <format>
+#include <ostream>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 
@@ -12,6 +14,18 @@ void SetError(std::string* error, std::string message) {
     if (error) {
         *error = std::move(message);
     }
+}
+
+const char* ConnectionKindName(EConnectionKind kind) {
+    switch (kind) {
+        case EConnectionKind::OneToOne:
+            return "one-to-one";
+        case EConnectionKind::Gather:
+            return "gather";
+        case EConnectionKind::HashShuffle:
+            return "hash-shuffle";
+    }
+    return "unknown";
 }
 
 } // namespace
@@ -159,6 +173,57 @@ bool TTaskGraph::Validate(std::string* error) const {
     }
 
     return true;
+}
+
+void TTaskGraph::Print(std::ostream& out) const {
+    std::unordered_map<const TTaskNode*, size_t> nodeIds;
+    nodeIds.reserve(Nodes_.size());
+    for (size_t i = 0; i < Nodes_.size(); ++i) {
+        nodeIds.emplace(Nodes_[i].get(), i);
+    }
+
+    std::unordered_map<const IConnection*, size_t> connectionIds;
+    connectionIds.reserve(OwnedConnections_.size());
+    for (size_t i = 0; i < OwnedConnections_.size(); ++i) {
+        connectionIds.emplace(OwnedConnections_[i].get(), i);
+    }
+
+    out << "nodes: " << Nodes_.size()
+        << ", edges: " << Edges_.size()
+        << ", connections: " << OwnedConnections_.size() << "\n";
+    out << "leaves:";
+    for (auto* leaf : Leaves_) {
+        out << " n" << nodeIds[leaf];
+    }
+    out << "\n";
+    if (Root_) {
+        out << "root: n" << nodeIds[Root_] << "\n";
+    }
+
+    for (size_t i = 0; i < OwnedConnections_.size(); ++i) {
+        const auto& conn = OwnedConnections_[i];
+        out << "conn c" << i
+            << " " << ConnectionKindName(conn->Kind())
+            << " src=" << conn->SrcCount()
+            << " dst=" << conn->DstCount() << "\n";
+    }
+
+    for (size_t i = 0; i < Nodes_.size(); ++i) {
+        const auto& node = Nodes_[i];
+        out << "node n" << i
+            << " in=" << node->Inbound.size()
+            << " out=" << node->Outbound.size() << "\n";
+    }
+
+    for (size_t i = 0; i < Edges_.size(); ++i) {
+        const auto& edge = Edges_[i];
+        out << "edge e" << i
+            << " n" << nodeIds[edge->Src]
+            << "[" << edge->SrcLane << "] -> n"
+            << nodeIds[edge->Dst]
+            << "[" << edge->DstLane << "] via c"
+            << connectionIds[edge->Connection] << "\n";
+    }
 }
 
 const std::vector<std::unique_ptr<TTaskNode>>& TTaskGraph::Nodes() const {
