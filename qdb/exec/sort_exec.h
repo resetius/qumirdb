@@ -54,6 +54,36 @@ private:
     size_t Cursor_ = 0;
 };
 
+class TTopSortProcessor {
+public:
+    TTopSortProcessor(
+        NQumir::NAst::TTypePtr outputType,
+        std::vector<TSortKey> keys,
+        std::vector<TSortColumnRef> keyColumns,
+        TSortRadixKernel radixKernel,
+        int64_t limit,
+        int64_t batchRows = kJoinOutputBatchRows);
+    ~TTopSortProcessor();
+
+    void Add(TRowSet& rowSet);
+    void Finish();
+    bool Next(TRowSet& rowSet);
+
+private:
+    bool TryRadixSortBatch(const TRowSet& batch, std::vector<uint32_t>& rows);
+
+    NQumir::NAst::TTypePtr OutputType_;
+    std::vector<TSortKey> Keys_;
+    std::vector<TSortColumnRef> KeyColumns_;
+    TSortRadixKernel RadixKernel_;
+    int64_t Limit_ = 0;
+    int64_t BatchRows_ = kJoinOutputBatchRows;
+
+    bool Materialized_ = false;
+    std::unique_ptr<TTopSortScratch> Scratch_;
+    size_t Cursor_ = 0;
+};
+
 TRuntimeUnaryBlockingKernel::TProcess MakeSortProcess(
     NQumir::NAst::TTypePtr outputType,
     std::vector<TSortKey> keys,

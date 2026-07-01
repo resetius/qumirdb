@@ -751,34 +751,7 @@ TRuntimeUnaryBlockingKernel::TProcess MakeSortProcess(
     };
 }
 
-struct TTopSortProcessState {
-    TTopSortProcessState(
-        TTypePtr outputType,
-        std::vector<TSortKey> keys,
-        std::vector<TSortColumnRef> keyColumns,
-        TSortRadixKernel radixKernel,
-        int64_t limit,
-        int64_t batchRows);
-
-    bool Next(IRuntimeNode& input, TRowSet& rowSet);
-
-private:
-    void Materialize(IRuntimeNode& input);
-    bool TryRadixSortBatch(const TRowSet& batch, std::vector<uint32_t>& rows);
-
-    TTypePtr OutputType_;
-    std::vector<TSortKey> Keys_;
-    std::vector<TSortColumnRef> KeyColumns_;
-    TSortRadixKernel RadixKernel_;
-    int64_t Limit_ = 0;
-    int64_t BatchRows_ = kJoinOutputBatchRows;
-
-    bool Materialized_ = false;
-    std::unique_ptr<TTopSortScratch> Scratch_;
-    size_t Cursor_ = 0;
-};
-
-TTopSortProcessState::TTopSortProcessState(
+TTopSortProcessor::TTopSortProcessor(
     TTypePtr outputType,
     std::vector<TSortKey> keys,
     std::vector<TSortColumnRef> keyColumns,
@@ -794,7 +767,9 @@ TTopSortProcessState::TTopSortProcessState(
     , Scratch_(std::make_unique<TTopSortScratch>())
 {}
 
-bool TTopSortProcessState::TryRadixSortBatch(
+TTopSortProcessor::~TTopSortProcessor() = default;
+
+bool TTopSortProcessor::TryRadixSortBatch(
     const TRowSet& batch,
     std::vector<uint32_t>& rows)
 {
@@ -861,12 +836,14 @@ bool TTopSortProcessState::TryRadixSortBatch(
     return true;
 }
 
-void TTopSortProcessState::Materialize(IRuntimeNode& input) {
+void TTopSortProcessor::Add(TRowSet& batch)
+{
     if (Materialized_) {
-        return;
+        throw std::runtime_error("top-sort processor is already finished");
     }
     if (Limit_ <= 0) {
-        Materialized_ = true;
+        Release(&batch);
+        batch = {};
         return;
     }
 
@@ -875,75 +852,79 @@ void TTopSortProcessState::Materialize(IRuntimeNode& input) {
         throw std::runtime_error("top-sort output must have TStructType");
     }
 
-    TRowSet batch{};
-    while (input.Next(batch)) {
-        auto& tempRows = Scratch_->TempRows;
-        auto& picks = Scratch_->Picks;
-        tempRows.clear();
-        tempRows.reserve(static_cast<size_t>(batch.RowCount));
-        for (int32_t row = 0; row < batch.RowCount; ++row) {
-            if (RowSelected(batch, row)) {
-                tempRows.push_back(static_cast<uint32_t>(row));
-            }
+    auto& tempRows = Scratch_->TempRows;
+    auto& picks = Scratch_->Picks;
+    tempRows.clear();
+    tempRows.reserve(static_cast<size_t>(batch.RowCount));
+    for (int32_t row = 0; row < batch.RowCount; ++row) {
+        if (RowSelected(batch, row)) {
+            tempRows.push_back(static_cast<uint32_t>(row));
         }
-
-        if (!TryRadixSortBatch(batch, tempRows)) {
-            std::stable_sort(tempRows.begin(), tempRows.end(),
-                [&](uint32_t lhs, uint32_t rhs) {
-                    return SortRowsLessColumns(batch.Columns, static_cast<int32_t>(lhs),
-                        batch.Columns, static_cast<int32_t>(rhs), Keys_, KeyColumns_);
-                });
-        }
-
-        const TRowSet stateView = Scratch_->State->RowSet();
-        const size_t stateRows = static_cast<size_t>(Scratch_->State->RowCount);
-        const size_t limit = static_cast<size_t>(Limit_);
-        const size_t pickCount = std::min(limit, stateRows + tempRows.size());
-        picks.resize(pickCount);
-
-        size_t left = 0;
-        size_t right = 0;
-        size_t out = 0;
-        while (out < pickCount && (left < stateRows || right < tempRows.size())) {
-            if (right == tempRows.size()) {
-                picks[out++] = TTopSortPick{0, static_cast<uint32_t>(left++)};
-                continue;
-            }
-            if (left == stateRows) {
-                picks[out++] = TTopSortPick{1, tempRows[right++]};
-                continue;
-            }
-
-            const uint32_t tempRow = tempRows[right];
-            if (SortRowsLessColumns(batch.Columns, static_cast<int32_t>(tempRow),
-                    stateView.Columns, static_cast<int32_t>(left), Keys_, KeyColumns_)) {
-                picks[out++] = TTopSortPick{1, tempRow};
-                ++right;
-            } else {
-                picks[out++] = TTopSortPick{0, static_cast<uint32_t>(left++)};
-            }
-        }
-
-        auto next = std::make_unique<TTopSortState>();
-        next->Gathered.resize(outputType->Fields.size());
-        next->Columns.resize(outputType->Fields.size());
-        next->RowCount = static_cast<int64_t>(pickCount);
-        for (size_t c = 0; c < outputType->Fields.size(); ++c) {
-            const TColumn emptyState{};
-            const TColumn& stateColumn = Scratch_->State->RowCount == 0 ? emptyState : stateView.Columns[c];
-            GatherTopSortColumn(stateColumn, batch.Columns[c], picks, pickCount,
-                outputType->Fields[c].second, next->Gathered[c]);
-            next->Columns[c] = next->Gathered[c].Column;
-        }
-        Scratch_->State = std::move(next);
-        Release(&batch);
     }
 
+    if (!TryRadixSortBatch(batch, tempRows)) {
+        std::stable_sort(tempRows.begin(), tempRows.end(),
+            [&](uint32_t lhs, uint32_t rhs) {
+                return SortRowsLessColumns(batch.Columns, static_cast<int32_t>(lhs),
+                    batch.Columns, static_cast<int32_t>(rhs), Keys_, KeyColumns_);
+            });
+    }
+
+    const TRowSet stateView = Scratch_->State->RowSet();
+    const size_t stateRows = static_cast<size_t>(Scratch_->State->RowCount);
+    const size_t limit = static_cast<size_t>(Limit_);
+    const size_t pickCount = std::min(limit, stateRows + tempRows.size());
+    picks.resize(pickCount);
+
+    size_t left = 0;
+    size_t right = 0;
+    size_t out = 0;
+    while (out < pickCount && (left < stateRows || right < tempRows.size())) {
+        if (right == tempRows.size()) {
+            picks[out++] = TTopSortPick{0, static_cast<uint32_t>(left++)};
+            continue;
+        }
+        if (left == stateRows) {
+            picks[out++] = TTopSortPick{1, tempRows[right++]};
+            continue;
+        }
+
+        const uint32_t tempRow = tempRows[right];
+        if (SortRowsLessColumns(batch.Columns, static_cast<int32_t>(tempRow),
+                stateView.Columns, static_cast<int32_t>(left), Keys_, KeyColumns_)) {
+            picks[out++] = TTopSortPick{1, tempRow};
+            ++right;
+        } else {
+            picks[out++] = TTopSortPick{0, static_cast<uint32_t>(left++)};
+        }
+    }
+
+    auto next = std::make_unique<TTopSortState>();
+    next->Gathered.resize(outputType->Fields.size());
+    next->Columns.resize(outputType->Fields.size());
+    next->RowCount = static_cast<int64_t>(pickCount);
+    for (size_t c = 0; c < outputType->Fields.size(); ++c) {
+        const TColumn emptyState{};
+        const TColumn& stateColumn = Scratch_->State->RowCount == 0
+            ? emptyState
+            : stateView.Columns[c];
+        GatherTopSortColumn(stateColumn, batch.Columns[c], picks, pickCount,
+            outputType->Fields[c].second, next->Gathered[c]);
+        next->Columns[c] = next->Gathered[c].Column;
+    }
+    Scratch_->State = std::move(next);
+    Release(&batch);
+    batch = {};
+}
+
+void TTopSortProcessor::Finish()
+{
     Materialized_ = true;
 }
 
-bool TTopSortProcessState::Next(IRuntimeNode& input, TRowSet& rowSet) {
-    Materialize(input);
+bool TTopSortProcessor::Next(TRowSet& rowSet)
+{
+    Finish();
     if (!Scratch_ || !Scratch_->State ||
         Cursor_ >= static_cast<size_t>(Scratch_->State->RowCount)) {
         return false;
@@ -988,7 +969,7 @@ TRuntimeUnaryBlockingKernel::TProcess MakeTopSortProcess(
     int64_t limit,
     int64_t batchRows)
 {
-    auto state = std::make_shared<TTopSortProcessState>(
+    auto state = std::make_shared<TTopSortProcessor>(
         std::move(outputType),
         std::move(keys),
         std::move(keyColumns),
@@ -996,7 +977,11 @@ TRuntimeUnaryBlockingKernel::TProcess MakeTopSortProcess(
         limit,
         batchRows);
     return [state = std::move(state)](IRuntimeNode& input, TRowSet& rowSet) {
-        return state->Next(input, rowSet);
+        TRowSet batch{};
+        while (input.Next(batch)) {
+            state->Add(batch);
+        }
+        return state->Next(rowSet);
     };
 }
 
