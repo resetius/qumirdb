@@ -9,6 +9,7 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <vector>
 
 using namespace NQdb::NScheduler;
 
@@ -121,6 +122,27 @@ private:
     std::atomic<bool> Running_ = false;
 };
 
+class TFinishTask : public ITaskNode {
+public:
+    ETaskResult Execute() override {
+        return ETaskResult::FINISHED;
+    }
+};
+
+class TManyInputSinkTask : public ITaskNode {
+public:
+    ETaskResult Execute() override {
+        if (!Requested_) {
+            Requested_ = true;
+            return ETaskResult::NEED_DATA;
+        }
+        return ETaskResult::FINISHED;
+    }
+
+private:
+    bool Requested_ = false;
+};
+
 std::unique_ptr<TTaskGraph> MakeRepeatGraph(TRepeatTask*& task, int repeats) {
     auto graph = std::make_unique<TTaskGraph>();
     auto repeat = std::make_unique<TRepeatTask>(repeats);
@@ -199,6 +221,32 @@ TEST(SchedulerThreaded, DoesNotExecuteSameTaskConcurrently) {
     std::string error;
     ASSERT_TRUE(scheduler.Run(&error)) << error;
     EXPECT_EQ(taskPtr->Violations.load(std::memory_order_relaxed), 0);
+}
+
+TEST(SchedulerThreaded, ReadyQueueCapacityIsAtLeastNodeCount) {
+    constexpr size_t inputCount = 128;
+
+    TTaskGraph graph;
+    std::vector<TTaskNode*> inputs;
+    inputs.reserve(inputCount);
+    for (size_t i = 0; i < inputCount; ++i) {
+        inputs.push_back(&graph.AddOwnedNode(std::make_unique<TFinishTask>()));
+    }
+    auto& sink = graph.AddOwnedNode(std::make_unique<TManyInputSinkTask>());
+    for (auto* input : inputs) {
+        graph.AddOwnedEdge(
+            *input,
+            sink,
+            std::make_unique<TOneToOneConnection>());
+    }
+    graph.Build();
+
+    TThreadedScheduler scheduler(
+        graph,
+        4,
+        /*readyQueueCapacity=*/1);
+    std::string error;
+    ASSERT_TRUE(scheduler.Run(&error)) << error;
 }
 
 TEST(SchedulerThreaded, CannotRunTwice) {

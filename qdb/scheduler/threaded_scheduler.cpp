@@ -23,9 +23,10 @@ TThreadedScheduler::TThreadedScheduler(
     size_t workerCount,
     size_t readyQueueCapacity)
     : Graph_(graph)
-    , Ready_(readyQueueCapacity
-        ? readyQueueCapacity
-        : std::max<size_t>(graph.Nodes().size(), 1))
+    , Ready_(std::max({
+        readyQueueCapacity,
+        graph.Nodes().size(),
+        size_t{1}}))
     , WorkerCount_(std::max<size_t>(workerCount, 1))
 {}
 
