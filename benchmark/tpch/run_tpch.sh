@@ -8,6 +8,7 @@ SQL_DIR="$SCRIPT_DIR/queries/sql"
 PARAMS_DIR="$SCRIPT_DIR/params"
 OUT_DIR="${OUT_DIR:-./results}"
 MODE="${MODE:-sexpr}"
+QDB_ARGS="${QDB_ARGS:-}"
 
 usage() {
     echo "Usage: $0 <base_dir> [scale] [query_filter]"
@@ -16,6 +17,7 @@ usage() {
     echo "  query_filter  — optional comma-separated list of query numbers to run (e.g. 1,3,7)"
     echo "Env:"
     echo "  MODE          — sexpr (default, runs queries/sexpr/*.sexp) or sql (runs queries/sql/*.sql via --sql)"
+    echo "  QDB_ARGS      — extra arguments passed to qdb, e.g. '--scheduler threaded --scheduler-workers 4'"
     exit 1
 }
 
@@ -24,6 +26,7 @@ usage() {
 BASE_DIR="$(cd "$1" && pwd)"
 SCALE_FILTER="${2:-}"
 QUERY_FILTER="${3:-}"
+read -r -a EXTRA_QDB_ARGS <<< "$QDB_ARGS"
 
 # Discover scale subdirectories (pq<N>)
 ALL_SCALES=()
@@ -182,13 +185,13 @@ for scale in "${SCALES[@]}"; do
             [[ -f "$template" ]] || continue
             tmp_sql="$tmpdir/q${q_num}_sf${sf_num}.sql"
             render "$template" "$data_dir" > "$tmp_sql"
-            read -r seconds rc <<< "$(run_query "Q${q_num} sf${sf_num}" --sql -i "$tmp_sql" --data "$data_dir")"
+            read -r seconds rc <<< "$(run_query "Q${q_num} sf${sf_num}" "${EXTRA_QDB_ARGS[@]}" --sql -i "$tmp_sql" --data "$data_dir")"
         else
             template="$SEXPR_DIR/q${q_num}.sexp"
             [[ -f "$template" ]] || continue
             tmp_sexp="$tmpdir/q${q_num}_sf${sf_num}.sexp"
             render "$template" "$data_dir" > "$tmp_sexp"
-            read -r seconds rc <<< "$(run_query "Q${q_num} sf${sf_num}" -i "$tmp_sexp")"
+            read -r seconds rc <<< "$(run_query "Q${q_num} sf${sf_num}" "${EXTRA_QDB_ARGS[@]}" -i "$tmp_sexp")"
         fi
 
         total_s=$(python3 -c "print(round($total_s + $seconds, 3))")
