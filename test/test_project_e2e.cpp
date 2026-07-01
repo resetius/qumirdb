@@ -11,6 +11,7 @@
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/passes/column_pruning.h>
 #include <qdb/plan/passes/typing.h>
+#include <qdb/scheduler/runtime_node.h>
 #include <qdb/sexp/parser.h>
 
 #include <array>
@@ -180,6 +181,56 @@ TEST(ProjectE2E, SchedulerRuntimeRunsUnaryPipeline) {
     }
     Release(&out);
     EXPECT_FALSE(plan->Next(out));
+}
+
+TEST(ProjectE2E, SchedulerRuntimeRunsLimitTail) {
+    std::array<int64_t, 3> first = {0, 1, 2};
+    std::array<int64_t, 3> second = {3, 4, 5};
+    std::array<TColumn, 1> firstCols = {
+        TColumn{.Data = reinterpret_cast<char*>(first.data())},
+    };
+    std::array<TColumn, 1> secondCols = {
+        TColumn{.Data = reinterpret_cast<char*>(second.data())},
+    };
+    TRowSet firstBatch{
+        .Columns = firstCols.data(),
+        .ColumnCount = 1,
+        .RowCount = 3,
+        .RefCount = 1,
+    };
+    TRowSet secondBatch{
+        .Columns = secondCols.data(),
+        .ColumnCount = 1,
+        .RowCount = 3,
+        .RefCount = 1,
+    };
+    TStubSource src(
+        {"value"},
+        {std::make_shared<TIntegerType>()},
+        {firstBatch, secondBatch});
+    NScheduler::TSettings settings;
+    settings.Scheduler.Mode = NScheduler::EExecutionMode::ThreadedScheduler;
+    settings.Scheduler.WorkerCount = 2;
+
+    auto plan = Plan(
+        "(rel limit (rel project (rel source \"L\") (value value)) "
+        "(limit 3) (offset 1))",
+        src,
+        settings);
+    ASSERT_NE(dynamic_cast<NScheduler::TRuntimeSchedulerPipeline*>(plan.get()), nullptr);
+
+    std::vector<int64_t> got;
+    TRowSet out{};
+    while (plan->Next(out)) {
+        const auto* values = reinterpret_cast<const int64_t*>(out.Columns[0].Data);
+        for (int64_t row = 0; row < out.RowCount; ++row) {
+            if (!out.Selection || out.Selection[row]) {
+                got.push_back(values[row]);
+            }
+        }
+        Release(&out);
+    }
+    EXPECT_EQ(got, (std::vector<int64_t>{1, 2, 3}));
 }
 
 int main(int argc, char** argv) {
