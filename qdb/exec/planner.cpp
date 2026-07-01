@@ -93,6 +93,25 @@ struct TSortBlockingState {
     bool InputFinished = false;
 };
 
+struct TTopSortBlockingState {
+    TTopSortBlockingState(
+        NQumir::NAst::TTypePtr outputType,
+        std::vector<TSortKey> keys,
+        std::vector<TSortColumnRef> keyColumns,
+        TSortRadixKernel radixKernel,
+        int64_t limit)
+        : Processor(
+            std::move(outputType),
+            std::move(keys),
+            std::move(keyColumns),
+            std::move(radixKernel),
+            limit)
+    {}
+
+    TTopSortProcessor Processor;
+    bool InputFinished = false;
+};
+
 // Byte width of the kernel output buffer per row for a computed column.
 // For TStringType (string computed columns), the JIT kernel writes one
 // TStringView struct (16 bytes) per row; the executor post-converts those.
@@ -670,6 +689,79 @@ std::unique_ptr<IRuntimeNode> TryBuildSchedulerSortPipeline(
     return BuildSchedulerRuntimePipeline(std::move(*build));
 }
 
+std::unique_ptr<IRuntimeNode> TryBuildSchedulerTopSortPipeline(
+    TTopSortOperator& sort,
+    NScheduler::TSettings settings,
+    std::ostream* diagnostics)
+{
+    auto build = BuildSchedulerUnarySpec(
+        sort.Input(),
+        std::move(settings),
+        diagnostics);
+    if (!build) {
+        return {};
+    }
+
+    auto* inputType = static_cast<NQumir::NAst::TStructType*>(
+        build->OutputType.get());
+    if (!inputType) {
+        throw std::runtime_error("top-sort input must have TStructType");
+    }
+
+    auto runtime = BuildSortRuntimeProcess(
+        *inputType,
+        sort.Keys(),
+        "top-sort",
+        diagnostics);
+    auto outputType = build->OutputType;
+    auto keys = sort.Keys();
+    auto keyColumns = std::move(runtime.KeyColumns);
+    auto radixKernel = std::move(runtime.RadixKernel);
+    const int64_t limit = sort.Limit();
+
+    auto code = std::make_shared<NScheduler::TBlockingCode>(
+        [](void* state, NScheduler::TInputPort& input, TRowSet& output) {
+            auto* sortState = static_cast<TTopSortBlockingState*>(state);
+            TRowSet rowSet{};
+            while (!sortState->InputFinished) {
+                auto fetch = input.Fetch(rowSet);
+                if (fetch == NScheduler::EFetchResult::NO_DATA) {
+                    return NScheduler::ETaskResult::NEED_DATA;
+                }
+                if (fetch == NScheduler::EFetchResult::FINISHED) {
+                    sortState->InputFinished = true;
+                    break;
+                }
+                sortState->Processor.Add(rowSet);
+                rowSet = {};
+            }
+            if (sortState->Processor.Next(output)) {
+                return NScheduler::ETaskResult::OK;
+            }
+            return NScheduler::ETaskResult::FINISHED;
+        });
+
+    build->Spec.BlockingTail = NScheduler::TBlockingPartitionSpec{
+        .Code = std::move(code),
+        .MakeState = [
+            outputType = std::move(outputType),
+            keys = std::move(keys),
+            keyColumns = std::move(keyColumns),
+            radixKernel = std::move(radixKernel),
+            limit]()
+        {
+            return std::make_shared<TTopSortBlockingState>(
+                outputType,
+                keys,
+                keyColumns,
+                radixKernel,
+                limit);
+        },
+    };
+
+    return BuildSchedulerRuntimePipeline(std::move(*build));
+}
+
 } // namespace
 
 void TPhysicalPlanner::PrintRuntimePlan(const TOperatorPtr& root) const {
@@ -757,6 +849,15 @@ std::unique_ptr<IRuntimeNode> TPhysicalPlanner::Build(const TOperatorPtr& root) 
         }
         if (auto maybe = TMaybeOp<TSortOperator>(root)) {
             if (auto runtime = TryBuildSchedulerSortPipeline(
+                    *maybe.Cast(),
+                    SchedulerSettings_,
+                    Diagnostics_))
+            {
+                return runtime;
+            }
+        }
+        if (auto maybe = TMaybeOp<TTopSortOperator>(root)) {
+            if (auto runtime = TryBuildSchedulerTopSortPipeline(
                     *maybe.Cast(),
                     SchedulerSettings_,
                     Diagnostics_))
