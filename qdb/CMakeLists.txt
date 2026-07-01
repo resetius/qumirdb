@@ -58,7 +58,6 @@ add_library(qumirdb
     scheduler/connection.cpp
     scheduler/executor.cpp
     scheduler/graph.cpp
-    scheduler/partitioner.cpp
     scheduler/plan_lowerer.cpp
     scheduler/runtime_adapter.cpp
     scheduler/runtime_node.cpp
