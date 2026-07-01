@@ -11,6 +11,7 @@
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/passes/column_pruning.h>
 #include <qdb/plan/passes/typing.h>
+#include <qdb/scheduler/runtime_node.h>
 #include <qdb/sexp/parser.h>
 
 #include <array>
@@ -197,6 +198,7 @@ TEST(AggregateF64, SchedulerUnaryPrefixFeedsAggregate) {
         "(keys k) (agg s sum w))",
         src,
         settings);
+    ASSERT_NE(dynamic_cast<NScheduler::TRuntimeSchedulerPipeline*>(plan.get()), nullptr);
 
     std::map<int64_t, double> got;
     TRowSet out{};

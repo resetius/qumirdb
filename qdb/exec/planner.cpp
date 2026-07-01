@@ -24,6 +24,7 @@
 #include <qumir/parser/type.h>
 
 #include <algorithm>
+#include <optional>
 #include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
@@ -45,6 +46,20 @@ struct TSchedulerUnaryStage {
 struct TUnaryRuntimeProcess {
     TRuntimeUnaryStreamingKernel::TProcess Process;
     NQumir::NAst::TTypePtr OutputType;
+};
+
+struct TSchedulerPipelineBuild {
+    NScheduler::TPipelinePartitionSpec Spec;
+    NQumir::NAst::TTypePtr OutputType;
+};
+
+struct TAggregateBlockingState {
+    explicit TAggregateBlockingState(TAggregateKernels kernels)
+        : Processor(std::move(kernels))
+    {}
+
+    TAggregateProcessor Processor;
+    bool Done = false;
 };
 
 // Byte width of the kernel output buffer per row for a computed column.
@@ -293,7 +308,7 @@ TSchedulerUnaryStage BuildSchedulerProjectStage(
     };
 }
 
-std::unique_ptr<IRuntimeNode> TryBuildSchedulerUnaryPipeline(
+std::optional<TSchedulerPipelineBuild> BuildSchedulerUnarySpec(
     const TOperatorPtr& root,
     NScheduler::TSettings settings,
     std::ostream* diagnostics)
@@ -314,7 +329,7 @@ std::unique_ptr<IRuntimeNode> TryBuildSchedulerUnaryPipeline(
 
     auto source = TMaybeOp<TSourceOperator>(current);
     if (!source) {
-        return {};
+        return std::nullopt;
     }
 
     auto outputType = BuildSourceRuntimeType(*source.Cast());
@@ -379,15 +394,101 @@ std::unique_ptr<IRuntimeNode> TryBuildSchedulerUnaryPipeline(
         spec.Settings.Partitioning.MaxPartitionCount = 1;
     }
 
+    return TSchedulerPipelineBuild{
+        .Spec = std::move(spec),
+        .OutputType = std::move(outputType),
+    };
+}
+
+std::unique_ptr<IRuntimeNode> BuildSchedulerRuntimePipeline(
+    TSchedulerPipelineBuild build)
+{
     std::string error;
     auto runtime = NScheduler::BuildBufferedSchedulerRuntimePipeline(
-        std::move(spec),
-        outputType,
+        std::move(build.Spec),
+        std::move(build.OutputType),
         &error);
     if (!runtime) {
         throw std::runtime_error(error);
     }
     return runtime;
+}
+
+std::unique_ptr<IRuntimeNode> TryBuildSchedulerUnaryPipeline(
+    const TOperatorPtr& root,
+    NScheduler::TSettings settings,
+    std::ostream* diagnostics)
+{
+    auto build = BuildSchedulerUnarySpec(root, std::move(settings), diagnostics);
+    if (!build) {
+        return {};
+    }
+    return BuildSchedulerRuntimePipeline(std::move(*build));
+}
+
+std::unique_ptr<IRuntimeNode> TryBuildSchedulerAggregatePipeline(
+    TAggregateOperator& aggregate,
+    NScheduler::TSettings settings,
+    std::ostream* diagnostics)
+{
+    auto build = BuildSchedulerUnarySpec(
+        aggregate.Input(),
+        std::move(settings),
+        diagnostics);
+    if (!build) {
+        return {};
+    }
+
+    auto* inputType = static_cast<NQumir::NAst::TStructType*>(
+        build->OutputType.get());
+    if (!inputType) {
+        throw std::runtime_error("aggregate input must have TStructType");
+    }
+
+    auto spec = NKernel::BuildAggregateKernelSpec(
+        *inputType,
+        aggregate.GroupKeys(),
+        aggregate.Aggs());
+    TKernelCompiler compiler(diagnostics);
+    auto kernels = std::make_shared<TAggregateKernels>(
+        compiler.CompileAggregate(spec));
+
+    auto code = std::make_shared<NScheduler::TBlockingCode>(
+        [](void* state, NScheduler::TInputPort& input, TRowSet& output) {
+            auto* aggregateState = static_cast<TAggregateBlockingState*>(state);
+            if (aggregateState->Done) {
+                return NScheduler::ETaskResult::FINISHED;
+            }
+
+            TRowSet rowSet{};
+            while (true) {
+                auto fetch = input.Fetch(rowSet);
+                if (fetch == NScheduler::EFetchResult::NO_DATA) {
+                    return NScheduler::ETaskResult::NEED_DATA;
+                }
+                if (fetch == NScheduler::EFetchResult::FINISHED) {
+                    aggregateState->Done = true;
+                    aggregateState->Processor.Finish(output);
+                    return NScheduler::ETaskResult::OK;
+                }
+                aggregateState->Processor.Add(rowSet);
+                Release(&rowSet);
+                rowSet = {};
+            }
+        });
+
+    build->Spec.BlockingTail = NScheduler::TBlockingPartitionSpec{
+        .Code = std::move(code),
+        .MakeState = [kernels]() {
+            return std::make_shared<TAggregateBlockingState>(*kernels);
+        },
+    };
+    build->OutputType = ComputeAggregateOutputType(
+        build->OutputType,
+        aggregate.GroupKeys(),
+        aggregate.Aggs());
+
+    return BuildSchedulerRuntimePipeline(std::move(*build));
 }
 
 } // namespace
@@ -456,6 +557,15 @@ std::unique_ptr<IRuntimeNode> TPhysicalPlanner::Build(const TOperatorPtr& root) 
                 Diagnostics_))
         {
             return runtime;
+        }
+        if (auto maybe = TMaybeOp<TAggregateOperator>(root)) {
+            if (auto runtime = TryBuildSchedulerAggregatePipeline(
+                    *maybe.Cast(),
+                    SchedulerSettings_,
+                    Diagnostics_))
+            {
+                return runtime;
+            }
         }
     }
 
