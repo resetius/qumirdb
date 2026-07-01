@@ -75,6 +75,25 @@ struct TSortBlockingState {
     bool InputFinished = false;
 };
 
+struct TMergeState {
+    TMergeState(
+        NQumir::NAst::TTypePtr outputType,
+        std::vector<TSortKey> keys,
+        std::vector<TSortColumnRef> keyColumns,
+        size_t runCount)
+        : Processor(
+            std::move(outputType),
+            std::move(keys),
+            std::move(keyColumns),
+            runCount)
+        , RunFinished(runCount, false)
+    {}
+
+    TMergeProcessor Processor;
+    std::vector<bool> RunFinished;
+    bool InputsDone = false;
+};
+
 struct TTopSortBlockingState {
     TTopSortBlockingState(
         NQumir::NAst::TTypePtr outputType,
@@ -671,12 +690,137 @@ private:
             outConn);
     }
 
+    // Partitioned sort: sort each input lane locally, then k-way merge the
+    // sorted runs (`sort -> merge`). Falls back to a single gathered sort when
+    // there is only one input lane.
     TLoweredOutput LowerSort(
         TSortOperator& sort,
         NScheduler::IConnection& outConn)
     {
-        return LowerSortLike(
-            sort.Input(), sort.Keys(), "sort", std::nullopt, outConn);
+        const size_t lanes = OutputLanes(sort.Input());
+        if (lanes <= 1) {
+            return LowerSortLike(
+                sort.Input(), sort.Keys(), "sort", std::nullopt, outConn);
+        }
+
+        const size_t cap = QueueCapacity();
+        auto childConn = std::make_unique<NScheduler::TOneToOneConnection>(cap);
+        childConn->Resize(lanes, lanes);
+        auto& childConnRef = Graph_.AddConnection(std::move(childConn));
+        auto childOut = Lower(sort.Input(), childConnRef);
+
+        auto childType = childOut.OutputType;
+        auto* inputType =
+            static_cast<NQumir::NAst::TStructType*>(childType.get());
+        if (!inputType) {
+            throw std::runtime_error("sort input must have TStructType");
+        }
+        auto runtime = BuildSortRuntimeProcess(
+            *inputType, sort.Keys(), "sort", Diagnostics_);
+        auto keys = sort.Keys();
+        auto keyColumns = runtime.KeyColumns;
+        auto radixKernel = runtime.RadixKernel;
+
+        auto sortCode = std::make_shared<NScheduler::TBlockingCode>(
+            [](void* state, NScheduler::TInputPort& input, TRowSet& output) {
+                auto* s = static_cast<TSortBlockingState*>(state);
+                TRowSet rowSet{};
+                while (!s->InputFinished) {
+                    auto fetch = input.Fetch(rowSet);
+                    if (fetch == NScheduler::EFetchResult::NO_DATA) {
+                        return NScheduler::ETaskResult::NEED_DATA;
+                    }
+                    if (fetch == NScheduler::EFetchResult::FINISHED) {
+                        s->InputFinished = true;
+                        break;
+                    }
+                    s->Processor.Add(rowSet);
+                    rowSet = {};
+                }
+                if (s->Processor.Next(output)) {
+                    return NScheduler::ETaskResult::OK;
+                }
+                return NScheduler::ETaskResult::FINISHED;
+            });
+
+        // One local sort per input lane, each writing a sorted run.
+        std::vector<NScheduler::IConnection*> runConns;
+        std::vector<NScheduler::TInputPort> mergeInputs;
+        std::vector<NScheduler::TTaskNode*> localSorts;
+        runConns.reserve(lanes);
+        mergeInputs.reserve(lanes);
+        localSorts.reserve(lanes);
+        for (size_t i = 0; i < lanes; ++i) {
+            auto runConn =
+                std::make_unique<NScheduler::TOneToOneConnection>(cap);
+            runConn->Resize(1, 1);
+            auto& runRef = Graph_.AddConnection(std::move(runConn));
+            auto task = std::make_unique<NScheduler::TBlockingTask>(
+                sortCode,
+                std::make_shared<TSortBlockingState>(
+                    childType, keys, keyColumns, radixKernel),
+                NScheduler::TInputPort{.Connection = &childConnRef, .Lane = i},
+                NScheduler::TOutputPort{.Connection = &runRef, .Lane = 0});
+            auto& node = Graph_.AddOwnedNode(std::move(task));
+            Graph_.AddEdge(*childOut.Producers[i], node, childConnRef, i, i);
+            runConns.push_back(&runRef);
+            mergeInputs.push_back(
+                NScheduler::TInputPort{.Connection = &runRef, .Lane = 0});
+            localSorts.push_back(&node);
+        }
+
+        auto mergeCode = std::make_shared<NScheduler::TMergeCode>(
+            [](void* state,
+               std::vector<NScheduler::TInputPort>& inputs,
+               TRowSet& output)
+            {
+                auto* s = static_cast<TMergeState*>(state);
+                if (!s->InputsDone) {
+                    bool allDone = true;
+                    for (size_t i = 0; i < inputs.size(); ++i) {
+                        if (s->RunFinished[i]) {
+                            continue;
+                        }
+                        for (;;) {
+                            TRowSet batch{};
+                            auto fetch = inputs[i].Fetch(batch);
+                            if (fetch == NScheduler::EFetchResult::NO_DATA) {
+                                allDone = false;
+                                break;
+                            }
+                            if (fetch == NScheduler::EFetchResult::FINISHED) {
+                                s->RunFinished[i] = true;
+                                break;
+                            }
+                            s->Processor.Add(batch, i);
+                        }
+                    }
+                    if (!allDone) {
+                        return NScheduler::ETaskResult::NEED_DATA;
+                    }
+                    s->Processor.Finish();
+                    s->InputsDone = true;
+                }
+                if (s->Processor.Next(output)) {
+                    return NScheduler::ETaskResult::OK;
+                }
+                return NScheduler::ETaskResult::FINISHED;
+            });
+
+        auto merge = std::make_unique<NScheduler::TMergeTask>(
+            mergeCode,
+            std::make_shared<TMergeState>(childType, keys, keyColumns, lanes),
+            std::move(mergeInputs),
+            NScheduler::TOutputPort{.Connection = &outConn, .Lane = 0});
+        auto& mergeNode = Graph_.AddOwnedNode(std::move(merge));
+        for (size_t i = 0; i < lanes; ++i) {
+            Graph_.AddEdge(*localSorts[i], mergeNode, *runConns[i], 0, 0);
+        }
+
+        return TLoweredOutput{
+            .Producers = {&mergeNode},
+            .OutputType = childType,
+        };
     }
 
     TLoweredOutput LowerTopSort(
