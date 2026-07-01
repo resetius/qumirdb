@@ -7,6 +7,7 @@
 #include <qdb/exec/source_exec.h>
 #include <qdb/exec/unary_block_exec.h>
 #include <qdb/exec/unary_stream_exec.h>
+#include <qdb/io/parquet/source.h>
 #include <qdb/scheduler/runtime_node.h>
 #include <qdb/plan/ops/aggregate.h>
 #include <qdb/plan/ops/limit.h>
@@ -33,6 +34,7 @@ namespace {
 
 struct TSchedulerSourceState {
     ISource* Source = nullptr;
+    std::unique_ptr<ISource> OwnedSource;
 };
 
 struct TSchedulerUnaryStage {
@@ -316,6 +318,8 @@ std::unique_ptr<IRuntimeNode> TryBuildSchedulerUnaryPipeline(
     }
 
     auto outputType = BuildSourceRuntimeType(*source.Cast());
+    auto* sourcePtr = &source.Cast()->GetSource();
+    auto* parquetSource = dynamic_cast<TParquetSource*>(sourcePtr);
     auto sourceCode = std::make_shared<NScheduler::TSourceCode>(
         [](void* state, TRowSet& rowSet) {
             auto* sourceState = static_cast<TSchedulerSourceState*>(state);
@@ -325,15 +329,31 @@ std::unique_ptr<IRuntimeNode> TryBuildSchedulerUnaryPipeline(
     NScheduler::TPipelinePartitionSpec spec;
     spec.Source = NScheduler::TSourcePartitionSpec{
         .Code = std::move(sourceCode),
-        .MakeState = [source = &source.Cast()->GetSource()](
+        .MakeState = [source = sourcePtr, parquetSource](
             size_t,
-            const NScheduler::TScanSplit*)
+            const NScheduler::TScanSplit* split)
         {
+            if (parquetSource && split && split->RowGroupCount) {
+                auto owned = parquetSource->MakeRowGroupRangeSource(
+                    split->FirstRowGroup,
+                    split->RowGroupCount);
+                auto* ptr = owned.get();
+                return std::make_shared<TSchedulerSourceState>(
+                    TSchedulerSourceState{
+                        .Source = ptr,
+                        .OwnedSource = std::move(owned),
+                    });
+            }
             return std::make_shared<TSchedulerSourceState>(TSchedulerSourceState{
                 .Source = source,
             });
         },
     };
+    if (parquetSource) {
+        spec.Source.Splits = NScheduler::BuildScanSplits(
+            parquetSource->ScanRowGroups(),
+            settings.ScanSplit);
+    }
 
     for (auto it = stages.rbegin(); it != stages.rend(); ++it) {
         if (auto filter = TMaybeOp<TFilterOperator>(*it)) {
@@ -354,8 +374,10 @@ std::unique_ptr<IRuntimeNode> TryBuildSchedulerUnaryPipeline(
     }
 
     spec.Settings = settings;
-    spec.Settings.Partitioning.DefaultPartitionCount = 1;
-    spec.Settings.Partitioning.MaxPartitionCount = 1;
+    if (spec.Source.Splits.empty()) {
+        spec.Settings.Partitioning.DefaultPartitionCount = 1;
+        spec.Settings.Partitioning.MaxPartitionCount = 1;
+    }
 
     std::string error;
     auto runtime = NScheduler::BuildBufferedSchedulerRuntimePipeline(
