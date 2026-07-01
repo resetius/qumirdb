@@ -65,6 +65,10 @@ bool ValidateSpec(const TPipelinePartitionSpec& spec, std::string* error)
         SetError(error, "pipeline partition spec has no sink state factory");
         return false;
     }
+    if (spec.BlockingTail.Code && !spec.BlockingTail.MakeState) {
+        SetError(error, "pipeline partition spec has no blocking state factory");
+        return false;
+    }
     return true;
 }
 
@@ -107,6 +111,9 @@ TPartitionedPipeline TPipelinePartitioner::Build(
             spec.UnaryStages[i].Code.get());
     }
     AppendCodeLine(debug, "sink", 1, spec.Sink.Code.get());
+    if (spec.BlockingTail.Code) {
+        AppendCodeLine(debug, "blocking", 1, spec.BlockingTail.Code.get());
+    }
 
     const size_t boundaryCount = spec.UnaryStages.size() + 1;
     std::vector<IConnection*> boundaries;
@@ -169,6 +176,69 @@ TPartitionedPipeline TPipelinePartitioner::Build(
                 << "\n";
         }
         previous = std::move(current);
+    }
+
+    if (spec.BlockingTail.Code) {
+        auto blockingToSink = std::make_unique<TOneToOneConnection>(queueCapacity);
+        blockingToSink->Resize(1, 1);
+        auto* blockingToSinkPtr = &graph->AddConnection(std::move(blockingToSink));
+
+        auto blocking = std::make_unique<TBlockingTask>(
+            spec.BlockingTail.Code,
+            spec.BlockingTail.MakeState(),
+            TInputPort{
+                .Connection = boundaries.back(),
+                .Lane = 0,
+            },
+            TOutputPort{
+                .Connection = blockingToSinkPtr,
+                .Lane = 0,
+            });
+        auto& blockingNode = graph->AddOwnedNode(std::move(blocking));
+        for (size_t partition = 0; partition < partitionCount; ++partition) {
+            graph->AddEdge(
+                *previous[partition],
+                blockingNode,
+                *boundaries.back(),
+                partition,
+                0);
+            debug << "edge Gather"
+                << " partition=" << partition
+                << " src_lane=" << partition
+                << " dst_lane=0"
+                << "\n";
+        }
+
+        auto sink = std::make_unique<TSinkTask>(
+            spec.Sink.Code,
+            spec.Sink.MakeState(),
+            TInputPort{
+                .Connection = blockingToSinkPtr,
+                .Lane = 0,
+            });
+        auto& sinkNode = graph->AddOwnedNode(std::move(sink));
+        graph->AddEdge(
+            blockingNode,
+            sinkNode,
+            *blockingToSinkPtr,
+            0,
+            0);
+        debug << "edge OneToOne"
+            << " stage=blocking"
+            << " partition=0"
+            << " src_lane=0"
+            << " dst_lane=0"
+            << "\n";
+
+        graph->Build();
+        if (!graph->Validate(error)) {
+            return {};
+        }
+
+        return TPartitionedPipeline{
+            .Graph = std::move(graph),
+            .Debug = debug.str(),
+        };
     }
 
     auto sink = std::make_unique<TSinkTask>(

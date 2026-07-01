@@ -50,6 +50,14 @@ struct TSinkCode {
     TWrite Write;
 };
 
+struct TBlockingCode {
+    using TProcess = std::function<ETaskResult(void*, TInputPort&, TRowSet&)>;
+
+    explicit TBlockingCode(TProcess process);
+
+    TProcess Process;
+};
+
 class TSourceTask final : public ITaskNode {
 public:
     TSourceTask(
@@ -111,6 +119,30 @@ private:
     std::shared_ptr<void> State_;
     TInputPort Input_;
     bool Finished_ = false;
+};
+
+class TBlockingTask final : public ITaskNode {
+public:
+    TBlockingTask(
+        std::shared_ptr<const TBlockingCode> code,
+        std::shared_ptr<void> state,
+        TInputPort input,
+        TOutputPort output);
+    ~TBlockingTask() override;
+
+    ETaskResult Execute() override;
+
+    const std::shared_ptr<const TBlockingCode>& Code() const;
+    const std::shared_ptr<void>& State() const;
+
+private:
+    std::shared_ptr<const TBlockingCode> Code_;
+    std::shared_ptr<void> State_;
+    TInputPort Input_;
+    TOutputPort Output_;
+    TRowSet CurrentOutput_ = {};
+    bool HasOutput_ = false;
+    bool OutputFinished_ = false;
 };
 
 } // namespace NScheduler

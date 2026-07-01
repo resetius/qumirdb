@@ -29,6 +29,12 @@ struct TUnaryState {
     int Add = 100;
 };
 
+struct TBlockingState {
+    int Rows = 0;
+    bool Done = false;
+    std::atomic<int>* DestroyCount = nullptr;
+};
+
 struct TSinkState {
     int Rows = 0;
     int Batches = 0;
@@ -269,6 +275,57 @@ TEST(SchedulerPartitioner, UsesScanSplitsForSourcePartitionCount) {
     EXPECT_EQ(fixture.SinkState->Batches, 3);
     EXPECT_EQ(fixture.SinkState->Rows, 30 + 40 + 50 + 3 * 100);
     EXPECT_EQ(fixture.DestroyCount->load(std::memory_order_relaxed), 3);
+}
+
+TEST(SchedulerPartitioner, RunsBlockingTailBeforeSink) {
+    constexpr size_t partitions = 3;
+
+    auto fixture = MakeSpec(partitions);
+    auto blockingState = std::make_shared<TBlockingState>(TBlockingState{
+        .DestroyCount = fixture.DestroyCount.get(),
+    });
+    auto blockingCode = std::make_shared<TBlockingCode>(
+        [](void* state, TInputPort& input, TRowSet& output) {
+            auto* blocking = static_cast<TBlockingState*>(state);
+            TRowSet rowSet{};
+            for (;;) {
+                auto fetch = input.Fetch(rowSet);
+                if (fetch == EFetchResult::NO_DATA) {
+                    return ETaskResult::NEED_DATA;
+                }
+                if (fetch == EFetchResult::FINISHED) {
+                    if (blocking->Done) {
+                        return ETaskResult::FINISHED;
+                    }
+                    output = MakeRowSet(blocking->Rows, blocking->DestroyCount);
+                    blocking->Done = true;
+                    return ETaskResult::OK;
+                }
+
+                blocking->Rows += static_cast<int>(rowSet.RowCount);
+                Release(&rowSet);
+            }
+        });
+    fixture.Spec.BlockingTail = TBlockingPartitionSpec{
+        .Code = blockingCode,
+        .MakeState = [blockingState]() {
+            return blockingState;
+        },
+    };
+
+    std::string error;
+    auto partitioned = TPipelinePartitioner::Build(fixture.Spec, &error);
+    ASSERT_NE(partitioned.Graph, nullptr) << error;
+    EXPECT_NE(partitioned.Debug.find("blocking"), std::string::npos);
+
+    TThreadedScheduler scheduler(*partitioned.Graph, 4);
+    ASSERT_TRUE(scheduler.Run(&error)) << error;
+    EXPECT_EQ(blockingState->Rows, ExpectedRows(partitions));
+    EXPECT_EQ(fixture.SinkState->Batches, 1);
+    EXPECT_EQ(fixture.SinkState->Rows, ExpectedRows(partitions));
+    EXPECT_EQ(
+        fixture.DestroyCount->load(std::memory_order_relaxed),
+        static_cast<int>(partitions * 2 + 1));
 }
 
 } // namespace
