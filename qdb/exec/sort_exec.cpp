@@ -1021,55 +1021,82 @@ TRuntimeLimit::TRuntimeLimit(std::unique_ptr<IRuntimeNode> input,
     int64_t batchRows)
     : Input_(std::move(input))
     , OutputType_(std::move(outputType))
-    , Limit_(limit)
-    , Offset_(offset)
-    , BatchRows_(batchRows)
-{}
+    , Processor_(limit, offset)
+{
+    (void)batchRows;
+}
 
-bool TRuntimeLimit::Next(TRowSet& rowSet) {
-    if (Limit_ <= 0 || Emitted_ >= Limit_) {
+bool TRuntimeLimit::Next(TRowSet& rowSet)
+{
+    if (Processor_.Finished()) {
         return false;
     }
 
     TRowSet input{};
     while (Input_->Next(input)) {
-        auto* data = new TLimitRowSetData;
-        data->Input = input;
-        data->Selection.assign(static_cast<size_t>(input.RowCount), uint8_t{0});
-
-        bool any = false;
-        for (int32_t row = 0; row < input.RowCount && Emitted_ < Limit_; ++row) {
-            if (!RowSelected(input, row)) {
-                continue;
-            }
-            if (Skipped_ < Offset_) {
-                ++Skipped_;
-                continue;
-            }
-            data->Selection[row] = 1;
-            ++Emitted_;
-            any = true;
+        if (Processor_.Process(input, rowSet)) {
+            return true;
         }
-
-        if (!any) {
-            Release(&data->Input);
-            delete data;
-            continue;
-        }
-
-        rowSet = TRowSet{
-            .Columns = input.Columns,
-            .ColumnCount = input.ColumnCount,
-            .RowCount = input.RowCount,
-            .Selection = data->Selection.data(),
-            .Destroy = DestroyLimitRowSet,
-            .Private = data,
-            .RefCount = 1,
-        };
-        return true;
+        input = {};
     }
 
     return false;
+}
+
+TLimitProcessor::TLimitProcessor(int64_t limit, int64_t offset)
+    : Limit_(limit)
+    , Offset_(offset)
+{}
+
+bool TLimitProcessor::Finished() const
+{
+    if (Limit_ <= 0 || Emitted_ >= Limit_) {
+        return true;
+    }
+    return false;
+}
+
+bool TLimitProcessor::Process(TRowSet& input, TRowSet& rowSet)
+{
+    if (Finished()) {
+        Release(&input);
+        return false;
+    }
+
+    auto* data = new TLimitRowSetData;
+    data->Input = input;
+    data->Selection.assign(static_cast<size_t>(input.RowCount), uint8_t{0});
+
+    bool any = false;
+    for (int32_t row = 0; row < input.RowCount && Emitted_ < Limit_; ++row) {
+        if (!RowSelected(input, row)) {
+            continue;
+        }
+        if (Skipped_ < Offset_) {
+            ++Skipped_;
+            continue;
+        }
+        data->Selection[row] = 1;
+        ++Emitted_;
+        any = true;
+    }
+
+    if (!any) {
+        Release(&data->Input);
+        delete data;
+        return false;
+    }
+
+    rowSet = TRowSet{
+        .Columns = input.Columns,
+        .ColumnCount = input.ColumnCount,
+        .RowCount = input.RowCount,
+        .Selection = data->Selection.data(),
+        .Destroy = DestroyLimitRowSet,
+        .Private = data,
+        .RefCount = 1,
+    };
+    return true;
 }
 
 } // namespace NQdb

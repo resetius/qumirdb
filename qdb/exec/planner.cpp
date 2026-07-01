@@ -62,6 +62,14 @@ struct TAggregateBlockingState {
     bool Done = false;
 };
 
+struct TLimitBlockingState {
+    TLimitBlockingState(int64_t limit, int64_t offset)
+        : Processor(limit, offset)
+    {}
+
+    TLimitProcessor Processor;
+};
+
 // Byte width of the kernel output buffer per row for a computed column.
 // For TStringType (string computed columns), the JIT kernel writes one
 // TStringView struct (16 bytes) per row; the executor post-converts those.
@@ -491,6 +499,57 @@ std::unique_ptr<IRuntimeNode> TryBuildSchedulerAggregatePipeline(
     return BuildSchedulerRuntimePipeline(std::move(*build));
 }
 
+std::unique_ptr<IRuntimeNode> TryBuildSchedulerLimitPipeline(
+    TLimitOperator& limit,
+    NScheduler::TSettings settings,
+    std::ostream* diagnostics)
+{
+    auto build = BuildSchedulerUnarySpec(
+        limit.Input(),
+        std::move(settings),
+        diagnostics);
+    if (!build) {
+        return {};
+    }
+
+    auto code = std::make_shared<NScheduler::TBlockingCode>(
+        [](void* state, NScheduler::TInputPort& input, TRowSet& output) {
+            auto* limitState = static_cast<TLimitBlockingState*>(state);
+            if (limitState->Processor.Finished()) {
+                return NScheduler::ETaskResult::FINISHED;
+            }
+
+            TRowSet rowSet{};
+            while (!limitState->Processor.Finished()) {
+                auto fetch = input.Fetch(rowSet);
+                if (fetch == NScheduler::EFetchResult::NO_DATA) {
+                    return NScheduler::ETaskResult::NEED_DATA;
+                }
+                if (fetch == NScheduler::EFetchResult::FINISHED) {
+                    return NScheduler::ETaskResult::FINISHED;
+                }
+                if (limitState->Processor.Process(rowSet, output)) {
+                    return NScheduler::ETaskResult::OK;
+                }
+                rowSet = {};
+            }
+            return NScheduler::ETaskResult::FINISHED;
+        });
+
+    const int64_t limitValue = limit.Limit();
+    const int64_t offsetValue = limit.Offset();
+    build->Spec.BlockingTail = NScheduler::TBlockingPartitionSpec{
+        .Code = std::move(code),
+        .MakeState = [limitValue, offsetValue]() {
+            return std::make_shared<TLimitBlockingState>(
+                limitValue,
+                offsetValue);
+        },
+    };
+
+    return BuildSchedulerRuntimePipeline(std::move(*build));
+}
+
 } // namespace
 
 void TPhysicalPlanner::PrintRuntimePlan(const TOperatorPtr& root) const {
@@ -560,6 +619,15 @@ std::unique_ptr<IRuntimeNode> TPhysicalPlanner::Build(const TOperatorPtr& root) 
         }
         if (auto maybe = TMaybeOp<TAggregateOperator>(root)) {
             if (auto runtime = TryBuildSchedulerAggregatePipeline(
+                    *maybe.Cast(),
+                    SchedulerSettings_,
+                    Diagnostics_))
+            {
+                return runtime;
+            }
+        }
+        if (auto maybe = TMaybeOp<TLimitOperator>(root)) {
+            if (auto runtime = TryBuildSchedulerLimitPipeline(
                     *maybe.Cast(),
                     SchedulerSettings_,
                     Diagnostics_))
