@@ -72,6 +72,10 @@ TBinaryBlockingCode::TBinaryBlockingCode(TProcess process)
     : Process(std::move(process))
 {}
 
+TMergeCode::TMergeCode(TProcess process)
+    : Process(std::move(process))
+{}
+
 THashShuffleCode::THashShuffleCode(THash hash)
     : Hash(std::move(hash))
 {}
@@ -319,6 +323,60 @@ const std::shared_ptr<const TBinaryBlockingCode>& TBinaryBlockingTask::Code() co
 }
 
 const std::shared_ptr<void>& TBinaryBlockingTask::State() const {
+    return State_;
+}
+
+TMergeTask::TMergeTask(
+    std::shared_ptr<const TMergeCode> code,
+    std::shared_ptr<void> state,
+    std::vector<TInputPort> inputs,
+    TOutputPort output)
+    : Code_(std::move(code))
+    , State_(std::move(state))
+    , Inputs_(std::move(inputs))
+    , Output_(output)
+{}
+
+TMergeTask::~TMergeTask() {
+    if (HasOutput_) {
+        Release(&CurrentOutput_);
+    }
+}
+
+ETaskResult TMergeTask::Execute() {
+    if (OutputFinished_) {
+        return ETaskResult::FINISHED;
+    }
+
+    if (HasOutput_) {
+        if (!Output_.CanPush()) {
+            return ETaskResult::BLOCKED_OUTPUT;
+        }
+        if (!Output_.Push(std::move(CurrentOutput_))) {
+            return ETaskResult::BLOCKED_OUTPUT;
+        }
+        CurrentOutput_ = {};
+        HasOutput_ = false;
+        return ETaskResult::OK;
+    }
+
+    auto result = Code_->Process(State_.get(), Inputs_, CurrentOutput_);
+    if (result == ETaskResult::OK) {
+        HasOutput_ = true;
+        return ETaskResult::OK;
+    }
+    if (result == ETaskResult::FINISHED) {
+        OutputFinished_ = true;
+        Output_.Finish();
+    }
+    return result;
+}
+
+const std::shared_ptr<const TMergeCode>& TMergeTask::Code() const {
+    return Code_;
+}
+
+const std::shared_ptr<void>& TMergeTask::State() const {
     return State_;
 }
 

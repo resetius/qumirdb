@@ -54,6 +54,36 @@ private:
     size_t Cursor_ = 0;
 };
 
+// K-way merge of already-sorted runs (one per input lane). Reuses the sort key
+// comparator and gather path; runs arrive as sorted batches and are ordered
+// among themselves. Buffering merge: batches are held in a row store and merged
+// into one sorted row-id sequence, then gathered out in batches.
+class TMergeProcessor {
+public:
+    TMergeProcessor(
+        NQumir::NAst::TTypePtr outputType,
+        std::vector<TSortKey> keys,
+        std::vector<TSortColumnRef> keyColumns,
+        size_t runCount,
+        int64_t batchRows = kJoinOutputBatchRows);
+
+    void Add(TRowSet& rowSet, size_t run);
+    void Finish();
+    bool Next(TRowSet& rowSet);
+
+private:
+    NQumir::NAst::TTypePtr OutputType_;
+    std::vector<TSortKey> Keys_;
+    std::vector<TSortColumnRef> KeyColumns_;
+    int64_t BatchRows_ = kJoinOutputBatchRows;
+
+    bool Materialized_ = false;
+    TRowStore Store_;
+    std::vector<std::vector<TRowId>> Runs_;
+    std::vector<TRowId> Merged_;
+    size_t Cursor_ = 0;
+};
+
 class TTopSortProcessor {
 public:
     TTopSortProcessor(

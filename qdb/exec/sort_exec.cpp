@@ -8,6 +8,7 @@
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <queue>
 #include <stdexcept>
 #include <string_view>
 #include <utility>
@@ -713,6 +714,114 @@ bool TSortProcessor::Next(TRowSet& rowSet)
     data->Columns.resize(outputType->Fields.size());
     for (size_t c = 0; c < outputType->Fields.size(); ++c) {
         GatherColumn(Store_, slice, static_cast<int32_t>(c), outputType->Fields[c].second, data->Gathered[c]);
+        data->Columns[c] = data->Gathered[c].Column;
+    }
+
+    rowSet = TRowSet{
+        .Columns = data->Columns.data(),
+        .ColumnCount = static_cast<int64_t>(data->Columns.size()),
+        .RowCount = static_cast<int64_t>(n),
+        .Selection = nullptr,
+        .Destroy = DestroySortedRowSet,
+        .Private = data,
+        .RefCount = 1,
+    };
+    Cursor_ += n;
+    return true;
+}
+
+TMergeProcessor::TMergeProcessor(
+    TTypePtr outputType,
+    std::vector<TSortKey> keys,
+    std::vector<TSortColumnRef> keyColumns,
+    size_t runCount,
+    int64_t batchRows)
+    : OutputType_(std::move(outputType))
+    , Keys_(std::move(keys))
+    , KeyColumns_(std::move(keyColumns))
+    , BatchRows_(batchRows)
+    , Runs_(runCount)
+{}
+
+void TMergeProcessor::Add(TRowSet& rowSet, size_t run)
+{
+    if (Materialized_) {
+        throw std::runtime_error("merge processor is already finished");
+    }
+    const int32_t batchIdx = Store_.PushBatch(rowSet);
+    const TRowSet& batch = Store_.Batch(batchIdx);
+    for (int32_t row = 0; row < batch.RowCount; ++row) {
+        if (RowSelected(batch, row)) {
+            Runs_[run].push_back(MakeRowId(batchIdx, row));
+        }
+    }
+    rowSet = {};
+}
+
+void TMergeProcessor::Finish()
+{
+    if (Materialized_) {
+        return;
+    }
+
+    size_t total = 0;
+    for (const auto& run : Runs_) {
+        total += run.size();
+    }
+    Merged_.reserve(total);
+
+    // Min-heap over the current head of each run. std::priority_queue is a
+    // max-heap, so the comparator returns true when `a` should sit below `b`,
+    // i.e. when a's key is greater than b's (b < a).
+    using THead = std::pair<TRowId, size_t>;
+    auto worse = [&](const THead& a, const THead& b) {
+        return SortRowsLess(Store_, Keys_, KeyColumns_, b.first, a.first);
+    };
+    std::priority_queue<THead, std::vector<THead>, decltype(worse)> heap(worse);
+
+    std::vector<size_t> pos(Runs_.size(), 0);
+    for (size_t i = 0; i < Runs_.size(); ++i) {
+        if (!Runs_[i].empty()) {
+            heap.push({Runs_[i][0], i});
+            pos[i] = 1;
+        }
+    }
+    while (!heap.empty()) {
+        const THead top = heap.top();
+        heap.pop();
+        Merged_.push_back(top.first);
+        const size_t run = top.second;
+        if (pos[run] < Runs_[run].size()) {
+            heap.push({Runs_[run][pos[run]], run});
+            ++pos[run];
+        }
+    }
+
+    Materialized_ = true;
+}
+
+bool TMergeProcessor::Next(TRowSet& rowSet)
+{
+    Finish();
+    if (Cursor_ >= Merged_.size()) {
+        return false;
+    }
+
+    const size_t n = std::min<size_t>(
+        static_cast<size_t>(BatchRows_), Merged_.size() - Cursor_);
+    const std::vector<TRowId> slice(
+        Merged_.begin() + Cursor_, Merged_.begin() + Cursor_ + n);
+
+    auto* outputType = static_cast<TStructType*>(OutputType_.get());
+    if (!outputType) {
+        throw std::runtime_error("merge output must have TStructType");
+    }
+    auto* data = new TSortedRowSetData;
+    data->Gathered.resize(outputType->Fields.size());
+    data->Columns.resize(outputType->Fields.size());
+    for (size_t c = 0; c < outputType->Fields.size(); ++c) {
+        GatherColumn(Store_, slice, static_cast<int32_t>(c),
+            outputType->Fields[c].second, data->Gathered[c]);
         data->Columns[c] = data->Gathered[c].Column;
     }
 

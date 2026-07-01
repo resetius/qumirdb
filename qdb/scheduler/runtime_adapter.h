@@ -80,6 +80,17 @@ struct THashShuffleCode {
     THash Hash;
 };
 
+struct TMergeCode {
+    using TProcess = std::function<ETaskResult(
+        void*,
+        std::vector<TInputPort>&,
+        TRowSet&)>;
+
+    explicit TMergeCode(TProcess process);
+
+    TProcess Process;
+};
+
 class TSourceTask final : public ITaskNode {
 public:
     TSourceTask(
@@ -187,6 +198,31 @@ private:
     std::shared_ptr<void> State_;
     TInputPort Left_;
     TInputPort Right_;
+    TOutputPort Output_;
+    TRowSet CurrentOutput_ = {};
+    bool HasOutput_ = false;
+    bool OutputFinished_ = false;
+};
+
+// N-input blocking task: reads several sorted runs and emits one stream.
+class TMergeTask final : public ITaskNode {
+public:
+    TMergeTask(
+        std::shared_ptr<const TMergeCode> code,
+        std::shared_ptr<void> state,
+        std::vector<TInputPort> inputs,
+        TOutputPort output);
+    ~TMergeTask() override;
+
+    ETaskResult Execute() override;
+
+    const std::shared_ptr<const TMergeCode>& Code() const;
+    const std::shared_ptr<void>& State() const;
+
+private:
+    std::shared_ptr<const TMergeCode> Code_;
+    std::shared_ptr<void> State_;
+    std::vector<TInputPort> Inputs_;
     TOutputPort Output_;
     TRowSet CurrentOutput_ = {};
     bool HasOutput_ = false;
