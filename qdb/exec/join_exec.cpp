@@ -289,18 +289,32 @@ TInnerJoinProcessor::TInnerJoinProcessor(
     TTypePtr leftType,
     TTypePtr rightType,
     TJoinKernels kernels,
-    EJoinType joinType)
+    EJoinType joinType,
+    bool hasResidual)
     : LeftType_(std::move(leftType))
     , RightType_(std::move(rightType))
     , Kernels_(std::move(kernels))
     , JoinType_(joinType)
+    , HasResidual_(hasResidual)
 {
+    // Semi/anti joins emit only the left columns.
     Builder_.emplace(&LeftRows_, &RightRows_,
-        BuildJoinColumns(LeftType_, RightType_, true));
+        BuildJoinColumns(LeftType_, RightType_, !IsSemiAnti()));
 }
 
 bool TInnerJoinProcessor::IsOuter() const {
     return JoinType_ == EJoinType::Left || JoinType_ == EJoinType::Right;
+}
+
+bool TInnerJoinProcessor::IsSemiAnti() const {
+    return JoinType_ == EJoinType::LeftSemi || JoinType_ == EJoinType::LeftAnti;
+}
+
+void TInnerJoinProcessor::CollectMatchedLeftIds() {
+    for (int64_t i = 0; i < PairBuffer_.Count; ++i) {
+        MatchedLeftIds_.insert(PairBuffer_.Data[2 * i]);
+    }
+    PairBuffer_.Count = 0;
 }
 
 TInnerJoinProcessor::~TInnerJoinProcessor() {
@@ -588,12 +602,134 @@ void TInnerJoinProcessor::FinalizeOuterJoin() {
     OuterFinalized_ = true;
 }
 
+// Semi/anti joins are blocking: consume all of the left (building the left
+// table + row store), then all of the right, then emit. Left must be fully
+// processed before the right so the non-residual path builds LeftTable while
+// RightTable is still empty. Pulls one side at a time; left first.
+bool TInnerJoinProcessor::PullSemiAntiBatch(
+    const TFetch& left,
+    const TFetch& right)
+{
+    if (!LeftDone_) {
+        TRowSet batch{};
+        auto fetch = left(batch);
+        if (fetch == EJoinFetchResult::NO_DATA) {
+            return false;
+        }
+        if (fetch == EJoinFetchResult::FINISHED) {
+            LeftDone_ = true;
+            return true;
+        }
+        const int32_t batchIdx = LeftRows_.PushBatch(batch);
+        Kernels_.ProcessLeft(
+            LeftTable_.data(),
+            RightTable_.data(),
+            const_cast<TRowSet*>(&LeftRows_.Batch(batchIdx)),
+            batchIdx,
+            &PairBuffer_,
+            const_cast<TRowSet*>(LeftRows_.Data()),
+            const_cast<TRowSet*>(RightRows_.Data()));
+        if (HasResidual_) {
+            CollectMatchedLeftIds();
+        } else {
+            PairBuffer_.Count = 0;
+        }
+        return true;
+    }
+    if (!RightDone_) {
+        TRowSet batch{};
+        auto fetch = right(batch);
+        if (fetch == EJoinFetchResult::NO_DATA) {
+            return false;
+        }
+        if (fetch == EJoinFetchResult::FINISHED) {
+            RightDone_ = true;
+            BothDone_ = true;
+            return true;
+        }
+        if (HasResidual_) {
+            Kernels_.ProbeRightStream(
+                LeftTable_.data(),
+                &batch,
+                -1,
+                &PairBuffer_,
+                const_cast<TRowSet*>(LeftRows_.Data()),
+                const_cast<TRowSet*>(RightRows_.Data()));
+            CollectMatchedLeftIds();
+        } else {
+            Kernels_.InsertKeyOnly(RightTable_.data(), nullptr, &batch, 0,
+                &PairBuffer_);
+            PairBuffer_.Count = 0;
+        }
+        Release(&batch);
+        return true;
+    }
+    BothDone_ = true;
+    return true;
+}
+
+void TInnerJoinProcessor::FinalizeSemiAntiJoin() {
+    Kernels_.FinalizeAntiSemi(LeftTable_.data(), RightTable_.data(), &PairBuffer_);
+    for (int64_t i = 0; i < PairBuffer_.Count; ++i) {
+        Builder_->AddPair(PairBuffer_.Data[2 * i], PairBuffer_.Data[2 * i + 1]);
+    }
+    PairBuffer_.Count = 0;
+    SemiAntiFinalized_ = true;
+}
+
+void TInnerJoinProcessor::FinalizeResidualSemiAntiJoin() {
+    // Emit each left row once: SEMI keeps matched, ANTI keeps unmatched.
+    for (int32_t b = 0; b < LeftRows_.BatchCount(); ++b) {
+        const int32_t cnt = LeftRows_.Batch(b).RowCount;
+        for (int32_t r = 0; r < cnt; ++r) {
+            const TRowId id = MakeRowId(b, r);
+            const bool matched = MatchedLeftIds_.count(id) > 0;
+            if ((JoinType_ == EJoinType::LeftSemi && matched) ||
+                (JoinType_ == EJoinType::LeftAnti && !matched)) {
+                Builder_->AddPair(id, kNullRowId);
+            }
+        }
+    }
+    SemiAntiFinalized_ = true;
+}
+
+EJoinProcessorResult TInnerJoinProcessor::ProcessSemiAnti(
+    const TFetch& left,
+    const TFetch& right,
+    TRowSet& output)
+{
+    if (DrainBuilder(*Builder_, output)) {
+        return EJoinProcessorResult::OK;
+    }
+    if (SemiAntiFinalized_) {
+        return EJoinProcessorResult::FINISHED;
+    }
+    while (!BothDone_) {
+        if (!PullSemiAntiBatch(left, right)) {
+            return EJoinProcessorResult::NEED_DATA;
+        }
+    }
+    if (HasResidual_) {
+        FinalizeResidualSemiAntiJoin();
+    } else {
+        FinalizeSemiAntiJoin();
+    }
+    if (DrainBuilder(*Builder_, output)) {
+        return EJoinProcessorResult::OK;
+    }
+    return EJoinProcessorResult::FINISHED;
+}
+
 EJoinProcessorResult TInnerJoinProcessor::Process(
     const TFetch& left,
     const TFetch& right,
     TRowSet& output)
 {
     EnsureInit();
+
+    if (IsSemiAnti()) {
+        return ProcessSemiAnti(left, right, output);
+    }
 
     // Once both inputs are drained, outer joins emit their unmatched rows.
     auto finishedResult = [&]() -> EJoinProcessorResult {
