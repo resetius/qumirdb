@@ -14,6 +14,7 @@ enum class EConnectionKind {
     OneToOne = 0,
     Gather = 1,
     HashShuffle = 2,
+    Broadcast = 3,
 };
 
 enum class EFetchResult {
@@ -120,6 +121,34 @@ private:
     std::vector<std::unique_ptr<std::atomic<bool>>> Finished_;
     std::atomic<size_t> FinishedCount_ = 0;
     std::vector<size_t> FetchIds_;
+};
+
+// One producer, N consumers: every pushed rowset is replicated (shared) to all
+// destination lanes. Used to broadcast a small side (e.g. a scalar) to every
+// partition of the vector side in a cross join.
+class TBroadcastConnection : public IConnection {
+public:
+    explicit TBroadcastConnection(size_t capacity = 1);
+    ~TBroadcastConnection() override;
+
+    EConnectionKind Kind() const override;
+    void Resize(size_t srcCount, size_t dstCount) override;
+    size_t SrcCount() const override;
+    size_t DstCount() const override;
+
+    bool CanPush(size_t srcId) const override;
+    bool Push(size_t srcId, TRowSet&& rowSet) override;
+    void Finish(size_t srcId) override;
+
+    EFetchResult Fetch(size_t dstId, TRowSet& rowSet) override;
+
+private:
+    struct TLane;
+
+    size_t Capacity_;
+    size_t DstCount_ = 0;
+    std::atomic<bool> Finished_ = false;
+    std::vector<std::unique_ptr<TLane>> Lanes_;
 };
 
 } // namespace NScheduler

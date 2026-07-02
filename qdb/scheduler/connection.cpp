@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <cassert>
+#include <memory>
 #include <utility>
 
 namespace NQdb {
@@ -14,6 +15,16 @@ TRowSet TakeRowSet(TRowSet& rowSet) {
     auto out = rowSet;
     rowSet = {};
     return out;
+}
+
+// Holds the shared source rowset behind a broadcast copy; releasing the last
+// copy releases the original.
+struct TBroadcastRowSetData {
+    std::shared_ptr<TRowSet> Input;
+};
+
+void DestroyBroadcastRowSet(TRowSet* rowSet) {
+    delete static_cast<TBroadcastRowSetData*>(rowSet->Private);
 }
 
 } // namespace
@@ -312,6 +323,115 @@ EFetchResult THashShuffleConnection::Fetch(size_t dstId, TRowSet& rowSet) {
 
 size_t THashShuffleConnection::LaneIndex(size_t srcId, size_t dstId) const {
     return srcId * DstCount_ + dstId;
+}
+
+struct TBroadcastConnection::TLane {
+    explicit TLane(size_t capacity)
+        : Queue(capacity)
+    {}
+
+    ~TLane() {
+        TRowSet rowSet{};
+        while (Queue.TryPop(rowSet)) {
+            Release(&rowSet);
+        }
+    }
+
+    TSPSC<TRowSet> Queue;
+};
+
+TBroadcastConnection::TBroadcastConnection(size_t capacity)
+    : Capacity_(capacity)
+{
+    Resize(1, 1);
+}
+
+TBroadcastConnection::~TBroadcastConnection() = default;
+
+EConnectionKind TBroadcastConnection::Kind() const {
+    return EConnectionKind::Broadcast;
+}
+
+void TBroadcastConnection::Resize(size_t srcCount, size_t dstCount) {
+    assert(srcCount == 1);
+    DstCount_ = dstCount;
+    Finished_.store(false, std::memory_order_release);
+    Lanes_.clear();
+    Lanes_.reserve(DstCount_);
+    for (size_t i = 0; i < DstCount_; ++i) {
+        Lanes_.push_back(std::make_unique<TLane>(Capacity_));
+    }
+}
+
+size_t TBroadcastConnection::SrcCount() const {
+    return 1;
+}
+
+size_t TBroadcastConnection::DstCount() const {
+    return DstCount_;
+}
+
+bool TBroadcastConnection::CanPush(size_t srcId) const {
+    assert(srcId == 0);
+    for (const auto& lane : Lanes_) {
+        if (!lane->Queue.CanPush()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool TBroadcastConnection::Push(size_t srcId, TRowSet&& rowSet) {
+    assert(srcId == 0);
+    // All destination lanes must accept, so the rowset is replicated to each in
+    // lockstep; otherwise leave the rowset untouched for a retry.
+    for (const auto& lane : Lanes_) {
+        if (!lane->Queue.CanPush()) {
+            return false;
+        }
+    }
+
+    auto moved = TakeRowSet(rowSet);
+    auto input = std::shared_ptr<TRowSet>(
+        new TRowSet(moved),
+        [](TRowSet* p) {
+            Release(p);
+            delete p;
+        });
+    for (auto& lane : Lanes_) {
+        auto* data = new TBroadcastRowSetData{input};
+        TRowSet copy{
+            .Columns = input->Columns,
+            .ColumnCount = input->ColumnCount,
+            .RowCount = input->RowCount,
+            .Selection = input->Selection,
+            .Destroy = DestroyBroadcastRowSet,
+            .Private = data,
+            .RefCount = 1,
+        };
+        const bool pushed = lane->Queue.TryPush(std::move(copy));
+        assert(pushed);
+        (void)pushed;
+    }
+    return true;
+}
+
+void TBroadcastConnection::Finish(size_t srcId) {
+    assert(srcId == 0);
+    Finished_.store(true, std::memory_order_release);
+}
+
+EFetchResult TBroadcastConnection::Fetch(size_t dstId, TRowSet& rowSet) {
+    assert(dstId < Lanes_.size());
+    if (Lanes_[dstId]->Queue.TryPop(rowSet)) {
+        return EFetchResult::OK;
+    }
+    if (!Finished_.load(std::memory_order_acquire)) {
+        return EFetchResult::NO_DATA;
+    }
+    return Lanes_[dstId]->Queue.TryPop(rowSet)
+        ? EFetchResult::OK
+        : EFetchResult::FINISHED;
 }
 
 } // namespace NScheduler

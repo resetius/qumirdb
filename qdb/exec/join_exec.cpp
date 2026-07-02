@@ -757,6 +757,86 @@ EJoinProcessorResult TInnerJoinProcessor::Process(
     return BothDone_ ? finishedResult() : EJoinProcessorResult::NEED_DATA;
 }
 
+namespace {
+
+bool CrossRowSelected(const TRowSet& batch, int32_t row) {
+    return !batch.Selection || batch.Selection[row] != 0;
+}
+
+} // namespace
+
+TCrossJoinProcessor::TCrossJoinProcessor(
+    TTypePtr leftType,
+    TTypePtr rightType)
+{
+    Builder_.emplace(&LeftRows_, &RightRows_,
+        BuildJoinColumns(std::move(leftType), std::move(rightType), true));
+}
+
+EJoinProcessorResult TCrossJoinProcessor::Process(
+    const TFetch& left,
+    const TFetch& right,
+    TRowSet& output)
+{
+    // Phase 1: fully buffer the (broadcast) right side.
+    if (!RightDrained_) {
+        for (;;) {
+            TRowSet batch{};
+            auto fetch = right(batch);
+            if (fetch == EJoinFetchResult::NO_DATA) {
+                return EJoinProcessorResult::NEED_DATA;
+            }
+            if (fetch == EJoinFetchResult::FINISHED) {
+                RightDrained_ = true;
+                break;
+            }
+            RightTotalRows_ += batch.RowCount;
+            RightRows_.PushBatch(batch);
+        }
+    }
+
+    // Phase 2: stream left, pairing each selected left row with every selected
+    // right row.
+    for (;;) {
+        if (DrainBuilder(*Builder_, output)) {
+            return EJoinProcessorResult::OK;
+        }
+        if (LeftDone_) {
+            return EJoinProcessorResult::FINISHED;
+        }
+        TRowSet batch{};
+        auto fetch = left(batch);
+        if (fetch == EJoinFetchResult::NO_DATA) {
+            return EJoinProcessorResult::NEED_DATA;
+        }
+        if (fetch == EJoinFetchResult::FINISHED) {
+            LeftDone_ = true;
+            continue;
+        }
+        if (RightTotalRows_ == 0) {
+            Release(&batch);
+            continue;
+        }
+        const int32_t li = LeftRows_.PushBatch(batch);
+        const int32_t leftCount = LeftRows_.Batch(li).RowCount;
+        for (int32_t l = 0; l < leftCount; ++l) {
+            if (!CrossRowSelected(LeftRows_.Batch(li), l)) {
+                continue;
+            }
+            const TRowId leftId = MakeRowId(li, l);
+            for (int32_t rb = 0; rb < RightRows_.BatchCount(); ++rb) {
+                const TRowSet& rightBatch = RightRows_.Batch(rb);
+                for (int32_t r = 0; r < rightBatch.RowCount; ++r) {
+                    if (!CrossRowSelected(rightBatch, r)) {
+                        continue;
+                    }
+                    Builder_->AddPair(leftId, MakeRowId(rb, r));
+                }
+            }
+        }
+    }
+}
+
 TRuntimeCrossJoin::TRuntimeCrossJoin(std::unique_ptr<IRuntimeNode> left,
     std::unique_ptr<IRuntimeNode> right,
     TTypePtr outputType)
