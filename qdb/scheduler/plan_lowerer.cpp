@@ -379,8 +379,11 @@ public:
             }
             // Grouped aggregate over a parallel input is hash-shuffled by group
             // key into partition-local aggregates (disjoint groups), so its
-            // output keeps the shuffle partition count.
-            if (!n.Cast()->GroupKeys().empty() && childLanes > 1) {
+            // output keeps the shuffle partition count. Global aggregates
+            // (`__group__` constant) stay single.
+            if (!IsGlobalAggregate(*n.Cast()) &&
+                !n.Cast()->GroupKeys().empty() && childLanes > 1)
+            {
                 return JoinPartitions();
             }
             return 1;
@@ -412,6 +415,23 @@ public:
             return JoinPartitions();
         }
         return 0;
+    }
+
+    // A "global" aggregate is a decorrelated ungrouped aggregate: its only
+    // group key is the constant `__group__` marker (a projected 1). It produces
+    // one row, so hash-shuffling it (all rows to one partition) is pure
+    // overhead — treat it as ungrouped and gather to a single aggregate.
+    bool IsGlobalAggregate(TAggregateOperator& aggregate) const {
+        const auto& keys = aggregate.GroupKeys();
+        if (keys.empty()) {
+            return false;
+        }
+        for (const auto& key : keys) {
+            if (key != "__group__") {
+                return false;
+            }
+        }
+        return true;
     }
 
     TLoweredOutput Lower(
@@ -679,7 +699,9 @@ private:
     {
         const size_t childLanes = OutputLanes(aggregate.Input());
         // Ungrouped or non-parallel input: single gathered aggregate.
-        if (aggregate.GroupKeys().empty() || childLanes <= 1) {
+        if (aggregate.GroupKeys().empty() || childLanes <= 1 ||
+            IsGlobalAggregate(aggregate))
+        {
             return LowerBlocking(
                 aggregate.Input(),
                 [&](const NQumir::NAst::TTypePtr& childType) {
