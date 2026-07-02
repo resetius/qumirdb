@@ -119,12 +119,14 @@ struct TSchedulerInnerJoinState {
         NQumir::NAst::TTypePtr leftType,
         NQumir::NAst::TTypePtr rightType,
         TJoinKernels kernels,
-        EJoinType joinType)
+        EJoinType joinType,
+        bool hasResidual)
         : Processor(
             std::move(leftType),
             std::move(rightType),
             std::move(kernels),
-            joinType)
+            joinType,
+            hasResidual)
     {}
 
     TInnerJoinProcessor Processor;
@@ -391,11 +393,14 @@ public:
         }
         if (auto n = TMaybeOp<TJoinOperator>(op)) {
             auto join = n.Cast();
-            // Inner and left/right outer equi-joins are hash-partitionable.
+            // Inner, left/right outer, and left semi/anti equi-joins are
+            // hash-partitionable (matches co-locate by key).
             const bool supportedType =
                 join->JoinType() == EJoinType::Inner ||
                 join->JoinType() == EJoinType::Left ||
-                join->JoinType() == EJoinType::Right;
+                join->JoinType() == EJoinType::Right ||
+                join->JoinType() == EJoinType::LeftSemi ||
+                join->JoinType() == EJoinType::LeftAnti;
             if (!supportedType || join->Keys().empty()) {
                 return 0;
             }
@@ -1206,7 +1211,8 @@ private:
             auto task = std::make_unique<NScheduler::TBinaryBlockingTask>(
                 joinCode,
                 std::make_shared<TSchedulerInnerJoinState>(
-                    leftType, rightType, *joinKernels, join.JoinType()),
+                    leftType, rightType, *joinKernels, join.JoinType(),
+                    join.Filter() != nullptr),
                 NScheduler::TInputPort{
                     .Connection = leftShuf.Connection, .Lane = j},
                 NScheduler::TInputPort{

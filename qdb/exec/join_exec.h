@@ -188,7 +188,8 @@ public:
         NQumir::NAst::TTypePtr leftType,
         NQumir::NAst::TTypePtr rightType,
         TJoinKernels kernels,
-        EJoinType joinType = EJoinType::Inner);
+        EJoinType joinType = EJoinType::Inner,
+        bool hasResidual = false);
     TInnerJoinProcessor(const TInnerJoinProcessor&) = delete;
     TInnerJoinProcessor& operator=(const TInnerJoinProcessor&) = delete;
     ~TInnerJoinProcessor();
@@ -208,12 +209,19 @@ private:
     static_assert(sizeof(TPairBufferState) == TKernelCompiler::kPairBufferSize);
 
     bool IsOuter() const;
+    bool IsSemiAnti() const;
     void EnsureInit();
     bool DrainReadyOutput(TRowSet& rowSet);
     void DrainKernelPairs();
     void DrainStreamingPairs(const TRowSet& streamBatch, EJoinSide streamSide);
+    void CollectMatchedLeftIds();
     bool PullOneInputBatch(const TFetch& left, const TFetch& right);
+    bool PullSemiAntiBatch(const TFetch& left, const TFetch& right);
     void FinalizeOuterJoin();
+    void FinalizeSemiAntiJoin();
+    void FinalizeResidualSemiAntiJoin();
+    EJoinProcessorResult ProcessSemiAnti(
+        const TFetch& left, const TFetch& right, TRowSet& output);
     EJoinSide ChooseSymmetricPullSide() const;
 
 private:
@@ -221,7 +229,10 @@ private:
     NQumir::NAst::TTypePtr RightType_;
     TJoinKernels Kernels_;
     EJoinType JoinType_ = EJoinType::Inner;
+    bool HasResidual_ = false;
     bool OuterFinalized_ = false;
+    bool SemiAntiFinalized_ = false;
+    std::unordered_set<TRowId> MatchedLeftIds_;
     TRowStore LeftRows_;
     TRowStore RightRows_;
     std::array<uint8_t, TKernelCompiler::kHashTableSize> LeftTable_{};
