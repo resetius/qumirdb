@@ -70,6 +70,15 @@ struct TKernelHelperSettings {
     size_t ScratchVectorSize = 0;
 };
 
+struct TAggregateSettings {
+    // Parallelize ungrouped/global aggregates with a partial->gather->combine
+    // cascade instead of gathering every lane into one aggregate. Off by
+    // default: the single-aggregate path is faster for cheap aggregates; the
+    // cascade only pays off when the serial aggregate is the bottleneck (very
+    // large inputs).
+    bool CascadeGlobal = false;
+};
+
 struct TSettings {
     TSchedulerSettings Scheduler;
     TPartitioningSettings Partitioning;
@@ -78,6 +87,7 @@ struct TSettings {
     THashShuffleSettings HashShuffle;
     TSortSettings Sort;
     TKernelHelperSettings KernelHelper;
+    TAggregateSettings Aggregate;
 };
 
 } // namespace NScheduler

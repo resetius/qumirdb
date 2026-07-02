@@ -749,15 +749,102 @@ private:
         };
     }
 
+    // Build the "combine" aggregate for the final phase of a cascade: it reads
+    // the partial aggregates' output columns and merges them. count becomes a
+    // sum of per-lane counts; sum/min/max stay the same function over their own
+    // output column. Group keys (e.g. `__group__`) carry through unchanged.
+    std::shared_ptr<TAggregateOperator> BuildCombineAggregate(
+        TAggregateOperator& aggregate)
+    {
+        std::vector<TAggregateSpec> combineAggs;
+        combineAggs.reserve(aggregate.Aggs().size());
+        for (const auto& agg : aggregate.Aggs()) {
+            std::string func = agg.Func == "count" ? "sum" : agg.Func;
+            combineAggs.push_back(TAggregateSpec{
+                .Name = agg.Name,
+                .Func = std::move(func),
+                .Arg = std::make_shared<NQumir::NAst::TIdentExpr>(
+                    NQumir::TLocation{}, agg.Name),
+            });
+        }
+        return std::make_shared<TAggregateOperator>(
+            aggregate.Input(), aggregate.GroupKeys(), std::move(combineAggs));
+    }
+
+    // child[N] -> partial-aggregate[N] -> gather(N->1) -> final-combine[1].
+    TLoweredOutput LowerAggregateCascade(
+        TAggregateOperator& aggregate,
+        size_t lanes,
+        NScheduler::IConnection& outConn)
+    {
+        const size_t cap = QueueCapacity();
+
+        auto childConn = std::make_unique<NScheduler::TOneToOneConnection>(cap);
+        childConn->Resize(lanes, lanes);
+        auto& childRef = Graph_.AddConnection(std::move(childConn));
+        auto childOut = Lower(aggregate.Input(), childRef);
+
+        auto partialTail = BuildAggregateTail(childOut.OutputType, aggregate);
+        auto partialType = partialTail.OutputType;
+
+        auto gather = std::make_unique<NScheduler::TGatherConnection>(cap);
+        gather->Resize(lanes, 1);
+        auto& gatherRef = Graph_.AddConnection(std::move(gather));
+
+        std::vector<NScheduler::TTaskNode*> partialNodes;
+        partialNodes.reserve(lanes);
+        for (size_t m = 0; m < lanes; ++m) {
+            auto task = std::make_unique<NScheduler::TBlockingTask>(
+                partialTail.Code,
+                partialTail.MakeState(),
+                NScheduler::TInputPort{.Connection = &childRef, .Lane = m},
+                NScheduler::TOutputPort{.Connection = &gatherRef, .Lane = m});
+            auto& node = Graph_.AddOwnedNode(std::move(task));
+            Graph_.AddEdge(*childOut.Producers[m], node, childRef, m, m);
+            partialNodes.push_back(&node);
+        }
+
+        auto combineAgg = BuildCombineAggregate(aggregate);
+        auto combineTail = BuildAggregateTail(partialType, *combineAgg);
+        auto finalTask = std::make_unique<NScheduler::TBlockingTask>(
+            std::move(combineTail.Code),
+            combineTail.MakeState(),
+            NScheduler::TInputPort{.Connection = &gatherRef, .Lane = 0},
+            NScheduler::TOutputPort{.Connection = &outConn, .Lane = 0});
+        auto& finalNode = Graph_.AddOwnedNode(std::move(finalTask));
+        for (size_t m = 0; m < lanes; ++m) {
+            Graph_.AddEdge(*partialNodes[m], finalNode, gatherRef, m, 0);
+        }
+
+        return TLoweredOutput{
+            .Producers = {&finalNode},
+            .OutputType = std::move(combineTail.OutputType),
+        };
+    }
+
     TLoweredOutput LowerAggregate(
         TAggregateOperator& aggregate,
         NScheduler::IConnection& outConn)
     {
         const size_t childLanes = OutputLanes(aggregate.Input());
-        // Ungrouped or non-parallel input: single gathered aggregate.
-        if (aggregate.GroupKeys().empty() || childLanes <= 1 ||
-            IsGlobalAggregate(aggregate))
-        {
+        // Non-parallel input: single aggregate, nothing to parallelize.
+        if (childLanes <= 1) {
+            return LowerBlocking(
+                aggregate.Input(),
+                [&](const NQumir::NAst::TTypePtr& childType) {
+                    return BuildAggregateTail(childType, aggregate);
+                },
+                outConn);
+        }
+
+        // Ungrouped or global (`__group__`) aggregate over a parallel input.
+        // Opt-in cascade (partial -> gather -> combine) parallelizes the
+        // aggregate; otherwise gather every lane into a single aggregate, which
+        // is faster for cheap aggregates (the common case).
+        if (aggregate.GroupKeys().empty() || IsGlobalAggregate(aggregate)) {
+            if (Settings_.Aggregate.CascadeGlobal) {
+                return LowerAggregateCascade(aggregate, childLanes, outConn);
+            }
             return LowerBlocking(
                 aggregate.Input(),
                 [&](const NQumir::NAst::TTypePtr& childType) {
