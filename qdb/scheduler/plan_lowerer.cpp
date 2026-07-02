@@ -479,13 +479,6 @@ public:
         if (!IsScalarSubtree(join.Right()) || IsScalarSubtree(join.Left())) {
             return 0;
         }
-        // DISABLED pending the threaded-scheduler deadlock fix: correct in
-        // single-threaded and for small vectors, but the broadcast/cross graph
-        // deadlocks the threaded scheduler on large multi-partition vectors
-        // (same threaded bug family as Q15). Cross falls back to serial.
-        if (Settings_.Scheduler.Mode != NScheduler::EExecutionMode::Serial) {
-            return 0;
-        }
         const size_t lanes = OutputLanes(join.Left());
         const size_t scalar = OutputLanes(join.Right());
         if (lanes <= 1 || scalar == 0) {
@@ -1246,14 +1239,12 @@ private:
         // then forward into a broadcast connection replicated to every vector
         // lane.
         const size_t scalarLanes = OutputLanes(join.Right());
-        auto scalarConn = std::make_unique<NScheduler::TOneToOneConnection>(cap);
-        scalarConn->Resize(scalarLanes, scalarLanes);
-        auto& scalarRef = Graph_.AddConnection(std::move(scalarConn));
-        auto scalarOut = Lower(join.Right(), scalarRef);
-
         auto scalarGather = std::make_unique<NScheduler::TGatherConnection>(cap);
         scalarGather->Resize(scalarLanes, 1);
         auto& scalarGatherRef = Graph_.AddConnection(std::move(scalarGather));
+        // Lower the scalar side directly into the gather so its producers write
+        // the same connection the forward reads (gather scalarLanes -> 1).
+        auto scalarOut = Lower(join.Right(), scalarGatherRef);
 
         auto broadcast = std::make_unique<NScheduler::TBroadcastConnection>(cap);
         broadcast->Resize(1, lanes);
