@@ -785,6 +785,60 @@ TJoinHashKernels TKernelCompiler::CompileJoinHash(
     };
 }
 
+std::function<bool(TRowSet*, uint64_t*)> TKernelCompiler::CompileGroupHash(
+    const NQumir::NAst::TStructType& inputType,
+    const std::vector<std::string>& groupKeys)
+{
+    using namespace NQumir::NAst;
+
+    // Reuse the join key descriptor with the same schema on both sides and each
+    // group key equated to itself; the left hash then hashes the group keys.
+    std::vector<std::pair<std::string, std::string>> keys;
+    keys.reserve(groupKeys.size());
+    for (const auto& key : groupKeys) {
+        keys.emplace_back(key, key);
+    }
+    const auto keyDesc =
+        NKernel::BuildJoinKeyDescriptor(inputType, inputType, keys);
+
+    auto columnType = QumirDbNamedType("TColumn");
+    auto rowSetType = QumirDbNamedType("TRowSet");
+
+    std::vector<TExprPtr> program;
+    for (auto& f : NKernel::GenJoinKeyTypeDecls(keyDesc)) {
+        program.push_back(std::move(f));
+    }
+    for (auto& f : NKernel::GenJoinKeyOpsFunDecls(keyDesc)) {
+        program.push_back(std::move(f));
+    }
+    program.push_back(NKernel::GenJoinHashBatchAst(
+        keyDesc,
+        /*isLeft=*/true,
+        "grp_hash",
+        columnType,
+        rowSetType));
+
+    auto options = Opts_;
+    options.PrintIr = Diagnostics_ != nullptr;
+    options.PrintLlvm = Diagnostics_ != nullptr;
+    auto runner = std::make_shared<NQumir::TLLVMRunner>(options);
+    auto block = std::make_shared<TBlockExpr>(
+        NQumir::TLocation{}, std::move(program));
+    PrintKernelAst(Diagnostics_, "group_hash.grp_hash", block);
+    std::string error;
+    void* fn = CompileKernelAst(*runner, block, "grp_hash", &error);
+    FinishKernelDiagnostics(Diagnostics_);
+    if (!fn) {
+        throw std::runtime_error(
+            "CompileGroupHash: grp_hash compilation failed: " + error);
+    }
+
+    using THashFn = bool(*)(TRowSet*, uint64_t*);
+    return [fn, runner](TRowSet* batch, uint64_t* hashes) {
+        return reinterpret_cast<THashFn>(fn)(batch, hashes);
+    };
+}
+
 TJoinKernels TKernelCompiler::CompileJoin(
     const NQumir::NAst::TStructType& leftType,
     const NQumir::NAst::TStructType& rightType,
