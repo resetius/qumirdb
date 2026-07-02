@@ -590,6 +590,9 @@ void PrintHelp() {
         "  --cascade-aggregates         Parallelize global aggregates (partial->gather->combine)\n"
         "  --shuffle-partitions <n>     Hash shuffle partition count\n"
         "  --shuffle-queue <n>          Rowset queue capacity per shuffle lane\n"
+        "  --shuffle-target-rows <n>    Target rows per materialized shuffle batch\n"
+        "  --shuffle-max-rows <n>       Maximum rows per materialized shuffle batch\n"
+        "  --shuffle-target-bytes <n>   Target bytes per materialized shuffle batch\n"
         "  --verbose                    Print the logical and runtime plans\n"
         "  --help|-h                    Show this help message\n"
         "\n"
@@ -705,6 +708,42 @@ int main(int argc, char** argv) {
             }
             config.Scheduler.HashShuffle.MaxQueuedRowsetsPerLane =
                 static_cast<size_t>(capacity);
+        } else if (!std::strcmp(argv[i], "--shuffle-target-rows")) {
+            if (i + 1 >= argc) {
+                std::cerr << "--shuffle-target-rows requires an argument\n";
+                return 1;
+            }
+            auto rows = std::atoi(argv[++i]);
+            if (rows <= 0) {
+                std::cerr << "--shuffle-target-rows requires a positive integer\n";
+                return 1;
+            }
+            config.Scheduler.HashShuffle.TargetOutputBatchRows =
+                static_cast<size_t>(rows);
+        } else if (!std::strcmp(argv[i], "--shuffle-max-rows")) {
+            if (i + 1 >= argc) {
+                std::cerr << "--shuffle-max-rows requires an argument\n";
+                return 1;
+            }
+            auto rows = std::atoi(argv[++i]);
+            if (rows <= 0) {
+                std::cerr << "--shuffle-max-rows requires a positive integer\n";
+                return 1;
+            }
+            config.Scheduler.HashShuffle.MaxOutputBatchRows =
+                static_cast<size_t>(rows);
+        } else if (!std::strcmp(argv[i], "--shuffle-target-bytes")) {
+            if (i + 1 >= argc) {
+                std::cerr << "--shuffle-target-bytes requires an argument\n";
+                return 1;
+            }
+            auto bytes = std::atoi(argv[++i]);
+            if (bytes <= 0) {
+                std::cerr << "--shuffle-target-bytes requires a positive integer\n";
+                return 1;
+            }
+            config.Scheduler.HashShuffle.TargetOutputBatchBytes =
+                static_cast<size_t>(bytes);
         } else if (!std::strcmp(argv[i], "--verbose")) {
             config.Verbose = true;
         } else if (!std::strcmp(argv[i], "--help") || !std::strcmp(argv[i], "-h")) {

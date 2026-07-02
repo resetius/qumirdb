@@ -50,6 +50,9 @@ TEST(SchedulerCore, SettingsDefaultsAreConservative) {
     EXPECT_EQ(settings.ScanSplit.RowGroupCoalescingFactor, 1u);
     EXPECT_EQ(settings.HashShuffle.PartitionCount, 0u);
     EXPECT_EQ(settings.HashShuffle.MaxPartitionCount, 0u);
+    EXPECT_EQ(settings.HashShuffle.TargetOutputBatchRows, 16u * 1024u);
+    EXPECT_EQ(settings.HashShuffle.MaxOutputBatchRows, 64u * 1024u);
+    EXPECT_EQ(settings.HashShuffle.TargetOutputBatchBytes, 1024u * 1024u);
     EXPECT_EQ(settings.Sort.MergeFanIn, 2u);
     EXPECT_TRUE(settings.KernelHelper.EnableRowsetHashKernel);
     EXPECT_TRUE(settings.KernelHelper.EnableCompareKernel);

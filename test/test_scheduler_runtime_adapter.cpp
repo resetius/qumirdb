@@ -6,7 +6,10 @@
 #include <qdb/scheduler/single_threaded_scheduler.h>
 #include <qdb/scheduler/threaded_scheduler.h>
 
+#include <qumir/parser/type.h>
+
 #include <atomic>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <utility>
@@ -45,6 +48,18 @@ void CountDestroy(TRowSet* rowSet) {
     counter->fetch_add(1, std::memory_order_relaxed);
 }
 
+struct TInt64RowSetData {
+    std::vector<int64_t> Values;
+    std::vector<TColumn> Columns;
+    std::atomic<int>* DestroyCount = nullptr;
+};
+
+void DestroyInt64RowSet(TRowSet* rowSet) {
+    auto* data = static_cast<TInt64RowSetData*>(rowSet->Private);
+    data->DestroyCount->fetch_add(1, std::memory_order_relaxed);
+    delete data;
+}
+
 TRowSet MakeRowSet(int64_t rows, std::atomic<int>* destroyCount) {
     return TRowSet{
         .Columns = nullptr,
@@ -53,6 +68,29 @@ TRowSet MakeRowSet(int64_t rows, std::atomic<int>* destroyCount) {
         .Selection = nullptr,
         .Destroy = CountDestroy,
         .Private = destroyCount,
+        .RefCount = 1,
+    };
+}
+
+TRowSet MakeInt64RowSet(std::vector<int64_t> values,
+    std::atomic<int>* destroyCount)
+{
+    auto* data = new TInt64RowSetData;
+    data->Values = std::move(values);
+    data->Columns.push_back(TColumn{
+        .Data = reinterpret_cast<char*>(data->Values.data()),
+        .Mask = nullptr,
+        .Offsets = nullptr,
+        .OffsetWidth = 0,
+    });
+    data->DestroyCount = destroyCount;
+    return TRowSet{
+        .Columns = data->Columns.data(),
+        .ColumnCount = 1,
+        .RowCount = static_cast<int64_t>(data->Values.size()),
+        .Selection = nullptr,
+        .Destroy = DestroyInt64RowSet,
+        .Private = data,
         .RefCount = 1,
     };
 }
@@ -372,6 +410,73 @@ TEST(SchedulerRuntimeAdapter, HashShuffleTaskScattersSelectedRows) {
     EXPECT_EQ(output.Fetch(0, left), EFetchResult::FINISHED);
     EXPECT_EQ(output.Fetch(1, right), EFetchResult::FINISHED);
     EXPECT_EQ(destroyCount.load(std::memory_order_relaxed), 1);
+}
+
+TEST(SchedulerRuntimeAdapter, HashShuffleTaskBatchesRowsUntilFinish) {
+    using namespace NQumir::NAst;
+
+    std::atomic<int> destroyCount = 0;
+    TOneToOneConnection input(2);
+    THashShuffleConnection output(4);
+    output.Resize(1, 2);
+
+    ASSERT_TRUE(input.Push(0, MakeInt64RowSet({0, 1}, &destroyCount)));
+    ASSERT_TRUE(input.Push(0, MakeInt64RowSet({2, 3}, &destroyCount)));
+    input.Finish(0);
+
+    auto schema = std::make_shared<TStructType>(
+        std::vector<std::pair<std::string, TTypePtr>>{
+            {"value", std::make_shared<TIntegerType>()},
+        });
+    auto code = std::make_shared<THashShuffleCode>(
+        [](TRowSet* batch, uint64_t* hashes) {
+            auto* values = reinterpret_cast<int64_t*>(batch->Columns[0].Data);
+            for (int64_t row = 0; row < batch->RowCount; ++row) {
+                hashes[row] = static_cast<uint64_t>(values[row]);
+            }
+            return true;
+        },
+        schema,
+        16,
+        64,
+        1024 * 1024);
+    auto state = std::make_shared<int>(0);
+    THashShuffleTask task(
+        code,
+        state,
+        TInputPort{.Connection = &input},
+        output,
+        0);
+
+    EXPECT_EQ(task.Execute(), ETaskResult::OK);
+    TRowSet left{};
+    EXPECT_EQ(output.Fetch(0, left), EFetchResult::NO_DATA);
+
+    EXPECT_EQ(task.Execute(), ETaskResult::OK);
+    EXPECT_EQ(output.Fetch(0, left), EFetchResult::NO_DATA);
+
+    EXPECT_EQ(task.Execute(), ETaskResult::FINISHED);
+
+    ASSERT_EQ(output.Fetch(0, left), EFetchResult::OK);
+    ASSERT_EQ(left.RowCount, 2);
+    ASSERT_EQ(left.Selection, nullptr);
+    auto* leftValues = reinterpret_cast<int64_t*>(left.Columns[0].Data);
+    EXPECT_EQ(std::vector<int64_t>(leftValues, leftValues + left.RowCount),
+        (std::vector<int64_t>{0, 2}));
+    Release(&left);
+
+    TRowSet right{};
+    ASSERT_EQ(output.Fetch(1, right), EFetchResult::OK);
+    ASSERT_EQ(right.RowCount, 2);
+    ASSERT_EQ(right.Selection, nullptr);
+    auto* rightValues = reinterpret_cast<int64_t*>(right.Columns[0].Data);
+    EXPECT_EQ(std::vector<int64_t>(rightValues, rightValues + right.RowCount),
+        (std::vector<int64_t>{1, 3}));
+    Release(&right);
+
+    EXPECT_EQ(output.Fetch(0, left), EFetchResult::FINISHED);
+    EXPECT_EQ(output.Fetch(1, right), EFetchResult::FINISHED);
+    EXPECT_EQ(destroyCount.load(std::memory_order_relaxed), 2);
 }
 
 } // namespace
