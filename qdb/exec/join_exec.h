@@ -251,6 +251,34 @@ private:
     int64_t LastRightBatchRows_ = 0;
 };
 
+// Fetch-driven Cartesian product join for the scheduler cross-scalar path:
+// buffers the (small, broadcast) right side, then streams left batches, pairing
+// each left row with every right row. Residual filtering is applied downstream
+// (cross -> filter).
+class TCrossJoinProcessor {
+public:
+    using TFetch = std::function<EJoinFetchResult(TRowSet&)>;
+
+    TCrossJoinProcessor(
+        NQumir::NAst::TTypePtr leftType,
+        NQumir::NAst::TTypePtr rightType);
+    TCrossJoinProcessor(const TCrossJoinProcessor&) = delete;
+    TCrossJoinProcessor& operator=(const TCrossJoinProcessor&) = delete;
+
+    EJoinProcessorResult Process(
+        const TFetch& left,
+        const TFetch& right,
+        TRowSet& output);
+
+private:
+    TRowStore LeftRows_;
+    TRowStore RightRows_;
+    std::optional<TJoinOutputBuilder> Builder_;
+    bool RightDrained_ = false;
+    bool LeftDone_ = false;
+    int64_t RightTotalRows_ = 0;
+};
+
 // Cartesian product join (no key columns, inner only).
 // Buffers the entire right side, then streams left batches.
 class TRuntimeCrossJoin : public TRuntimeBinaryKernel {
