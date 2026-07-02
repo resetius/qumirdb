@@ -51,6 +51,7 @@ public:
 
     void SetDebugName(std::string name);
     const std::string& DebugName() const;
+    void SetStatsEnabled(bool enabled);
     TConnectionStats Stats() const;
 
 protected:
@@ -63,6 +64,7 @@ protected:
 
 private:
     std::string DebugName_;
+    bool StatsEnabled_ = false;
     mutable std::atomic<uint64_t> Pushed_ = 0;
     mutable std::atomic<uint64_t> Popped_ = 0;
     mutable std::atomic<uint64_t> Finished_ = 0;

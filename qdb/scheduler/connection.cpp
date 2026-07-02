@@ -38,6 +38,10 @@ const std::string& IConnection::DebugName() const {
     return DebugName_;
 }
 
+void IConnection::SetStatsEnabled(bool enabled) {
+    StatsEnabled_ = enabled;
+}
+
 TConnectionStats IConnection::Stats() const {
     return TConnectionStats{
         .Pushed = Pushed_.load(std::memory_order_relaxed),
@@ -50,26 +54,44 @@ TConnectionStats IConnection::Stats() const {
 }
 
 void IConnection::CountPushed(uint64_t count) const {
+    if (!StatsEnabled_) {
+        return;
+    }
     Pushed_.fetch_add(count, std::memory_order_relaxed);
 }
 
 void IConnection::CountPopped(uint64_t count) const {
+    if (!StatsEnabled_) {
+        return;
+    }
     Popped_.fetch_add(count, std::memory_order_relaxed);
 }
 
 void IConnection::CountFinished(uint64_t count) const {
+    if (!StatsEnabled_) {
+        return;
+    }
     Finished_.fetch_add(count, std::memory_order_relaxed);
 }
 
 void IConnection::CountBlockedPush(uint64_t count) const {
+    if (!StatsEnabled_) {
+        return;
+    }
     BlockedPush_.fetch_add(count, std::memory_order_relaxed);
 }
 
 void IConnection::CountEmptyFetch(uint64_t count) const {
+    if (!StatsEnabled_) {
+        return;
+    }
     EmptyFetch_.fetch_add(count, std::memory_order_relaxed);
 }
 
 void IConnection::CountFinishedFetch(uint64_t count) const {
+    if (!StatsEnabled_) {
+        return;
+    }
     FinishedFetch_.fetch_add(count, std::memory_order_relaxed);
 }
 

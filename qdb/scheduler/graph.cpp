@@ -177,6 +177,12 @@ bool TTaskGraph::Validate(std::string* error) const {
     return true;
 }
 
+void TTaskGraph::SetConnectionStatsEnabled(bool enabled) {
+    for (auto& connection : OwnedConnections_) {
+        connection->SetStatsEnabled(enabled);
+    }
+}
+
 void TTaskGraph::Print(std::ostream& out) const {
     std::unordered_map<const TTaskNode*, size_t> nodeIds;
     nodeIds.reserve(Nodes_.size());
