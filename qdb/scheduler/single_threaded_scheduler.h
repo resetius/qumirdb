@@ -14,6 +14,7 @@ public:
     explicit TSingleThreadedScheduler(TTaskGraph& graph);
 
     bool Run(std::string* error = nullptr);
+    TSchedulerRunStats Stats() const;
 
 private:
     void Schedule(TTaskNode* node);
@@ -23,6 +24,7 @@ private:
     TTaskGraph& Graph_;
     std::list<TTaskNode*> Ready_;
     std::unordered_set<TTaskNode*> Scheduled_;
+    TSchedulerRunStats Stats_;
     bool HasRun_ = false;
 };
 

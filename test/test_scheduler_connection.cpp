@@ -59,6 +59,26 @@ TEST(SchedulerConnection, OneToOneReportsFinishAfterQueueIsDrained) {
     EXPECT_EQ(conn.Fetch(0, out), EFetchResult::FINISHED);
 }
 
+TEST(SchedulerConnection, TracksDebugNameAndCounters) {
+    TOneToOneConnection conn(1);
+    conn.SetDebugName("test-edge");
+
+    auto input = MakeRowSet(7);
+    ASSERT_TRUE(conn.Push(0, std::move(input)));
+    conn.Finish(0);
+
+    TRowSet out{};
+    EXPECT_EQ(conn.Fetch(0, out), EFetchResult::OK);
+    EXPECT_EQ(conn.Fetch(0, out), EFetchResult::FINISHED);
+
+    auto stats = conn.Stats();
+    EXPECT_EQ(conn.DebugName(), "test-edge");
+    EXPECT_EQ(stats.Pushed, 1u);
+    EXPECT_EQ(stats.Popped, 1u);
+    EXPECT_EQ(stats.Finished, 1u);
+    EXPECT_EQ(stats.FinishedFetch, 1u);
+}
+
 TEST(SchedulerConnection, OneToOnePreservesInputWhenPushIsBlocked) {
     TOneToOneConnection conn(1);
     auto first = MakeRowSet(1);

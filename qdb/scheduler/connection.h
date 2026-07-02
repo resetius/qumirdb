@@ -4,7 +4,9 @@
 
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <memory>
+#include <string>
 #include <vector>
 
 namespace NQdb {
@@ -23,6 +25,15 @@ enum class EFetchResult {
     FINISHED = 2,
 };
 
+struct TConnectionStats {
+    uint64_t Pushed = 0;
+    uint64_t Popped = 0;
+    uint64_t Finished = 0;
+    uint64_t BlockedPush = 0;
+    uint64_t EmptyFetch = 0;
+    uint64_t FinishedFetch = 0;
+};
+
 class IConnection {
 public:
     virtual ~IConnection() = default;
@@ -37,6 +48,27 @@ public:
     virtual void Finish(size_t srcId) = 0;
 
     virtual EFetchResult Fetch(size_t dstId, TRowSet& rowSet) = 0;
+
+    void SetDebugName(std::string name);
+    const std::string& DebugName() const;
+    TConnectionStats Stats() const;
+
+protected:
+    void CountPushed(uint64_t count = 1) const;
+    void CountPopped(uint64_t count = 1) const;
+    void CountFinished(uint64_t count = 1) const;
+    void CountBlockedPush(uint64_t count = 1) const;
+    void CountEmptyFetch(uint64_t count = 1) const;
+    void CountFinishedFetch(uint64_t count = 1) const;
+
+private:
+    std::string DebugName_;
+    mutable std::atomic<uint64_t> Pushed_ = 0;
+    mutable std::atomic<uint64_t> Popped_ = 0;
+    mutable std::atomic<uint64_t> Finished_ = 0;
+    mutable std::atomic<uint64_t> BlockedPush_ = 0;
+    mutable std::atomic<uint64_t> EmptyFetch_ = 0;
+    mutable std::atomic<uint64_t> FinishedFetch_ = 0;
 };
 
 class TOneToOneConnection : public IConnection {

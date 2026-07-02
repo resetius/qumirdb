@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+
 namespace NQdb {
 namespace NScheduler {
 
@@ -23,6 +25,19 @@ public:
     virtual ~ITaskNode() = default;
 
     virtual ETaskResult Execute() = 0;
+};
+
+struct TSchedulerRunStats {
+    uint64_t Scheduled = 0;
+    uint64_t Popped = 0;
+    uint64_t Executed = 0;
+    uint64_t NeedData = 0;
+    uint64_t BlockedOutput = 0;
+    uint64_t Ok = 0;
+    uint64_t Finished = 0;
+    uint64_t Rescheduled = 0;
+    uint64_t ReadyPushRetries = 0;
+    uint64_t EmptyReadyPolls = 0;
 };
 
 } // namespace NScheduler
