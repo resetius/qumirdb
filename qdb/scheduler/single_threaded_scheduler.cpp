@@ -31,22 +31,32 @@ bool TSingleThreadedScheduler::Run(std::string* error) {
 
     Ready_.clear();
     Scheduled_.clear();
+    Stats_ = {};
     Schedule(Graph_.Root());
 
     while (!Ready_.empty()) {
         auto* node = Ready_.front();
         Ready_.pop_front();
         Scheduled_.erase(node);
+        ++Stats_.Popped;
 
         auto state = node->Task->Execute();
+        ++Stats_.Executed;
         if (state == ETaskResult::NEED_DATA) {
+            ++Stats_.NeedData;
             ScheduleInput(node);
         } else if (
             state == ETaskResult::BLOCKED_OUTPUT ||
             state == ETaskResult::FINISHED)
         {
+            if (state == ETaskResult::BLOCKED_OUTPUT) {
+                ++Stats_.BlockedOutput;
+            } else {
+                ++Stats_.Finished;
+            }
             ScheduleOutput(node);
         } else if (state == ETaskResult::OK) {
+            ++Stats_.Ok;
             Schedule(node);
             ScheduleOutput(node);
         }
@@ -61,6 +71,7 @@ void TSingleThreadedScheduler::Schedule(TTaskNode* node) {
     }
     Ready_.push_back(node);
     Scheduled_.insert(node);
+    ++Stats_.Scheduled;
 }
 
 void TSingleThreadedScheduler::ScheduleInput(TTaskNode* node) {
@@ -73,6 +84,10 @@ void TSingleThreadedScheduler::ScheduleOutput(TTaskNode* node) {
     for (auto* edge : node->Outbound) {
         Schedule(edge->Dst);
     }
+}
+
+TSchedulerRunStats TSingleThreadedScheduler::Stats() const {
+    return Stats_;
 }
 
 } // namespace NScheduler

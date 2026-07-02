@@ -53,6 +53,7 @@ public:
     void Build();
     bool Validate(std::string* error = nullptr) const;
     void Print(std::ostream& out) const;
+    void PrintConnectionStats(std::ostream& out) const;
 
     const std::vector<std::unique_ptr<TTaskNode>>& Nodes() const;
     const std::vector<std::unique_ptr<TTaskEdge>>& Edges() const;

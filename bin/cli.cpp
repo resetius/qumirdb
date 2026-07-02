@@ -586,6 +586,7 @@ void PrintHelp() {
         "  --scheduler <mode>           Execution mode: serial, single, threaded\n"
         "  --scheduler-workers <n>      Worker count for threaded scheduler\n"
         "  --scan-tasks <n>             Maximum parquet scan tasks for scheduler mode\n"
+        "  --scheduler-counters         Print scheduler and connection counters with --verbose\n"
         "  --cascade-aggregates         Parallelize global aggregates (partial->gather->combine)\n"
         "  --shuffle-partitions <n>     Hash shuffle partition count\n"
         "  --shuffle-queue <n>          Rowset queue capacity per shuffle lane\n"
@@ -674,6 +675,8 @@ int main(int argc, char** argv) {
                 return 1;
             }
             config.Scheduler.ScanSplit.MaxScanTasks = static_cast<size_t>(tasks);
+        } else if (!std::strcmp(argv[i], "--scheduler-counters")) {
+            config.Scheduler.Queue.EnableDebugCounters = true;
         } else if (!std::strcmp(argv[i], "--cascade-aggregates")) {
             config.Scheduler.Aggregate.CascadeGlobal = true;
         } else if (!std::strcmp(argv[i], "--shuffle-partitions")) {

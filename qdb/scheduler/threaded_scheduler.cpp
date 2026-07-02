@@ -43,6 +43,7 @@ bool TThreadedScheduler::Run(std::string* error) {
     }
 
     FinishedCount_.store(0, std::memory_order_release);
+    ResetStats();
     Schedule(Graph_.Root());
 
     std::vector<std::thread> workers;
@@ -88,13 +89,19 @@ void TThreadedScheduler::Schedule(TTaskNode* node) {
     }
 
     while (!Ready_.TryPush(std::move(node))) {
+        ReadyPushRetries_.fetch_add(1, std::memory_order_relaxed);
         std::this_thread::yield();
     }
+    Scheduled_.fetch_add(1, std::memory_order_relaxed);
 }
 
 TTaskNode* TThreadedScheduler::PopReady() {
     TTaskNode* node = nullptr;
-    Ready_.TryPop(node);
+    if (Ready_.TryPop(node)) {
+        Popped_.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        EmptyReadyPolls_.fetch_add(1, std::memory_order_relaxed);
+    }
     return node;
 }
 
@@ -139,22 +146,29 @@ void TThreadedScheduler::Work() {
         }
 
         auto result = node->Task->Execute();
+        Executed_.fetch_add(1, std::memory_order_relaxed);
         if (result == ETaskResult::NEED_DATA) {
+            NeedData_.fetch_add(1, std::memory_order_relaxed);
             auto reschedule = FinishRun(node);
             ScheduleInput(node);
             if (reschedule) {
+                Rescheduled_.fetch_add(1, std::memory_order_relaxed);
                 Schedule(node);
             }
         } else if (result == ETaskResult::BLOCKED_OUTPUT) {
+            BlockedOutput_.fetch_add(1, std::memory_order_relaxed);
             auto reschedule = FinishRun(node);
             ScheduleOutput(node);
             if (reschedule) {
+                Rescheduled_.fetch_add(1, std::memory_order_relaxed);
                 Schedule(node);
             }
         } else if (result == ETaskResult::FINISHED) {
+            Finished_.fetch_add(1, std::memory_order_relaxed);
             FinishNode(node);
             ScheduleOutput(node);
         } else if (result == ETaskResult::OK) {
+            Ok_.fetch_add(1, std::memory_order_relaxed);
             FinishRun(node);
             Schedule(node);
             ScheduleOutput(node);
@@ -172,6 +186,34 @@ void TThreadedScheduler::FinishNode(TTaskNode* node) {
     auto previous = node->State.exchange(ETaskState::Finished, std::memory_order_acq_rel);
     assert(previous == ETaskState::Running || previous == ETaskState::Reschedule);
     FinishedCount_.fetch_add(1, std::memory_order_acq_rel);
+}
+
+void TThreadedScheduler::ResetStats() {
+    Scheduled_.store(0, std::memory_order_relaxed);
+    Popped_.store(0, std::memory_order_relaxed);
+    Executed_.store(0, std::memory_order_relaxed);
+    NeedData_.store(0, std::memory_order_relaxed);
+    BlockedOutput_.store(0, std::memory_order_relaxed);
+    Ok_.store(0, std::memory_order_relaxed);
+    Finished_.store(0, std::memory_order_relaxed);
+    Rescheduled_.store(0, std::memory_order_relaxed);
+    ReadyPushRetries_.store(0, std::memory_order_relaxed);
+    EmptyReadyPolls_.store(0, std::memory_order_relaxed);
+}
+
+TSchedulerRunStats TThreadedScheduler::Stats() const {
+    return TSchedulerRunStats{
+        .Scheduled = Scheduled_.load(std::memory_order_relaxed),
+        .Popped = Popped_.load(std::memory_order_relaxed),
+        .Executed = Executed_.load(std::memory_order_relaxed),
+        .NeedData = NeedData_.load(std::memory_order_relaxed),
+        .BlockedOutput = BlockedOutput_.load(std::memory_order_relaxed),
+        .Ok = Ok_.load(std::memory_order_relaxed),
+        .Finished = Finished_.load(std::memory_order_relaxed),
+        .Rescheduled = Rescheduled_.load(std::memory_order_relaxed),
+        .ReadyPushRetries = ReadyPushRetries_.load(std::memory_order_relaxed),
+        .EmptyReadyPolls = EmptyReadyPolls_.load(std::memory_order_relaxed),
+    };
 }
 
 } // namespace NScheduler

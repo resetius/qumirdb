@@ -5,6 +5,7 @@
 #include <qdb/scheduler/runtime_adapter.h>
 
 #include <cstddef>
+#include <iosfwd>
 #include <memory>
 #include <string>
 #include <vector>
@@ -32,7 +33,8 @@ public:
         std::unique_ptr<TTaskGraph> graph,
         TSettings settings,
         NQumir::NAst::TTypePtr outputType,
-        std::shared_ptr<TBufferedSchedulerOutput> output);
+        std::shared_ptr<TBufferedSchedulerOutput> output,
+        std::ostream* diagnostics);
 
     NQumir::NAst::TTypePtr OutputType() const override { return OutputType_; }
     bool Next(TRowSet& rowSet) override;
@@ -42,6 +44,7 @@ private:
     TSettings Settings_;
     NQumir::NAst::TTypePtr OutputType_;
     std::shared_ptr<TBufferedSchedulerOutput> Output_;
+    std::ostream* Diagnostics_ = nullptr;
     bool Started_ = false;
 };
 

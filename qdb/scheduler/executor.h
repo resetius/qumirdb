@@ -15,10 +15,12 @@ public:
         TSettings settings);
 
     bool Run(std::string* error = nullptr);
+    TSchedulerRunStats Stats() const;
 
 private:
     TTaskGraph& Graph_;
     TSettings Settings_;
+    TSchedulerRunStats Stats_;
 };
 
 } // namespace NScheduler

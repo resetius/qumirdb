@@ -33,7 +33,9 @@ bool TSchedulerExecutor::Run(std::string* error) {
 
     if (Settings_.Scheduler.Mode == EExecutionMode::SingleThreadedScheduler) {
         TSingleThreadedScheduler scheduler(Graph_);
-        return scheduler.Run(error);
+        const bool ok = scheduler.Run(error);
+        Stats_ = scheduler.Stats();
+        return ok;
     }
 
     if (Settings_.Scheduler.Mode == EExecutionMode::ThreadedScheduler) {
@@ -41,11 +43,17 @@ bool TSchedulerExecutor::Run(std::string* error) {
             Graph_,
             std::max<size_t>(Settings_.Scheduler.WorkerCount, 1),
             Settings_.Scheduler.ReadyQueueCapacity);
-        return scheduler.Run(error);
+        const bool ok = scheduler.Run(error);
+        Stats_ = scheduler.Stats();
+        return ok;
     }
 
     SetError(error, "unknown scheduler execution mode");
     return false;
+}
+
+TSchedulerRunStats TSchedulerExecutor::Stats() const {
+    return Stats_;
 }
 
 } // namespace NScheduler

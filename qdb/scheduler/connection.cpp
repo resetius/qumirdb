@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cassert>
 #include <memory>
+#include <string>
 #include <utility>
 
 namespace NQdb {
@@ -28,6 +29,49 @@ void DestroyBroadcastRowSet(TRowSet* rowSet) {
 }
 
 } // namespace
+
+void IConnection::SetDebugName(std::string name) {
+    DebugName_ = std::move(name);
+}
+
+const std::string& IConnection::DebugName() const {
+    return DebugName_;
+}
+
+TConnectionStats IConnection::Stats() const {
+    return TConnectionStats{
+        .Pushed = Pushed_.load(std::memory_order_relaxed),
+        .Popped = Popped_.load(std::memory_order_relaxed),
+        .Finished = Finished_.load(std::memory_order_relaxed),
+        .BlockedPush = BlockedPush_.load(std::memory_order_relaxed),
+        .EmptyFetch = EmptyFetch_.load(std::memory_order_relaxed),
+        .FinishedFetch = FinishedFetch_.load(std::memory_order_relaxed),
+    };
+}
+
+void IConnection::CountPushed(uint64_t count) const {
+    Pushed_.fetch_add(count, std::memory_order_relaxed);
+}
+
+void IConnection::CountPopped(uint64_t count) const {
+    Popped_.fetch_add(count, std::memory_order_relaxed);
+}
+
+void IConnection::CountFinished(uint64_t count) const {
+    Finished_.fetch_add(count, std::memory_order_relaxed);
+}
+
+void IConnection::CountBlockedPush(uint64_t count) const {
+    BlockedPush_.fetch_add(count, std::memory_order_relaxed);
+}
+
+void IConnection::CountEmptyFetch(uint64_t count) const {
+    EmptyFetch_.fetch_add(count, std::memory_order_relaxed);
+}
+
+void IConnection::CountFinishedFetch(uint64_t count) const {
+    FinishedFetch_.fetch_add(count, std::memory_order_relaxed);
+}
 
 struct TOneToOneConnection::TLane {
     explicit TLane(size_t capacity)
@@ -77,36 +121,49 @@ size_t TOneToOneConnection::DstCount() const {
 
 bool TOneToOneConnection::CanPush(size_t srcId) const {
     assert(srcId < Size_);
-    return Lanes_[srcId]->Queue.CanPush();
+    const bool canPush = Lanes_[srcId]->Queue.CanPush();
+    if (!canPush) {
+        CountBlockedPush();
+    }
+    return canPush;
 }
 
 bool TOneToOneConnection::Push(size_t srcId, TRowSet&& rowSet) {
     assert(srcId < Size_);
     auto moved = TakeRowSet(rowSet);
     if (Lanes_[srcId]->Queue.TryPush(std::move(moved))) {
+        CountPushed();
         return true;
     }
+    CountBlockedPush();
     rowSet = TakeRowSet(moved);
     return false;
 }
 
 void TOneToOneConnection::Finish(size_t srcId) {
     assert(srcId < Size_);
-    Lanes_[srcId]->Finished.store(true, std::memory_order_release);
+    if (!Lanes_[srcId]->Finished.exchange(true, std::memory_order_acq_rel)) {
+        CountFinished();
+    }
 }
 
 EFetchResult TOneToOneConnection::Fetch(size_t dstId, TRowSet& rowSet) {
     assert(dstId < Size_);
     if (Lanes_[dstId]->Queue.TryPop(rowSet)) {
+        CountPopped();
         return EFetchResult::OK;
     }
 
     if (!Lanes_[dstId]->Finished.load(std::memory_order_acquire)) {
+        CountEmptyFetch();
         return EFetchResult::NO_DATA;
     }
-    return Lanes_[dstId]->Queue.TryPop(rowSet)
-        ? EFetchResult::OK
-        : EFetchResult::FINISHED;
+    if (Lanes_[dstId]->Queue.TryPop(rowSet)) {
+        CountPopped();
+        return EFetchResult::OK;
+    }
+    CountFinishedFetch();
+    return EFetchResult::FINISHED;
 }
 
 struct TGatherConnection::TLane {
@@ -159,15 +216,21 @@ size_t TGatherConnection::DstCount() const {
 
 bool TGatherConnection::CanPush(size_t srcId) const {
     assert(srcId < Size_);
-    return Lanes_[srcId]->Queue.CanPush();
+    const bool canPush = Lanes_[srcId]->Queue.CanPush();
+    if (!canPush) {
+        CountBlockedPush();
+    }
+    return canPush;
 }
 
 bool TGatherConnection::Push(size_t srcId, TRowSet&& rowSet) {
     assert(srcId < Size_);
     auto moved = TakeRowSet(rowSet);
     if (Lanes_[srcId]->Queue.TryPush(std::move(moved))) {
+        CountPushed();
         return true;
     }
+    CountBlockedPush();
     rowSet = TakeRowSet(moved);
     return false;
 }
@@ -176,6 +239,7 @@ void TGatherConnection::Finish(size_t srcId) {
     assert(srcId < Size_);
     if (!Lanes_[srcId]->Finished.exchange(true, std::memory_order_acq_rel)) {
         FinishedCount_.fetch_add(1, std::memory_order_acq_rel);
+        CountFinished();
     }
 }
 
@@ -191,6 +255,7 @@ EFetchResult TGatherConnection::Fetch(size_t dstId, TRowSet& rowSet) {
         for (size_t i = 0; i < Size_; ++i) {
             auto index = (from + i) % Size_;
             if (Lanes_[index]->Queue.TryPop(rowSet)) {
+                CountPopped();
                 return true;
             }
         }
@@ -202,9 +267,14 @@ EFetchResult TGatherConnection::Fetch(size_t dstId, TRowSet& rowSet) {
     }
 
     if (FinishedCount_.load(std::memory_order_acquire) != Size_) {
+        CountEmptyFetch();
         return EFetchResult::NO_DATA;
     }
-    return fetch() ? EFetchResult::OK : EFetchResult::FINISHED;
+    if (fetch()) {
+        return EFetchResult::OK;
+    }
+    CountFinishedFetch();
+    return EFetchResult::FINISHED;
 }
 
 struct THashShuffleConnection::TLane {
@@ -273,13 +343,18 @@ void THashShuffleConnection::Finish(size_t srcId) {
     assert(srcId < SrcCount_);
     if (!Finished_[srcId]->exchange(true, std::memory_order_acq_rel)) {
         FinishedCount_.fetch_add(1, std::memory_order_acq_rel);
+        CountFinished();
     }
 }
 
 bool THashShuffleConnection::CanPushTo(size_t srcId, size_t dstId) const {
     assert(srcId < SrcCount_);
     assert(dstId < DstCount_);
-    return Lanes_[LaneIndex(srcId, dstId)]->Queue.CanPush();
+    const bool canPush = Lanes_[LaneIndex(srcId, dstId)]->Queue.CanPush();
+    if (!canPush) {
+        CountBlockedPush();
+    }
+    return canPush;
 }
 
 bool THashShuffleConnection::PushTo(size_t srcId, size_t dstId, TRowSet&& rowSet) {
@@ -287,8 +362,10 @@ bool THashShuffleConnection::PushTo(size_t srcId, size_t dstId, TRowSet&& rowSet
     assert(dstId < DstCount_);
     auto moved = TakeRowSet(rowSet);
     if (Lanes_[LaneIndex(srcId, dstId)]->Queue.TryPush(std::move(moved))) {
+        CountPushed();
         return true;
     }
+    CountBlockedPush();
     rowSet = TakeRowSet(moved);
     return false;
 }
@@ -305,6 +382,7 @@ EFetchResult THashShuffleConnection::Fetch(size_t dstId, TRowSet& rowSet) {
         for (size_t i = 0; i < SrcCount_; ++i) {
             auto srcId = (from + i) % SrcCount_;
             if (Lanes_[LaneIndex(srcId, dstId)]->Queue.TryPop(rowSet)) {
+                CountPopped();
                 return true;
             }
         }
@@ -316,9 +394,14 @@ EFetchResult THashShuffleConnection::Fetch(size_t dstId, TRowSet& rowSet) {
     }
 
     if (FinishedCount_.load(std::memory_order_acquire) != SrcCount_) {
+        CountEmptyFetch();
         return EFetchResult::NO_DATA;
     }
-    return fetch() ? EFetchResult::OK : EFetchResult::FINISHED;
+    if (fetch()) {
+        return EFetchResult::OK;
+    }
+    CountFinishedFetch();
+    return EFetchResult::FINISHED;
 }
 
 size_t THashShuffleConnection::LaneIndex(size_t srcId, size_t dstId) const {
@@ -375,6 +458,7 @@ bool TBroadcastConnection::CanPush(size_t srcId) const {
     assert(srcId == 0);
     for (const auto& lane : Lanes_) {
         if (!lane->Queue.CanPush()) {
+            CountBlockedPush();
             return false;
         }
     }
@@ -387,6 +471,7 @@ bool TBroadcastConnection::Push(size_t srcId, TRowSet&& rowSet) {
     // lockstep; otherwise leave the rowset untouched for a retry.
     for (const auto& lane : Lanes_) {
         if (!lane->Queue.CanPush()) {
+            CountBlockedPush();
             return false;
         }
     }
@@ -413,25 +498,33 @@ bool TBroadcastConnection::Push(size_t srcId, TRowSet&& rowSet) {
         assert(pushed);
         (void)pushed;
     }
+    CountPushed();
     return true;
 }
 
 void TBroadcastConnection::Finish(size_t srcId) {
     assert(srcId == 0);
-    Finished_.store(true, std::memory_order_release);
+    if (!Finished_.exchange(true, std::memory_order_acq_rel)) {
+        CountFinished();
+    }
 }
 
 EFetchResult TBroadcastConnection::Fetch(size_t dstId, TRowSet& rowSet) {
     assert(dstId < Lanes_.size());
     if (Lanes_[dstId]->Queue.TryPop(rowSet)) {
+        CountPopped();
         return EFetchResult::OK;
     }
     if (!Finished_.load(std::memory_order_acquire)) {
+        CountEmptyFetch();
         return EFetchResult::NO_DATA;
     }
-    return Lanes_[dstId]->Queue.TryPop(rowSet)
-        ? EFetchResult::OK
-        : EFetchResult::FINISHED;
+    if (Lanes_[dstId]->Queue.TryPop(rowSet)) {
+        CountPopped();
+        return EFetchResult::OK;
+    }
+    CountFinishedFetch();
+    return EFetchResult::FINISHED;
 }
 
 } // namespace NScheduler
