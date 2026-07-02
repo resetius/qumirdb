@@ -132,6 +132,16 @@ struct TSchedulerInnerJoinState {
     TInnerJoinProcessor Processor;
 };
 
+struct TSchedulerCrossJoinState {
+    TSchedulerCrossJoinState(
+        NQumir::NAst::TTypePtr leftType,
+        NQumir::NAst::TTypePtr rightType)
+        : Processor(std::move(leftType), std::move(rightType))
+    {}
+
+    TCrossJoinProcessor Processor;
+};
+
 struct TOwnedSelectionData {
     std::vector<uint8_t> Selection;
     void (*InnerDestroy)(TRowSet*) = nullptr;
@@ -396,6 +406,11 @@ public:
         }
         if (auto n = TMaybeOp<TJoinOperator>(op)) {
             auto join = n.Cast();
+            // Keyless join: cross join, parallelizable only with a scalar
+            // (broadcast) side; keeps the vector-side partition count.
+            if (join->Keys().empty()) {
+                return CrossScalarLanes(*join);
+            }
             // Inner, left/right outer, and left semi/anti equi-joins are
             // hash-partitionable (matches co-locate by key).
             const bool supportedType =
@@ -404,7 +419,7 @@ public:
                 join->JoinType() == EJoinType::Right ||
                 join->JoinType() == EJoinType::LeftSemi ||
                 join->JoinType() == EJoinType::LeftAnti;
-            if (!supportedType || join->Keys().empty()) {
+            if (!supportedType) {
                 return 0;
             }
             if (OutputLanes(join->Left()) == 0 ||
@@ -432,6 +447,51 @@ public:
             }
         }
         return true;
+    }
+
+    // A subtree "scalar" for broadcast purposes if it terminates in an
+    // aggregate (through project/filter). Its output is small and replicable.
+    bool IsScalarSubtree(const TOperatorPtr& op) const {
+        auto cur = op;
+        while (cur) {
+            if (TMaybeOp<TAggregateOperator>(cur)) {
+                return true;
+            }
+            if (auto f = TMaybeOp<TFilterOperator>(cur)) {
+                cur = f.Cast()->Input();
+                continue;
+            }
+            if (auto p = TMaybeOp<TProjectOperator>(cur)) {
+                cur = p.Cast()->Input();
+                continue;
+            }
+            return false;
+        }
+        return false;
+    }
+
+    // Vector-side lane count for a cross-scalar join, or 0 if not eligible.
+    // Only the common `vector CROSS scalar-on-the-right` shape is handled.
+    size_t CrossScalarLanes(TJoinOperator& join) const {
+        if (join.JoinType() != EJoinType::Inner || !join.Keys().empty()) {
+            return 0;
+        }
+        if (!IsScalarSubtree(join.Right()) || IsScalarSubtree(join.Left())) {
+            return 0;
+        }
+        // DISABLED pending the threaded-scheduler deadlock fix: correct in
+        // single-threaded and for small vectors, but the broadcast/cross graph
+        // deadlocks the threaded scheduler on large multi-partition vectors
+        // (same threaded bug family as Q15). Cross falls back to serial.
+        if (Settings_.Scheduler.Mode != NScheduler::EExecutionMode::Serial) {
+            return 0;
+        }
+        const size_t lanes = OutputLanes(join.Left());
+        const size_t scalar = OutputLanes(join.Right());
+        if (lanes <= 1 || scalar == 0) {
+            return 0;
+        }
+        return lanes;
     }
 
     TLoweredOutput Lower(
@@ -472,6 +532,9 @@ public:
             return LowerTopSort(*n.Cast(), outConn);
         }
         if (auto n = TMaybeOp<TJoinOperator>(op)) {
+            if (n.Cast()->Keys().empty()) {
+                return LowerCrossJoin(*n.Cast(), outConn);
+            }
             return LowerJoin(*n.Cast(), outConn);
         }
         throw std::runtime_error("scheduler lowering: unsupported operator");
@@ -1159,6 +1222,133 @@ private:
             .Producers = {&limitNode},
             .OutputType = std::move(merged.OutputType),
         };
+    }
+
+    // Cross join with a scalar (broadcast) right side:
+    //   vector[N] x Broadcast(scalar) -> local cross[N] -> filter(residual) ->
+    //   parent gather. The scalar side is lowered, gathered to one lane, and
+    //   forwarded into a broadcast connection replicated to every vector lane.
+    TLoweredOutput LowerCrossJoin(
+        TJoinOperator& join,
+        NScheduler::IConnection& outConn)
+    {
+        const size_t cap = QueueCapacity();
+        const size_t lanes = OutputLanes(join.Left());
+
+        // Vector (streamed, partitioned) side.
+        auto vectorConn = std::make_unique<NScheduler::TOneToOneConnection>(cap);
+        vectorConn->Resize(lanes, lanes);
+        auto& vectorRef = Graph_.AddConnection(std::move(vectorConn));
+        auto vectorOut = Lower(join.Left(), vectorRef);
+
+        // Scalar (buffered, broadcast) side: lower it (its `__group__` aggregate
+        // stays single via IsGlobalAggregate — no shuffle), gather to one lane,
+        // then forward into a broadcast connection replicated to every vector
+        // lane.
+        const size_t scalarLanes = OutputLanes(join.Right());
+        auto scalarConn = std::make_unique<NScheduler::TOneToOneConnection>(cap);
+        scalarConn->Resize(scalarLanes, scalarLanes);
+        auto& scalarRef = Graph_.AddConnection(std::move(scalarConn));
+        auto scalarOut = Lower(join.Right(), scalarRef);
+
+        auto scalarGather = std::make_unique<NScheduler::TGatherConnection>(cap);
+        scalarGather->Resize(scalarLanes, 1);
+        auto& scalarGatherRef = Graph_.AddConnection(std::move(scalarGather));
+
+        auto broadcast = std::make_unique<NScheduler::TBroadcastConnection>(cap);
+        broadcast->Resize(1, lanes);
+        auto& broadcastRef = Graph_.AddConnection(std::move(broadcast));
+
+        auto fwdCode = std::make_shared<NScheduler::TUnaryCode>(
+            [](void*, TRowSet&) {});
+        auto fwd = std::make_unique<NScheduler::TUnaryTask>(
+            fwdCode,
+            std::make_shared<int>(0),
+            NScheduler::TInputPort{.Connection = &scalarGatherRef, .Lane = 0},
+            NScheduler::TOutputPort{.Connection = &broadcastRef, .Lane = 0});
+        auto& fwdNode = Graph_.AddOwnedNode(std::move(fwd));
+        for (size_t m = 0; m < scalarLanes; ++m) {
+            Graph_.AddEdge(*scalarOut.Producers[m], fwdNode, scalarGatherRef, m, 0);
+        }
+
+        auto leftType = vectorOut.OutputType;
+        auto rightType = scalarOut.OutputType;
+        auto crossTypeExp =
+            ComputeJoinOutputType(leftType, rightType, join.JoinType());
+        if (!crossTypeExp) {
+            throw std::runtime_error(
+                "cross join: " + crossTypeExp.error().ToString());
+        }
+        auto crossType = *crossTypeExp;
+
+        auto crossCode = std::make_shared<NScheduler::TBinaryBlockingCode>(
+            [](void* state,
+               NScheduler::TInputPort& left,
+               NScheduler::TInputPort& right,
+               TRowSet& output)
+            {
+                auto* s = static_cast<TSchedulerCrossJoinState*>(state);
+                auto fetchLeft = [&](TRowSet& rowSet) {
+                    return MapJoinFetch(left.Fetch(rowSet));
+                };
+                auto fetchRight = [&](TRowSet& rowSet) {
+                    return MapJoinFetch(right.Fetch(rowSet));
+                };
+                return MapJoinProcessResult(
+                    s->Processor.Process(fetchLeft, fetchRight, output));
+            });
+
+        const bool hasResidual = join.Filter() != nullptr;
+        NScheduler::IConnection* crossOut = &outConn;
+        NScheduler::IConnection* residualConn = nullptr;
+        if (hasResidual) {
+            auto conn = std::make_unique<NScheduler::TOneToOneConnection>(cap);
+            conn->Resize(lanes, lanes);
+            residualConn = &Graph_.AddConnection(std::move(conn));
+            crossOut = residualConn;
+        }
+
+        std::vector<NScheduler::TTaskNode*> crossNodes;
+        crossNodes.reserve(lanes);
+        for (size_t m = 0; m < lanes; ++m) {
+            auto task = std::make_unique<NScheduler::TBinaryBlockingTask>(
+                crossCode,
+                std::make_shared<TSchedulerCrossJoinState>(leftType, rightType),
+                NScheduler::TInputPort{.Connection = &vectorRef, .Lane = m},
+                NScheduler::TInputPort{.Connection = &broadcastRef, .Lane = m},
+                NScheduler::TOutputPort{.Connection = crossOut, .Lane = m});
+            auto& node = Graph_.AddOwnedNode(std::move(task));
+            Graph_.AddEdge(*vectorOut.Producers[m], node, vectorRef, m, m);
+            Graph_.AddEdge(fwdNode, node, broadcastRef, 0, m);
+            crossNodes.push_back(&node);
+        }
+
+        if (!hasResidual) {
+            return TLoweredOutput{
+                .Producers = std::move(crossNodes),
+                .OutputType = std::move(crossType),
+            };
+        }
+
+        // Residual predicate is a plain filter over the glued schema.
+        auto filterOp =
+            std::make_shared<TFilterOperator>(join.Left(), join.Filter());
+        auto stage =
+            BuildSchedulerFilterStage(*filterOp, crossType, Diagnostics_);
+        TLoweredOutput result;
+        result.OutputType = std::move(stage.OutputType);
+        result.Producers.reserve(lanes);
+        for (size_t m = 0; m < lanes; ++m) {
+            auto task = std::make_unique<NScheduler::TUnaryTask>(
+                stage.Code,
+                stage.MakeState(m),
+                NScheduler::TInputPort{.Connection = residualConn, .Lane = m},
+                NScheduler::TOutputPort{.Connection = &outConn, .Lane = m});
+            auto& node = Graph_.AddOwnedNode(std::move(task));
+            Graph_.AddEdge(*crossNodes[m], node, *residualConn, m, m);
+            result.Producers.push_back(&node);
+        }
+        return result;
     }
 
     TLoweredOutput LowerJoin(
