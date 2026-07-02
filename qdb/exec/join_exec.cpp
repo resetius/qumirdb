@@ -288,13 +288,19 @@ bool TJoinOutputBuilder::NextBatch(TRowSet& out) {
 TInnerJoinProcessor::TInnerJoinProcessor(
     TTypePtr leftType,
     TTypePtr rightType,
-    TJoinKernels kernels)
+    TJoinKernels kernels,
+    EJoinType joinType)
     : LeftType_(std::move(leftType))
     , RightType_(std::move(rightType))
     , Kernels_(std::move(kernels))
+    , JoinType_(joinType)
 {
     Builder_.emplace(&LeftRows_, &RightRows_,
         BuildJoinColumns(LeftType_, RightType_, true));
+}
+
+bool TInnerJoinProcessor::IsOuter() const {
+    return JoinType_ == EJoinType::Left || JoinType_ == EJoinType::Right;
 }
 
 TInnerJoinProcessor::~TInnerJoinProcessor() {
@@ -519,11 +525,18 @@ bool TInnerJoinProcessor::PullOneInputBatch(
         return true;
     };
 
+    // Outer joins must keep both sides materialized to emit unmatched rows in
+    // the final scan, so they never switch to the streaming (drop-one-side)
+    // path; they keep storing the remaining side after the other finishes.
+    const bool allowStreaming = !IsOuter();
+
     for (;;) {
-        if (StreamMode_ == EJoinStreamMode::StreamLeftAgainstRight) {
+        if (allowStreaming &&
+            StreamMode_ == EJoinStreamMode::StreamLeftAgainstRight) {
             return streamLeft();
         }
-        if (StreamMode_ == EJoinStreamMode::StreamRightAgainstLeft) {
+        if (allowStreaming &&
+            StreamMode_ == EJoinStreamMode::StreamRightAgainstLeft) {
             return streamRight();
         }
 
@@ -532,12 +545,18 @@ bool TInnerJoinProcessor::PullOneInputBatch(
             return true;
         }
         if (LeftDone_) {
-            StreamMode_ = EJoinStreamMode::StreamRightAgainstLeft;
-            continue;
+            if (allowStreaming) {
+                StreamMode_ = EJoinStreamMode::StreamRightAgainstLeft;
+                continue;
+            }
+            return processRight();
         }
         if (RightDone_) {
-            StreamMode_ = EJoinStreamMode::StreamLeftAgainstRight;
-            continue;
+            if (allowStreaming) {
+                StreamMode_ = EJoinStreamMode::StreamLeftAgainstRight;
+                continue;
+            }
+            return processLeft();
         }
 
         const auto first = ChooseSymmetricPullSide();
@@ -554,6 +573,21 @@ bool TInnerJoinProcessor::PullOneInputBatch(
     }
 }
 
+void TInnerJoinProcessor::FinalizeOuterJoin() {
+    // LEFT: emit left rows unmatched against the right table (right = null).
+    // RIGHT: symmetric; swap pair columns so left stays the left side.
+    if (JoinType_ == EJoinType::Left) {
+        Kernels_.FinalizeOuter(LeftTable_.data(), RightTable_.data(), &PairBuffer_);
+    } else {
+        Kernels_.FinalizeOuter(RightTable_.data(), LeftTable_.data(), &PairBuffer_);
+        for (int64_t i = 0; i < PairBuffer_.Count; ++i) {
+            std::swap(PairBuffer_.Data[2 * i], PairBuffer_.Data[2 * i + 1]);
+        }
+    }
+    DrainKernelPairs();
+    OuterFinalized_ = true;
+}
+
 EJoinProcessorResult TInnerJoinProcessor::Process(
     const TFetch& left,
     const TFetch& right,
@@ -561,11 +595,22 @@ EJoinProcessorResult TInnerJoinProcessor::Process(
 {
     EnsureInit();
 
+    // Once both inputs are drained, outer joins emit their unmatched rows.
+    auto finishedResult = [&]() -> EJoinProcessorResult {
+        if (IsOuter() && !OuterFinalized_) {
+            FinalizeOuterJoin();
+            if (DrainReadyOutput(output) || DrainBuilder(*Builder_, output)) {
+                return EJoinProcessorResult::OK;
+            }
+        }
+        return EJoinProcessorResult::FINISHED;
+    };
+
     if (DrainReadyOutput(output) || DrainBuilder(*Builder_, output)) {
         return EJoinProcessorResult::OK;
     }
     if (BothDone_) {
-        return EJoinProcessorResult::FINISHED;
+        return finishedResult();
     }
     if (!PullOneInputBatch(left, right)) {
         return EJoinProcessorResult::NEED_DATA;
@@ -573,9 +618,7 @@ EJoinProcessorResult TInnerJoinProcessor::Process(
     if (DrainReadyOutput(output) || DrainBuilder(*Builder_, output)) {
         return EJoinProcessorResult::OK;
     }
-    return BothDone_
-        ? EJoinProcessorResult::FINISHED
-        : EJoinProcessorResult::NEED_DATA;
+    return BothDone_ ? finishedResult() : EJoinProcessorResult::NEED_DATA;
 }
 
 TRuntimeCrossJoin::TRuntimeCrossJoin(std::unique_ptr<IRuntimeNode> left,

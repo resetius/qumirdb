@@ -187,7 +187,8 @@ public:
     TInnerJoinProcessor(
         NQumir::NAst::TTypePtr leftType,
         NQumir::NAst::TTypePtr rightType,
-        TJoinKernels kernels);
+        TJoinKernels kernels,
+        EJoinType joinType = EJoinType::Inner);
     TInnerJoinProcessor(const TInnerJoinProcessor&) = delete;
     TInnerJoinProcessor& operator=(const TInnerJoinProcessor&) = delete;
     ~TInnerJoinProcessor();
@@ -206,17 +207,21 @@ private:
     };
     static_assert(sizeof(TPairBufferState) == TKernelCompiler::kPairBufferSize);
 
+    bool IsOuter() const;
     void EnsureInit();
     bool DrainReadyOutput(TRowSet& rowSet);
     void DrainKernelPairs();
     void DrainStreamingPairs(const TRowSet& streamBatch, EJoinSide streamSide);
     bool PullOneInputBatch(const TFetch& left, const TFetch& right);
+    void FinalizeOuterJoin();
     EJoinSide ChooseSymmetricPullSide() const;
 
 private:
     NQumir::NAst::TTypePtr LeftType_;
     NQumir::NAst::TTypePtr RightType_;
     TJoinKernels Kernels_;
+    EJoinType JoinType_ = EJoinType::Inner;
+    bool OuterFinalized_ = false;
     TRowStore LeftRows_;
     TRowStore RightRows_;
     std::array<uint8_t, TKernelCompiler::kHashTableSize> LeftTable_{};
