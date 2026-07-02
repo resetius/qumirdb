@@ -118,11 +118,13 @@ struct TSchedulerInnerJoinState {
     TSchedulerInnerJoinState(
         NQumir::NAst::TTypePtr leftType,
         NQumir::NAst::TTypePtr rightType,
-        TJoinKernels kernels)
+        TJoinKernels kernels,
+        EJoinType joinType)
         : Processor(
             std::move(leftType),
             std::move(rightType),
-            std::move(kernels))
+            std::move(kernels),
+            joinType)
     {}
 
     TInnerJoinProcessor Processor;
@@ -389,7 +391,12 @@ public:
         }
         if (auto n = TMaybeOp<TJoinOperator>(op)) {
             auto join = n.Cast();
-            if (join->JoinType() != EJoinType::Inner || join->Keys().empty()) {
+            // Inner and left/right outer equi-joins are hash-partitionable.
+            const bool supportedType =
+                join->JoinType() == EJoinType::Inner ||
+                join->JoinType() == EJoinType::Left ||
+                join->JoinType() == EJoinType::Right;
+            if (!supportedType || join->Keys().empty()) {
                 return 0;
             }
             if (OutputLanes(join->Left()) == 0 ||
@@ -1199,7 +1206,7 @@ private:
             auto task = std::make_unique<NScheduler::TBinaryBlockingTask>(
                 joinCode,
                 std::make_shared<TSchedulerInnerJoinState>(
-                    leftType, rightType, *joinKernels),
+                    leftType, rightType, *joinKernels, join.JoinType()),
                 NScheduler::TInputPort{
                     .Connection = leftShuf.Connection, .Lane = j},
                 NScheduler::TInputPort{
