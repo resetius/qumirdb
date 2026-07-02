@@ -158,15 +158,28 @@ std::unique_ptr<IRuntimeNode> TPhysicalPlanner::Build(const TOperatorPtr& root) 
             throw std::runtime_error("join inputs must have TStructType");
         }
 
-        // Cross join: no key columns → Cartesian product executor.
+        // Cross join: no key columns → Cartesian product executor. A residual
+        // predicate on a keyless join is just a filter over the glued output
+        // schema (cross -> filter).
         if (join->Keys().empty()) {
             auto outputType = ComputeJoinOutputType(
                 left->OutputType(), right->OutputType(), join->JoinType());
             if (!outputType) {
                 throw std::runtime_error("cross join: " + outputType.error().ToString());
             }
-            return std::make_unique<TRuntimeCrossJoin>(
-                std::move(left), std::move(right), std::move(*outputType));
+            auto crossType = *outputType;
+            std::unique_ptr<IRuntimeNode> cross =
+                std::make_unique<TRuntimeCrossJoin>(
+                    std::move(left), std::move(right), crossType);
+            if (join->Filter()) {
+                auto residualFilter =
+                    std::make_shared<TFilterOperator>(join, join->Filter());
+                auto runtime = BuildFilterRuntimeProcess(
+                    *residualFilter, crossType, Diagnostics_);
+                return std::make_unique<TRuntimeUnaryStreamingKernel>(
+                    std::move(cross), crossType, std::move(runtime.Process));
+            }
+            return cross;
         }
 
         auto spec = NKernel::BuildJoinKernelSpec(
