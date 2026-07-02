@@ -238,6 +238,115 @@ struct TLoweredOutput {
     NQumir::NAst::TTypePtr OutputType;
 };
 
+// A rowset-wide hash over aggregate group keys computed in C++ (no JIT), so the
+// shuffle works for any key type including strings. The shuffle only needs a
+// consistent hash (equal keys -> equal partition); it need not match the
+// aggregate kernel's internal hash, since partitions are disjoint and each
+// re-aggregates fully. One hash per physical row; selection is applied by the
+// scatter, not here.
+inline std::function<bool(TRowSet*, uint64_t*)> MakeGroupKeyHash(
+    const NQumir::NAst::TStructType& inputType,
+    const std::vector<std::string>& groupKeys)
+{
+    using namespace NQumir::NAst;
+
+    struct TKeyColumn {
+        int32_t Index = 0;
+        int32_t Width = 0; // fixed-width byte size; 0 for string/bool
+        bool IsString = false;
+        bool IsBool = false;
+    };
+
+    std::vector<TKeyColumn> cols;
+    cols.reserve(groupKeys.size());
+    for (const auto& groupKey : groupKeys) {
+        int32_t index = -1;
+        TTypePtr fieldType;
+        for (size_t i = 0; i < inputType.Fields.size(); ++i) {
+            std::string name = inputType.Fields[i].first;
+            auto dot = name.rfind('.');
+            const std::string bare =
+                dot != std::string::npos ? name.substr(dot + 1) : name;
+            if (bare == groupKey || name == groupKey) {
+                index = static_cast<int32_t>(i);
+                fieldType = inputType.Fields[i].second;
+                break;
+            }
+        }
+        if (index < 0) {
+            throw std::runtime_error(
+                "group key not found in aggregate input: " + groupKey);
+        }
+        TKeyColumn kc;
+        kc.Index = index;
+        auto inner = UnwrapNamedType(UnwrapNullableType(fieldType));
+        if (TMaybeType<TStringType>(inner)) {
+            kc.IsString = true;
+        } else if (TMaybeType<TBoolType>(inner)) {
+            kc.IsBool = true;
+        } else if (auto integer = TMaybeType<TIntegerType>(inner)) {
+            kc.Width = integer.Cast()->BitWidth() / 8;
+        } else if (TMaybeType<TFloatType>(inner)) {
+            kc.Width = 8;
+        } else {
+            throw std::runtime_error("unsupported group key type for hash");
+        }
+        cols.push_back(kc);
+    }
+
+    return [cols](TRowSet* batch, uint64_t* hashes) -> bool {
+        constexpr uint64_t kOffset = 0xcbf29ce484222325ULL;
+        constexpr uint64_t kPrime = 0x100000001b3ULL;
+        auto mixBytes = [](uint64_t h, const char* data, size_t len) {
+            for (size_t i = 0; i < len; ++i) {
+                h ^= static_cast<uint8_t>(data[i]);
+                h *= kPrime;
+            }
+            return h;
+        };
+        for (int64_t row = 0; row < batch->RowCount; ++row) {
+            uint64_t h = kOffset;
+            for (const auto& kc : cols) {
+                const TColumn& col = batch->Columns[kc.Index];
+                const int32_t r = static_cast<int32_t>(row);
+                const bool valid = !col.Mask ||
+                    ((col.Mask[(col.MaskBitOffset + r) / 8] >>
+                        ((col.MaskBitOffset + r) % 8)) & 1);
+                if (!valid) {
+                    h ^= 0x9e3779b97f4a7c15ULL; // null sentinel
+                    h *= kPrime;
+                    continue;
+                }
+                if (kc.IsString) {
+                    int64_t begin;
+                    int64_t end;
+                    if (col.OffsetWidth == 8) {
+                        begin = static_cast<const int64_t*>(col.Offsets)[r];
+                        end = static_cast<const int64_t*>(col.Offsets)[r + 1];
+                    } else {
+                        begin = static_cast<const int32_t*>(col.Offsets)[r];
+                        end = static_cast<const int32_t*>(col.Offsets)[r + 1];
+                    }
+                    h = mixBytes(h, col.Data + begin,
+                        static_cast<size_t>(end - begin));
+                } else if (kc.IsBool) {
+                    const uint8_t v = (static_cast<const uint8_t*>(
+                        static_cast<const void*>(col.Data))[
+                            (col.DataBitOffset + r) / 8] >>
+                        ((col.DataBitOffset + r) % 8)) & 1;
+                    h = mixBytes(h,
+                        static_cast<const char*>(static_cast<const void*>(&v)), 1);
+                } else {
+                    h = mixBytes(h, col.Data + static_cast<size_t>(r) * kc.Width,
+                        static_cast<size_t>(kc.Width));
+                }
+            }
+            hashes[row] = h;
+        }
+        return true;
+    };
+}
+
 class TSchedulerGraphLowerer {
 public:
     TSchedulerGraphLowerer(
@@ -266,11 +375,8 @@ public:
             }
             // Grouped aggregate over a parallel input is hash-shuffled by group
             // key into partition-local aggregates (disjoint groups), so its
-            // output keeps the shuffle partition count. Only when the group keys
-            // are hashable; otherwise it stays a single gathered aggregate.
-            if (!n.Cast()->GroupKeys().empty() && childLanes > 1 &&
-                AggregateGroupKeysHashable(*n.Cast()))
-            {
+            // output keeps the shuffle partition count.
+            if (!n.Cast()->GroupKeys().empty() && childLanes > 1) {
                 return JoinPartitions();
             }
             return 1;
@@ -369,41 +475,6 @@ private:
             return OutputLanes(n.Cast()->Input()) != 0;
         }
         return false;
-    }
-
-    // A grouped aggregate can be hash-shuffled only when its group keys are
-    // hashable by the shared join/aggregate key machinery, which does not yet
-    // support string keys. String-keyed group-bys fall back to a single
-    // gathered aggregate.
-    bool AggregateGroupKeysHashable(TAggregateOperator& aggregate) const {
-        using namespace NQumir::NAst;
-        auto inputType = aggregate.Input()->OutputColumns();
-        auto* st = static_cast<TStructType*>(inputType.get());
-        if (!st) {
-            return false;
-        }
-        for (const auto& groupKey : aggregate.GroupKeys()) {
-            const TTypePtr* fieldType = nullptr;
-            for (const auto& [name, type] : st->Fields) {
-                std::string bare = name;
-                auto dot = bare.rfind('.');
-                if (dot != std::string::npos) {
-                    bare = bare.substr(dot + 1);
-                }
-                if (bare == groupKey || name == groupKey) {
-                    fieldType = &type;
-                    break;
-                }
-            }
-            if (!fieldType) {
-                return false;
-            }
-            auto inner = UnwrapNamedType(UnwrapNullableType(*fieldType));
-            if (TMaybeType<TStringType>(inner)) {
-                return false;
-            }
-        }
-        return true;
     }
 
     std::vector<NScheduler::TScanSplit> ScanSplits(TSourceOperator& src) const {
@@ -595,11 +666,8 @@ private:
         NScheduler::IConnection& outConn)
     {
         const size_t childLanes = OutputLanes(aggregate.Input());
-        // Ungrouped, non-parallel input, or non-hashable (e.g. string) group
-        // keys: single gathered aggregate.
-        if (aggregate.GroupKeys().empty() || childLanes <= 1 ||
-            !AggregateGroupKeysHashable(aggregate))
-        {
+        // Ungrouped or non-parallel input: single gathered aggregate.
+        if (aggregate.GroupKeys().empty() || childLanes <= 1) {
             return LowerBlocking(
                 aggregate.Input(),
                 [&](const NQumir::NAst::TTypePtr& childType) {
@@ -625,9 +693,7 @@ private:
         if (!childStruct) {
             throw std::runtime_error("aggregate input must have TStructType");
         }
-        TKernelCompiler compiler(Diagnostics_);
-        auto groupHash = compiler.CompileGroupHash(
-            *childStruct, aggregate.GroupKeys());
+        auto groupHash = MakeGroupKeyHash(*childStruct, aggregate.GroupKeys());
         auto tail = BuildAggregateTail(childType, aggregate);
 
         auto shuffle =
