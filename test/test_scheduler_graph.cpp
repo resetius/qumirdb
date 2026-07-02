@@ -141,7 +141,7 @@ TEST(SchedulerGraph, PrintsConnectionsAndLaneMapping) {
     std::stringstream out;
     graph.Print(out);
     const auto text = out.str();
-    EXPECT_NE(text.find("conn c0 gather src=2 dst=1"), std::string::npos);
+    EXPECT_NE(text.find("conn c0 - gather src=2 dst=1"), std::string::npos);
     EXPECT_NE(text.find("edge e0 n0[0] -> n2[0] via c0"), std::string::npos);
     EXPECT_NE(text.find("edge e1 n1[1] -> n2[0] via c0"), std::string::npos);
 }

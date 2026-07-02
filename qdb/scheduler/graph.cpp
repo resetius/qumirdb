@@ -24,6 +24,8 @@ const char* ConnectionKindName(EConnectionKind kind) {
             return "gather";
         case EConnectionKind::HashShuffle:
             return "hash-shuffle";
+        case EConnectionKind::Broadcast:
+            return "broadcast";
     }
     return "unknown";
 }
@@ -203,6 +205,7 @@ void TTaskGraph::Print(std::ostream& out) const {
     for (size_t i = 0; i < OwnedConnections_.size(); ++i) {
         const auto& conn = OwnedConnections_[i];
         out << "conn c" << i
+            << " " << (conn->DebugName().empty() ? "-" : conn->DebugName())
             << " " << ConnectionKindName(conn->Kind())
             << " src=" << conn->SrcCount()
             << " dst=" << conn->DstCount() << "\n";
@@ -223,6 +226,23 @@ void TTaskGraph::Print(std::ostream& out) const {
             << nodeIds[edge->Dst]
             << "[" << edge->DstLane << "] via c"
             << connectionIds[edge->Connection] << "\n";
+    }
+}
+
+void TTaskGraph::PrintConnectionStats(std::ostream& out) const {
+    for (size_t i = 0; i < OwnedConnections_.size(); ++i) {
+        const auto& conn = OwnedConnections_[i];
+        auto stats = conn->Stats();
+        out << "conn c" << i
+            << " " << (conn->DebugName().empty() ? "-" : conn->DebugName())
+            << " " << ConnectionKindName(conn->Kind())
+            << " pushed=" << stats.Pushed
+            << " popped=" << stats.Popped
+            << " finished=" << stats.Finished
+            << " blocked_push=" << stats.BlockedPush
+            << " empty_fetch=" << stats.EmptyFetch
+            << " finished_fetch=" << stats.FinishedFetch
+            << "\n";
     }
 }
 

@@ -1,5 +1,6 @@
 #include <qdb/scheduler/runtime_node.h>
 
+#include <ostream>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -52,11 +53,13 @@ TRuntimeSchedulerPipeline::TRuntimeSchedulerPipeline(
     std::unique_ptr<TTaskGraph> graph,
     TSettings settings,
     NQumir::NAst::TTypePtr outputType,
-    std::shared_ptr<TBufferedSchedulerOutput> output)
+    std::shared_ptr<TBufferedSchedulerOutput> output,
+    std::ostream* diagnostics)
     : Graph_(std::move(graph))
     , Settings_(settings)
     , OutputType_(std::move(outputType))
     , Output_(std::move(output))
+    , Diagnostics_(diagnostics)
 {}
 
 bool TRuntimeSchedulerPipeline::Next(TRowSet& rowSet)
@@ -67,6 +70,24 @@ bool TRuntimeSchedulerPipeline::Next(TRowSet& rowSet)
         TSchedulerExecutor executor(*Graph_, Settings_);
         if (!executor.Run(&error)) {
             throw std::runtime_error(error);
+        }
+        if (Settings_.Queue.EnableDebugCounters && Diagnostics_) {
+            auto stats = executor.Stats();
+            *Diagnostics_ << "\n========== SCHEDULER COUNTERS ==========\n";
+            *Diagnostics_
+                << "scheduled=" << stats.Scheduled
+                << " popped=" << stats.Popped
+                << " executed=" << stats.Executed
+                << " ok=" << stats.Ok
+                << " need_data=" << stats.NeedData
+                << " blocked_output=" << stats.BlockedOutput
+                << " finished=" << stats.Finished
+                << " rescheduled=" << stats.Rescheduled
+                << " ready_push_retries=" << stats.ReadyPushRetries
+                << " empty_ready_polls=" << stats.EmptyReadyPolls
+                << "\n";
+            Graph_->PrintConnectionStats(*Diagnostics_);
+            *Diagnostics_ << "========================================\n";
         }
     }
     return Output_->Next(rowSet);
