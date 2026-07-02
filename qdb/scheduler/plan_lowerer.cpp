@@ -14,6 +14,7 @@
 #include <qdb/plan/ops/project.h>
 #include <qdb/plan/ops/sort.h>
 #include <qdb/plan/ops/source.h>
+#include <qdb/plan/types/nullable.h>
 #include <qdb/scheduler/connection.h>
 #include <qdb/scheduler/graph.h>
 #include <qdb/scheduler/runtime_node.h>
@@ -258,8 +259,23 @@ public:
         if (auto n = TMaybeOp<TProjectOperator>(op)) {
             return OutputLanes(n.Cast()->Input());
         }
-        if (TMaybeOp<TAggregateOperator>(op) ||
-            TMaybeOp<TLimitOperator>(op) ||
+        if (auto n = TMaybeOp<TAggregateOperator>(op)) {
+            const size_t childLanes = OutputLanes(n.Cast()->Input());
+            if (childLanes == 0) {
+                return 0;
+            }
+            // Grouped aggregate over a parallel input is hash-shuffled by group
+            // key into partition-local aggregates (disjoint groups), so its
+            // output keeps the shuffle partition count. Only when the group keys
+            // are hashable; otherwise it stays a single gathered aggregate.
+            if (!n.Cast()->GroupKeys().empty() && childLanes > 1 &&
+                AggregateGroupKeysHashable(*n.Cast()))
+            {
+                return JoinPartitions();
+            }
+            return 1;
+        }
+        if (TMaybeOp<TLimitOperator>(op) ||
             TMaybeOp<TSortOperator>(op) ||
             TMaybeOp<TTopSortOperator>(op))
         {
@@ -353,6 +369,41 @@ private:
             return OutputLanes(n.Cast()->Input()) != 0;
         }
         return false;
+    }
+
+    // A grouped aggregate can be hash-shuffled only when its group keys are
+    // hashable by the shared join/aggregate key machinery, which does not yet
+    // support string keys. String-keyed group-bys fall back to a single
+    // gathered aggregate.
+    bool AggregateGroupKeysHashable(TAggregateOperator& aggregate) const {
+        using namespace NQumir::NAst;
+        auto inputType = aggregate.Input()->OutputColumns();
+        auto* st = static_cast<TStructType*>(inputType.get());
+        if (!st) {
+            return false;
+        }
+        for (const auto& groupKey : aggregate.GroupKeys()) {
+            const TTypePtr* fieldType = nullptr;
+            for (const auto& [name, type] : st->Fields) {
+                std::string bare = name;
+                auto dot = bare.rfind('.');
+                if (dot != std::string::npos) {
+                    bare = bare.substr(dot + 1);
+                }
+                if (bare == groupKey || name == groupKey) {
+                    fieldType = &type;
+                    break;
+                }
+            }
+            if (!fieldType) {
+                return false;
+            }
+            auto inner = UnwrapNamedType(UnwrapNullableType(*fieldType));
+            if (TMaybeType<TStringType>(inner)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     std::vector<NScheduler::TScanSplit> ScanSplits(TSourceOperator& src) const {
@@ -490,59 +541,133 @@ private:
         };
     }
 
+    // Builds the aggregate code + partition-local state factory + output type
+    // for a given (already-lowered) input type. Kernels are compiled once and
+    // shared across all partition states.
+    TBlockingTail BuildAggregateTail(
+        const NQumir::NAst::TTypePtr& childType,
+        TAggregateOperator& aggregate)
+    {
+        auto* inputType =
+            static_cast<NQumir::NAst::TStructType*>(childType.get());
+        if (!inputType) {
+            throw std::runtime_error("aggregate input must have TStructType");
+        }
+        auto spec = NKernel::BuildAggregateKernelSpec(
+            *inputType, aggregate.GroupKeys(), aggregate.Aggs());
+        TKernelCompiler compiler(Diagnostics_);
+        auto kernels = std::make_shared<TAggregateKernels>(
+            compiler.CompileAggregate(spec));
+        auto code = std::make_shared<NScheduler::TBlockingCode>(
+            [](void* state, NScheduler::TInputPort& input, TRowSet& output) {
+                auto* s = static_cast<TAggregateBlockingState*>(state);
+                if (s->Done) {
+                    return NScheduler::ETaskResult::FINISHED;
+                }
+                TRowSet rowSet{};
+                while (true) {
+                    auto fetch = input.Fetch(rowSet);
+                    if (fetch == NScheduler::EFetchResult::NO_DATA) {
+                        return NScheduler::ETaskResult::NEED_DATA;
+                    }
+                    if (fetch == NScheduler::EFetchResult::FINISHED) {
+                        s->Done = true;
+                        s->Processor.Finish(output);
+                        return NScheduler::ETaskResult::OK;
+                    }
+                    s->Processor.Add(rowSet);
+                    Release(&rowSet);
+                    rowSet = {};
+                }
+            });
+        return TBlockingTail{
+            .Code = std::move(code),
+            .MakeState = [kernels]() -> std::shared_ptr<void> {
+                return std::make_shared<TAggregateBlockingState>(*kernels);
+            },
+            .OutputType = ComputeAggregateOutputType(
+                childType, aggregate.GroupKeys(), aggregate.Aggs()),
+        };
+    }
+
     TLoweredOutput LowerAggregate(
         TAggregateOperator& aggregate,
         NScheduler::IConnection& outConn)
     {
-        return LowerBlocking(
-            aggregate.Input(),
-            [&](const NQumir::NAst::TTypePtr& childType) {
-                auto* inputType =
-                    static_cast<NQumir::NAst::TStructType*>(childType.get());
-                if (!inputType) {
-                    throw std::runtime_error(
-                        "aggregate input must have TStructType");
-                }
-                auto spec = NKernel::BuildAggregateKernelSpec(
-                    *inputType, aggregate.GroupKeys(), aggregate.Aggs());
-                TKernelCompiler compiler(Diagnostics_);
-                auto kernels = std::make_shared<TAggregateKernels>(
-                    compiler.CompileAggregate(spec));
-                auto code = std::make_shared<NScheduler::TBlockingCode>(
-                    [](void* state,
-                       NScheduler::TInputPort& input,
-                       TRowSet& output)
-                    {
-                        auto* s = static_cast<TAggregateBlockingState*>(state);
-                        if (s->Done) {
-                            return NScheduler::ETaskResult::FINISHED;
-                        }
-                        TRowSet rowSet{};
-                        while (true) {
-                            auto fetch = input.Fetch(rowSet);
-                            if (fetch == NScheduler::EFetchResult::NO_DATA) {
-                                return NScheduler::ETaskResult::NEED_DATA;
-                            }
-                            if (fetch == NScheduler::EFetchResult::FINISHED) {
-                                s->Done = true;
-                                s->Processor.Finish(output);
-                                return NScheduler::ETaskResult::OK;
-                            }
-                            s->Processor.Add(rowSet);
-                            Release(&rowSet);
-                            rowSet = {};
-                        }
-                    });
-                return TBlockingTail{
-                    .Code = std::move(code),
-                    .MakeState = [kernels]() -> std::shared_ptr<void> {
-                        return std::make_shared<TAggregateBlockingState>(*kernels);
-                    },
-                    .OutputType = ComputeAggregateOutputType(
-                        childType, aggregate.GroupKeys(), aggregate.Aggs()),
-                };
-            },
-            outConn);
+        const size_t childLanes = OutputLanes(aggregate.Input());
+        // Ungrouped, non-parallel input, or non-hashable (e.g. string) group
+        // keys: single gathered aggregate.
+        if (aggregate.GroupKeys().empty() || childLanes <= 1 ||
+            !AggregateGroupKeysHashable(aggregate))
+        {
+            return LowerBlocking(
+                aggregate.Input(),
+                [&](const NQumir::NAst::TTypePtr& childType) {
+                    return BuildAggregateTail(childType, aggregate);
+                },
+                outConn);
+        }
+
+        // Grouped aggregate: hash-shuffle the input by group key into `parts`
+        // partition-local aggregates. Matching keys land in one partition, so
+        // each computes complete groups; the parent gathers the partitions.
+        const size_t parts = JoinPartitions();
+        const size_t cap = QueueCapacity();
+
+        auto childConn = std::make_unique<NScheduler::TOneToOneConnection>(cap);
+        childConn->Resize(childLanes, childLanes);
+        auto& childConnRef = Graph_.AddConnection(std::move(childConn));
+        auto childOut = Lower(aggregate.Input(), childConnRef);
+
+        auto childType = childOut.OutputType;
+        auto* childStruct =
+            static_cast<NQumir::NAst::TStructType*>(childType.get());
+        if (!childStruct) {
+            throw std::runtime_error("aggregate input must have TStructType");
+        }
+        TKernelCompiler compiler(Diagnostics_);
+        auto groupHash = compiler.CompileGroupHash(
+            *childStruct, aggregate.GroupKeys());
+        auto tail = BuildAggregateTail(childType, aggregate);
+
+        auto shuffle =
+            std::make_unique<NScheduler::THashShuffleConnection>(cap);
+        shuffle->Resize(childLanes, parts);
+        auto* shufPtr = shuffle.get();
+        auto& shufRef = Graph_.AddConnection(std::move(shuffle));
+
+        auto hashCode = std::make_shared<NScheduler::THashShuffleCode>(
+            std::move(groupHash));
+        std::vector<NScheduler::TTaskNode*> shufNodes;
+        shufNodes.reserve(childLanes);
+        for (size_t i = 0; i < childLanes; ++i) {
+            auto task = std::make_unique<NScheduler::THashShuffleTask>(
+                hashCode,
+                std::make_shared<int>(0),
+                NScheduler::TInputPort{.Connection = &childConnRef, .Lane = i},
+                *shufPtr,
+                i);
+            auto& node = Graph_.AddOwnedNode(std::move(task));
+            Graph_.AddEdge(*childOut.Producers[i], node, childConnRef, i, i);
+            shufNodes.push_back(&node);
+        }
+
+        TLoweredOutput result;
+        result.OutputType = tail.OutputType;
+        result.Producers.reserve(parts);
+        for (size_t m = 0; m < parts; ++m) {
+            auto task = std::make_unique<NScheduler::TBlockingTask>(
+                tail.Code,
+                tail.MakeState(),
+                NScheduler::TInputPort{.Connection = &shufRef, .Lane = m},
+                NScheduler::TOutputPort{.Connection = &outConn, .Lane = m});
+            auto& node = Graph_.AddOwnedNode(std::move(task));
+            for (size_t s = 0; s < childLanes; ++s) {
+                Graph_.AddEdge(*shufNodes[s], node, shufRef, s, m);
+            }
+            result.Producers.push_back(&node);
+        }
+        return result;
     }
 
     TLoweredOutput LowerLimit(
