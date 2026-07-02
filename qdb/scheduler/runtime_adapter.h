@@ -4,6 +4,8 @@
 #include <qdb/scheduler/connection.h>
 #include <qdb/scheduler/state.h>
 
+#include <qumir/parser/type.h>
+
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -76,8 +78,17 @@ struct THashShuffleCode {
     using THash = std::function<bool(TRowSet*, uint64_t*)>;
 
     explicit THashShuffleCode(THash hash);
+    THashShuffleCode(THash hash,
+        NQumir::NAst::TTypePtr inputType,
+        size_t targetOutputBatchRows,
+        size_t maxOutputBatchRows,
+        size_t targetOutputBatchBytes);
 
     THash Hash;
+    NQumir::NAst::TTypePtr InputType;
+    size_t TargetOutputBatchRows = 0;
+    size_t MaxOutputBatchRows = 0;
+    size_t TargetOutputBatchBytes = 0;
 };
 
 struct TMergeCode {
@@ -245,9 +256,21 @@ public:
     const std::shared_ptr<void>& State() const;
 
 private:
+    struct TBufferedBatch;
+    struct TDestinationBuffer;
     struct TPendingOutput;
 
+    bool BatchingEnabled() const;
+    void EnsureBuffers(size_t partitions);
     void Scatter(TRowSet& rowSet);
+    void ScatterBuffered(TRowSet& rowSet);
+    void ScatterViews(TRowSet& rowSet);
+    void AddBufferedRows(size_t dst,
+        const std::shared_ptr<TRowSet>& input,
+        std::vector<int32_t>&& rows,
+        size_t bytes);
+    void FlushBuffer(size_t dst);
+    void FlushAllBuffers();
     ETaskResult PushPending();
     void ClearPending();
 
@@ -258,6 +281,7 @@ private:
     THashShuffleConnection* Output_ = nullptr;
     size_t SourceLane_ = 0;
     std::vector<uint64_t> Hashes_;
+    std::vector<std::unique_ptr<TDestinationBuffer>> Buffers_;
     std::vector<TPendingOutput> Pending_;
     size_t PendingIndex_ = 0;
     bool OutputFinished_ = false;

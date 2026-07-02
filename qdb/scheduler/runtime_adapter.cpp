@@ -1,5 +1,11 @@
 #include <qdb/scheduler/runtime_adapter.h>
 
+#include <qdb/plan/types/nullable.h>
+
+#include <qumir/error.h>
+
+#include <algorithm>
+#include <cstring>
 #include <memory>
 #include <stdexcept>
 #include <utility>
@@ -9,14 +15,32 @@ namespace NQdb {
 namespace NScheduler {
 namespace {
 
+using namespace NQumir::NAst;
+
 struct THashShuffleRowSetData {
     std::shared_ptr<TRowSet> Input;
     std::vector<uint8_t> Selection;
 };
 
+struct TShuffleColumnData {
+    std::vector<char> Data;
+    std::vector<int64_t> Offsets;
+    std::vector<uint8_t> Mask;
+    TColumn Column{};
+};
+
+struct TMaterializedShuffleRowSetData {
+    std::vector<TShuffleColumnData> Gathered;
+    std::vector<TColumn> Columns;
+};
+
 void DestroyHashShuffleRowSet(TRowSet* rowSet) {
     auto* data = static_cast<THashShuffleRowSetData*>(rowSet->Private);
     delete data;
+}
+
+void DestroyMaterializedShuffleRowSet(TRowSet* rowSet) {
+    delete static_cast<TMaterializedShuffleRowSetData*>(rowSet->Private);
 }
 
 void DestroySharedRowSet(TRowSet* rowSet) {
@@ -26,6 +50,74 @@ void DestroySharedRowSet(TRowSet* rowSet) {
 
 bool RowSelected(const TRowSet& rowSet, int64_t row) {
     return !rowSet.Selection || rowSet.Selection[row] != 0;
+}
+
+bool SourceValid(const TColumn& col, int32_t row) {
+    if (!col.Mask) {
+        return true;
+    }
+    const int32_t bit = col.MaskBitOffset + row;
+    return ((col.Mask[bit / 8] >> (bit % 8)) & 1) != 0;
+}
+
+int64_t OffsetAt(const TColumn& col, int32_t i) {
+    if (col.OffsetWidth == 8) {
+        return static_cast<const int64_t*>(col.Offsets)[i];
+    }
+    return static_cast<const int32_t*>(col.Offsets)[i];
+}
+
+bool BoolAt(const TColumn& col, int32_t row) {
+    const auto* bits = reinterpret_cast<const uint8_t*>(col.Data);
+    const int32_t bit = col.DataBitOffset + row;
+    return ((bits[bit / 8] >> (bit % 8)) & 1) != 0;
+}
+
+void ClearBit(std::vector<uint8_t>& mask, size_t i) {
+    mask[i / 8] &= ~(uint8_t(1) << (i % 8));
+}
+
+TTypePtr ShuffleValueType(const TTypePtr& type) {
+    return UnwrapNamedType(UnwrapNullableType(type));
+}
+
+size_t ShuffleColumnFixedWidth(const TTypePtr& type) {
+    auto valueType = ShuffleValueType(type);
+    if (auto integer = TMaybeType<TIntegerType>(valueType)) {
+        return static_cast<size_t>(integer.Cast()->BitWidth() / 8);
+    }
+    if (TMaybeType<TFloatType>(valueType)) {
+        return 8;
+    }
+    if (TMaybeType<TBoolType>(valueType) || TMaybeType<TStringType>(valueType)) {
+        return 0;
+    }
+    throw NQumir::TError(
+        "hash shuffle cannot materialize column of type " +
+        (type ? type->ToString() : std::string("<null>")));
+}
+
+size_t EstimateShuffleRowBytes(const TStructType& inputType) {
+    size_t total = 0;
+    for (const auto& field : inputType.Fields) {
+        const auto valueType = ShuffleValueType(field.second);
+        if (TMaybeType<TStringType>(valueType)) {
+            total += sizeof(int64_t) + 32;
+        } else if (TMaybeType<TBoolType>(valueType)) {
+            total += 1;
+        } else {
+            total += ShuffleColumnFixedWidth(field.second);
+        }
+    }
+    return std::max<size_t>(total, 1);
+}
+
+const TStructType& ShuffleInputStruct(const TTypePtr& type) {
+    auto structure = TMaybeType<TStructType>(UnwrapNamedType(type));
+    if (!structure) {
+        throw std::runtime_error("hash shuffle input must have TStructType");
+    }
+    return *structure.Cast();
 }
 
 } // namespace
@@ -78,6 +170,18 @@ TMergeCode::TMergeCode(TProcess process)
 
 THashShuffleCode::THashShuffleCode(THash hash)
     : Hash(std::move(hash))
+{}
+
+THashShuffleCode::THashShuffleCode(THash hash,
+    NQumir::NAst::TTypePtr inputType,
+    size_t targetOutputBatchRows,
+    size_t maxOutputBatchRows,
+    size_t targetOutputBatchBytes)
+    : Hash(std::move(hash))
+    , InputType(std::move(inputType))
+    , TargetOutputBatchRows(targetOutputBatchRows)
+    , MaxOutputBatchRows(maxOutputBatchRows)
+    , TargetOutputBatchBytes(targetOutputBatchBytes)
 {}
 
 TSourceTask::TSourceTask(
@@ -385,6 +489,17 @@ struct THashShuffleTask::TPendingOutput {
     TRowSet RowSet = {};
 };
 
+struct THashShuffleTask::TBufferedBatch {
+    std::shared_ptr<TRowSet> Input;
+    std::vector<int32_t> Rows;
+};
+
+struct THashShuffleTask::TDestinationBuffer {
+    std::vector<TBufferedBatch> Batches;
+    size_t RowCount = 0;
+    size_t ByteCount = 0;
+};
+
 THashShuffleTask::THashShuffleTask(
     std::shared_ptr<const THashShuffleCode> code,
     std::shared_ptr<void> state,
@@ -417,6 +532,11 @@ ETaskResult THashShuffleTask::Execute() {
         return ETaskResult::NEED_DATA;
     }
     if (fetch == EFetchResult::FINISHED) {
+        FlushAllBuffers();
+        auto result = PushPending();
+        if (result != ETaskResult::OK) {
+            return result;
+        }
         OutputFinished_ = true;
         Output_->Finish(SourceLane_);
         return ETaskResult::FINISHED;
@@ -437,7 +557,83 @@ const std::shared_ptr<void>& THashShuffleTask::State() const {
     return State_;
 }
 
+bool THashShuffleTask::BatchingEnabled() const {
+    return Code_->InputType && Code_->TargetOutputBatchRows > 0;
+}
+
+void THashShuffleTask::EnsureBuffers(size_t partitions) {
+    if (Buffers_.size() == partitions) {
+        return;
+    }
+    Buffers_.clear();
+    Buffers_.reserve(partitions);
+    for (size_t i = 0; i < partitions; ++i) {
+        Buffers_.push_back(std::make_unique<TDestinationBuffer>());
+    }
+}
+
 void THashShuffleTask::Scatter(TRowSet& rowSet) {
+    if (BatchingEnabled()) {
+        ScatterBuffered(rowSet);
+    } else {
+        ScatterViews(rowSet);
+    }
+}
+
+void THashShuffleTask::ScatterBuffered(TRowSet& rowSet) {
+    const size_t partitions = Output_->DstCount();
+    if (partitions == 0 || rowSet.RowCount <= 0) {
+        return;
+    }
+    EnsureBuffers(partitions);
+
+    const auto& inputType = ShuffleInputStruct(Code_->InputType);
+    if (rowSet.ColumnCount < static_cast<int64_t>(inputType.Fields.size())) {
+        throw std::runtime_error("hash shuffle rowset has fewer columns than schema");
+    }
+
+    auto input = std::shared_ptr<TRowSet>(new TRowSet(rowSet), DestroySharedRowSet);
+    rowSet = {};
+
+    std::vector<std::vector<int32_t>> rows(partitions);
+    std::vector<size_t> bytes(partitions, 0);
+
+    const size_t estimatedRowBytes = EstimateShuffleRowBytes(inputType);
+
+    if (partitions == 1) {
+        rows[0].reserve(static_cast<size_t>(input->RowCount));
+        for (int64_t row = 0; row < input->RowCount; ++row) {
+            if (!RowSelected(*input, row)) {
+                continue;
+            }
+            rows[0].push_back(static_cast<int32_t>(row));
+        }
+        bytes[0] = rows[0].size() * estimatedRowBytes;
+        AddBufferedRows(0, input, std::move(rows[0]), bytes[0]);
+        return;
+    }
+
+    Hashes_.assign(static_cast<size_t>(input->RowCount), 0);
+    if (!Code_->Hash(input.get(), Hashes_.data())) {
+        throw std::runtime_error("hash shuffle hash kernel failed");
+    }
+
+    for (int64_t row = 0; row < input->RowCount; ++row) {
+        if (!RowSelected(*input, row)) {
+            continue;
+        }
+        const size_t dst = static_cast<size_t>(
+            Hashes_[static_cast<size_t>(row)] % partitions);
+        rows[dst].push_back(static_cast<int32_t>(row));
+    }
+
+    for (size_t dst = 0; dst < partitions; ++dst) {
+        bytes[dst] = rows[dst].size() * estimatedRowBytes;
+        AddBufferedRows(dst, input, std::move(rows[dst]), bytes[dst]);
+    }
+}
+
+void THashShuffleTask::ScatterViews(TRowSet& rowSet) {
     const size_t partitions = Output_->DstCount();
     if (partitions == 0 || rowSet.RowCount <= 0) {
         return;
@@ -509,6 +705,197 @@ void THashShuffleTask::Scatter(TRowSet& rowSet) {
                 .RefCount = 1,
             },
         });
+    }
+}
+
+void THashShuffleTask::AddBufferedRows(size_t dst,
+    const std::shared_ptr<TRowSet>& input,
+    std::vector<int32_t>&& rows,
+    size_t bytes)
+{
+    if (rows.empty()) {
+        return;
+    }
+    auto& buffer = *Buffers_[dst];
+    buffer.RowCount += rows.size();
+    buffer.ByteCount += bytes;
+    buffer.Batches.push_back(TBufferedBatch{
+        .Input = input,
+        .Rows = std::move(rows),
+    });
+
+    const size_t targetRows = Code_->TargetOutputBatchRows;
+    const size_t maxRows = Code_->MaxOutputBatchRows;
+    const size_t targetBytes = Code_->TargetOutputBatchBytes;
+    if ((targetRows > 0 && buffer.RowCount >= targetRows) ||
+        (maxRows > 0 && buffer.RowCount >= maxRows) ||
+        (targetBytes > 0 && buffer.ByteCount >= targetBytes)) {
+        FlushBuffer(dst);
+    }
+}
+
+void THashShuffleTask::FlushBuffer(size_t dst) {
+    auto& buffer = *Buffers_[dst];
+    if (buffer.RowCount == 0) {
+        return;
+    }
+
+    if (buffer.Batches.size() == 1) {
+        auto& batch = buffer.Batches[0];
+        auto* data = new THashShuffleRowSetData;
+        data->Input = batch.Input;
+        data->Selection.assign(static_cast<size_t>(batch.Input->RowCount),
+            uint8_t{0});
+        for (int32_t row : batch.Rows) {
+            data->Selection[static_cast<size_t>(row)] = 0xff;
+        }
+        Pending_.push_back(TPendingOutput{
+            .DstLane = dst,
+            .RowSet = TRowSet{
+                .Columns = batch.Input->Columns,
+                .ColumnCount = batch.Input->ColumnCount,
+                .RowCount = batch.Input->RowCount,
+                .Selection = data->Selection.data(),
+                .Destroy = DestroyHashShuffleRowSet,
+                .Private = data,
+                .RefCount = 1,
+            },
+        });
+        buffer.Batches.clear();
+        buffer.RowCount = 0;
+        buffer.ByteCount = 0;
+        return;
+    }
+
+    const auto& inputType = ShuffleInputStruct(Code_->InputType);
+    auto* data = new TMaterializedShuffleRowSetData;
+    data->Gathered.resize(inputType.Fields.size());
+    data->Columns.resize(inputType.Fields.size());
+
+    for (size_t colIdx = 0; colIdx < inputType.Fields.size(); ++colIdx) {
+        const auto& type = inputType.Fields[colIdx].second;
+        const auto valueType = ShuffleValueType(type);
+        const bool isString = static_cast<bool>(TMaybeType<TStringType>(valueType));
+        const bool isBool = static_cast<bool>(TMaybeType<TBoolType>(valueType));
+        const size_t width = ShuffleColumnFixedWidth(type);
+        auto& out = data->Gathered[colIdx];
+        const size_t rowCount = buffer.RowCount;
+
+        out.Data.clear();
+        out.Offsets.clear();
+        out.Mask.assign((rowCount + 7) / 8, 0xff);
+        bool anyNull = false;
+
+        auto markNull = [&](size_t row) {
+            ClearBit(out.Mask, row);
+            anyNull = true;
+        };
+
+        size_t outRow = 0;
+        if (isString) {
+            out.Offsets.resize(rowCount + 1);
+            out.Offsets[0] = 0;
+            for (const auto& batch : buffer.Batches) {
+                const TColumn& col = batch.Input->Columns[colIdx];
+                for (int32_t row : batch.Rows) {
+                    int64_t len = 0;
+                    if (!SourceValid(col, row)) {
+                        markNull(outRow);
+                    } else {
+                        len = OffsetAt(col, row + 1) - OffsetAt(col, row);
+                    }
+                    out.Offsets[outRow + 1] = out.Offsets[outRow] + len;
+                    ++outRow;
+                }
+            }
+            out.Data.resize(static_cast<size_t>(out.Offsets[rowCount]));
+            outRow = 0;
+            for (const auto& batch : buffer.Batches) {
+                const TColumn& col = batch.Input->Columns[colIdx];
+                for (int32_t row : batch.Rows) {
+                    if (SourceValid(col, row)) {
+                        const int64_t begin = OffsetAt(col, row);
+                        const int64_t len = OffsetAt(col, row + 1) - begin;
+                        if (len > 0) {
+                            std::memcpy(out.Data.data() + out.Offsets[outRow],
+                                col.Data + begin,
+                                static_cast<size_t>(len));
+                        }
+                    }
+                    ++outRow;
+                }
+            }
+            out.Column = TColumn{
+                .Data = out.Data.data(),
+                .Mask = anyNull ? out.Mask.data() : nullptr,
+                .Offsets = out.Offsets.data(),
+                .OffsetWidth = 8,
+            };
+        } else if (isBool) {
+            out.Data.assign((rowCount + 7) / 8, 0);
+            for (const auto& batch : buffer.Batches) {
+                const TColumn& col = batch.Input->Columns[colIdx];
+                for (int32_t row : batch.Rows) {
+                    if (!SourceValid(col, row)) {
+                        markNull(outRow);
+                    } else if (BoolAt(col, row)) {
+                        out.Data[outRow / 8] |= char(uint8_t(1) << (outRow % 8));
+                    }
+                    ++outRow;
+                }
+            }
+            out.Column = TColumn{
+                .Data = out.Data.data(),
+                .Mask = anyNull ? out.Mask.data() : nullptr,
+            };
+        } else {
+            out.Data.assign(rowCount * width, 0);
+            for (const auto& batch : buffer.Batches) {
+                const TColumn& col = batch.Input->Columns[colIdx];
+                for (int32_t row : batch.Rows) {
+                    if (!SourceValid(col, row)) {
+                        markNull(outRow);
+                    } else {
+                        std::memcpy(out.Data.data() + outRow * width,
+                            col.Data + static_cast<int64_t>(row) * width,
+                            width);
+                    }
+                    ++outRow;
+                }
+            }
+            out.Column = TColumn{
+                .Data = out.Data.data(),
+                .Mask = anyNull ? out.Mask.data() : nullptr,
+            };
+        }
+
+        if (!anyNull) {
+            out.Mask.clear();
+        }
+        data->Columns[colIdx] = out.Column;
+    }
+
+    Pending_.push_back(TPendingOutput{
+        .DstLane = dst,
+        .RowSet = TRowSet{
+            .Columns = data->Columns.data(),
+            .ColumnCount = static_cast<int64_t>(data->Columns.size()),
+            .RowCount = static_cast<int64_t>(buffer.RowCount),
+            .Selection = nullptr,
+            .Destroy = DestroyMaterializedShuffleRowSet,
+            .Private = data,
+            .RefCount = 1,
+        },
+    });
+
+    buffer.Batches.clear();
+    buffer.RowCount = 0;
+    buffer.ByteCount = 0;
+}
+
+void THashShuffleTask::FlushAllBuffers() {
+    for (size_t dst = 0; dst < Buffers_.size(); ++dst) {
+        FlushBuffer(dst);
     }
 }
 

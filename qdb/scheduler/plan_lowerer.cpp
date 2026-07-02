@@ -890,8 +890,7 @@ private:
         auto* shufPtr = shuffle.get();
         auto& shufRef = Graph_.AddConnection(std::move(shuffle));
 
-        auto hashCode = std::make_shared<NScheduler::THashShuffleCode>(
-            std::move(groupHash));
+        auto hashCode = MakeHashShuffleCode(std::move(groupHash), childType);
         std::vector<NScheduler::TTaskNode*> shufNodes;
         shufNodes.reserve(childLanes);
         for (size_t i = 0; i < childLanes; ++i) {
@@ -1489,14 +1488,14 @@ private:
             leftPipeRef,
             leftLanes,
             joinParts,
-            std::make_shared<NScheduler::THashShuffleCode>(hashKernels.Left),
+            MakeHashShuffleCode(hashKernels.Left, leftType),
             "join-left-shuffle");
         auto rightShuf = BuildShuffleNodes(
             rightOut,
             rightPipeRef,
             rightLanes,
             joinParts,
-            std::make_shared<NScheduler::THashShuffleCode>(hashKernels.Right),
+            MakeHashShuffleCode(hashKernels.Right, rightType),
             "join-right-shuffle");
 
         auto joinCode = std::make_shared<NScheduler::TBinaryBlockingCode>(
@@ -1575,6 +1574,18 @@ private:
         return side;
     }
 
+    std::shared_ptr<NScheduler::THashShuffleCode> MakeHashShuffleCode(
+        NScheduler::THashShuffleCode::THash hash,
+        NQumir::NAst::TTypePtr inputType) const
+    {
+        return std::make_shared<NScheduler::THashShuffleCode>(
+            std::move(hash),
+            std::move(inputType),
+            Settings_.HashShuffle.TargetOutputBatchRows,
+            Settings_.HashShuffle.MaxOutputBatchRows,
+            Settings_.HashShuffle.TargetOutputBatchBytes);
+    }
+
 private:
     NScheduler::TTaskGraph& Graph_;
     NScheduler::TSettings Settings_;
@@ -1636,6 +1647,12 @@ std::unique_ptr<IRuntimeNode> BuildSchedulerPlanPipeline(
         *diagnostics
             << " shuffle_queue="
             << settings.HashShuffle.MaxQueuedRowsetsPerLane
+            << " shuffle_target_rows="
+            << settings.HashShuffle.TargetOutputBatchRows
+            << " shuffle_max_rows="
+            << settings.HashShuffle.MaxOutputBatchRows
+            << " shuffle_target_bytes="
+            << settings.HashShuffle.TargetOutputBatchBytes
             << "\n";
         graph->Print(*diagnostics);
         *diagnostics << "=====================================\n";

@@ -52,8 +52,9 @@ struct THashShuffleSettings {
     size_t MaxProducerLanes = 1;
     size_t MaxQueuedRowsetsPerLane = 1;
     size_t MaxQueuedBytesPerLane = 0;
-    size_t TargetOutputBatchRows = 0;
-    size_t TargetOutputBatchBytes = 0;
+    size_t TargetOutputBatchRows = 16 * 1024;
+    size_t MaxOutputBatchRows = 64 * 1024;
+    size_t TargetOutputBatchBytes = 1024 * 1024;
     size_t SerialFallbackRowsThreshold = 0;
 };
 
