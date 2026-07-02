@@ -67,6 +67,7 @@ bool TRuntimeSchedulerPipeline::Next(TRowSet& rowSet)
     if (!Started_) {
         Started_ = true;
         std::string error;
+        Graph_->SetConnectionStatsEnabled(Settings_.Queue.EnableDebugCounters);
         TSchedulerExecutor executor(*Graph_, Settings_);
         if (!executor.Run(&error)) {
             throw std::runtime_error(error);

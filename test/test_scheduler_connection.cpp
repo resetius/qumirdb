@@ -62,6 +62,7 @@ TEST(SchedulerConnection, OneToOneReportsFinishAfterQueueIsDrained) {
 TEST(SchedulerConnection, TracksDebugNameAndCounters) {
     TOneToOneConnection conn(1);
     conn.SetDebugName("test-edge");
+    conn.SetStatsEnabled(true);
 
     auto input = MakeRowSet(7);
     ASSERT_TRUE(conn.Push(0, std::move(input)));

@@ -577,12 +577,17 @@ private:
 
     size_t JoinPartitions() const {
         auto partitions = Settings_.HashShuffle.PartitionCount;
-        if (partitions <= 1) {
-            partitions = Settings_.Scheduler.WorkerCount;
+        if (partitions == 0) {
+            auto scanTasks = Settings_.ScanSplit.MaxScanTasks;
+            if (scanTasks == 0) {
+                scanTasks = 1;
+            }
+            partitions = (scanTasks + 4) / 5;
+            partitions = std::min(partitions, Settings_.Scheduler.WorkerCount);
         }
 
         auto maxPartitions = Settings_.HashShuffle.MaxPartitionCount;
-        if (maxPartitions <= 1) {
+        if (maxPartitions == 0) {
             maxPartitions = partitions;
         }
 
@@ -1621,8 +1626,14 @@ std::unique_ptr<IRuntimeNode> BuildSchedulerPlanPipeline(
             << " workers=" << settings.Scheduler.WorkerCount
             << " ready_queue=" << settings.Scheduler.ReadyQueueCapacity
             << " rowset_queue=" << settings.Queue.RowsetCapacityPerLane
-            << " scan_tasks=" << settings.ScanSplit.MaxScanTasks
-            << " shuffle_parts=" << settings.HashShuffle.PartitionCount
+            << " scan_tasks=" << settings.ScanSplit.MaxScanTasks;
+        if (settings.HashShuffle.PartitionCount == 0) {
+            *diagnostics << " shuffle_parts=auto";
+        } else {
+            *diagnostics << " shuffle_parts="
+                << settings.HashShuffle.PartitionCount;
+        }
+        *diagnostics
             << " shuffle_queue="
             << settings.HashShuffle.MaxQueuedRowsetsPerLane
             << "\n";

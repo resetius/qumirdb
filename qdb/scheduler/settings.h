@@ -47,8 +47,8 @@ struct TScanSplitSettings {
 };
 
 struct THashShuffleSettings {
-    size_t PartitionCount = 1;
-    size_t MaxPartitionCount = 1;
+    size_t PartitionCount = 0;
+    size_t MaxPartitionCount = 0;
     size_t MaxProducerLanes = 1;
     size_t MaxQueuedRowsetsPerLane = 1;
     size_t MaxQueuedBytesPerLane = 0;

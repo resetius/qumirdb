@@ -52,6 +52,7 @@ public:
 
     void Build();
     bool Validate(std::string* error = nullptr) const;
+    void SetConnectionStatsEnabled(bool enabled);
     void Print(std::ostream& out) const;
     void PrintConnectionStats(std::ostream& out) const;
 
