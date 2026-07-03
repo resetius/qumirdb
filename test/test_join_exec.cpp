@@ -704,7 +704,26 @@ std::vector<std::pair<int64_t,int64_t>> DrainSemiAntiJoin(
 
 #include <unordered_set>
 
-TEST(RuntimeJoin, LeftSemiScalarKey) {
+// Left semi and left anti joins share identical setup and differ only in which
+// left rows survive (matched vs unmatched), so they run as one parametrized
+// suite over the join type. SemiAntiOracle is the reference for both.
+namespace {
+class RuntimeSemiAntiJoin : public testing::TestWithParam<EJoinType> {
+protected:
+    bool IsAnti() const { return GetParam() == EJoinType::LeftAnti; }
+};
+
+INSTANTIATE_TEST_SUITE_P(
+    Types,
+    RuntimeSemiAntiJoin,
+    testing::Values(EJoinType::LeftSemi, EJoinType::LeftAnti),
+    [](const testing::TestParamInfo<EJoinType>& info) {
+        return info.param == EJoinType::LeftAnti ? "Anti" : "Semi";
+    });
+} // namespace
+
+TEST_P(RuntimeSemiAntiJoin, ScalarKey) {
+    const EJoinType jt = GetParam();
     std::vector<int64_t> lk = {1, 2, 3, 4}, lv = {10, 20, 30, 40};
     std::vector<int64_t> rk = {2, 3, 5},    rv = {200, 300, 500};
     std::vector<TColumn> lcols, rcols;
@@ -718,47 +737,21 @@ TEST(RuntimeJoin, LeftSemiScalarKey) {
     auto right = std::make_unique<TVectorRuntimeSource>(rightType, std::move(rbatches));
 
     TKernelCompiler compiler;
-    auto kernels = CompileJoin(compiler, leftType, rightType, EJoinType::LeftSemi);
-    auto outputType = ComputeJoinOutputType(leftType, rightType, EJoinType::LeftSemi);
+    auto kernels = CompileJoin(compiler, leftType, rightType, jt);
+    auto outputType = ComputeJoinOutputType(leftType, rightType, jt);
     ASSERT_TRUE(outputType);
 
-    TRuntimeJoin join(std::move(left), std::move(right), *outputType, std::move(kernels), EJoinType::LeftSemi);
+    TRuntimeJoin join(std::move(left), std::move(right), *outputType, std::move(kernels), jt);
     auto got = DrainSemiAntiJoin(join, /*cols=*/2);
 
-    auto expected = SemiAntiOracle(lk, lv, rk, /*isAnti=*/false);
+    auto expected = SemiAntiOracle(lk, lv, rk, IsAnti()); // semi {(2,20),(3,30)}; anti {(1,10),(4,40)}
     std::sort(got.begin(), got.end());
     std::sort(expected.begin(), expected.end());
-    EXPECT_EQ(got, expected); // {(2,20),(3,30)}
+    EXPECT_EQ(got, expected);
 }
 
-TEST(RuntimeJoin, LeftAntiScalarKey) {
-    std::vector<int64_t> lk = {1, 2, 3, 4}, lv = {10, 20, 30, 40};
-    std::vector<int64_t> rk = {2, 3, 5},    rv = {200, 300, 500};
-    std::vector<TColumn> lcols, rcols;
-
-    auto leftType  = KeyValSchema("lk", "lv");
-    auto rightType = KeyValSchema("rk", "rv");
-    std::vector<TRowSet> lbatches = {KeyValBatch(lk.data(), lv.data(), 4, lcols)};
-    std::vector<TRowSet> rbatches = {KeyValBatch(rk.data(), rv.data(), 3, rcols)};
-
-    auto left  = std::make_unique<TVectorRuntimeSource>(leftType,  std::move(lbatches));
-    auto right = std::make_unique<TVectorRuntimeSource>(rightType, std::move(rbatches));
-
-    TKernelCompiler compiler;
-    auto kernels = CompileJoin(compiler, leftType, rightType, EJoinType::LeftAnti);
-    auto outputType = ComputeJoinOutputType(leftType, rightType, EJoinType::LeftAnti);
-    ASSERT_TRUE(outputType);
-
-    TRuntimeJoin join(std::move(left), std::move(right), *outputType, std::move(kernels), EJoinType::LeftAnti);
-    auto got = DrainSemiAntiJoin(join, /*cols=*/2);
-
-    auto expected = SemiAntiOracle(lk, lv, rk, /*isAnti=*/true);
-    std::sort(got.begin(), got.end());
-    std::sort(expected.begin(), expected.end());
-    EXPECT_EQ(got, expected); // {(1,10),(4,40)}
-}
-
-TEST(RuntimeJoin, LeftSemiResidualStreamsRight) {
+TEST_P(RuntimeSemiAntiJoin, ResidualStreamsRight) {
+    const EJoinType jt = GetParam();
     std::vector<int64_t> lk = {1, 1, 2}, lv = {10, 20, 30};
     std::vector<int64_t> rk = {1, 2}, rv = {10, 30};
     std::vector<TColumn> lcols, rcols;
@@ -777,55 +770,24 @@ TEST(RuntimeJoin, LeftSemiResidualStreamsRight) {
         std::make_shared<TIdentExpr>(NQumir::TLocation{}, "rv"));
 
     TKernelCompiler compiler;
-    auto kernels = CompileJoin(
-        compiler, leftType, rightType, EJoinType::LeftSemi, residual);
-    auto outputType = ComputeJoinOutputType(leftType, rightType, EJoinType::LeftSemi);
+    auto kernels = CompileJoin(compiler, leftType, rightType, jt, residual);
+    auto outputType = ComputeJoinOutputType(leftType, rightType, jt);
     ASSERT_TRUE(outputType);
 
     TRuntimeJoin join(std::move(left), std::move(right), *outputType,
-        std::move(kernels), EJoinType::LeftSemi, /*hasResidual=*/true);
+        std::move(kernels), jt, /*hasResidual=*/true);
     auto got = DrainSemiAntiJoin(join, /*cols=*/2);
 
-    std::vector<std::pair<int64_t,int64_t>> expected = {{1, 20}};
-    std::sort(got.begin(), got.end());
-    EXPECT_EQ(got, expected);
-}
-
-TEST(RuntimeJoin, LeftAntiResidualStreamsRight) {
-    std::vector<int64_t> lk = {1, 1, 2}, lv = {10, 20, 30};
-    std::vector<int64_t> rk = {1, 2}, rv = {10, 30};
-    std::vector<TColumn> lcols, rcols;
-
-    auto leftType  = KeyValSchema("lk", "lv");
-    auto rightType = KeyValSchema("rk", "rv");
-    std::vector<TRowSet> lbatches = {KeyValBatch(lk.data(), lv.data(), 3, lcols)};
-    std::vector<TRowSet> rbatches = {KeyValBatch(rk.data(), rv.data(), 2, rcols)};
-
-    auto left  = std::make_unique<TVectorRuntimeSource>(leftType,  std::move(lbatches));
-    auto right = std::make_unique<TVectorRuntimeSource>(rightType, std::move(rbatches));
-
-    auto residual = std::make_shared<TBinaryExpr>(
-        NQumir::TLocation{}, TOperator("!="),
-        std::make_shared<TIdentExpr>(NQumir::TLocation{}, "lv"),
-        std::make_shared<TIdentExpr>(NQumir::TLocation{}, "rv"));
-
-    TKernelCompiler compiler;
-    auto kernels = CompileJoin(
-        compiler, leftType, rightType, EJoinType::LeftAnti, residual);
-    auto outputType = ComputeJoinOutputType(leftType, rightType, EJoinType::LeftAnti);
-    ASSERT_TRUE(outputType);
-
-    TRuntimeJoin join(std::move(left), std::move(right), *outputType,
-        std::move(kernels), EJoinType::LeftAnti, /*hasResidual=*/true);
-    auto got = DrainSemiAntiJoin(join, /*cols=*/2);
-
-    std::vector<std::pair<int64_t,int64_t>> expected = {{1, 10}, {2, 30}};
+    std::vector<std::pair<int64_t,int64_t>> expected =
+        IsAnti() ? std::vector<std::pair<int64_t,int64_t>>{{1, 10}, {2, 30}}
+                 : std::vector<std::pair<int64_t,int64_t>>{{1, 20}};
     std::sort(got.begin(), got.end());
     std::sort(expected.begin(), expected.end());
     EXPECT_EQ(got, expected);
 }
 
-TEST(RuntimeJoin, LeftSemiEmptyRight) {
+TEST_P(RuntimeSemiAntiJoin, EmptyRight) {
+    const EJoinType jt = GetParam();
     std::vector<int64_t> lk = {1, 2, 3}, lv = {10, 20, 30};
     std::vector<TColumn> lcols;
 
@@ -837,41 +799,24 @@ TEST(RuntimeJoin, LeftSemiEmptyRight) {
     auto right = std::make_unique<TVectorRuntimeSource>(rightType, std::vector<TRowSet>{});
 
     TKernelCompiler compiler;
-    auto kernels = CompileJoin(compiler, leftType, rightType, EJoinType::LeftSemi);
-    auto outputType = ComputeJoinOutputType(leftType, rightType, EJoinType::LeftSemi);
+    auto kernels = CompileJoin(compiler, leftType, rightType, jt);
+    auto outputType = ComputeJoinOutputType(leftType, rightType, jt);
     ASSERT_TRUE(outputType);
 
-    TRuntimeJoin join(std::move(left), std::move(right), *outputType, std::move(kernels), EJoinType::LeftSemi);
+    TRuntimeJoin join(std::move(left), std::move(right), *outputType, std::move(kernels), jt);
     auto got = DrainSemiAntiJoin(join, /*cols=*/2);
-    EXPECT_TRUE(got.empty()); // no right rows → no matches
-}
-
-TEST(RuntimeJoin, LeftAntiEmptyRight) {
-    std::vector<int64_t> lk = {1, 2, 3}, lv = {10, 20, 30};
-    std::vector<TColumn> lcols;
-
-    auto leftType  = KeyValSchema("lk", "lv");
-    auto rightType = KeyValSchema("rk", "rv");
-    std::vector<TRowSet> lbatches = {KeyValBatch(lk.data(), lv.data(), 3, lcols)};
-
-    auto left  = std::make_unique<TVectorRuntimeSource>(leftType,  std::move(lbatches));
-    auto right = std::make_unique<TVectorRuntimeSource>(rightType, std::vector<TRowSet>{});
-
-    TKernelCompiler compiler;
-    auto kernels = CompileJoin(compiler, leftType, rightType, EJoinType::LeftAnti);
-    auto outputType = ComputeJoinOutputType(leftType, rightType, EJoinType::LeftAnti);
-    ASSERT_TRUE(outputType);
-
-    TRuntimeJoin join(std::move(left), std::move(right), *outputType, std::move(kernels), EJoinType::LeftAnti);
-    auto got = DrainSemiAntiJoin(join, /*cols=*/2);
-
-    // All left rows pass when right is empty.
-    std::vector<std::pair<int64_t,int64_t>> expected = {{1,10},{2,20},{3,30}};
     std::sort(got.begin(), got.end());
+
+    // No right rows: semi matches nothing, anti passes every left row through.
+    std::vector<std::pair<int64_t,int64_t>> expected;
+    if (IsAnti()) {
+        expected = {{1,10},{2,20},{3,30}};
+    }
     EXPECT_EQ(got, expected);
 }
 
-TEST(RuntimeJoin, LeftSemiMultiBatch) {
+TEST_P(RuntimeSemiAntiJoin, MultiBatch) {
+    const EJoinType jt = GetParam();
     int seed = 42;
     auto rnd = [&]() { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed; };
     std::vector<int64_t> lk, lv, rk, rv;
@@ -895,51 +840,14 @@ TEST(RuntimeJoin, LeftSemiMultiBatch) {
     auto right = std::make_unique<TVectorRuntimeSource>(rightType, split(rk, rv));
 
     TKernelCompiler compiler;
-    auto kernels = CompileJoin(compiler, leftType, rightType, EJoinType::LeftSemi);
-    auto outputType = ComputeJoinOutputType(leftType, rightType, EJoinType::LeftSemi);
+    auto kernels = CompileJoin(compiler, leftType, rightType, jt);
+    auto outputType = ComputeJoinOutputType(leftType, rightType, jt);
     ASSERT_TRUE(outputType);
 
-    TRuntimeJoin join(std::move(left), std::move(right), *outputType, std::move(kernels), EJoinType::LeftSemi);
+    TRuntimeJoin join(std::move(left), std::move(right), *outputType, std::move(kernels), jt);
     auto got = DrainSemiAntiJoin(join, /*cols=*/2);
 
-    auto expected = SemiAntiOracle(lk, lv, rk, /*isAnti=*/false);
-    std::sort(got.begin(), got.end());
-    std::sort(expected.begin(), expected.end());
-    EXPECT_EQ(got, expected);
-}
-
-TEST(RuntimeJoin, LeftAntiMultiBatch) {
-    int seed = 99;
-    auto rnd = [&]() { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed; };
-    std::vector<int64_t> lk, lv, rk, rv;
-    for (int i = 0; i < 55; ++i) { lk.push_back(rnd() % 10); lv.push_back(i); }
-    for (int i = 0; i < 30; ++i) { rk.push_back(rnd() % 10); rv.push_back(2000 + i); }
-
-    auto leftType  = KeyValSchema("lk", "lv");
-    auto rightType = KeyValSchema("rk", "rv");
-    std::vector<std::vector<TColumn>> colStorage;
-    auto split = [&](std::vector<int64_t>& keys, std::vector<int64_t>& vals) {
-        std::vector<TRowSet> batches;
-        for (size_t off = 0; off < keys.size(); off += 10) {
-            int64_t n = std::min<int64_t>(10, (int64_t)keys.size() - (int64_t)off);
-            colStorage.emplace_back();
-            batches.push_back(KeyValBatch(keys.data() + off, vals.data() + off, n, colStorage.back()));
-        }
-        return batches;
-    };
-
-    auto left  = std::make_unique<TVectorRuntimeSource>(leftType,  split(lk, lv));
-    auto right = std::make_unique<TVectorRuntimeSource>(rightType, split(rk, rv));
-
-    TKernelCompiler compiler;
-    auto kernels = CompileJoin(compiler, leftType, rightType, EJoinType::LeftAnti);
-    auto outputType = ComputeJoinOutputType(leftType, rightType, EJoinType::LeftAnti);
-    ASSERT_TRUE(outputType);
-
-    TRuntimeJoin join(std::move(left), std::move(right), *outputType, std::move(kernels), EJoinType::LeftAnti);
-    auto got = DrainSemiAntiJoin(join, /*cols=*/2);
-
-    auto expected = SemiAntiOracle(lk, lv, rk, /*isAnti=*/true);
+    auto expected = SemiAntiOracle(lk, lv, rk, IsAnti());
     std::sort(got.begin(), got.end());
     std::sort(expected.begin(), expected.end());
     EXPECT_EQ(got, expected);

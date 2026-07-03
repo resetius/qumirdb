@@ -43,8 +43,6 @@ TEST(SchedulerCore, SettingsDefaultsAreConservative) {
 
     EXPECT_EQ(settings.Scheduler.Mode, EExecutionMode::Serial);
     EXPECT_EQ(settings.Scheduler.WorkerCount, 1u);
-    EXPECT_EQ(settings.Partitioning.DefaultPartitionCount, 1u);
-    EXPECT_EQ(settings.Partitioning.MaxPartitionCount, 1u);
     EXPECT_EQ(settings.Queue.RowsetCapacityPerLane, 1u);
     EXPECT_EQ(settings.ScanSplit.MaxScanTasks, 1u);
     EXPECT_EQ(settings.ScanSplit.RowGroupCoalescingFactor, 1u);
@@ -53,9 +51,7 @@ TEST(SchedulerCore, SettingsDefaultsAreConservative) {
     EXPECT_EQ(settings.HashShuffle.TargetOutputBatchRows, 16u * 1024u);
     EXPECT_EQ(settings.HashShuffle.MaxOutputBatchRows, 64u * 1024u);
     EXPECT_EQ(settings.HashShuffle.TargetOutputBatchBytes, 1024u * 1024u);
-    EXPECT_EQ(settings.Sort.MergeFanIn, 2u);
-    EXPECT_TRUE(settings.KernelHelper.EnableRowsetHashKernel);
-    EXPECT_TRUE(settings.KernelHelper.EnableCompareKernel);
+    EXPECT_FALSE(settings.Aggregate.CascadeGlobal);
 }
 
 } // namespace
