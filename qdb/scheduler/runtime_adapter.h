@@ -111,9 +111,6 @@ public:
 
     ETaskResult Execute() override;
 
-    const std::shared_ptr<const TSourceCode>& Code() const;
-    const std::shared_ptr<void>& State() const;
-
 private:
     std::shared_ptr<const TSourceCode> Code_;
     std::shared_ptr<void> State_;
@@ -155,9 +152,6 @@ public:
 
     ETaskResult Execute() override;
 
-    const std::shared_ptr<const TSinkCode>& Code() const;
-    const std::shared_ptr<void>& State() const;
-
 private:
     std::shared_ptr<const TSinkCode> Code_;
     std::shared_ptr<void> State_;
@@ -175,9 +169,6 @@ public:
     ~TBlockingTask() override;
 
     ETaskResult Execute() override;
-
-    const std::shared_ptr<const TBlockingCode>& Code() const;
-    const std::shared_ptr<void>& State() const;
 
 private:
     std::shared_ptr<const TBlockingCode> Code_;
@@ -200,9 +191,6 @@ public:
     ~TBinaryBlockingTask() override;
 
     ETaskResult Execute() override;
-
-    const std::shared_ptr<const TBinaryBlockingCode>& Code() const;
-    const std::shared_ptr<void>& State() const;
 
 private:
     std::shared_ptr<const TBinaryBlockingCode> Code_;
@@ -227,9 +215,6 @@ public:
 
     ETaskResult Execute() override;
 
-    const std::shared_ptr<const TMergeCode>& Code() const;
-    const std::shared_ptr<void>& State() const;
-
 private:
     std::shared_ptr<const TMergeCode> Code_;
     std::shared_ptr<void> State_;
@@ -251,9 +236,6 @@ public:
     ~THashShuffleTask() override;
 
     ETaskResult Execute() override;
-
-    const std::shared_ptr<const THashShuffleCode>& Code() const;
-    const std::shared_ptr<void>& State() const;
 
 private:
     struct TBufferedBatch;

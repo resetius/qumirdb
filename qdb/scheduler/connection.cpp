@@ -95,12 +95,12 @@ void IConnection::CountFinishedFetch(uint64_t count) const {
     FinishedFetch_.fetch_add(count, std::memory_order_relaxed);
 }
 
-struct TOneToOneConnection::TLane {
-    explicit TLane(size_t capacity)
+struct TConnectionLane {
+    explicit TConnectionLane(size_t capacity)
         : Queue(capacity)
     {}
 
-    ~TLane() {
+    ~TConnectionLane() {
         TRowSet rowSet{};
         while (Queue.TryPop(rowSet)) {
             Release(&rowSet);
@@ -110,6 +110,25 @@ struct TOneToOneConnection::TLane {
     TSPSC<TRowSet> Queue;
     std::atomic<bool> Finished = false;
 };
+
+bool IConnection::LaneCanPush(TConnectionLane& lane) const {
+    const bool canPush = lane.Queue.CanPush();
+    if (!canPush) {
+        CountBlockedPush();
+    }
+    return canPush;
+}
+
+bool IConnection::LanePush(TConnectionLane& lane, TRowSet& rowSet) const {
+    auto moved = TakeRowSet(rowSet);
+    if (lane.Queue.TryPush(std::move(moved))) {
+        CountPushed();
+        return true;
+    }
+    CountBlockedPush();
+    rowSet = TakeRowSet(moved);
+    return false;
+}
 
 TOneToOneConnection::TOneToOneConnection(size_t capacity)
     : Capacity_(capacity)
@@ -129,7 +148,7 @@ void TOneToOneConnection::Resize(size_t srcCount, size_t dstCount) {
     Lanes_.clear();
     Lanes_.reserve(Size_);
     for (size_t i = 0; i < Size_; ++i) {
-        Lanes_.push_back(std::make_unique<TLane>(Capacity_));
+        Lanes_.push_back(std::make_unique<TConnectionLane>(Capacity_));
     }
 }
 
@@ -143,23 +162,12 @@ size_t TOneToOneConnection::DstCount() const {
 
 bool TOneToOneConnection::CanPush(size_t srcId) const {
     assert(srcId < Size_);
-    const bool canPush = Lanes_[srcId]->Queue.CanPush();
-    if (!canPush) {
-        CountBlockedPush();
-    }
-    return canPush;
+    return LaneCanPush(*Lanes_[srcId]);
 }
 
 bool TOneToOneConnection::Push(size_t srcId, TRowSet&& rowSet) {
     assert(srcId < Size_);
-    auto moved = TakeRowSet(rowSet);
-    if (Lanes_[srcId]->Queue.TryPush(std::move(moved))) {
-        CountPushed();
-        return true;
-    }
-    CountBlockedPush();
-    rowSet = TakeRowSet(moved);
-    return false;
+    return LanePush(*Lanes_[srcId], rowSet);
 }
 
 void TOneToOneConnection::Finish(size_t srcId) {
@@ -188,22 +196,6 @@ EFetchResult TOneToOneConnection::Fetch(size_t dstId, TRowSet& rowSet) {
     return EFetchResult::FINISHED;
 }
 
-struct TGatherConnection::TLane {
-    explicit TLane(size_t capacity)
-        : Queue(capacity)
-    {}
-
-    ~TLane() {
-        TRowSet rowSet{};
-        while (Queue.TryPop(rowSet)) {
-            Release(&rowSet);
-        }
-    }
-
-    TSPSC<TRowSet> Queue;
-    std::atomic<bool> Finished = false;
-};
-
 TGatherConnection::TGatherConnection(size_t capacity)
     : Capacity_(capacity)
 {
@@ -224,7 +216,7 @@ void TGatherConnection::Resize(size_t srcCount, size_t dstCount) {
     Lanes_.clear();
     Lanes_.reserve(Size_);
     for (size_t i = 0; i < Size_; ++i) {
-        Lanes_.push_back(std::make_unique<TLane>(Capacity_));
+        Lanes_.push_back(std::make_unique<TConnectionLane>(Capacity_));
     }
 }
 
@@ -238,23 +230,12 @@ size_t TGatherConnection::DstCount() const {
 
 bool TGatherConnection::CanPush(size_t srcId) const {
     assert(srcId < Size_);
-    const bool canPush = Lanes_[srcId]->Queue.CanPush();
-    if (!canPush) {
-        CountBlockedPush();
-    }
-    return canPush;
+    return LaneCanPush(*Lanes_[srcId]);
 }
 
 bool TGatherConnection::Push(size_t srcId, TRowSet&& rowSet) {
     assert(srcId < Size_);
-    auto moved = TakeRowSet(rowSet);
-    if (Lanes_[srcId]->Queue.TryPush(std::move(moved))) {
-        CountPushed();
-        return true;
-    }
-    CountBlockedPush();
-    rowSet = TakeRowSet(moved);
-    return false;
+    return LanePush(*Lanes_[srcId], rowSet);
 }
 
 void TGatherConnection::Finish(size_t srcId) {
@@ -299,21 +280,6 @@ EFetchResult TGatherConnection::Fetch(size_t dstId, TRowSet& rowSet) {
     return EFetchResult::FINISHED;
 }
 
-struct THashShuffleConnection::TLane {
-    explicit TLane(size_t capacity)
-        : Queue(capacity)
-    {}
-
-    ~TLane() {
-        TRowSet rowSet{};
-        while (Queue.TryPop(rowSet)) {
-            Release(&rowSet);
-        }
-    }
-
-    TSPSC<TRowSet> Queue;
-};
-
 THashShuffleConnection::THashShuffleConnection(size_t capacity)
     : Capacity_(capacity)
 {
@@ -333,7 +299,7 @@ void THashShuffleConnection::Resize(size_t srcCount, size_t dstCount) {
     Lanes_.clear();
     Lanes_.reserve(SrcCount_ * DstCount_);
     for (size_t i = 0; i < SrcCount_ * DstCount_; ++i) {
-        Lanes_.push_back(std::make_unique<TLane>(Capacity_));
+        Lanes_.push_back(std::make_unique<TConnectionLane>(Capacity_));
     }
     Finished_.clear();
     Finished_.reserve(SrcCount_);
@@ -430,21 +396,6 @@ size_t THashShuffleConnection::LaneIndex(size_t srcId, size_t dstId) const {
     return srcId * DstCount_ + dstId;
 }
 
-struct TBroadcastConnection::TLane {
-    explicit TLane(size_t capacity)
-        : Queue(capacity)
-    {}
-
-    ~TLane() {
-        TRowSet rowSet{};
-        while (Queue.TryPop(rowSet)) {
-            Release(&rowSet);
-        }
-    }
-
-    TSPSC<TRowSet> Queue;
-};
-
 TBroadcastConnection::TBroadcastConnection(size_t capacity)
     : Capacity_(capacity)
 {
@@ -464,7 +415,7 @@ void TBroadcastConnection::Resize(size_t srcCount, size_t dstCount) {
     Lanes_.clear();
     Lanes_.reserve(DstCount_);
     for (size_t i = 0; i < DstCount_; ++i) {
-        Lanes_.push_back(std::make_unique<TLane>(Capacity_));
+        Lanes_.push_back(std::make_unique<TConnectionLane>(Capacity_));
     }
 }
 

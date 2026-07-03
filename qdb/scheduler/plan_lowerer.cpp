@@ -602,6 +602,27 @@ private:
             1);
     }
 
+    // Create a connection of the given type, size it, name it for diagnostics,
+    // register it in the graph, and return a reference to the stored object.
+    template <class TConn>
+    TConn& AddConn(
+        size_t srcLanes,
+        size_t dstLanes,
+        std::string name,
+        size_t capacity)
+    {
+        auto conn = std::make_unique<TConn>(capacity);
+        conn->Resize(srcLanes, dstLanes);
+        conn->SetDebugName(std::move(name));
+        return static_cast<TConn&>(Graph_.AddConnection(std::move(conn)));
+    }
+
+    template <class TConn>
+    TConn& AddConn(size_t srcLanes, size_t dstLanes, std::string name) {
+        return AddConn<TConn>(
+            srcLanes, dstLanes, std::move(name), QueueCapacity());
+    }
+
     TLoweredOutput LowerSource(
         TSourceOperator& src,
         NScheduler::IConnection& outConn)
@@ -653,11 +674,8 @@ private:
         NScheduler::IConnection& outConn)
     {
         const size_t lanes = OutputLanes(child);
-        auto childConn = std::make_unique<NScheduler::TOneToOneConnection>(
-            QueueCapacity());
-        childConn->Resize(lanes, lanes);
-        childConn->SetDebugName("unary-input");
-        auto& childConnRef = Graph_.AddConnection(std::move(childConn));
+        auto& childConnRef = AddConn<NScheduler::TOneToOneConnection>(
+            lanes, lanes, "unary-input");
         auto childOut = Lower(child, childConnRef);
 
         auto stage = buildStage(childOut.OutputType);
@@ -684,11 +702,8 @@ private:
         NScheduler::IConnection& outConn)
     {
         const size_t lanes = OutputLanes(child);
-        auto gather = std::make_unique<NScheduler::TGatherConnection>(
-            QueueCapacity());
-        gather->Resize(lanes, 1);
-        gather->SetDebugName("blocking-input-gather");
-        auto& gatherRef = Graph_.AddConnection(std::move(gather));
+        auto& gatherRef = AddConn<NScheduler::TGatherConnection>(
+            lanes, 1, "blocking-input-gather");
         auto childOut = Lower(child, gatherRef);
 
         TBlockingTail tail = buildTail(childOut.OutputType);
@@ -784,21 +799,15 @@ private:
         size_t lanes,
         NScheduler::IConnection& outConn)
     {
-        const size_t cap = QueueCapacity();
-
-        auto childConn = std::make_unique<NScheduler::TOneToOneConnection>(cap);
-        childConn->Resize(lanes, lanes);
-        childConn->SetDebugName("aggregate-cascade-input");
-        auto& childRef = Graph_.AddConnection(std::move(childConn));
+        auto& childRef = AddConn<NScheduler::TOneToOneConnection>(
+            lanes, lanes, "aggregate-cascade-input");
         auto childOut = Lower(aggregate.Input(), childRef);
 
         auto partialTail = BuildAggregateTail(childOut.OutputType, aggregate);
         auto partialType = partialTail.OutputType;
 
-        auto gather = std::make_unique<NScheduler::TGatherConnection>(cap);
-        gather->Resize(lanes, 1);
-        gather->SetDebugName("aggregate-cascade-gather");
-        auto& gatherRef = Graph_.AddConnection(std::move(gather));
+        auto& gatherRef = AddConn<NScheduler::TGatherConnection>(
+            lanes, 1, "aggregate-cascade-gather");
 
         std::vector<NScheduler::TTaskNode*> partialNodes;
         partialNodes.reserve(lanes);
@@ -866,12 +875,8 @@ private:
         // partition-local aggregates. Matching keys land in one partition, so
         // each computes complete groups; the parent gathers the partitions.
         const size_t parts = JoinPartitions();
-        const size_t cap = QueueCapacity();
-
-        auto childConn = std::make_unique<NScheduler::TOneToOneConnection>(cap);
-        childConn->Resize(childLanes, childLanes);
-        childConn->SetDebugName("aggregate-shuffle-input");
-        auto& childConnRef = Graph_.AddConnection(std::move(childConn));
+        auto& childConnRef = AddConn<NScheduler::TOneToOneConnection>(
+            childLanes, childLanes, "aggregate-shuffle-input");
         auto childOut = Lower(aggregate.Input(), childConnRef);
 
         auto childType = childOut.OutputType;
@@ -883,12 +888,9 @@ private:
         auto groupHash = MakeGroupKeyHash(*childStruct, aggregate.GroupKeys());
         auto tail = BuildAggregateTail(childType, aggregate);
 
-        auto shuffle =
-            std::make_unique<NScheduler::THashShuffleConnection>(cap);
-        shuffle->Resize(childLanes, parts);
-        shuffle->SetDebugName("aggregate-shuffle");
-        auto* shufPtr = shuffle.get();
-        auto& shufRef = Graph_.AddConnection(std::move(shuffle));
+        auto& shufRef = AddConn<NScheduler::THashShuffleConnection>(
+            childLanes, parts, "aggregate-shuffle");
+        auto* shufPtr = &shufRef;
 
         auto hashCode = MakeHashShuffleCode(std::move(groupHash), childType);
         std::vector<NScheduler::TTaskNode*> shufNodes;
@@ -1082,13 +1084,9 @@ private:
         std::string_view kernelName,
         std::optional<int64_t> topLimit,
         NScheduler::IConnection& mergeOut)
-    {
-        const size_t cap = QueueCapacity();
-        auto childConn = std::make_unique<NScheduler::TOneToOneConnection>(cap);
-        const size_t lanes = OutputLanes(input);
-        childConn->Resize(lanes, lanes);
-        childConn->SetDebugName("sort-merge-input");
-        auto& childConnRef = Graph_.AddConnection(std::move(childConn));
+    {        const size_t lanes = OutputLanes(input);
+        auto& childConnRef = AddConn<NScheduler::TOneToOneConnection>(
+            lanes, lanes, "sort-merge-input");
         auto childOut = Lower(input, childConnRef);
 
         auto childType = childOut.OutputType;
@@ -1172,11 +1170,8 @@ private:
         mergeInputs.reserve(lanes);
         localSorts.reserve(lanes);
         for (size_t i = 0; i < lanes; ++i) {
-            auto runConn =
-                std::make_unique<NScheduler::TOneToOneConnection>(cap);
-            runConn->Resize(1, 1);
-            runConn->SetDebugName("sort-run-" + std::to_string(i));
-            auto& runRef = Graph_.AddConnection(std::move(runConn));
+            auto& runRef = AddConn<NScheduler::TOneToOneConnection>(
+                1, 1, "sort-run-" + std::to_string(i));
             auto task = std::make_unique<NScheduler::TBlockingTask>(
                 localCode,
                 makeLocalState(),
@@ -1271,12 +1266,8 @@ private:
             return LowerSortLike(
                 sort.Input(), sort.Keys(), "top-sort", sort.Limit(), outConn);
         }
-
-        const size_t cap = QueueCapacity();
-        auto mergeConn = std::make_unique<NScheduler::TOneToOneConnection>(cap);
-        mergeConn->Resize(1, 1);
-        mergeConn->SetDebugName("top-sort-merge-output");
-        auto& mergeConnRef = Graph_.AddConnection(std::move(mergeConn));
+        auto& mergeConnRef = AddConn<NScheduler::TOneToOneConnection>(
+            1, 1, "top-sort-merge-output");
         auto merged = BuildSortMerge(
             sort.Input(), sort.Keys(), "top-sort", sort.Limit(), mergeConnRef);
 
@@ -1324,15 +1315,11 @@ private:
     TLoweredOutput LowerCrossJoin(
         TJoinOperator& join,
         NScheduler::IConnection& outConn)
-    {
-        const size_t cap = QueueCapacity();
-        const size_t lanes = OutputLanes(join.Left());
+    {        const size_t lanes = OutputLanes(join.Left());
 
         // Vector (streamed, partitioned) side.
-        auto vectorConn = std::make_unique<NScheduler::TOneToOneConnection>(cap);
-        vectorConn->Resize(lanes, lanes);
-        vectorConn->SetDebugName("cross-vector-input");
-        auto& vectorRef = Graph_.AddConnection(std::move(vectorConn));
+        auto& vectorRef = AddConn<NScheduler::TOneToOneConnection>(
+            lanes, lanes, "cross-vector-input");
         auto vectorOut = Lower(join.Left(), vectorRef);
 
         // Scalar (buffered, broadcast) side: lower it (its `__group__` aggregate
@@ -1340,18 +1327,14 @@ private:
         // then forward into a broadcast connection replicated to every vector
         // lane.
         const size_t scalarLanes = OutputLanes(join.Right());
-        auto scalarGather = std::make_unique<NScheduler::TGatherConnection>(cap);
-        scalarGather->Resize(scalarLanes, 1);
-        scalarGather->SetDebugName("cross-scalar-gather");
-        auto& scalarGatherRef = Graph_.AddConnection(std::move(scalarGather));
+        auto& scalarGatherRef = AddConn<NScheduler::TGatherConnection>(
+            scalarLanes, 1, "cross-scalar-gather");
         // Lower the scalar side directly into the gather so its producers write
         // the same connection the forward reads (gather scalarLanes -> 1).
         auto scalarOut = Lower(join.Right(), scalarGatherRef);
 
-        auto broadcast = std::make_unique<NScheduler::TBroadcastConnection>(cap);
-        broadcast->Resize(1, lanes);
-        broadcast->SetDebugName("cross-scalar-broadcast");
-        auto& broadcastRef = Graph_.AddConnection(std::move(broadcast));
+        auto& broadcastRef = AddConn<NScheduler::TBroadcastConnection>(
+            1, lanes, "cross-scalar-broadcast");
 
         auto fwdCode = std::make_shared<NScheduler::TUnaryCode>(
             [](void*, TRowSet&) {});
@@ -1396,10 +1379,8 @@ private:
         NScheduler::IConnection* crossOut = &outConn;
         NScheduler::IConnection* residualConn = nullptr;
         if (hasResidual) {
-            auto conn = std::make_unique<NScheduler::TOneToOneConnection>(cap);
-            conn->Resize(lanes, lanes);
-            conn->SetDebugName("cross-residual-input");
-            residualConn = &Graph_.AddConnection(std::move(conn));
+            residualConn = &AddConn<NScheduler::TOneToOneConnection>(
+                lanes, lanes, "cross-residual-input");
             crossOut = residualConn;
         }
 
@@ -1454,18 +1435,12 @@ private:
         const size_t leftLanes = OutputLanes(join.Left());
         const size_t rightLanes = OutputLanes(join.Right());
         const size_t joinParts = JoinPartitions();
-        const size_t cap = QueueCapacity();
-
-        auto leftPipe = std::make_unique<NScheduler::TOneToOneConnection>(cap);
-        leftPipe->Resize(leftLanes, leftLanes);
-        leftPipe->SetDebugName("join-left-input");
-        auto& leftPipeRef = Graph_.AddConnection(std::move(leftPipe));
+        auto& leftPipeRef = AddConn<NScheduler::TOneToOneConnection>(
+            leftLanes, leftLanes, "join-left-input");
         auto leftOut = Lower(join.Left(), leftPipeRef);
 
-        auto rightPipe = std::make_unique<NScheduler::TOneToOneConnection>(cap);
-        rightPipe->Resize(rightLanes, rightLanes);
-        rightPipe->SetDebugName("join-right-input");
-        auto& rightPipeRef = Graph_.AddConnection(std::move(rightPipe));
+        auto& rightPipeRef = AddConn<NScheduler::TOneToOneConnection>(
+            rightLanes, rightLanes, "join-right-input");
         auto rightOut = Lower(join.Right(), rightPipeRef);
 
         auto leftType = leftOut.OutputType;
@@ -1550,12 +1525,8 @@ private:
         std::shared_ptr<NScheduler::THashShuffleCode> hashCode,
         std::string debugName)
     {
-        auto shuffle = std::make_unique<NScheduler::THashShuffleConnection>(
-            ShuffleQueueCapacity());
-        shuffle->Resize(inputLanes, joinParts);
-        shuffle->SetDebugName(std::move(debugName));
-        auto* shufPtr = shuffle.get();
-        Graph_.AddConnection(std::move(shuffle));
+        auto* shufPtr = &AddConn<NScheduler::THashShuffleConnection>(
+            inputLanes, joinParts, std::move(debugName), ShuffleQueueCapacity());
 
         TShuffleSide side;
         side.Connection = shufPtr;

@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstring>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -16,6 +17,28 @@ namespace NScheduler {
 namespace {
 
 using namespace NQumir::NAst;
+
+// Flush a blocking task's buffered output rowset. Returns the result to return
+// immediately (OK once pushed, BLOCKED_OUTPUT if the queue is full), or nullopt
+// when nothing is pending so the caller proceeds to produce the next output.
+std::optional<ETaskResult> FlushPendingOutput(
+    bool& hasOutput,
+    TOutputPort& output,
+    TRowSet& current)
+{
+    if (!hasOutput) {
+        return std::nullopt;
+    }
+    if (!output.CanPush()) {
+        return ETaskResult::BLOCKED_OUTPUT;
+    }
+    if (!output.Push(std::move(current))) {
+        return ETaskResult::BLOCKED_OUTPUT;
+    }
+    current = {};
+    hasOutput = false;
+    return ETaskResult::OK;
+}
 
 struct THashShuffleRowSetData {
     std::shared_ptr<TRowSet> Input;
@@ -215,14 +238,6 @@ ETaskResult TSourceTask::Execute() {
     return ETaskResult::OK;
 }
 
-const std::shared_ptr<const TSourceCode>& TSourceTask::Code() const {
-    return Code_;
-}
-
-const std::shared_ptr<void>& TSourceTask::State() const {
-    return State_;
-}
-
 TUnaryTask::TUnaryTask(
     std::shared_ptr<const TUnaryCode> code,
     std::shared_ptr<void> state,
@@ -312,14 +327,6 @@ ETaskResult TSinkTask::Execute() {
     return ETaskResult::OK;
 }
 
-const std::shared_ptr<const TSinkCode>& TSinkTask::Code() const {
-    return Code_;
-}
-
-const std::shared_ptr<void>& TSinkTask::State() const {
-    return State_;
-}
-
 TBlockingTask::TBlockingTask(
     std::shared_ptr<const TBlockingCode> code,
     std::shared_ptr<void> state,
@@ -342,16 +349,8 @@ ETaskResult TBlockingTask::Execute() {
         return ETaskResult::FINISHED;
     }
 
-    if (HasOutput_) {
-        if (!Output_.CanPush()) {
-            return ETaskResult::BLOCKED_OUTPUT;
-        }
-        if (!Output_.Push(std::move(CurrentOutput_))) {
-            return ETaskResult::BLOCKED_OUTPUT;
-        }
-        CurrentOutput_ = {};
-        HasOutput_ = false;
-        return ETaskResult::OK;
+    if (auto result = FlushPendingOutput(HasOutput_, Output_, CurrentOutput_)) {
+        return *result;
     }
 
     auto result = Code_->Process(State_.get(), Input_, CurrentOutput_);
@@ -364,14 +363,6 @@ ETaskResult TBlockingTask::Execute() {
         Output_.Finish();
     }
     return result;
-}
-
-const std::shared_ptr<const TBlockingCode>& TBlockingTask::Code() const {
-    return Code_;
-}
-
-const std::shared_ptr<void>& TBlockingTask::State() const {
-    return State_;
 }
 
 TBinaryBlockingTask::TBinaryBlockingTask(
@@ -398,16 +389,8 @@ ETaskResult TBinaryBlockingTask::Execute() {
         return ETaskResult::FINISHED;
     }
 
-    if (HasOutput_) {
-        if (!Output_.CanPush()) {
-            return ETaskResult::BLOCKED_OUTPUT;
-        }
-        if (!Output_.Push(std::move(CurrentOutput_))) {
-            return ETaskResult::BLOCKED_OUTPUT;
-        }
-        CurrentOutput_ = {};
-        HasOutput_ = false;
-        return ETaskResult::OK;
+    if (auto result = FlushPendingOutput(HasOutput_, Output_, CurrentOutput_)) {
+        return *result;
     }
 
     auto result = Code_->Process(State_.get(), Left_, Right_, CurrentOutput_);
@@ -420,14 +403,6 @@ ETaskResult TBinaryBlockingTask::Execute() {
         Output_.Finish();
     }
     return result;
-}
-
-const std::shared_ptr<const TBinaryBlockingCode>& TBinaryBlockingTask::Code() const {
-    return Code_;
-}
-
-const std::shared_ptr<void>& TBinaryBlockingTask::State() const {
-    return State_;
 }
 
 TMergeTask::TMergeTask(
@@ -452,16 +427,8 @@ ETaskResult TMergeTask::Execute() {
         return ETaskResult::FINISHED;
     }
 
-    if (HasOutput_) {
-        if (!Output_.CanPush()) {
-            return ETaskResult::BLOCKED_OUTPUT;
-        }
-        if (!Output_.Push(std::move(CurrentOutput_))) {
-            return ETaskResult::BLOCKED_OUTPUT;
-        }
-        CurrentOutput_ = {};
-        HasOutput_ = false;
-        return ETaskResult::OK;
+    if (auto result = FlushPendingOutput(HasOutput_, Output_, CurrentOutput_)) {
+        return *result;
     }
 
     auto result = Code_->Process(State_.get(), Inputs_, CurrentOutput_);
@@ -474,14 +441,6 @@ ETaskResult TMergeTask::Execute() {
         Output_.Finish();
     }
     return result;
-}
-
-const std::shared_ptr<const TMergeCode>& TMergeTask::Code() const {
-    return Code_;
-}
-
-const std::shared_ptr<void>& TMergeTask::State() const {
-    return State_;
 }
 
 struct THashShuffleTask::TPendingOutput {
@@ -547,14 +506,6 @@ ETaskResult THashShuffleTask::Execute() {
         Release(&rowSet);
     }
     return PushPending();
-}
-
-const std::shared_ptr<const THashShuffleCode>& THashShuffleTask::Code() const {
-    return Code_;
-}
-
-const std::shared_ptr<void>& THashShuffleTask::State() const {
-    return State_;
 }
 
 bool THashShuffleTask::BatchingEnabled() const {
