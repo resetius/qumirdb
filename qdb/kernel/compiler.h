@@ -209,15 +209,6 @@ public:
     TJoinHashKernels CompileJoinHash(
         const NKernel::TOperatorKernelSpec& spec);
 
-    // Compiles a rowset-wide hash helper over the aggregate group keys, so a
-    // grouped aggregate can be hash-shuffled by group key. Fills one uint64
-    // hash per physical input row; selection is not applied by the helper.
-    // Uses the same key-ops machinery as the join hash, so equal group-key
-    // values hash consistently.
-    std::function<bool(TRowSet*, uint64_t*)> CompileGroupHash(
-        const NQumir::NAst::TStructType& inputType,
-        const std::vector<std::string>& groupKeys);
-
 private:
     // Implementation for the equi-key pairs `keys` (parallel left/right column
     // names) over rows of leftType/rightType. String keys are not supported yet.

@@ -25,6 +25,10 @@ enum class EFetchResult {
     FINISHED = 2,
 };
 
+// A single-producer/single-consumer lane: a bounded rowset queue plus a finished
+// flag. Shared by every connection type; defined in connection.cpp.
+struct TConnectionLane;
+
 struct TConnectionStats {
     uint64_t Pushed = 0;
     uint64_t Popped = 0;
@@ -62,6 +66,12 @@ protected:
     void CountEmptyFetch(uint64_t count = 1) const;
     void CountFinishedFetch(uint64_t count = 1) const;
 
+    // Push/can-push against a single lane, updating counters. Shared by the
+    // single-lane connections (one-to-one, gather). On a failed push the rowset
+    // is left untouched for a retry.
+    bool LaneCanPush(TConnectionLane& lane) const;
+    bool LanePush(TConnectionLane& lane, TRowSet& rowSet) const;
+
 private:
     std::string DebugName_;
     bool StatsEnabled_ = false;
@@ -90,11 +100,9 @@ public:
     EFetchResult Fetch(size_t dstId, TRowSet& rowSet) override;
 
 private:
-    struct TLane;
-
     size_t Capacity_;
     size_t Size_ = 0;
-    std::vector<std::unique_ptr<TLane>> Lanes_;
+    std::vector<std::unique_ptr<TConnectionLane>> Lanes_;
 };
 
 class TGatherConnection : public IConnection {
@@ -114,13 +122,11 @@ public:
     EFetchResult Fetch(size_t dstId, TRowSet& rowSet) override;
 
 private:
-    struct TLane;
-
     size_t Capacity_;
     size_t Size_ = 0;
     size_t FetchId_ = 0;
     std::atomic<size_t> FinishedCount_ = 0;
-    std::vector<std::unique_ptr<TLane>> Lanes_;
+    std::vector<std::unique_ptr<TConnectionLane>> Lanes_;
 };
 
 class THashShuffleConnection : public IConnection {
@@ -143,15 +149,13 @@ public:
     EFetchResult Fetch(size_t dstId, TRowSet& rowSet) override;
 
 private:
-    struct TLane;
-
     size_t LaneIndex(size_t srcId, size_t dstId) const;
 
 private:
     size_t Capacity_;
     size_t SrcCount_ = 0;
     size_t DstCount_ = 0;
-    std::vector<std::unique_ptr<TLane>> Lanes_;
+    std::vector<std::unique_ptr<TConnectionLane>> Lanes_;
     std::vector<std::unique_ptr<std::atomic<bool>>> Finished_;
     std::atomic<size_t> FinishedCount_ = 0;
     std::vector<size_t> FetchIds_;
@@ -177,12 +181,10 @@ public:
     EFetchResult Fetch(size_t dstId, TRowSet& rowSet) override;
 
 private:
-    struct TLane;
-
     size_t Capacity_;
     size_t DstCount_ = 0;
     std::atomic<bool> Finished_ = false;
-    std::vector<std::unique_ptr<TLane>> Lanes_;
+    std::vector<std::unique_ptr<TConnectionLane>> Lanes_;
 };
 
 } // namespace NScheduler
