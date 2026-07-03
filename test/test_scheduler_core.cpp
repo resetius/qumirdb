@@ -43,7 +43,7 @@ TEST(SchedulerCore, SettingsDefaultsAreConservative) {
 
     EXPECT_EQ(settings.Scheduler.Mode, EExecutionMode::Serial);
     EXPECT_EQ(settings.Scheduler.WorkerCount, 1u);
-    EXPECT_EQ(settings.Queue.RowsetCapacityPerLane, 1u);
+    EXPECT_EQ(settings.Queue.RowsetCapacityPerLane, 4u);
     EXPECT_EQ(settings.ScanSplit.MaxScanTasks, 1u);
     EXPECT_EQ(settings.ScanSplit.RowGroupCoalescingFactor, 1u);
     EXPECT_EQ(settings.HashShuffle.PartitionCount, 0u);
