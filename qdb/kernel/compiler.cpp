@@ -13,7 +13,6 @@
 #include <qumir/error.h>
 #include <qumir/parser/core/printer.h>
 
-#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <unordered_map>
