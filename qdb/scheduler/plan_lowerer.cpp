@@ -394,7 +394,7 @@ public:
             if (!IsGlobalAggregate(*n.Cast()) &&
                 !n.Cast()->GroupKeys().empty() && childLanes > 1)
             {
-                return JoinPartitions();
+                return JoinPartitions(childLanes);
             }
             return 1;
         }
@@ -422,12 +422,12 @@ public:
             if (!supportedType) {
                 return 0;
             }
-            if (OutputLanes(join->Left()) == 0 ||
-                OutputLanes(join->Right()) == 0)
-            {
+            const size_t leftLanes = OutputLanes(join->Left());
+            const size_t rightLanes = OutputLanes(join->Right());
+            if (leftLanes == 0 || rightLanes == 0) {
                 return 0;
             }
-            return JoinPartitions();
+            return JoinPartitions(std::max(leftLanes, rightLanes));
         }
         return 0;
     }
@@ -686,15 +686,18 @@ private:
             Settings_.ScanSplit);
     }
 
-    size_t JoinPartitions() const {
+    // Number of hash-shuffle partitions for a shuffled operator (grouped
+    // aggregate / equi-join). Defaults to the input's own parallelism
+    // (`inputLanes` — its scan-split lane count, a data-size proxy) capped at
+    // half the worker count: small inputs stay narrow, large inputs fan out, and
+    // the half-worker cap guards against shuffle over-sharding on big inputs
+    // (measured to regress a few queries at cap = WorkerCount).
+    // `--shuffle-partitions` overrides.
+    size_t JoinPartitions(size_t inputLanes) const {
         auto partitions = Settings_.HashShuffle.PartitionCount;
         if (partitions == 0) {
-            auto scanTasks = Settings_.ScanSplit.MaxScanTasks;
-            if (scanTasks == 0) {
-                scanTasks = 1;
-            }
-            partitions = (scanTasks + 4) / 5;
-            partitions = std::min(partitions, Settings_.Scheduler.WorkerCount);
+            auto cap = std::max<size_t>(Settings_.Scheduler.WorkerCount / 2, 1);
+            partitions = std::min(inputLanes, cap);
         }
 
         auto maxPartitions = Settings_.HashShuffle.MaxPartitionCount;
@@ -985,7 +988,7 @@ private:
         // Grouped aggregate: hash-shuffle the input by group key into `parts`
         // partition-local aggregates. Matching keys land in one partition, so
         // each computes complete groups; the parent gathers the partitions.
-        const size_t parts = JoinPartitions();
+        const size_t parts = JoinPartitions(childLanes);
         auto& childConnRef = AddConn<NScheduler::TOneToOneConnection>(
             childLanes, childLanes, "aggregate-shuffle-input");
         auto childOut = Lower(aggregate.Input(), childConnRef);
@@ -1357,7 +1360,7 @@ private:
         using namespace NQumir::NAst;
         const size_t leftLanes = OutputLanes(join.Left());
         const size_t rightLanes = OutputLanes(join.Right());
-        const size_t joinParts = JoinPartitions();
+        const size_t joinParts = JoinPartitions(std::max(leftLanes, rightLanes));
         auto& leftPipeRef = AddConn<NScheduler::TOneToOneConnection>(
             leftLanes, leftLanes, "join-left-input");
         auto leftOut = Lower(join.Left(), leftPipeRef);
