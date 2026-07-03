@@ -6,6 +6,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <semaphore>
 #include <string>
 
 namespace NQdb {
@@ -33,6 +34,9 @@ private:
 
     TTaskGraph& Graph_;
     TMPMCQueue<TTaskNode*> Ready_;
+    // One permit is released per task pushed to Ready_; idle workers block on
+    // it (after a short spin) instead of busy-yielding until work arrives.
+    std::counting_semaphore<> WorkAvailable_{0};
     std::atomic<size_t> FinishedCount_ = 0;
     std::atomic<uint64_t> Scheduled_ = 0;
     std::atomic<uint64_t> Popped_ = 0;

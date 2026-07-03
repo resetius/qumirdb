@@ -589,6 +589,7 @@ void PrintHelp() {
         "  --scheduler-counters         Print scheduler and connection counters with --verbose\n"
         "  --cascade-aggregates         Parallelize global aggregates (partial->gather->combine)\n"
         "  --shuffle-partitions <n>     Hash shuffle partition count\n"
+        "  --queue-depth <n>            Rowset queue capacity per connection lane\n"
         "  --shuffle-queue <n>          Rowset queue capacity per shuffle lane\n"
         "  --shuffle-target-rows <n>    Target rows per materialized shuffle batch\n"
         "  --shuffle-max-rows <n>       Maximum rows per materialized shuffle batch\n"
@@ -707,6 +708,18 @@ int main(int argc, char** argv) {
                 return 1;
             }
             config.Scheduler.HashShuffle.MaxQueuedRowsetsPerLane =
+                static_cast<size_t>(capacity);
+        } else if (!std::strcmp(argv[i], "--queue-depth")) {
+            if (i + 1 >= argc) {
+                std::cerr << "--queue-depth requires an argument\n";
+                return 1;
+            }
+            auto capacity = std::atoi(argv[++i]);
+            if (capacity <= 0) {
+                std::cerr << "--queue-depth requires a positive integer\n";
+                return 1;
+            }
+            config.Scheduler.Queue.RowsetCapacityPerLane =
                 static_cast<size_t>(capacity);
         } else if (!std::strcmp(argv[i], "--shuffle-target-rows")) {
             if (i + 1 >= argc) {

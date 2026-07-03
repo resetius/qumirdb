@@ -93,6 +93,9 @@ void TThreadedScheduler::Schedule(TTaskNode* node) {
         std::this_thread::yield();
     }
     Scheduled_.fetch_add(1, std::memory_order_relaxed);
+    // Wake one idle worker (release synchronizes with the acquiring worker, so
+    // the pushed node is visible before it pops).
+    WorkAvailable_.release();
 }
 
 TTaskNode* TThreadedScheduler::PopReady() {
@@ -128,12 +131,37 @@ void TThreadedScheduler::ScheduleOutput(TTaskNode* node) {
 }
 
 void TThreadedScheduler::Work() {
-    auto nodeCount = Graph_.Nodes().size();
-    while (FinishedCount_.load(std::memory_order_acquire) != nodeCount) {
+    const size_t nodeCount = Graph_.Nodes().size();
+    // Brief spin on the work permit before blocking, so bursts of scheduling
+    // are picked up without an OS wakeup; then park on the semaphore.
+    constexpr int acquireSpin = 64;
+    for (;;) {
+        if (FinishedCount_.load(std::memory_order_acquire) == nodeCount) {
+            return;
+        }
+        bool gotPermit = false;
+        for (int i = 0; i < acquireSpin; ++i) {
+            if (WorkAvailable_.try_acquire()) {
+                gotPermit = true;
+                break;
+            }
+        }
+        if (!gotPermit) {
+            WorkAvailable_.acquire();
+        }
+        if (FinishedCount_.load(std::memory_order_acquire) == nodeCount) {
+            return;
+        }
+
+        // A permit means a node was enqueued; release/acquire ordering makes it
+        // visible, so this pops immediately (the loop only guards a transient
+        // MPMC gap or the termination wakeup).
         auto* node = PopReady();
-        if (!node) {
-            std::this_thread::yield();
-            continue;
+        while (!node) {
+            if (FinishedCount_.load(std::memory_order_acquire) == nodeCount) {
+                return;
+            }
+            node = PopReady();
         }
 
         auto expected = ETaskState::Queued;
@@ -185,7 +213,12 @@ bool TThreadedScheduler::FinishRun(TTaskNode* node) {
 void TThreadedScheduler::FinishNode(TTaskNode* node) {
     auto previous = node->State.exchange(ETaskState::Finished, std::memory_order_acq_rel);
     assert(previous == ETaskState::Running || previous == ETaskState::Reschedule);
-    FinishedCount_.fetch_add(1, std::memory_order_acq_rel);
+    auto finished = FinishedCount_.fetch_add(1, std::memory_order_acq_rel) + 1;
+    if (finished == Graph_.Nodes().size()) {
+        // Graph is complete: wake every worker so they observe termination and
+        // exit instead of blocking on the permit forever.
+        WorkAvailable_.release(static_cast<ptrdiff_t>(WorkerCount_));
+    }
 }
 
 void TThreadedScheduler::ResetStats() {
