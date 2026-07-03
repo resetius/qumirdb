@@ -549,6 +549,117 @@ private:
         std::vector<NScheduler::TTaskNode*> Nodes;
     };
 
+    // Blocking code for a local (top-)sort: drain the input into the processor,
+    // then stream its sorted output. Works for both TSortBlockingState and
+    // TTopSortBlockingState (same Add/Next/InputFinished interface).
+    template <class TState>
+    std::shared_ptr<const NScheduler::TBlockingCode> MakeSortBlockingCode() {
+        return std::make_shared<NScheduler::TBlockingCode>(
+            [](void* state, NScheduler::TInputPort& input, TRowSet& output) {
+                auto* s = static_cast<TState*>(state);
+                TRowSet rowSet{};
+                while (!s->InputFinished) {
+                    auto fetch = input.Fetch(rowSet);
+                    if (fetch == NScheduler::EFetchResult::NO_DATA) {
+                        return NScheduler::ETaskResult::NEED_DATA;
+                    }
+                    if (fetch == NScheduler::EFetchResult::FINISHED) {
+                        s->InputFinished = true;
+                        break;
+                    }
+                    s->Processor.Add(rowSet);
+                    rowSet = {};
+                }
+                if (s->Processor.Next(output)) {
+                    return NScheduler::ETaskResult::OK;
+                }
+                return NScheduler::ETaskResult::FINISHED;
+            });
+    }
+
+    // Blocking tail for a local sort (top-K when topLimit is set, otherwise a
+    // full sort). Shared by the single-lane path and the per-lane locals of the
+    // partitioned merge.
+    TBlockingTail MakeSortTail(
+        const NQumir::NAst::TTypePtr& childType,
+        const std::vector<TSortKey>& keys,
+        std::vector<TSortColumnRef> keyColumns,
+        TSortRadixKernel radixKernel,
+        std::optional<int64_t> topLimit)
+    {
+        if (topLimit) {
+            const int64_t limit = *topLimit;
+            return TBlockingTail{
+                .Code = MakeSortBlockingCode<TTopSortBlockingState>(),
+                .MakeState = [childType, keys, keyColumns, radixKernel, limit]()
+                    -> std::shared_ptr<void>
+                {
+                    return std::make_shared<TTopSortBlockingState>(
+                        childType, keys, keyColumns, radixKernel, limit);
+                },
+                .OutputType = childType,
+            };
+        }
+        return TBlockingTail{
+            .Code = MakeSortBlockingCode<TSortBlockingState>(),
+            .MakeState = [childType, keys, keyColumns, radixKernel]()
+                -> std::shared_ptr<void>
+            {
+                return std::make_shared<TSortBlockingState>(
+                    childType, keys, keyColumns, radixKernel);
+            },
+            .OutputType = childType,
+        };
+    }
+
+    // Blocking code for a limit/offset task.
+    std::shared_ptr<const NScheduler::TBlockingCode> MakeLimitBlockingCode() {
+        return std::make_shared<NScheduler::TBlockingCode>(
+            [](void* state, NScheduler::TInputPort& input, TRowSet& output) {
+                auto* s = static_cast<TLimitBlockingState*>(state);
+                if (s->Processor.Finished()) {
+                    return NScheduler::ETaskResult::FINISHED;
+                }
+                TRowSet rowSet{};
+                while (!s->Processor.Finished()) {
+                    auto fetch = input.Fetch(rowSet);
+                    if (fetch == NScheduler::EFetchResult::NO_DATA) {
+                        return NScheduler::ETaskResult::NEED_DATA;
+                    }
+                    if (fetch == NScheduler::EFetchResult::FINISHED) {
+                        return NScheduler::ETaskResult::FINISHED;
+                    }
+                    if (s->Processor.Process(rowSet, output)) {
+                        return NScheduler::ETaskResult::OK;
+                    }
+                    rowSet = {};
+                }
+                return NScheduler::ETaskResult::FINISHED;
+            });
+    }
+
+    // Binary blocking code adapting scheduler input ports to a join/cross
+    // processor's fetch-callback interface. TState wraps the processor.
+    template <class TState>
+    std::shared_ptr<const NScheduler::TBinaryBlockingCode> MakeBinaryJoinCode() {
+        return std::make_shared<NScheduler::TBinaryBlockingCode>(
+            [](void* state,
+               NScheduler::TInputPort& left,
+               NScheduler::TInputPort& right,
+               TRowSet& output)
+            {
+                auto* s = static_cast<TState*>(state);
+                auto fetchLeft = [&](TRowSet& rowSet) {
+                    return MapJoinFetch(left.Fetch(rowSet));
+                };
+                auto fetchRight = [&](TRowSet& rowSet) {
+                    return MapJoinFetch(right.Fetch(rowSet));
+                };
+                return MapJoinProcessResult(
+                    s->Processor.Process(fetchLeft, fetchRight, output));
+            });
+    }
+
     bool SupportedChild(const TOperatorPtr& op) const {
         if (auto n = TMaybeOp<TAggregateOperator>(op)) {
             return OutputLanes(n.Cast()->Input()) != 0;
@@ -932,35 +1043,10 @@ private:
         return LowerBlocking(
             limit.Input(),
             [&](const NQumir::NAst::TTypePtr& childType) {
-                auto code = std::make_shared<NScheduler::TBlockingCode>(
-                    [](void* state,
-                       NScheduler::TInputPort& input,
-                       TRowSet& output)
-                    {
-                        auto* s = static_cast<TLimitBlockingState*>(state);
-                        if (s->Processor.Finished()) {
-                            return NScheduler::ETaskResult::FINISHED;
-                        }
-                        TRowSet rowSet{};
-                        while (!s->Processor.Finished()) {
-                            auto fetch = input.Fetch(rowSet);
-                            if (fetch == NScheduler::EFetchResult::NO_DATA) {
-                                return NScheduler::ETaskResult::NEED_DATA;
-                            }
-                            if (fetch == NScheduler::EFetchResult::FINISHED) {
-                                return NScheduler::ETaskResult::FINISHED;
-                            }
-                            if (s->Processor.Process(rowSet, output)) {
-                                return NScheduler::ETaskResult::OK;
-                            }
-                            rowSet = {};
-                        }
-                        return NScheduler::ETaskResult::FINISHED;
-                    });
                 const int64_t limitValue = limit.Limit();
                 const int64_t offsetValue = limit.Offset();
                 return TBlockingTail{
-                    .Code = std::move(code),
+                    .Code = MakeLimitBlockingCode(),
                     .MakeState = [limitValue, offsetValue]()
                         -> std::shared_ptr<void>
                     {
@@ -991,81 +1077,10 @@ private:
                 }
                 auto runtime = BuildSortRuntimeProcess(
                     *inputType, sortKeys, kernelName, Diagnostics_);
-                auto keys = sortKeys;
-                auto keyColumns = std::move(runtime.KeyColumns);
-                auto radixKernel = std::move(runtime.RadixKernel);
-                if (topLimit) {
-                    auto code = std::make_shared<NScheduler::TBlockingCode>(
-                        [](void* state,
-                           NScheduler::TInputPort& input,
-                           TRowSet& output)
-                        {
-                            auto* s = static_cast<TTopSortBlockingState*>(state);
-                            TRowSet rowSet{};
-                            while (!s->InputFinished) {
-                                auto fetch = input.Fetch(rowSet);
-                                if (fetch == NScheduler::EFetchResult::NO_DATA) {
-                                    return NScheduler::ETaskResult::NEED_DATA;
-                                }
-                                if (fetch ==
-                                    NScheduler::EFetchResult::FINISHED)
-                                {
-                                    s->InputFinished = true;
-                                    break;
-                                }
-                                s->Processor.Add(rowSet);
-                                rowSet = {};
-                            }
-                            if (s->Processor.Next(output)) {
-                                return NScheduler::ETaskResult::OK;
-                            }
-                            return NScheduler::ETaskResult::FINISHED;
-                        });
-                    const int64_t limit = *topLimit;
-                    return TBlockingTail{
-                        .Code = std::move(code),
-                        .MakeState = [childType, keys, keyColumns, radixKernel,
-                                      limit]() -> std::shared_ptr<void> {
-                            return std::make_shared<TTopSortBlockingState>(
-                                childType, keys, keyColumns, radixKernel, limit);
-                        },
-                        .OutputType = childType,
-                    };
-                }
-                auto code = std::make_shared<NScheduler::TBlockingCode>(
-                    [](void* state,
-                       NScheduler::TInputPort& input,
-                       TRowSet& output)
-                    {
-                        auto* s = static_cast<TSortBlockingState*>(state);
-                        TRowSet rowSet{};
-                        while (!s->InputFinished) {
-                            auto fetch = input.Fetch(rowSet);
-                            if (fetch == NScheduler::EFetchResult::NO_DATA) {
-                                return NScheduler::ETaskResult::NEED_DATA;
-                            }
-                            if (fetch == NScheduler::EFetchResult::FINISHED) {
-                                s->InputFinished = true;
-                                break;
-                            }
-                            s->Processor.Add(rowSet);
-                            rowSet = {};
-                        }
-                        if (s->Processor.Next(output)) {
-                            return NScheduler::ETaskResult::OK;
-                        }
-                        return NScheduler::ETaskResult::FINISHED;
-                    });
-                return TBlockingTail{
-                    .Code = std::move(code),
-                    .MakeState = [childType, keys, keyColumns, radixKernel]()
-                        -> std::shared_ptr<void>
-                    {
-                        return std::make_shared<TSortBlockingState>(
-                            childType, keys, keyColumns, radixKernel);
-                    },
-                    .OutputType = childType,
-                };
+                return MakeSortTail(
+                    childType, sortKeys,
+                    std::move(runtime.KeyColumns),
+                    std::move(runtime.RadixKernel), topLimit);
             },
             outConn);
     }
@@ -1084,7 +1099,8 @@ private:
         std::string_view kernelName,
         std::optional<int64_t> topLimit,
         NScheduler::IConnection& mergeOut)
-    {        const size_t lanes = OutputLanes(input);
+    {
+        const size_t lanes = OutputLanes(input);
         auto& childConnRef = AddConn<NScheduler::TOneToOneConnection>(
             lanes, lanes, "sort-merge-input");
         auto childOut = Lower(input, childConnRef);
@@ -1099,68 +1115,11 @@ private:
             *inputType, sortKeys, kernelName, Diagnostics_);
         auto keys = sortKeys;
         auto keyColumns = runtime.KeyColumns;
-        auto radixKernel = runtime.RadixKernel;
 
-        std::shared_ptr<const NScheduler::TBlockingCode> localCode;
-        std::function<std::shared_ptr<void>()> makeLocalState;
-        if (topLimit) {
-            localCode = std::make_shared<NScheduler::TBlockingCode>(
-                [](void* state, NScheduler::TInputPort& input, TRowSet& output) {
-                    auto* s = static_cast<TTopSortBlockingState*>(state);
-                    TRowSet rowSet{};
-                    while (!s->InputFinished) {
-                        auto fetch = input.Fetch(rowSet);
-                        if (fetch == NScheduler::EFetchResult::NO_DATA) {
-                            return NScheduler::ETaskResult::NEED_DATA;
-                        }
-                        if (fetch == NScheduler::EFetchResult::FINISHED) {
-                            s->InputFinished = true;
-                            break;
-                        }
-                        s->Processor.Add(rowSet);
-                        rowSet = {};
-                    }
-                    if (s->Processor.Next(output)) {
-                        return NScheduler::ETaskResult::OK;
-                    }
-                    return NScheduler::ETaskResult::FINISHED;
-                });
-            const int64_t limit = *topLimit;
-            makeLocalState = [childType, keys, keyColumns, radixKernel, limit]()
-                -> std::shared_ptr<void>
-            {
-                return std::make_shared<TTopSortBlockingState>(
-                    childType, keys, keyColumns, radixKernel, limit);
-            };
-        } else {
-            localCode = std::make_shared<NScheduler::TBlockingCode>(
-                [](void* state, NScheduler::TInputPort& input, TRowSet& output) {
-                    auto* s = static_cast<TSortBlockingState*>(state);
-                    TRowSet rowSet{};
-                    while (!s->InputFinished) {
-                        auto fetch = input.Fetch(rowSet);
-                        if (fetch == NScheduler::EFetchResult::NO_DATA) {
-                            return NScheduler::ETaskResult::NEED_DATA;
-                        }
-                        if (fetch == NScheduler::EFetchResult::FINISHED) {
-                            s->InputFinished = true;
-                            break;
-                        }
-                        s->Processor.Add(rowSet);
-                        rowSet = {};
-                    }
-                    if (s->Processor.Next(output)) {
-                        return NScheduler::ETaskResult::OK;
-                    }
-                    return NScheduler::ETaskResult::FINISHED;
-                });
-            makeLocalState = [childType, keys, keyColumns, radixKernel]()
-                -> std::shared_ptr<void>
-            {
-                return std::make_shared<TSortBlockingState>(
-                    childType, keys, keyColumns, radixKernel);
-            };
-        }
+        // Per-lane local (top-)sort producing sorted runs for the merge.
+        auto localTail = MakeSortTail(
+            childType, keys, keyColumns,
+            std::move(runtime.RadixKernel), topLimit);
 
         // One local (top-)sort per input lane, each writing a sorted run.
         std::vector<NScheduler::IConnection*> runConns;
@@ -1173,8 +1132,8 @@ private:
             auto& runRef = AddConn<NScheduler::TOneToOneConnection>(
                 1, 1, "sort-run-" + std::to_string(i));
             auto task = std::make_unique<NScheduler::TBlockingTask>(
-                localCode,
-                makeLocalState(),
+                localTail.Code,
+                localTail.MakeState(),
                 NScheduler::TInputPort{.Connection = &childConnRef, .Lane = i},
                 NScheduler::TOutputPort{.Connection = &runRef, .Lane = 0});
             auto& node = Graph_.AddOwnedNode(std::move(task));
@@ -1271,28 +1230,7 @@ private:
         auto merged = BuildSortMerge(
             sort.Input(), sort.Keys(), "top-sort", sort.Limit(), mergeConnRef);
 
-        auto limitCode = std::make_shared<NScheduler::TBlockingCode>(
-            [](void* state, NScheduler::TInputPort& input, TRowSet& output) {
-                auto* s = static_cast<TLimitBlockingState*>(state);
-                if (s->Processor.Finished()) {
-                    return NScheduler::ETaskResult::FINISHED;
-                }
-                TRowSet rowSet{};
-                while (!s->Processor.Finished()) {
-                    auto fetch = input.Fetch(rowSet);
-                    if (fetch == NScheduler::EFetchResult::NO_DATA) {
-                        return NScheduler::ETaskResult::NEED_DATA;
-                    }
-                    if (fetch == NScheduler::EFetchResult::FINISHED) {
-                        return NScheduler::ETaskResult::FINISHED;
-                    }
-                    if (s->Processor.Process(rowSet, output)) {
-                        return NScheduler::ETaskResult::OK;
-                    }
-                    rowSet = {};
-                }
-                return NScheduler::ETaskResult::FINISHED;
-            });
+        auto limitCode = MakeLimitBlockingCode();
         const int64_t limit = sort.Limit();
         auto limitTask = std::make_unique<NScheduler::TBlockingTask>(
             limitCode,
@@ -1358,22 +1296,7 @@ private:
         }
         auto crossType = *crossTypeExp;
 
-        auto crossCode = std::make_shared<NScheduler::TBinaryBlockingCode>(
-            [](void* state,
-               NScheduler::TInputPort& left,
-               NScheduler::TInputPort& right,
-               TRowSet& output)
-            {
-                auto* s = static_cast<TSchedulerCrossJoinState*>(state);
-                auto fetchLeft = [&](TRowSet& rowSet) {
-                    return MapJoinFetch(left.Fetch(rowSet));
-                };
-                auto fetchRight = [&](TRowSet& rowSet) {
-                    return MapJoinFetch(right.Fetch(rowSet));
-                };
-                return MapJoinProcessResult(
-                    s->Processor.Process(fetchLeft, fetchRight, output));
-            });
+        auto crossCode = MakeBinaryJoinCode<TSchedulerCrossJoinState>();
 
         const bool hasResidual = join.Filter() != nullptr;
         NScheduler::IConnection* crossOut = &outConn;
@@ -1473,22 +1396,7 @@ private:
             MakeHashShuffleCode(hashKernels.Right, rightType),
             "join-right-shuffle");
 
-        auto joinCode = std::make_shared<NScheduler::TBinaryBlockingCode>(
-            [](void* state,
-               NScheduler::TInputPort& left,
-               NScheduler::TInputPort& right,
-               TRowSet& output)
-            {
-                auto* joinState = static_cast<TSchedulerInnerJoinState*>(state);
-                auto fetchLeft = [&](TRowSet& rowSet) {
-                    return MapJoinFetch(left.Fetch(rowSet));
-                };
-                auto fetchRight = [&](TRowSet& rowSet) {
-                    return MapJoinFetch(right.Fetch(rowSet));
-                };
-                return MapJoinProcessResult(
-                    joinState->Processor.Process(fetchLeft, fetchRight, output));
-            });
+        auto joinCode = MakeBinaryJoinCode<TSchedulerInnerJoinState>();
 
         TLoweredOutput result;
         result.OutputType = kernelSpec.OutputSchema;
