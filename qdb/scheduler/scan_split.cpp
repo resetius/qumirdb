@@ -21,38 +21,6 @@ TScanSplit MakeSingleSplit(
     return split;
 }
 
-bool ReachesTarget(
-    const TScanSplit& split,
-    const TScanSplitSettings& settings)
-{
-    if (
-        settings.TargetRowsPerTask &&
-        split.RowCount >= static_cast<int64_t>(settings.TargetRowsPerTask))
-    {
-        return true;
-    }
-    if (
-        settings.TargetBytesPerTask &&
-        split.ByteSize >= static_cast<int64_t>(settings.TargetBytesPerTask))
-    {
-        return true;
-    }
-    return false;
-}
-
-bool HasTarget(const TScanSplitSettings& settings)
-{
-    return settings.TargetRowsPerTask || settings.TargetBytesPerTask;
-}
-
-bool ReachesMinimum(
-    const TScanSplit& split,
-    const TScanSplitSettings& settings)
-{
-    return !settings.MinRowsPerTask ||
-        split.RowCount >= static_cast<int64_t>(settings.MinRowsPerTask);
-}
-
 } // namespace
 
 std::vector<TScanSplit> BuildScanSplits(
@@ -79,44 +47,27 @@ std::vector<TScanSplit> BuildScanSplits(
         return {MakeSingleSplit(rowGroups, true)};
     }
 
+    // Split the row groups into up to maxTasks evenly-sized, contiguous chunks
+    // of ceil(n / m) groups each. The last chunk may be slightly smaller, which
+    // is fine — an even split keeps every worker busy. (The previous target/byte
+    // heuristic degenerated to 15 one-group splits plus one giant split when no
+    // target was configured, serialising the whole scan onto a single worker.)
+    const size_t groupCount = rowGroups.size();
+    const size_t taskCount = std::min(maxTasks, groupCount);
+    const size_t groupsPerTask = (groupCount + taskCount - 1) / taskCount;
+
     std::vector<TScanSplit> splits;
-    splits.reserve(std::min(maxTasks, rowGroups.size()));
-
-    const auto coalescingFactor = std::max<size_t>(
-        settings.RowGroupCoalescingFactor,
-        1);
-    TScanSplit current;
-    for (size_t index = 0; index < rowGroups.size(); ++index) {
-        const auto& rowGroup = rowGroups[index];
-        if (!current.RowGroupCount) {
-            current.FirstRowGroup = rowGroup.RowGroup;
+    splits.reserve(taskCount);
+    for (size_t begin = 0; begin < groupCount; begin += groupsPerTask) {
+        const size_t end = std::min(begin + groupsPerTask, groupCount);
+        TScanSplit split;
+        split.FirstRowGroup = rowGroups[begin].RowGroup;
+        split.RowGroupCount = end - begin;
+        for (size_t i = begin; i < end; ++i) {
+            split.RowCount += rowGroups[i].RowCount;
+            split.ByteSize += rowGroups[i].ByteSize;
         }
-        ++current.RowGroupCount;
-        current.RowCount += rowGroup.RowCount;
-        current.ByteSize += rowGroup.ByteSize;
-
-        const auto remainingGroups = rowGroups.size() - index - 1;
-        const auto remainingSplitSlots = maxTasks - splits.size() - 1;
-        if (!remainingSplitSlots && remainingGroups) {
-            continue;
-        }
-
-        const auto reachesCoalescing = current.RowGroupCount >= coalescingFactor;
-        if (
-            reachesCoalescing &&
-            ReachesMinimum(current, settings) &&
-            (
-                ReachesTarget(current, settings) ||
-                !HasTarget(settings) ||
-                !remainingGroups))
-        {
-            splits.push_back(current);
-            current = {};
-        }
-    }
-
-    if (current.RowGroupCount) {
-        splits.push_back(current);
+        splits.push_back(split);
     }
     return splits;
 }
