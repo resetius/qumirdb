@@ -1,19 +1,44 @@
 #pragma once
 
-#include <qdb/exec/executor.h>
+#include <qdb/io/io.h>
 #include <qdb/plan/ops/operator.h>
+#include <qdb/scheduler/connection.h>
+#include <qdb/scheduler/graph.h>
 #include <qdb/scheduler/settings.h>
 
 #include <iosfwd>
 #include <memory>
+#include <string>
+#include <vector>
 
 namespace NQdb {
 namespace NScheduler {
 
-std::unique_ptr<IRuntimeNode> BuildSchedulerPlanPipeline(
+// A plan lowered into a scheduler task graph, without a terminal sink attached.
+// FinalGather and Producers point into Graph; a sink is attached to FinalGather
+// (one edge per producer lane) before the graph is run.
+struct TLoweredPlan {
+    std::unique_ptr<TTaskGraph> Graph;
+    NQumir::NAst::TTypePtr OutputType;
+    IConnection* FinalGather = nullptr;
+    std::vector<TTaskNode*> Producers;
+    size_t Lanes = 0;
+};
+
+// Lower a logical plan into a scheduler graph (no terminal sink yet).
+TLoweredPlan LowerPlanToGraph(
     const TOperatorPtr& root,
     TSettings settings,
     std::ostream* diagnostics);
+
+// Attach a terminal sink that writes every output rowset to `sink`, then run the
+// graph on the configured scheduler. Returns false and sets `error` on failure.
+bool RunPlanIntoSink(
+    TLoweredPlan lowered,
+    ISink& sink,
+    TSettings settings,
+    std::ostream* diagnostics,
+    std::string* error);
 
 } // namespace NScheduler
 } // namespace NQdb

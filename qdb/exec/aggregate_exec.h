@@ -1,6 +1,5 @@
 #pragma once
 
-#include <qdb/exec/unary_block_exec.h>
 #include <qdb/kernel/compiler.h>
 
 #include <array>
@@ -28,8 +27,5 @@ private:
     bool Finished_ = false;
     bool Destroyed_ = false;
 };
-
-TRuntimeUnaryBlockingKernel::TProcess MakeAggregateProcess(
-    TAggregateKernels kernels);
 
 } // namespace NQdb

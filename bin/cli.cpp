@@ -1,6 +1,7 @@
-#include <qdb/exec/planner.h>
+#include <qdb/exec/planner_helpers.h>
 #include <qdb/io/parquet/source.h>
 #include <qdb/io/text/sink.h>
+#include <qdb/scheduler/plan_lowerer.h>
 #include <qdb/plan/build.h>
 #include <qdb/plan/ops/aggregate.h>
 #include <qdb/plan/ops/filter.h>
@@ -109,9 +110,6 @@ TFormatSpec ParseFormat(const std::string& spec) {
 }
 
 NQdb::NScheduler::EExecutionMode ParseSchedulerMode(const std::string& mode) {
-    if (mode == "serial") {
-        return NQdb::NScheduler::EExecutionMode::Serial;
-    }
     if (mode == "single") {
         return NQdb::NScheduler::EExecutionMode::SingleThreadedScheduler;
     }
@@ -147,7 +145,6 @@ struct TConfig {
     ESyntax Syntax = ESyntax::Sexpr;
     std::string DataDir = ".";
     TFormatSpec Format;
-    int MaxRowSets = -1;
     bool Verbose = false;
     NQdb::NScheduler::TSettings Scheduler;
 };
@@ -319,6 +316,23 @@ bool StripExplain(std::string& text) {
     return true;
 }
 
+// Wraps the output sink to count the total number of result rows.
+class TCountingSink : public NQdb::ISink {
+public:
+    explicit TCountingSink(NQdb::ISink& inner) : Inner_(inner) {}
+
+    void Write(const NQdb::TRowSet& rowSet) override {
+        Rows_ += rowSet.RowCount;
+        Inner_.Write(rowSet);
+    }
+    void Flush() override { Inner_.Flush(); }
+    int64_t Rows() const { return Rows_; }
+
+private:
+    NQdb::ISink& Inner_;
+    int64_t Rows_ = 0;
+};
+
 int RunQuery(ESyntax syntax, std::istream& in, const TConfig& config) {
     std::vector<std::unique_ptr<NQdb::TParquetSource>> sources;
     auto makeSource = [&](const std::string& path) -> NQdb::TOperatorPtr {
@@ -388,15 +402,17 @@ int RunQuery(ESyntax syntax, std::istream& in, const TConfig& config) {
         return 0;
     }
 
-    NQdb::TPhysicalPlanner planner(
-        config.Verbose ? &std::cerr : nullptr,
-        config.Scheduler);
-    planner.PrintRuntimePlan(*plan);
-    auto executor = planner.Build(*plan);
+    auto* diagnostics = config.Verbose ? &std::cerr : nullptr;
+    if (diagnostics) {
+        NQdb::PrintRuntimePlan(*diagnostics, *plan);
+    }
+
+    auto lowered = NQdb::NScheduler::LowerPlanToGraph(
+        *plan, config.Scheduler, diagnostics);
 
     std::vector<std::string> outputNames;
     std::vector<NQdb::TColumnSchema> outputColumns;
-    auto schema = SchemaFromType(executor->OutputType(), outputNames, outputColumns);
+    auto schema = SchemaFromType(lowered.OutputType, outputNames, outputColumns);
 
     std::unique_ptr<NQdb::ISink> sink;
     if (config.Format.Name == "csv") {
@@ -408,17 +424,17 @@ int RunQuery(ESyntax syntax, std::istream& in, const TConfig& config) {
         sink = std::make_unique<NQdb::TConsoleSink>(schema, std::cout);
     }
 
-    NQdb::TRowSet rowSet = {};
-    int count = 0;
+    TCountingSink counting(*sink);
     auto start = std::chrono::steady_clock::now();
-    while ((config.MaxRowSets < 0 || count < config.MaxRowSets) && executor->Next(rowSet)) {
-        sink->Write(rowSet);
-        NQdb::Release(&rowSet);
-        ++count;
+    std::string error;
+    if (!NQdb::NScheduler::RunPlanIntoSink(
+            std::move(lowered), counting, config.Scheduler, diagnostics, &error)) {
+        std::cerr << error << "\n";
+        return 1;
     }
-    sink->Flush();
+    counting.Flush();
     auto elapsed = std::chrono::steady_clock::now() - start;
-    std::cerr << "Processed " << count << " rowsets in "
+    std::cerr << "Returned " << counting.Rows() << " rows in "
               << std::chrono::duration<double>(elapsed).count() << " seconds\n";
     return 0;
 }
@@ -582,8 +598,7 @@ void PrintHelp() {
         "    <escape>csv                CSV with quoting/escaping\n"
         "    <separator=X>csv           CSV with custom separator X\n"
         "    null                       Consume rows without output\n"
-        "  --rowsets <n>                Stop after n rowsets\n"
-        "  --scheduler <mode>           Execution mode: serial, single, threaded\n"
+        "  --scheduler <mode>           Execution mode: single, threaded\n"
         "  --scheduler-workers <n>      Worker count for threaded scheduler\n"
         "  --scan-tasks <n>             Maximum parquet scan tasks for scheduler mode\n"
         "  --scheduler-counters         Print scheduler and connection counters with --verbose\n"
@@ -634,16 +649,6 @@ int main(int argc, char** argv) {
                 config.Format = ParseFormat(argv[++i]);
             } catch (const std::invalid_argument& e) {
                 std::cerr << "Invalid format spec: " << e.what() << "\n";
-                return 1;
-            }
-        } else if (!std::strcmp(argv[i], "--rowsets")) {
-            if (i + 1 >= argc) {
-                std::cerr << "--rowsets requires an argument\n";
-                return 1;
-            }
-            config.MaxRowSets = std::atoi(argv[++i]);
-            if (config.MaxRowSets <= 0) {
-                std::cerr << "--rowsets requires a positive integer\n";
                 return 1;
             }
         } else if (!std::strcmp(argv[i], "--scheduler")) {

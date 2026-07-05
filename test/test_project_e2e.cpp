@@ -5,13 +5,11 @@
 #include <qumir/parser/core/parser.h>
 #include <qumir/parser/type.h>
 
-#include <qdb/exec/executor.h>
-#include <qdb/exec/planner.h>
+#include "plan_runner.h"
 #include <qdb/io/io.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/passes/column_pruning.h>
 #include <qdb/plan/passes/typing.h>
-#include <qdb/scheduler/runtime_node.h>
 #include <qdb/sexp/parser.h>
 
 #include <array>
@@ -50,7 +48,7 @@ struct TStubSource : ISource {
     }
 };
 
-std::unique_ptr<IRuntimeNode> Plan(
+std::unique_ptr<TTestRuntime> Plan(
     const std::string& sexp,
     ISource& src,
     NScheduler::TSettings schedulerSettings = {})
@@ -70,8 +68,7 @@ std::unique_ptr<IRuntimeNode> Plan(
     auto root = std::static_pointer_cast<IOperator>(*parsed);
     AnnotateTypes(root);
     ApplyColumnPruning(root);
-    TPhysicalPlanner planner(nullptr, schedulerSettings);
-    return planner.Build(root);
+    return RunPlan(root, schedulerSettings);
 }
 
 } // namespace
@@ -217,7 +214,6 @@ TEST(ProjectE2E, SchedulerRuntimeRunsLimitTail) {
         "(limit 3) (offset 1))",
         src,
         settings);
-    ASSERT_NE(dynamic_cast<NScheduler::TRuntimeSchedulerPipeline*>(plan.get()), nullptr);
 
     std::vector<int64_t> got;
     TRowSet out{};

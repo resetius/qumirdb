@@ -65,13 +65,22 @@ query_enabled() {
 # "<seconds_float> <rc>" on stdout.
 run_query() {
     local label="$1"; shift
-    local out rc seconds
+    local out_file rc seconds
+    out_file="$(mktemp "$tmpdir/qdb_output.XXXXXX")"
     set +e
-    out=$("$QDB_BIN" "$@" 2>&1)
+    "$QDB_BIN" "$@" > "$out_file" 2>&1
     rc=$?
     set -e
-    printf '\n=== %s (rc=%s) ===\n%s\n' "$label" "$rc" "$out" >> "$LOG_FILE"
-    seconds=$(echo "$out" | grep -o 'Processed [0-9]* rowsets in [0-9.]*' | grep -o '[0-9.]*$' || echo "0")
+    printf '\n=== %s (rc=%s) ===\n' "$label" "$rc" >> "$LOG_FILE"
+    cat "$out_file" >> "$LOG_FILE"
+    printf '\n' >> "$LOG_FILE"
+    seconds=$(
+        sed -nE \
+            -e 's/.*Returned [0-9]+ rows in ([0-9]+([.][0-9]+)?) seconds.*/\1/p' \
+            -e 's/.*Processed [0-9]+ rowsets in ([0-9]+([.][0-9]+)?).*/\1/p' \
+            "$out_file" | tail -n 1
+    )
+    seconds="${seconds:-0}"
     echo "$seconds $rc"
 }
 

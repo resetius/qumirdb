@@ -5,8 +5,7 @@
 #include <qumir/parser/core/parser.h>
 #include <qumir/parser/type.h>
 
-#include <qdb/exec/executor.h>
-#include <qdb/exec/planner.h>
+#include "plan_runner.h"
 #include <qdb/io/io.h>
 #include <qdb/kernel/compiler.h>
 #include <qdb/plan/ops/aggregate.h>
@@ -171,8 +170,7 @@ TEST(AggregateE2E, MultipleGroups) {
     TVectorSource source({"k", "v"}, std::move(batches));
     auto root = ParsePlan(kPlanSexp, source);
 
-    TPhysicalPlanner planner;
-    auto runtime = planner.Build(root);
+    auto runtime = RunPlan(root);
 
     auto reference = ComputeReference(keys, vals);
 
@@ -228,8 +226,7 @@ TEST(AggregateE2E, SingleGroup) {
     TVectorSource source({"k", "v"}, std::move(batches));
     auto root = ParsePlan(kPlanSexp, source);
 
-    TPhysicalPlanner planner;
-    auto runtime = planner.Build(root);
+    auto runtime = RunPlan(root);
 
     TRowSet result{};
     ASSERT_TRUE(runtime->Next(result));
@@ -294,8 +291,7 @@ TEST(AggregateE2E, CompositeIntegerKeysProduceSeparateColumns) {
         "(rel aggregate (rel source \"data.parquet\") (keys k1 k2) "
         "(agg c count) (agg s sum v))",
         source);
-    TPhysicalPlanner planner;
-    auto runtime = planner.Build(root);
+    auto runtime = RunPlan(root);
 
     std::unordered_map<TPair, std::pair<int64_t, int64_t>, TPairHash> reference;
     for (size_t i = 0; i < first.size(); ++i) {
@@ -345,8 +341,7 @@ TEST(AggregateE2E, ScalarI32KeyPreservesTypedOutput) {
         "(rel aggregate (rel source \"data.parquet\") (keys k) "
         "(agg c count) (agg s sum v))",
         source);
-    TPhysicalPlanner planner;
-    auto runtime = planner.Build(root);
+    auto runtime = RunPlan(root);
 
     std::unordered_map<int32_t, std::pair<int64_t, int64_t>> reference;
     for (size_t i = 0; i < keys.size(); ++i) {
@@ -410,8 +405,7 @@ TEST(AggregateE2E, ScalarStringKeyOwnsFinalizedOutput) {
         "(rel aggregate (rel source \"data.parquet\") (keys k) "
         "(agg c count) (agg s sum v))",
         source);
-    TPhysicalPlanner planner;
-    auto runtime = planner.Build(root);
+    auto runtime = RunPlan(root);
 
     TRowSet result{};
     ASSERT_TRUE(runtime->Next(result));
@@ -455,8 +449,7 @@ TEST(AggregateE2E, NullStringKeysGroupTogetherAndDifferFromEmpty) {
         "(rel aggregate (rel source \"data.parquet\") (keys k) "
         "(agg c count) (agg s sum v))",
         source);
-    TPhysicalPlanner planner;
-    auto runtime = planner.Build(root);
+    auto runtime = RunPlan(root);
 
     TRowSet result{};
     ASSERT_TRUE(runtime->Next(result));
@@ -497,8 +490,7 @@ TEST(AggregateE2E, NullIntegerKeysIgnorePayloadAndDifferFromZero) {
         "(rel aggregate (rel source \"data.parquet\") (keys k) "
         "(agg c count) (agg s sum v))",
         source);
-    TPhysicalPlanner planner;
-    auto runtime = planner.Build(root);
+    auto runtime = RunPlan(root);
 
     TRowSet result{};
     ASSERT_TRUE(runtime->Next(result));
@@ -544,8 +536,7 @@ TEST(AggregateE2E, CompositeNullKeysTrackValidityPerPosition) {
         "(rel aggregate (rel source \"data.parquet\") (keys k1 k2) "
         "(agg c count) (agg s sum v))",
         source);
-    TPhysicalPlanner planner;
-    auto runtime = planner.Build(root);
+    auto runtime = RunPlan(root);
 
     TRowSet result{};
     ASSERT_TRUE(runtime->Next(result));
@@ -614,8 +605,7 @@ TEST(AggregateE2E, MixedStringI32KeysFinalizeToSeparateColumns) {
         "(rel aggregate (rel source \"data.parquet\") (keys name id) "
         "(agg c count) (agg s sum v))",
         source);
-    TPhysicalPlanner planner;
-    auto runtime = planner.Build(root);
+    auto runtime = RunPlan(root);
 
     TRowSet result{};
     ASSERT_TRUE(runtime->Next(result));
@@ -678,8 +668,7 @@ TEST(AggregateE2E, MixedI32StringKeysPreserveReducersAcrossGrow) {
         "(rel aggregate (rel source \"data.parquet\") (keys id name) "
         "(agg c count) (agg s sum v))",
         source);
-    TPhysicalPlanner planner;
-    auto runtime = planner.Build(root);
+    auto runtime = RunPlan(root);
 
     TRowSet result{};
     ASSERT_TRUE(runtime->Next(result));
@@ -721,8 +710,7 @@ TEST(AggregateE2E, TwoStringKeysFinalizeIndependentColumns) {
         "(rel aggregate (rel source \"data.parquet\") (keys left right) "
         "(agg c count) (agg s sum v))",
         source);
-    TPhysicalPlanner planner;
-    auto runtime = planner.Build(root);
+    auto runtime = RunPlan(root);
 
     TRowSet result{};
     ASSERT_TRUE(runtime->Next(result));
@@ -783,8 +771,7 @@ TEST(AggregateE2E, ScalarF64KeyCanonicalizesSignedZero) {
         "(rel aggregate (rel source \"data.parquet\") (keys k) "
         "(agg c count) (agg s sum v))",
         source);
-    TPhysicalPlanner planner;
-    auto runtime = planner.Build(root);
+    auto runtime = RunPlan(root);
 
     auto canonicalBits = [](double value) {
         uint64_t bits = std::bit_cast<uint64_t>(value);
@@ -858,8 +845,7 @@ TEST(AggregateE2E, MixedI32F64CompositeKeyPreservesLayoutAndTypedColumns) {
         "(rel aggregate (rel source \"data.parquet\") (keys k1 k2) "
         "(agg c count) (agg s sum v))",
         source);
-    TPhysicalPlanner planner;
-    auto runtime = planner.Build(root);
+    auto runtime = RunPlan(root);
 
     std::map<std::pair<int32_t, double>, std::pair<int64_t, int64_t>> reference;
     for (size_t i = 0; i < first.size(); ++i) {
@@ -952,8 +938,7 @@ TEST(AggregateE2E, PlannerUsesPhysicalPrunedSchemaForKeyDescriptor) {
         "(rel aggregate (rel source \"data.parquet\") "
         "(keys key_i32 key_f64) (agg s sum value))",
         source);
-    TPhysicalPlanner planner;
-    auto runtime = planner.Build(root);
+    auto runtime = RunPlan(root);
 
     EXPECT_EQ(source.RestrictedColumns(),
         (std::unordered_set<std::string>{"key_i32", "key_f64", "value"}));
@@ -1025,8 +1010,7 @@ TEST(AggregateE2E, NullableReducerArgumentSeparatesCountStarFromCountArg) {
         "(agg c count) (agg cn count v) (agg s sum v) "
         "(agg mn min v) (agg mx max v))",
         source);
-    TPhysicalPlanner planner;
-    auto runtime = planner.Build(root);
+    auto runtime = RunPlan(root);
 
     TRowSet result{};
     ASSERT_TRUE(runtime->Next(result));
@@ -1102,8 +1086,7 @@ TEST(AggregateE2E, NullableReducerArgumentHonoursSelectionMask) {
         "(agg c count) (agg cn count v) (agg s sum v) "
         "(agg mn min v) (agg mx max v))",
         source);
-    TPhysicalPlanner planner;
-    auto runtime = planner.Build(root);
+    auto runtime = RunPlan(root);
 
     TRowSet result{};
     ASSERT_TRUE(runtime->Next(result));
@@ -1188,8 +1171,7 @@ TEST(AggregateE2E, NullableReducerArgumentAccumulatesAcrossBatchesAndGrow) {
         "(agg c count) (agg cn count v) (agg s sum v) "
         "(agg mn min v) (agg mx max v))",
         source);
-    TPhysicalPlanner planner;
-    auto runtime = planner.Build(root);
+    auto runtime = RunPlan(root);
 
     TRowSet result{};
     ASSERT_TRUE(runtime->Next(result));
@@ -1238,8 +1220,7 @@ TEST(AggregateE2E, NonNullableReducerArgumentKeepsAggregateOutputNonNull) {
         "(agg c count) (agg cn count v) (agg s sum v) "
         "(agg mn min v) (agg mx max v))",
         source);
-    TPhysicalPlanner planner;
-    auto runtime = planner.Build(root);
+    auto runtime = RunPlan(root);
 
     TRowSet result{};
     ASSERT_TRUE(runtime->Next(result));
@@ -1300,8 +1281,7 @@ TEST(AggregateE2E, NullableReducerArgumentWithCompositeStringKey) {
         "(agg c count) (agg cn count v) (agg s sum v) "
         "(agg mn min v) (agg mx max v))",
         source);
-    TPhysicalPlanner planner;
-    auto runtime = planner.Build(root);
+    auto runtime = RunPlan(root);
 
     TRowSet result{};
     ASSERT_TRUE(runtime->Next(result));
@@ -1365,8 +1345,7 @@ TEST(AggregateE2E, NullableReducerArgumentWithNullStringKey) {
         "(rel aggregate (rel source \"data.parquet\") (keys k) "
         "(agg c count) (agg cn count v) (agg s sum v))",
         source);
-    TPhysicalPlanner planner;
-    auto runtime = planner.Build(root);
+    auto runtime = RunPlan(root);
 
     TRowSet result{};
     ASSERT_TRUE(runtime->Next(result));
