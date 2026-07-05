@@ -75,21 +75,23 @@ TEST(SchedulerScanSplit, KeepsTinyInputsSerial) {
     EXPECT_TRUE(splits[0].SerialRead);
 }
 
-TEST(SchedulerScanSplit, UsesTargetRowsWhenConfigured) {
+TEST(SchedulerScanSplit, SplitsContiguousRangesEvenly) {
     TScanSplitSettings settings;
     settings.Strategy = EScanSplitStrategy::RowGroupRange;
-    settings.MaxScanTasks = 4;
-    settings.TargetRowsPerTask = 25;
+    settings.MaxScanTasks = 2;
 
-    auto splits = BuildScanSplits(RowGroups(), settings);
+    auto rowGroups = RowGroups();
+    rowGroups.push_back({.RowGroup = 4, .RowCount = 50, .ByteSize = 500});
 
-    ASSERT_EQ(splits.size(), 3u);
-    EXPECT_EQ(splits[0].RowGroupCount, 2u);
-    EXPECT_EQ(splits[0].RowCount, 30);
-    EXPECT_EQ(splits[1].RowGroupCount, 1u);
-    EXPECT_EQ(splits[1].RowCount, 30);
-    EXPECT_EQ(splits[2].RowGroupCount, 1u);
-    EXPECT_EQ(splits[2].RowCount, 40);
+    auto splits = BuildScanSplits(rowGroups, settings);
+
+    ASSERT_EQ(splits.size(), 2u);
+    EXPECT_EQ(splits[0].FirstRowGroup, 0u);
+    EXPECT_EQ(splits[0].RowGroupCount, 3u);
+    EXPECT_EQ(splits[0].RowCount, 60);
+    EXPECT_EQ(splits[1].FirstRowGroup, 3u);
+    EXPECT_EQ(splits[1].RowGroupCount, 2u);
+    EXPECT_EQ(splits[1].RowCount, 90);
 }
 
 } // namespace

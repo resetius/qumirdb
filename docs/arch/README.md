@@ -39,6 +39,9 @@ Physical execution:
   generic Oz kernels, type-specific hash injection, runtime ABI and memory.
 - [Join](join.md) - supported join forms, adaptive symmetric/probe-only hash
   join scheduling, kernel split, residual predicates, and runtime lifetime.
+- [Scheduler runtime](scheduler_runtime.md) - scheduled physical graph, task
+  nodes, connections, compiled kernels, lowering patterns, and JS/WASM runtime
+  boundary.
 - [Dispatch](dispatch.md) - runtime shell dispatch model, node kinds, and
   kernel/dispatcher ownership split.
 - [String values](string_values.md) - proposed borrowed/owned string ABI for

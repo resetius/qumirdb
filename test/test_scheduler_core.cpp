@@ -45,7 +45,6 @@ TEST(SchedulerCore, SettingsDefaultsAreConservative) {
     EXPECT_EQ(settings.Scheduler.WorkerCount, 1u);
     EXPECT_EQ(settings.Queue.RowsetCapacityPerLane, 4u);
     EXPECT_EQ(settings.ScanSplit.MaxScanTasks, 1u);
-    EXPECT_EQ(settings.ScanSplit.RowGroupCoalescingFactor, 1u);
     EXPECT_EQ(settings.HashShuffle.PartitionCount, 0u);
     EXPECT_EQ(settings.HashShuffle.MaxPartitionCount, 0u);
     EXPECT_EQ(settings.HashShuffle.TargetOutputBatchRows, 16u * 1024u);
