@@ -792,19 +792,25 @@ private:
         NScheduler::IConnection& outConn)
     {
         const size_t lanes = OutputLanes(child);
-        auto& gatherRef = AddConn<NScheduler::TGatherConnection>(
-            lanes, 1, "blocking-input-gather");
-        auto childOut = Lower(child, gatherRef);
+        NScheduler::IConnection* inputConn = nullptr;
+        if (lanes == 1) {
+            inputConn = &AddConn<NScheduler::TOneToOneConnection>(
+                1, 1, "blocking-input");
+        } else {
+            inputConn = &AddConn<NScheduler::TGatherConnection>(
+                lanes, 1, "blocking-input-gather");
+        }
+        auto childOut = Lower(child, *inputConn);
 
         TBlockingTail tail = buildTail(childOut.OutputType);
         auto task = std::make_unique<NScheduler::TBlockingTask>(
             std::move(tail.Code),
             tail.MakeState(),
-            NScheduler::TInputPort{.Connection = &gatherRef, .Lane = 0},
+            NScheduler::TInputPort{.Connection = inputConn, .Lane = 0},
             NScheduler::TOutputPort{.Connection = &outConn, .Lane = 0});
         auto& node = Graph_.AddOwnedNode(std::move(task));
         for (size_t p = 0; p < lanes; ++p) {
-            Graph_.AddEdge(*childOut.Producers[p], node, gatherRef, p, 0);
+            Graph_.AddEdge(*childOut.Producers[p], node, *inputConn, p, 0);
         }
         return TLoweredOutput{
             .Producers = {&node},
@@ -1239,30 +1245,40 @@ private:
             lanes, lanes, "cross-vector-input");
         auto vectorOut = Lower(join.Left(), vectorRef);
 
-        // Scalar (buffered, broadcast) side: lower it (its `__group__` aggregate
-        // stays single via IsGlobalAggregate — no shuffle), gather to one lane,
-        // then forward into a broadcast connection replicated to every vector
-        // lane.
         const size_t scalarLanes = OutputLanes(join.Right());
-        auto& scalarGatherRef = AddConn<NScheduler::TGatherConnection>(
-            scalarLanes, 1, "cross-scalar-gather");
-        // Lower the scalar side directly into the gather so its producers write
-        // the same connection the forward reads (gather scalarLanes -> 1).
-        auto scalarOut = Lower(join.Right(), scalarGatherRef);
+        TLoweredOutput scalarOut;
+        NScheduler::IConnection* scalarInput = nullptr;
+        NScheduler::TTaskNode* scalarBroadcastProducer = nullptr;
+        const bool directScalar = lanes == 1 && scalarLanes == 1;
+        if (directScalar) {
+            scalarInput = &AddConn<NScheduler::TOneToOneConnection>(
+                1, 1, "cross-right-input");
+            scalarOut = Lower(join.Right(), *scalarInput);
+        } else {
+            // Scalar (buffered, broadcast) side: lower it, gather to one lane,
+            // then forward into a broadcast connection replicated to every
+            // vector lane.
+            auto& scalarGatherRef = AddConn<NScheduler::TGatherConnection>(
+                scalarLanes, 1, "cross-scalar-gather");
+            scalarOut = Lower(join.Right(), scalarGatherRef);
 
-        auto& broadcastRef = AddConn<NScheduler::TBroadcastConnection>(
-            1, lanes, "cross-scalar-broadcast");
+            auto& broadcastRef = AddConn<NScheduler::TBroadcastConnection>(
+                1, lanes, "cross-scalar-broadcast");
 
-        auto fwdCode = std::make_shared<NScheduler::TUnaryCode>(
-            [](void*, TRowSet&) {});
-        auto fwd = std::make_unique<NScheduler::TUnaryTask>(
-            fwdCode,
-            std::make_shared<int>(0),
-            NScheduler::TInputPort{.Connection = &scalarGatherRef, .Lane = 0},
-            NScheduler::TOutputPort{.Connection = &broadcastRef, .Lane = 0});
-        auto& fwdNode = Graph_.AddOwnedNode(std::move(fwd));
-        for (size_t m = 0; m < scalarLanes; ++m) {
-            Graph_.AddEdge(*scalarOut.Producers[m], fwdNode, scalarGatherRef, m, 0);
+            auto fwdCode = std::make_shared<NScheduler::TUnaryCode>(
+                [](void*, TRowSet&) {});
+            auto fwd = std::make_unique<NScheduler::TUnaryTask>(
+                fwdCode,
+                std::make_shared<int>(0),
+                NScheduler::TInputPort{.Connection = &scalarGatherRef, .Lane = 0},
+                NScheduler::TOutputPort{.Connection = &broadcastRef, .Lane = 0});
+            auto& fwdNode = Graph_.AddOwnedNode(std::move(fwd));
+            for (size_t m = 0; m < scalarLanes; ++m) {
+                Graph_.AddEdge(
+                    *scalarOut.Producers[m], fwdNode, scalarGatherRef, m, 0);
+            }
+            scalarInput = &broadcastRef;
+            scalarBroadcastProducer = &fwdNode;
         }
 
         auto leftType = vectorOut.OutputType;
@@ -1293,11 +1309,16 @@ private:
                 crossCode,
                 std::make_shared<TSchedulerCrossJoinState>(leftType, rightType),
                 NScheduler::TInputPort{.Connection = &vectorRef, .Lane = m},
-                NScheduler::TInputPort{.Connection = &broadcastRef, .Lane = m},
+                NScheduler::TInputPort{.Connection = scalarInput, .Lane = m},
                 NScheduler::TOutputPort{.Connection = crossOut, .Lane = m});
             auto& node = Graph_.AddOwnedNode(std::move(task));
             Graph_.AddEdge(*vectorOut.Producers[m], node, vectorRef, m, m);
-            Graph_.AddEdge(fwdNode, node, broadcastRef, 0, m);
+            if (directScalar) {
+                Graph_.AddEdge(*scalarOut.Producers[0], node, *scalarInput, 0, 0);
+            } else {
+                Graph_.AddEdge(
+                    *scalarBroadcastProducer, node, *scalarInput, 0, m);
+            }
             crossNodes.push_back(&node);
         }
 
@@ -1358,8 +1379,29 @@ private:
         TKernelCompiler compiler(Diagnostics_);
         auto joinKernels = std::make_shared<TJoinKernels>(
             compiler.CompileJoin(kernelSpec));
-        auto hashKernels = compiler.CompileJoinHash(kernelSpec);
+        auto joinCode = MakeBinaryJoinCode<TSchedulerInnerJoinState>();
 
+        if (leftLanes == 1 && rightLanes == 1 && joinParts == 1) {
+            auto task = std::make_unique<NScheduler::TBinaryBlockingTask>(
+                joinCode,
+                std::make_shared<TSchedulerInnerJoinState>(
+                    leftType, rightType, *joinKernels, join.JoinType(),
+                    join.Filter() != nullptr),
+                NScheduler::TInputPort{
+                    .Connection = &leftPipeRef, .Lane = 0},
+                NScheduler::TInputPort{
+                    .Connection = &rightPipeRef, .Lane = 0},
+                NScheduler::TOutputPort{.Connection = &outConn, .Lane = 0});
+            auto& node = Graph_.AddOwnedNode(std::move(task));
+            Graph_.AddEdge(*leftOut.Producers[0], node, leftPipeRef, 0, 0);
+            Graph_.AddEdge(*rightOut.Producers[0], node, rightPipeRef, 0, 0);
+            return TLoweredOutput{
+                .Producers = {&node},
+                .OutputType = kernelSpec.OutputSchema,
+            };
+        }
+
+        auto hashKernels = compiler.CompileJoinHash(kernelSpec);
         auto leftShuf = BuildShuffleNodes(
             leftOut,
             leftPipeRef,
@@ -1374,8 +1416,6 @@ private:
             joinParts,
             MakeHashShuffleCode(hashKernels.Right, rightType),
             "join-right-shuffle");
-
-        auto joinCode = MakeBinaryJoinCode<TSchedulerInnerJoinState>();
 
         TLoweredOutput result;
         result.OutputType = kernelSpec.OutputSchema;
@@ -1520,16 +1560,24 @@ TLoweredPlan LowerPlanToGraph(
             "scheduler lowering produced no output lanes for the plan");
     }
 
-    auto gather = std::make_unique<TGatherConnection>(lowerer.QueueCapacity());
-    gather->Resize(lanes, 1);
-    gather->SetDebugName("final-gather");
-    auto& gatherRef = graph->AddConnection(std::move(gather));
-    auto out = lowerer.Lower(root, gatherRef);
+    IConnection* finalRef = nullptr;
+    if (lanes == 1) {
+        auto conn = std::make_unique<TOneToOneConnection>(lowerer.QueueCapacity());
+        conn->Resize(1, 1);
+        conn->SetDebugName("final-output");
+        finalRef = &graph->AddConnection(std::move(conn));
+    } else {
+        auto gather = std::make_unique<TGatherConnection>(lowerer.QueueCapacity());
+        gather->Resize(lanes, 1);
+        gather->SetDebugName("final-gather");
+        finalRef = &graph->AddConnection(std::move(gather));
+    }
+    auto out = lowerer.Lower(root, *finalRef);
 
     return TLoweredPlan{
         .Graph = std::move(graph),
         .OutputType = std::move(out.OutputType),
-        .FinalGather = &gatherRef,
+        .FinalGather = finalRef,
         .Producers = std::move(out.Producers),
         .Lanes = lanes,
     };
