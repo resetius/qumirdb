@@ -33,11 +33,7 @@ struct TQueueSettings {
 
 struct TScanSplitSettings {
     EScanSplitStrategy Strategy = EScanSplitStrategy::Auto;
-    size_t TargetRowsPerTask = 0;
-    size_t TargetBytesPerTask = 0;
-    size_t MinRowsPerTask = 0;
     size_t MaxScanTasks = 1;
-    size_t RowGroupCoalescingFactor = 1;
     size_t TinyInputRowsThreshold = 0;
 };
 
