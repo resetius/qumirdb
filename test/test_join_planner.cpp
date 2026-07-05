@@ -5,13 +5,11 @@
 #include <qumir/parser/core/parser.h>
 #include <qumir/parser/type.h>
 
-#include <qdb/exec/executor.h>
-#include <qdb/exec/planner.h>
+#include "plan_runner.h"
 #include <qdb/io/io.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/passes/column_pruning.h>
 #include <qdb/plan/passes/typing.h>
-#include <qdb/scheduler/runtime_node.h>
 #include <qdb/sexp/parser.h>
 
 #include <algorithm>
@@ -63,7 +61,7 @@ TRowSet KeyValBatch(int64_t* keys, int64_t* vals, int64_t rows, std::vector<TCol
 
 // Parses `sexp`, wiring "L" -> left source, anything else -> right source, then
 // runs the full logical pipeline + physical planner.
-std::unique_ptr<IRuntimeNode> PlanJoin(
+std::unique_ptr<TTestRuntime> PlanJoin(
     const std::string& sexp,
     ISource& left,
     ISource& right,
@@ -85,8 +83,7 @@ std::unique_ptr<IRuntimeNode> PlanJoin(
     auto root = std::static_pointer_cast<IOperator>(*parsed);
     AnnotateTypes(root);
     ApplyColumnPruning(root);
-    TPhysicalPlanner planner(nullptr, schedulerSettings);
-    return planner.Build(root);
+    return RunPlan(root, schedulerSettings);
 }
 
 } // namespace
@@ -138,7 +135,6 @@ TEST(JoinPlanner, SchedulerThreadedInnerJoinE2E) {
         left,
         right,
         settings);
-    ASSERT_NE(dynamic_cast<NScheduler::TRuntimeSchedulerPipeline*>(plan.get()), nullptr);
 
     std::vector<std::tuple<int64_t, int64_t, int64_t, int64_t>> got;
     TRowSet out{};

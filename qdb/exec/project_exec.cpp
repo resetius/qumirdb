@@ -24,7 +24,7 @@ void DestroyProjectedRowSet(TRowSet* rowSet) {
 
 } // namespace
 
-TRuntimeUnaryStreamingKernel::TProcess MakeProjectProcess(
+TUnaryStreamProcess MakeProjectProcess(
     std::vector<TProjectColumn> columns,
     TKernelCompiler::TProjectDispatch computeDispatch,
     std::vector<size_t> computedWidths,

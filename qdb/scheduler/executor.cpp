@@ -26,11 +26,6 @@ TSchedulerExecutor::TSchedulerExecutor(
 {}
 
 bool TSchedulerExecutor::Run(std::string* error) {
-    if (Settings_.Scheduler.Mode == EExecutionMode::Serial) {
-        SetError(error, "serial execution mode uses the current physical executor");
-        return false;
-    }
-
     if (Settings_.Scheduler.Mode == EExecutionMode::SingleThreadedScheduler) {
         TSingleThreadedScheduler scheduler(Graph_);
         const bool ok = scheduler.Run(error);

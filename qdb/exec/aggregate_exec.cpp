@@ -188,26 +188,4 @@ void TAggregateProcessor::Destroy()
     }
 }
 
-TRuntimeUnaryBlockingKernel::TProcess MakeAggregateProcess(
-    TAggregateKernels kernels)
-{
-    return [
-        processor = std::make_shared<TAggregateProcessor>(std::move(kernels)),
-        done = false](IRuntimeNode& input, TRowSet& rowSet) mutable
-    {
-        if (done) {
-            return false;
-        }
-        done = true;
-
-        TRowSet batch = {};
-        while (input.Next(batch)) {
-            processor->Add(batch);
-            Release(&batch);
-        }
-
-        return processor->Finish(rowSet);
-    };
-}
-
 } // namespace NQdb

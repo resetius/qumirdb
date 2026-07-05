@@ -1,7 +1,7 @@
 #pragma once
 
-#include <qdb/exec/unary_stream_exec.h>
 #include <qdb/exec/sort_exec.h>
+#include <qdb/exec/unary_process.h>
 #include <qdb/plan/ops/filter.h>
 #include <qdb/plan/ops/project.h>
 #include <qdb/plan/ops/source.h>
@@ -14,7 +14,7 @@
 namespace NQdb {
 
 struct TUnaryRuntimeProcess {
-    TRuntimeUnaryStreamingKernel::TProcess Process;
+    TUnaryStreamProcess Process;
     NQumir::NAst::TTypePtr OutputType;
 };
 
@@ -22,6 +22,9 @@ struct TSortRuntimeProcess {
     std::vector<TSortColumnRef> KeyColumns;
     TSortRadixKernel RadixKernel;
 };
+
+// Print a human-readable runtime-plan tree for diagnostics (--verbose).
+void PrintRuntimePlan(std::ostream& out, const TOperatorPtr& root);
 
 NQumir::NAst::TTypePtr BuildSourceRuntimeType(TSourceOperator& src);
 

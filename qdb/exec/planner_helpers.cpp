@@ -1,6 +1,9 @@
 #include <qdb/exec/planner_helpers.h>
 #include <qdb/exec/filter_exec.h>
 #include <qdb/exec/project_exec.h>
+#include <qdb/plan/ops/aggregate.h>
+#include <qdb/plan/ops/join.h>
+#include <qdb/plan/ops/limit.h>
 #include <qdb/kernel/compiler.h>
 #include <qdb/kernel/project_type.h>
 #include <qdb/kernel/spec.h>
@@ -244,6 +247,65 @@ TSortRuntimeProcess BuildSortRuntimeProcess(
         .KeyColumns = std::move(sortInputs.KeyColumns),
         .RadixKernel = std::move(radixKernel),
     };
+}
+
+namespace {
+
+void PrintRuntimePlanNode(
+    std::ostream& out, const TOperatorPtr& root, int depth)
+{
+    const std::string indent(static_cast<size_t>(depth) * 2, ' ');
+    out << indent;
+    if (auto node = TMaybeOp<TSourceOperator>(root)) {
+        out << "source " << node.Cast()->SourcePath() << "\n";
+        return;
+    }
+    if (auto node = TMaybeOp<TFilterOperator>(root)) {
+        out << "filter [JIT: AST -> IR -> LLVM]\n";
+        PrintRuntimePlanNode(out, node.Cast()->Input(), depth + 1);
+        return;
+    }
+    if (auto node = TMaybeOp<TProjectOperator>(root)) {
+        out << "project [column mapping]\n";
+        PrintRuntimePlanNode(out, node.Cast()->Input(), depth + 1);
+        return;
+    }
+    if (auto node = TMaybeOp<TAggregateOperator>(root)) {
+        out << "aggregate [JIT: update + finalize]\n";
+        PrintRuntimePlanNode(out, node.Cast()->Input(), depth + 1);
+        return;
+    }
+    if (auto node = TMaybeOp<TJoinOperator>(root)) {
+        out << "join [symmetric hash, JIT probe+insert]\n";
+        PrintRuntimePlanNode(out, node.Cast()->Left(), depth + 1);
+        PrintRuntimePlanNode(out, node.Cast()->Right(), depth + 1);
+        return;
+    }
+    if (auto node = TMaybeOp<TSortOperator>(root)) {
+        out << "sort [stable indices]\n";
+        PrintRuntimePlanNode(out, node.Cast()->Input(), depth + 1);
+        return;
+    }
+    if (auto node = TMaybeOp<TTopSortOperator>(root)) {
+        out << "top-sort [bounded stable state]\n";
+        PrintRuntimePlanNode(out, node.Cast()->Input(), depth + 1);
+        return;
+    }
+    if (auto node = TMaybeOp<TLimitOperator>(root)) {
+        out << "limit [" << node.Cast()->Limit()
+            << ", offset " << node.Cast()->Offset() << "]\n";
+        PrintRuntimePlanNode(out, node.Cast()->Input(), depth + 1);
+        return;
+    }
+    out << "unknown\n";
+}
+
+} // namespace
+
+void PrintRuntimePlan(std::ostream& out, const TOperatorPtr& root) {
+    out << "\n========== RUNTIME PLAN ==========\n";
+    PrintRuntimePlanNode(out, root, 0);
+    out << "==================================\n";
 }
 
 } // namespace NQdb

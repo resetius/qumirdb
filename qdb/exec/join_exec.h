@@ -1,6 +1,5 @@
 #pragma once
 
-#include <qdb/exec/binary_exec.h>
 #include <qdb/io/io.h>
 #include <qdb/kernel/compiler.h>
 
@@ -277,104 +276,6 @@ private:
     bool RightDrained_ = false;
     bool LeftDone_ = false;
     int64_t RightTotalRows_ = 0;
-};
-
-// Cartesian product join (no key columns, inner only).
-// Buffers the entire right side, then streams left batches.
-class TRuntimeCrossJoin : public TRuntimeBinaryKernel {
-public:
-    TRuntimeCrossJoin(std::unique_ptr<IRuntimeNode> left,
-        std::unique_ptr<IRuntimeNode> right,
-        NQumir::NAst::TTypePtr outputType);
-
-    bool Next(TRowSet& rowSet) override;
-
-private:
-    void EnsureRightDrained();
-    bool FillNextLeftBatch();
-
-    TRowStore LeftRows_;
-    TRowStore RightRows_;
-    std::optional<TJoinOutputBuilder> Builder_;
-    bool RightDrained_ = false;
-    bool LeftDone_ = false;
-    int64_t RightTotalRows_ = 0;
-};
-
-// Symmetric (pipelined) hash join executor.
-// - Inner: streams matched pairs as both inputs arrive (pipelined).
-// - LeftSemi/LeftAnti: blocking — consumes all inputs first, then does a final
-//   scan of the left table against the right table to find matching/missing
-//   keys, emitting left rows accordingly (right_row_id = kNullRowId).
-class TRuntimeJoin : public TRuntimeBinaryKernel {
-public:
-    TRuntimeJoin(std::unique_ptr<IRuntimeNode> left,
-        std::unique_ptr<IRuntimeNode> right,
-        NQumir::NAst::TTypePtr outputType, TJoinKernels kernels,
-        EJoinType joinType,
-        bool hasResidual = false);
-    ~TRuntimeJoin() override;
-
-    bool Next(TRowSet& rowSet) override;
-
-private:
-    // Mirrors the PairBuffer external type (modules/qumirdb.cpp).
-    struct TPairBufferState {
-        int64_t Count = 0;
-        int64_t Capacity = 0;
-        int64_t* Data = nullptr;
-    };
-    static_assert(sizeof(TPairBufferState) == TKernelCompiler::kPairBufferSize);
-
-    void EnsureInit();
-    bool IsSemiAnti() const;
-    bool IsOuter() const;
-    bool NextResidualSemiAnti(TRowSet& rowSet);
-    bool NextSemiAnti(TRowSet& rowSet);
-    bool NextOuter(TRowSet& rowSet);
-    bool NextInner(TRowSet& rowSet);
-    void PullOneInputBatch();
-    void PullOneInnerInputBatch();
-    EJoinSide ChooseSymmetricPullSide() const;
-    bool DrainReadyOutput(TRowSet& rowSet);
-    void DrainKernelPairs();
-    void DrainStreamingPairs(const TRowSet& streamBatch, EJoinSide streamSide);
-    void FinalizeResidualSemiAntiJoin();
-    void FinalizeSemiAntiJoin();
-    void FinalizeOuterJoin();
-    // Residual LeftSemi/LeftAnti: collect the (already filter-pruned) left row
-    // IDs from PairBuffer_ into MatchedLeftIds_, then reset the buffer.
-    void CollectMatchedLeftIds();
-
-    TJoinKernels Kernels_;
-    EJoinType JoinType_;
-    TRowStore LeftRows_;
-    TRowStore RightRows_;
-    std::array<uint8_t, TKernelCompiler::kHashTableSize> LeftTable_{};
-    std::array<uint8_t, TKernelCompiler::kHashTableSize> RightTable_{};
-    TPairBufferState PairBuffer_;
-    std::optional<TJoinOutputBuilder> Builder_;
-    std::deque<TRowSet> ReadyOutput_;
-    bool Initialized_ = false;
-    bool LeftDone_ = false;
-    bool RightDone_ = false;
-    bool BothDone_ = false;
-    EJoinStreamMode StreamMode_ = EJoinStreamMode::Symmetric;
-    int64_t StoredLeftRows_ = 0;
-    int64_t StoredRightRows_ = 0;
-    int64_t LastLeftBatchRows_ = 0;
-    int64_t LastRightBatchRows_ = 0;
-    bool SemiAntiFinalized_ = false;
-    bool OuterFinalized_ = false;
-
-    // True when a residual filter is injected into the join kernels. The filter
-    // itself lives inside the kernel (jt_residual_filter); this flag only selects
-    // the LeftSemi/LeftAnti execution path (Inner pair generation + dedup).
-    bool HasResidual_ = false;
-    // LeftSemi/LeftAnti + residual: left row IDs that survived the in-kernel
-    // filter on at least one matched pair.
-    std::unordered_set<TRowId> MatchedLeftIds_;
-    bool ResidualSemiAntiDone_ = false;
 };
 
 } // namespace NQdb

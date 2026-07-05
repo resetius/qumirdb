@@ -838,28 +838,6 @@ bool TMergeProcessor::Next(TRowSet& rowSet)
     return true;
 }
 
-TRuntimeUnaryBlockingKernel::TProcess MakeSortProcess(
-    TTypePtr outputType,
-    std::vector<TSortKey> keys,
-    std::vector<TSortColumnRef> keyColumns,
-    TSortRadixKernel radixKernel,
-    int64_t batchRows)
-{
-    auto state = std::make_shared<TSortProcessor>(
-        std::move(outputType),
-        std::move(keys),
-        std::move(keyColumns),
-        std::move(radixKernel),
-        batchRows);
-    return [state = std::move(state)](IRuntimeNode& input, TRowSet& rowSet) {
-        TRowSet batch{};
-        while (input.Next(batch)) {
-            state->Add(batch);
-        }
-        return state->Next(rowSet);
-    };
-}
-
 TTopSortProcessor::TTopSortProcessor(
     TTypePtr outputType,
     std::vector<TSortKey> keys,
@@ -1068,59 +1046,6 @@ bool TTopSortProcessor::Next(TRowSet& rowSet)
     };
     Cursor_ += n;
     return true;
-}
-
-TRuntimeUnaryBlockingKernel::TProcess MakeTopSortProcess(
-    TTypePtr outputType,
-    std::vector<TSortKey> keys,
-    std::vector<TSortColumnRef> keyColumns,
-    TSortRadixKernel radixKernel,
-    int64_t limit,
-    int64_t batchRows)
-{
-    auto state = std::make_shared<TTopSortProcessor>(
-        std::move(outputType),
-        std::move(keys),
-        std::move(keyColumns),
-        std::move(radixKernel),
-        limit,
-        batchRows);
-    return [state = std::move(state)](IRuntimeNode& input, TRowSet& rowSet) {
-        TRowSet batch{};
-        while (input.Next(batch)) {
-            state->Add(batch);
-        }
-        return state->Next(rowSet);
-    };
-}
-
-TRuntimeLimit::TRuntimeLimit(std::unique_ptr<IRuntimeNode> input,
-    TTypePtr outputType,
-    int64_t limit,
-    int64_t offset,
-    int64_t batchRows)
-    : Input_(std::move(input))
-    , OutputType_(std::move(outputType))
-    , Processor_(limit, offset)
-{
-    (void)batchRows;
-}
-
-bool TRuntimeLimit::Next(TRowSet& rowSet)
-{
-    if (Processor_.Finished()) {
-        return false;
-    }
-
-    TRowSet input{};
-    while (Input_->Next(input)) {
-        if (Processor_.Process(input, rowSet)) {
-            return true;
-        }
-        input = {};
-    }
-
-    return false;
 }
 
 TLimitProcessor::TLimitProcessor(int64_t limit, int64_t offset)
