@@ -3,7 +3,6 @@
 #include <qdb/exec/join_exec.h>
 #include <qdb/exec/planner_helpers.h>
 #include <qdb/exec/sort_exec.h>
-#include <qdb/exec/unary_stream_exec.h>
 #include <qdb/io/parquet/source.h>
 #include <qdb/kernel/compiler.h>
 #include <qdb/kernel/spec.h>
@@ -16,8 +15,9 @@
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/types/nullable.h>
 #include <qdb/scheduler/connection.h>
+#include <qdb/scheduler/executor.h>
 #include <qdb/scheduler/graph.h>
-#include <qdb/scheduler/runtime_node.h>
+#include <qdb/scheduler/runtime_adapter.h>
 #include <qdb/scheduler/scan_split.h>
 
 #include <algorithm>
@@ -449,39 +449,15 @@ public:
         return true;
     }
 
-    // A subtree "scalar" for broadcast purposes if it terminates in an
-    // aggregate (through project/filter). Its output is small and replicable.
-    bool IsScalarSubtree(const TOperatorPtr& op) const {
-        auto cur = op;
-        while (cur) {
-            if (TMaybeOp<TAggregateOperator>(cur)) {
-                return true;
-            }
-            if (auto f = TMaybeOp<TFilterOperator>(cur)) {
-                cur = f.Cast()->Input();
-                continue;
-            }
-            if (auto p = TMaybeOp<TProjectOperator>(cur)) {
-                cur = p.Cast()->Input();
-                continue;
-            }
-            return false;
-        }
-        return false;
-    }
-
-    // Vector-side lane count for a cross-scalar join, or 0 if not eligible.
-    // Only the common `vector CROSS scalar-on-the-right` shape is handled.
+    // Vector-side lane count for a keyless inner join. This mirrors the old
+    // cross-join executor: buffer/gather the right side, then stream the left.
     size_t CrossScalarLanes(TJoinOperator& join) const {
         if (join.JoinType() != EJoinType::Inner || !join.Keys().empty()) {
             return 0;
         }
-        if (!IsScalarSubtree(join.Right()) || IsScalarSubtree(join.Left())) {
-            return 0;
-        }
         const size_t lanes = OutputLanes(join.Left());
-        const size_t scalar = OutputLanes(join.Right());
-        if (lanes <= 1 || scalar == 0) {
+        const size_t rightLanes = OutputLanes(join.Right());
+        if (lanes == 0 || rightLanes == 0) {
             return 0;
         }
         return lanes;
@@ -1478,7 +1454,60 @@ private:
 
 namespace NScheduler {
 
-std::unique_ptr<IRuntimeNode> BuildSchedulerPlanPipeline(
+namespace {
+
+std::shared_ptr<TSinkCode> MakeSinkWriterCode() {
+    return std::make_shared<TSinkCode>(
+        [](void* state, const TRowSet& rowSet) {
+            static_cast<ISink*>(state)->Write(rowSet);
+        });
+}
+
+void PrintGraphDiagnostics(
+    std::ostream& out, const TTaskGraph& graph, const TSettings& settings)
+{
+    out << "\n========== SCHEDULER GRAPH ==========\n";
+    out << "mode=" << static_cast<int>(settings.Scheduler.Mode)
+        << " workers=" << settings.Scheduler.WorkerCount
+        << " ready_queue=" << settings.Scheduler.ReadyQueueCapacity
+        << " rowset_queue=" << settings.Queue.RowsetCapacityPerLane
+        << " scan_tasks=" << settings.ScanSplit.MaxScanTasks;
+    if (settings.HashShuffle.PartitionCount == 0) {
+        out << " shuffle_parts=auto";
+    } else {
+        out << " shuffle_parts=" << settings.HashShuffle.PartitionCount;
+    }
+    out << " shuffle_queue=" << settings.HashShuffle.MaxQueuedRowsetsPerLane
+        << " shuffle_target_rows=" << settings.HashShuffle.TargetOutputBatchRows
+        << " shuffle_max_rows=" << settings.HashShuffle.MaxOutputBatchRows
+        << " shuffle_target_bytes=" << settings.HashShuffle.TargetOutputBatchBytes
+        << "\n";
+    graph.Print(out);
+    out << "=====================================\n";
+}
+
+void PrintCounterDiagnostics(
+    std::ostream& out, const TTaskGraph& graph, const TSchedulerRunStats& stats)
+{
+    out << "\n========== SCHEDULER COUNTERS ==========\n"
+        << "scheduled=" << stats.Scheduled
+        << " popped=" << stats.Popped
+        << " executed=" << stats.Executed
+        << " ok=" << stats.Ok
+        << " need_data=" << stats.NeedData
+        << " blocked_output=" << stats.BlockedOutput
+        << " finished=" << stats.Finished
+        << " rescheduled=" << stats.Rescheduled
+        << " ready_push_retries=" << stats.ReadyPushRetries
+        << " empty_ready_polls=" << stats.EmptyReadyPolls
+        << "\n";
+    graph.PrintConnectionStats(out);
+    out << "========================================\n";
+}
+
+} // namespace
+
+TLoweredPlan LowerPlanToGraph(
     const TOperatorPtr& root,
     TSettings settings,
     std::ostream* diagnostics)
@@ -1487,64 +1516,62 @@ std::unique_ptr<IRuntimeNode> BuildSchedulerPlanPipeline(
     TSchedulerGraphLowerer lowerer(*graph, settings, diagnostics);
     const size_t lanes = lowerer.OutputLanes(root);
     if (lanes == 0) {
-        return {};
+        throw std::runtime_error(
+            "scheduler lowering produced no output lanes for the plan");
     }
 
-    auto gather = std::make_unique<TGatherConnection>(
-        lowerer.QueueCapacity());
+    auto gather = std::make_unique<TGatherConnection>(lowerer.QueueCapacity());
     gather->Resize(lanes, 1);
     gather->SetDebugName("final-gather");
     auto& gatherRef = graph->AddConnection(std::move(gather));
     auto out = lowerer.Lower(root, gatherRef);
 
-    auto output = std::make_shared<TBufferedSchedulerOutput>();
-    auto sink = std::make_unique<TSinkTask>(
-        MakeBufferedSchedulerSinkCode(),
-        output,
-        TInputPort{.Connection = &gatherRef, .Lane = 0});
-    auto& sinkNode = graph->AddOwnedNode(std::move(sink));
-    for (size_t p = 0; p < lanes; ++p) {
-        graph->AddEdge(*out.Producers[p], sinkNode, gatherRef, p, 0);
+    return TLoweredPlan{
+        .Graph = std::move(graph),
+        .OutputType = std::move(out.OutputType),
+        .FinalGather = &gatherRef,
+        .Producers = std::move(out.Producers),
+        .Lanes = lanes,
+    };
+}
+
+bool RunPlanIntoSink(
+    TLoweredPlan lowered,
+    ISink& sink,
+    TSettings settings,
+    std::ostream* diagnostics,
+    std::string* error)
+{
+    // Aliasing shared_ptr: the sink task's state points at the caller-owned
+    // sink without taking ownership of it.
+    std::shared_ptr<void> sinkState(std::shared_ptr<void>{}, &sink);
+    auto sinkTask = std::make_unique<TSinkTask>(
+        MakeSinkWriterCode(),
+        std::move(sinkState),
+        TInputPort{.Connection = lowered.FinalGather, .Lane = 0});
+    auto& sinkNode = lowered.Graph->AddOwnedNode(std::move(sinkTask));
+    for (size_t p = 0; p < lowered.Lanes; ++p) {
+        lowered.Graph->AddEdge(
+            *lowered.Producers[p], sinkNode, *lowered.FinalGather, p, 0);
     }
 
-    graph->Build();
-    std::string error;
-    if (!graph->Validate(&error)) {
-        throw std::runtime_error("scheduler graph invalid: " + error);
+    lowered.Graph->Build();
+    if (!lowered.Graph->Validate(error)) {
+        return false;
     }
+    lowered.Graph->SetConnectionStatsEnabled(settings.Queue.EnableDebugCounters);
     if (diagnostics) {
-        *diagnostics << "\n========== SCHEDULER GRAPH ==========\n";
-        *diagnostics << "mode="
-            << static_cast<int>(settings.Scheduler.Mode)
-            << " workers=" << settings.Scheduler.WorkerCount
-            << " ready_queue=" << settings.Scheduler.ReadyQueueCapacity
-            << " rowset_queue=" << settings.Queue.RowsetCapacityPerLane
-            << " scan_tasks=" << settings.ScanSplit.MaxScanTasks;
-        if (settings.HashShuffle.PartitionCount == 0) {
-            *diagnostics << " shuffle_parts=auto";
-        } else {
-            *diagnostics << " shuffle_parts="
-                << settings.HashShuffle.PartitionCount;
-        }
-        *diagnostics
-            << " shuffle_queue="
-            << settings.HashShuffle.MaxQueuedRowsetsPerLane
-            << " shuffle_target_rows="
-            << settings.HashShuffle.TargetOutputBatchRows
-            << " shuffle_max_rows="
-            << settings.HashShuffle.MaxOutputBatchRows
-            << " shuffle_target_bytes="
-            << settings.HashShuffle.TargetOutputBatchBytes
-            << "\n";
-        graph->Print(*diagnostics);
-        *diagnostics << "=====================================\n";
+        PrintGraphDiagnostics(*diagnostics, *lowered.Graph, settings);
     }
-    return std::make_unique<TRuntimeSchedulerPipeline>(
-        std::move(graph),
-        std::move(settings),
-        std::move(out.OutputType),
-        std::move(output),
-        diagnostics);
+
+    TSchedulerExecutor executor(*lowered.Graph, settings);
+    if (!executor.Run(error)) {
+        return false;
+    }
+    if (settings.Queue.EnableDebugCounters && diagnostics) {
+        PrintCounterDiagnostics(*diagnostics, *lowered.Graph, executor.Stats());
+    }
+    return true;
 }
 
 } // namespace NScheduler

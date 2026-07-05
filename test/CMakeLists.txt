@@ -27,7 +27,10 @@ ut(test_project_kernel test_project_kernel.cpp)
 ut(test_kernel_spec test_kernel_spec.cpp)
 ut(test_project_e2e test_project_e2e.cpp)
 ut(test_join_pipeline test_join_pipeline.cpp)
-ut(test_join_exec test_join_exec.cpp)
+# TODO(remove-next): test_join_exec drove the deleted TRuntimeJoin pull executor
+# directly (mock IRuntimeNode sources). Rewrite against TInnerJoinProcessor or the
+# scheduler before re-enabling. Join coverage meanwhile: test_join_planner + TPC-H.
+# ut(test_join_exec test_join_exec.cpp)
 ut(test_join_kernel test_join_kernel.cpp)
 ut(test_join_planner test_join_planner.cpp)
 ut(test_lexer test_lexer.cpp)

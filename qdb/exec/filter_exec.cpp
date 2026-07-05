@@ -4,7 +4,7 @@
 
 namespace NQdb {
 
-TRuntimeUnaryStreamingKernel::TProcess MakeFilterProcess(
+TUnaryStreamProcess MakeFilterProcess(
     TKernelCompiler::TFilterDispatch dispatch)
 {
     return [dispatch = std::move(dispatch)](

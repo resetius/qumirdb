@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <qdb/io/schema.h>
-#include <qdb/exec/planner.h>
+#include "plan_runner.h"
 #include <qdb/plan/build.h>
 #include <qdb/plan/ops/aggregate.h>
 #include <qdb/plan/ops/limit.h>
@@ -12,7 +12,6 @@
 #include <qdb/plan/passes/qualify_columns.h>
 #include <qdb/plan/passes/top_sort.h>
 #include <qdb/plan/types/nullable.h>
-#include <qdb/scheduler/runtime_node.h>
 #include <qdb/sql/parser.h>
 
 #include <qumir/codegen/llvm/llvm_initializer.h>
@@ -276,8 +275,7 @@ TEST(SortExec, SortsStringAndNumericKeysAcrossBatches) {
         {.Column = "score", .Direction = ESortDirection::Desc},
     });
 
-    TPhysicalPlanner planner;
-    auto runtime = planner.Build(root);
+    auto runtime = RunPlan(root);
 
     TRowSet out{};
     ASSERT_TRUE(runtime->Next(out));
@@ -318,8 +316,7 @@ TEST(SortExec, SortsCompositeNumericKeysWithFusedRadixKernel) {
         {.Column = "b", .Direction = ESortDirection::Desc},
     });
 
-    TPhysicalPlanner planner;
-    auto runtime = planner.Build(root);
+    auto runtime = RunPlan(root);
 
     TRowSet out{};
     ASSERT_TRUE(runtime->Next(out));
@@ -360,9 +357,7 @@ TEST(SortExec, SchedulerRuntimeRunsSortTail) {
     settings.Scheduler.Mode = NScheduler::EExecutionMode::ThreadedScheduler;
     settings.Scheduler.WorkerCount = 2;
 
-    TPhysicalPlanner planner(nullptr, settings);
-    auto runtime = planner.Build(root);
-    ASSERT_NE(dynamic_cast<NScheduler::TRuntimeSchedulerPipeline*>(runtime.get()), nullptr);
+    auto runtime = RunPlan(root, settings);
 
     TRowSet out{};
     ASSERT_TRUE(runtime->Next(out));
@@ -393,8 +388,7 @@ TEST(SortExec, TopSortReturnsLimitFromOneBatch) {
     auto optimized = ApplyTopSort(*plan);
     ASSERT_TRUE(TMaybeOp<TTopSortOperator>(optimized));
 
-    TPhysicalPlanner planner;
-    auto runtime = planner.Build(optimized);
+    auto runtime = RunPlan(optimized);
 
     TRowSet out{};
     ASSERT_TRUE(runtime->Next(out));
@@ -433,9 +427,7 @@ TEST(SortExec, SchedulerRuntimeRunsTopSortTail) {
     settings.Scheduler.Mode = NScheduler::EExecutionMode::ThreadedScheduler;
     settings.Scheduler.WorkerCount = 2;
 
-    TPhysicalPlanner planner(nullptr, settings);
-    auto runtime = planner.Build(root);
-    ASSERT_NE(dynamic_cast<NScheduler::TRuntimeSchedulerPipeline*>(runtime.get()), nullptr);
+    auto runtime = RunPlan(root, settings);
 
     TRowSet out{};
     ASSERT_TRUE(runtime->Next(out));
@@ -466,8 +458,7 @@ TEST(SortExec, TopSortHonorsDescDirection) {
     auto optimized = ApplyTopSort(*plan);
     ASSERT_TRUE(TMaybeOp<TTopSortOperator>(optimized));
 
-    TPhysicalPlanner planner;
-    auto runtime = planner.Build(optimized);
+    auto runtime = RunPlan(optimized);
 
     TRowSet out{};
     ASSERT_TRUE(runtime->Next(out));
@@ -503,8 +494,7 @@ TEST(SortExec, TopSortMergesBatchesStably) {
     auto optimized = ApplyTopSort(*plan);
     ASSERT_TRUE(TMaybeOp<TTopSortOperator>(optimized));
 
-    TPhysicalPlanner planner;
-    auto runtime = planner.Build(optimized);
+    auto runtime = RunPlan(optimized);
 
     TRowSet out{};
     ASSERT_TRUE(runtime->Next(out));
@@ -545,8 +535,7 @@ TEST(SortExec, TopSortHandlesNullableNumericKeys) {
     auto optimized = ApplyTopSort(*plan);
     ASSERT_TRUE(TMaybeOp<TTopSortOperator>(optimized));
 
-    TPhysicalPlanner planner;
-    auto runtime = planner.Build(optimized);
+    auto runtime = RunPlan(optimized);
 
     TRowSet out{};
     ASSERT_TRUE(runtime->Next(out));
@@ -572,8 +561,7 @@ TEST(SortExec, EmptyInputProducesNoRows) {
         {.Column = "a", .Direction = ESortDirection::Asc},
     });
 
-    TPhysicalPlanner planner;
-    auto runtime = planner.Build(root);
+    auto runtime = RunPlan(root);
 
     TRowSet out{};
     EXPECT_FALSE(runtime->Next(out));
@@ -597,8 +585,7 @@ TEST(SortExec, AllEqualNumericKeysKeepInputOrderWithRadixKernel) {
         {.Column = "k", .Direction = ESortDirection::Desc},
     });
 
-    TPhysicalPlanner planner;
-    auto runtime = planner.Build(root);
+    auto runtime = RunPlan(root);
 
     TRowSet out{};
     ASSERT_TRUE(runtime->Next(out));
@@ -630,8 +617,7 @@ TEST(SortExec, ProjectionAfterSortSeesSortedRows) {
         {.Name = "a", .Expression = Ident("a")},
     });
 
-    TPhysicalPlanner planner;
-    auto runtime = planner.Build(project);
+    auto runtime = RunPlan(project);
 
     TRowSet out{};
     ASSERT_TRUE(runtime->Next(out));
@@ -669,8 +655,7 @@ TEST(SortExec, SortAfterAggregate) {
         {.Column = "s", .Direction = ESortDirection::Desc},
     });
 
-    TPhysicalPlanner planner;
-    auto runtime = planner.Build(sort);
+    auto runtime = RunPlan(sort);
 
     TRowSet out{};
     ASSERT_TRUE(runtime->Next(out));
@@ -712,8 +697,7 @@ TEST(SortExec, NullableNumericKeysUseRadixNullOrdering) {
         {.Column = "k", .Direction = ESortDirection::Asc, .Nulls = ESortNulls::First},
     });
 
-    TPhysicalPlanner planner;
-    auto runtime = planner.Build(sort);
+    auto runtime = RunPlan(sort);
 
     TRowSet out{};
     ASSERT_TRUE(runtime->Next(out));
@@ -757,8 +741,7 @@ TEST(SortExec, NullableNumericKeysRespectDescNullsLast) {
         {.Column = "k", .Direction = ESortDirection::Desc, .Nulls = ESortNulls::Last},
     });
 
-    TPhysicalPlanner planner;
-    auto runtime = planner.Build(sort);
+    auto runtime = RunPlan(sort);
 
     TRowSet out{};
     ASSERT_TRUE(runtime->Next(out));
@@ -796,8 +779,7 @@ TEST(SortExec, RespectsInputSelection) {
         {.Column = "score", .Direction = ESortDirection::Asc},
     });
 
-    TPhysicalPlanner planner;
-    auto runtime = planner.Build(root);
+    auto runtime = RunPlan(root);
 
     TRowSet out{};
     ASSERT_TRUE(runtime->Next(out));

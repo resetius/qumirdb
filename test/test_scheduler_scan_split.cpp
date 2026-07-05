@@ -30,11 +30,27 @@ TEST(SchedulerScanSplit, DefaultsToSingleSerialSplit) {
     EXPECT_TRUE(splits[0].SerialRead);
 }
 
-TEST(SchedulerScanSplit, CoalescesRowGroupsForParallelRead) {
+TEST(SchedulerScanSplit, SplitsOnePerRowGroupWhenTasksAllow) {
+    // 4 row groups, 4 tasks -> one row group per split.
     TScanSplitSettings settings;
     settings.Strategy = EScanSplitStrategy::RowGroupRange;
     settings.MaxScanTasks = 4;
-    settings.RowGroupCoalescingFactor = 2;
+
+    auto splits = BuildScanSplits(RowGroups(), settings);
+
+    ASSERT_EQ(splits.size(), 4u);
+    for (size_t i = 0; i < splits.size(); ++i) {
+        EXPECT_EQ(splits[i].FirstRowGroup, i);
+        EXPECT_EQ(splits[i].RowGroupCount, 1u);
+        EXPECT_FALSE(splits[i].SerialRead);
+    }
+}
+
+TEST(SchedulerScanSplit, SplitsEvenlyAndCapsAtMaxTasks) {
+    // 4 row groups, 2 tasks -> two even contiguous splits of 2.
+    TScanSplitSettings settings;
+    settings.Strategy = EScanSplitStrategy::RowGroupRange;
+    settings.MaxScanTasks = 2;
 
     auto splits = BuildScanSplits(RowGroups(), settings);
 
@@ -42,25 +58,9 @@ TEST(SchedulerScanSplit, CoalescesRowGroupsForParallelRead) {
     EXPECT_EQ(splits[0].FirstRowGroup, 0u);
     EXPECT_EQ(splits[0].RowGroupCount, 2u);
     EXPECT_EQ(splits[0].RowCount, 30);
-    EXPECT_FALSE(splits[0].SerialRead);
     EXPECT_EQ(splits[1].FirstRowGroup, 2u);
     EXPECT_EQ(splits[1].RowGroupCount, 2u);
     EXPECT_EQ(splits[1].RowCount, 70);
-}
-
-TEST(SchedulerScanSplit, CapsNumberOfTasks) {
-    TScanSplitSettings settings;
-    settings.Strategy = EScanSplitStrategy::RowGroupRange;
-    settings.MaxScanTasks = 2;
-    settings.RowGroupCoalescingFactor = 1;
-
-    auto splits = BuildScanSplits(RowGroups(), settings);
-
-    ASSERT_EQ(splits.size(), 2u);
-    EXPECT_EQ(splits[0].RowGroupCount, 1u);
-    EXPECT_EQ(splits[1].FirstRowGroup, 1u);
-    EXPECT_EQ(splits[1].RowGroupCount, 3u);
-    EXPECT_EQ(splits[1].RowCount, 90);
 }
 
 TEST(SchedulerScanSplit, KeepsTinyInputsSerial) {

@@ -6,9 +6,8 @@ namespace NQdb {
 namespace NScheduler {
 
 enum class EExecutionMode {
-    Serial = 0,
-    SingleThreadedScheduler = 1,
-    ThreadedScheduler = 2,
+    SingleThreadedScheduler = 0,
+    ThreadedScheduler = 1,
 };
 
 enum class EScanSplitStrategy {
@@ -18,7 +17,7 @@ enum class EScanSplitStrategy {
 };
 
 struct TSchedulerSettings {
-    EExecutionMode Mode = EExecutionMode::Serial;
+    EExecutionMode Mode = EExecutionMode::SingleThreadedScheduler;
     size_t WorkerCount = 1;
     size_t ReadyQueueCapacity = 1024;
 };

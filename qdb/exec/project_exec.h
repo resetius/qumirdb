@@ -1,6 +1,6 @@
 #pragma once
 
-#include <qdb/exec/unary_stream_exec.h>
+#include <qdb/exec/unary_process.h>
 #include <qdb/kernel/compiler.h>
 
 #include <cstdint>
@@ -17,7 +17,7 @@ struct TProjectColumn {
     int32_t Index = 0;
 };
 
-TRuntimeUnaryStreamingKernel::TProcess MakeProjectProcess(
+TUnaryStreamProcess MakeProjectProcess(
     std::vector<TProjectColumn> columns,
     TKernelCompiler::TProjectDispatch computeDispatch,
     std::vector<size_t> computedWidths,

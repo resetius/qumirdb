@@ -1,11 +1,11 @@
 #pragma once
 
-#include <qdb/exec/unary_stream_exec.h>
+#include <qdb/exec/unary_process.h>
 #include <qdb/kernel/compiler.h>
 
 namespace NQdb {
 
-TRuntimeUnaryStreamingKernel::TProcess MakeFilterProcess(
+TUnaryStreamProcess MakeFilterProcess(
     TKernelCompiler::TFilterDispatch dispatch);
 
 } // namespace NQdb

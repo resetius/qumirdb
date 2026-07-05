@@ -44,23 +44,17 @@ add_library(qumirdb
     kernel/spec.cpp
     kernel/lib.cpp
     kernel/compiler.cpp
-    exec/source_exec.cpp
-    exec/unary_stream_exec.cpp
-    exec/unary_block_exec.cpp
-    exec/binary_exec.cpp
     exec/filter_exec.cpp
     exec/project_exec.cpp
     exec/aggregate_exec.cpp
     exec/join_exec.cpp
     exec/sort_exec.cpp
     exec/planner_helpers.cpp
-    exec/planner.cpp
     scheduler/connection.cpp
     scheduler/executor.cpp
     scheduler/graph.cpp
     scheduler/plan_lowerer.cpp
     scheduler/runtime_adapter.cpp
-    scheduler/runtime_node.cpp
     scheduler/scan_split.cpp
     scheduler/single_threaded_scheduler.cpp
     scheduler/threaded_scheduler.cpp
