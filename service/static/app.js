@@ -1,35 +1,28 @@
 import { getJson, postJson } from './api.js';
 import { renderGraph } from './graph.js';
 import { tpchQueries } from './tpch_queries.js';
+import {
+  addFilesToBrowserDataset,
+  createBrowserDataset,
+  deleteBrowserDataset,
+  listBrowserDatasets,
+  removeFileFromBrowserDataset,
+  renameBrowserDataset
+} from './browser_storage.js';
+import { readParquetTable } from './browser_parquet.js';
 
 const $ = selector => document.querySelector(selector);
 
 const QUERIES_KEY = 'qdb.web.queries';
 const ACTIVE_QUERY_KEY = 'qdb.web.activeQuery';
-const DATASETS_KEY = 'qdb.web.datasets';
 const ACTIVE_DATASET_KEY = 'qdb.web.activeDataset';
-
-const tpchDataset = {
-  id: 'tpch-browser-mock',
-  name: 'TPC-H Mock',
-  source: { kind: 'browser', files: [] },
-  tables: [
-    table('region', [['r_regionkey', 'i32'], ['r_name', 'string'], ['r_comment', 'string']], stats(5, 1)),
-    table('nation', [['n_nationkey', 'i32'], ['n_name', 'string'], ['n_regionkey', 'i32'], ['n_comment', 'string']], stats(25, 1)),
-    table('supplier', [['s_suppkey', 'i32'], ['s_name', 'string'], ['s_address', 'string'], ['s_nationkey', 'i32'], ['s_phone', 'string'], ['s_acctbal', 'f64'], ['s_comment', 'string']], stats(10000, 2)),
-    table('customer', [['c_custkey', 'i32'], ['c_name', 'string'], ['c_address', 'string'], ['c_nationkey', 'i32'], ['c_phone', 'string'], ['c_acctbal', 'f64'], ['c_mktsegment', 'string'], ['c_comment', 'string']], stats(150000, 4)),
-    table('part', [['p_partkey', 'i32'], ['p_name', 'string'], ['p_mfgr', 'string'], ['p_brand', 'string'], ['p_type', 'string'], ['p_size', 'i32'], ['p_container', 'string'], ['p_retailprice', 'f64'], ['p_comment', 'string']], stats(200000, 4)),
-    table('partsupp', [['ps_partkey', 'i32'], ['ps_suppkey', 'i32'], ['ps_availqty', 'i32'], ['ps_supplycost', 'f64'], ['ps_comment', 'string']], stats(800000, 8)),
-    table('orders', [['o_orderkey', 'i32'], ['o_custkey', 'i32'], ['o_orderstatus', 'string'], ['o_totalprice', 'f64'], ['o_orderdate', 'i32'], ['o_orderpriority', 'string'], ['o_clerk', 'string'], ['o_shippriority', 'i32'], ['o_comment', 'string']], stats(1500000, 12)),
-    table('lineitem', [['l_orderkey', 'i32'], ['l_partkey', 'i32'], ['l_suppkey', 'i32'], ['l_linenumber', 'i32'], ['l_quantity', 'f64'], ['l_extendedprice', 'f64'], ['l_discount', 'f64'], ['l_tax', 'f64'], ['l_returnflag', 'string'], ['l_linestatus', 'string'], ['l_shipdate', 'i32'], ['l_commitdate', 'i32'], ['l_receiptdate', 'i32'], ['l_shipinstruct', 'string'], ['l_shipmode', 'string'], ['l_comment', 'string']], stats(6001215, 18))
-  ]
-};
 
 let editor = null;
 let activeQueryId = localStorage.getItem(ACTIVE_QUERY_KEY) || '';
 let suppressEditorSave = false;
-let activeDatasetId = localStorage.getItem(ACTIVE_DATASET_KEY) || tpchDataset.id;
+let activeDatasetId = localStorage.getItem(ACTIVE_DATASET_KEY) || '';
 let serverDatasets = [];
+let browserDatasets = [];
 let lastBundle = null;
 let lastExplainKey = null;
 let graphMode = 'logical';
@@ -48,22 +41,6 @@ window.addEventListener('DOMContentLoaded', () => {
   initDatasets();
   initActions();
 });
-
-function stats(rows, rowGroups) {
-  return {
-    rows,
-    rowGroups,
-    bytes: rows * 128
-  };
-}
-
-function table(name, columns, tableStats = null) {
-  return {
-    name,
-    columns: columns.map(([columnName, type]) => ({ name: columnName, type })),
-    ...(tableStats ? { stats: tableStats } : {})
-  };
-}
 
 function initEditor() {
   const textarea = $('#sql-editor');
@@ -229,41 +206,30 @@ function renderQueries() {
 
 async function initDatasets() {
   serverDatasets = await loadServerDatasets();
-  if (!localStorage.getItem(ACTIVE_DATASET_KEY) && serverDatasets.length) {
-    activeDatasetId = serverDatasets[0].id;
-    localStorage.setItem(ACTIVE_DATASET_KEY, activeDatasetId);
-  }
+  browserDatasets = await loadBrowserDatasets();
+  ensureActiveDataset();
 
-  const existing = loadDatasets();
-  const presetIndex = existing.findIndex(dataset => dataset.id === tpchDataset.id);
-  if (presetIndex >= 0) {
-    existing[presetIndex] = tpchDataset;
-    saveDatasets(existing);
-  } else {
-    existing.unshift(tpchDataset);
-    saveDatasets(existing);
-  }
-  $('#dataset-add-files').addEventListener('click', () => $('#dataset-files').click());
-  $('#dataset-files').addEventListener('change', event => {
-    const files = Array.from(event.target.files || []).map(file => ({
-      name: file.name,
-      size: file.size,
-      type: file.type || 'application/octet-stream'
-    }));
-    const datasets = loadDatasets();
-    const dataset = {
-      id: crypto.randomUUID(),
-      name: files.length ? files[0].name : 'Browser dataset',
-      source: { kind: 'browser', files },
-      tables: []
-    };
-    datasets.unshift(dataset);
-    activeDatasetId = dataset.id;
-    localStorage.setItem(ACTIVE_DATASET_KEY, activeDatasetId);
-    saveDatasets(datasets);
-    renderDatasets();
+  $('#dataset-create').addEventListener('click', createEmptyBrowserDataset);
+  $('#dataset-files').addEventListener('change', async event => {
+    await addFilesToActiveBrowserDataset(Array.from(event.target.files || []));
+    event.target.value = '';
   });
   renderDatasets();
+}
+
+async function loadBrowserDatasets() {
+  try {
+    return await listBrowserDatasets();
+  } catch (error) {
+    showDetails({
+      ok: false,
+      error: {
+        stage: 'browser-storage',
+        message: error.message || String(error)
+      }
+    });
+    return [];
+  }
 }
 
 async function loadServerDatasets() {
@@ -274,58 +240,221 @@ async function loadServerDatasets() {
   return result.datasets || [];
 }
 
-function loadDatasets() {
+async function createEmptyBrowserDataset() {
+  const name = window.prompt('Dataset name', `Dataset ${browserDatasets.length + 1}`);
+  const trimmed = name?.trim();
+  if (!trimmed) {
+    return;
+  }
   try {
-    return JSON.parse(localStorage.getItem(DATASETS_KEY) || '[]');
-  } catch {
-    return [];
+    const dataset = await createBrowserDataset(trimmed);
+    browserDatasets = await loadBrowserDatasets();
+    activeDatasetId = dataset.id;
+    localStorage.setItem(ACTIVE_DATASET_KEY, activeDatasetId);
+    renderDatasets();
+  } catch (error) {
+    showDetails({
+      ok: false,
+      error: {
+        stage: 'browser-storage',
+        message: error.message || String(error)
+      }
+    });
+    selectTab('details');
   }
 }
 
-function saveDatasets(datasets) {
-  localStorage.setItem(DATASETS_KEY, JSON.stringify(datasets));
-}
-
 function activeDataset() {
-  return allDatasets().find(dataset => dataset.id === activeDatasetId) || tpchDataset;
+  return allDatasets().find(dataset => dataset.id === activeDatasetId) || null;
 }
 
 function allDatasets() {
-  return [...serverDatasets, ...loadDatasets()];
+  return [...serverDatasets, ...browserDatasets];
+}
+
+function ensureActiveDataset() {
+  const datasets = allDatasets();
+  if (!datasets.some(dataset => dataset.id === activeDatasetId)) {
+    activeDatasetId = datasets[0]?.id || '';
+  }
+  if (activeDatasetId) {
+    localStorage.setItem(ACTIVE_DATASET_KEY, activeDatasetId);
+  } else {
+    localStorage.removeItem(ACTIVE_DATASET_KEY);
+  }
+}
+
+async function addFilesToActiveBrowserDataset(files) {
+  const dataset = activeDataset();
+  if (dataset?.source?.kind !== 'browser') {
+    showDetails({
+      ok: false,
+      error: { message: 'Select a browser dataset before adding parquet files.' }
+    });
+    selectTab('details');
+    return;
+  }
+
+  const parquetFiles = files.filter(file => file.name.toLowerCase().endsWith('.parquet'));
+  if (!parquetFiles.length) {
+    showDetails({ ok: false, error: { message: 'Select one or more .parquet files.' } });
+    selectTab('details');
+    return;
+  }
+
+  setStatus('reading parquet');
+  try {
+    const tables = [];
+    for (const file of parquetFiles) {
+      tables.push({
+        ...(await readParquetTable(file)),
+        sourceFile: file.name
+      });
+    }
+    await addFilesToBrowserDataset(dataset, parquetFiles, tables);
+    browserDatasets = await loadBrowserDatasets();
+    ensureActiveDataset();
+    renderDatasets();
+    setStatus('dataset ready');
+  } catch (error) {
+    setStatus('dataset failed');
+    showDetails({ ok: false, error: { message: error.message || String(error) } });
+    selectTab('details');
+  }
+}
+
+async function renameActiveBrowserDataset(dataset) {
+  const name = window.prompt('Dataset name', dataset.name || '');
+  const trimmed = name?.trim();
+  if (!trimmed || trimmed === dataset.name) {
+    return;
+  }
+  try {
+    await renameBrowserDataset(dataset, trimmed);
+    browserDatasets = await loadBrowserDatasets();
+    renderDatasets();
+  } catch (error) {
+    showDetails({
+      ok: false,
+      error: {
+        stage: 'browser-storage',
+        message: error.message || String(error)
+      }
+    });
+    selectTab('details');
+  }
 }
 
 function renderDatasets() {
   const root = $('#datasets-list');
   root.replaceChildren();
   for (const dataset of allDatasets()) {
+    const row = document.createElement('div');
+    row.className = `dataset-item${dataset.id === activeDatasetId ? ' active' : ''}`;
     const button = document.createElement('button');
-    button.className = `list-item${dataset.id === activeDatasetId ? ' active' : ''}`;
+    button.className = 'dataset-select';
     button.type = 'button';
     button.textContent = dataset.source?.kind === 'server'
       ? `${dataset.name} · server`
-      : dataset.name;
+      : `${dataset.name} · browser`;
     button.addEventListener('click', () => {
       activeDatasetId = dataset.id;
       localStorage.setItem(ACTIVE_DATASET_KEY, activeDatasetId);
       renderDatasets();
     });
-    root.appendChild(button);
+    row.appendChild(button);
+    if (dataset.source?.kind === 'browser') {
+      const upload = document.createElement('button');
+      upload.className = 'icon-button dataset-action';
+      upload.type = 'button';
+      upload.title = 'Add parquet files';
+      upload.setAttribute('aria-label', 'Add parquet files');
+      upload.innerHTML = '<i data-lucide="upload"></i>';
+      upload.addEventListener('click', event => {
+        event.stopPropagation();
+        activeDatasetId = dataset.id;
+        localStorage.setItem(ACTIVE_DATASET_KEY, activeDatasetId);
+        $('#dataset-files').click();
+      });
+      row.appendChild(upload);
+
+      const rename = document.createElement('button');
+      rename.className = 'icon-button dataset-action';
+      rename.type = 'button';
+      rename.title = 'Rename dataset';
+      rename.setAttribute('aria-label', 'Rename dataset');
+      rename.innerHTML = '<i data-lucide="pencil"></i>';
+      rename.addEventListener('click', async event => {
+        event.stopPropagation();
+        await renameActiveBrowserDataset(dataset);
+      });
+      row.appendChild(rename);
+
+      const remove = document.createElement('button');
+      remove.className = 'icon-button dataset-action';
+      remove.type = 'button';
+      remove.title = 'Delete dataset';
+      remove.setAttribute('aria-label', 'Delete dataset');
+      remove.innerHTML = '<i data-lucide="trash-2"></i>';
+      remove.addEventListener('click', async event => {
+        event.stopPropagation();
+        await deleteBrowserDataset(dataset.id);
+        browserDatasets = await loadBrowserDatasets();
+        ensureActiveDataset();
+        renderDatasets();
+      });
+      row.appendChild(remove);
+    }
+    root.appendChild(row);
   }
+  window.lucide?.createIcons();
   renderSchema(activeDataset());
 }
 
 function renderSchema(dataset) {
   const root = $('#schema-tree');
   root.replaceChildren();
+  if (!dataset) {
+    const empty = document.createElement('div');
+    empty.className = 'schema-empty';
+    empty.textContent = 'No dataset selected.';
+    root.appendChild(empty);
+    return;
+  }
+  if (!(dataset.tables || []).length) {
+    const empty = document.createElement('div');
+    empty.className = 'schema-empty';
+    empty.textContent = dataset.source?.kind === 'browser'
+      ? 'No parquet files in this dataset.'
+      : 'No tables.';
+    root.appendChild(empty);
+    return;
+  }
   for (const item of dataset.tables || []) {
     const tableRoot = document.createElement('div');
     tableRoot.className = 'schema-table';
+    const header = document.createElement('div');
+    header.className = 'schema-table-header';
     const title = document.createElement('div');
     title.className = 'schema-table-name';
     title.textContent = item.stats
       ? `${item.name} · ${formatNumber(item.stats.rows || 0)} rows · ${item.stats.rowGroups || 1} rg`
       : item.name;
-    tableRoot.appendChild(title);
+    header.appendChild(title);
+    if (dataset.source?.kind === 'browser') {
+      const sourceFile = browserTableSourceFile(dataset, item);
+      const remove = document.createElement('button');
+      remove.className = 'icon-button schema-table-action';
+      remove.type = 'button';
+      remove.title = 'Remove parquet file';
+      remove.setAttribute('aria-label', 'Remove parquet file');
+      remove.innerHTML = '<i data-lucide="trash-2"></i>';
+      remove.addEventListener('click', async () => {
+        await removeBrowserDatasetFile(dataset, sourceFile);
+      });
+      header.appendChild(remove);
+    }
+    tableRoot.appendChild(header);
     for (const column of item.columns || []) {
       const row = document.createElement('div');
       row.className = 'schema-column';
@@ -334,12 +463,65 @@ function renderSchema(dataset) {
     }
     root.appendChild(tableRoot);
   }
+  window.lucide?.createIcons();
+}
+
+function browserTableSourceFile(dataset, table) {
+  if (table.sourceFile) {
+    return table.sourceFile;
+  }
+  const files = dataset.source?.files || [];
+  return files.find(file => tableNameFromFile(file.name) === table.name)?.name ||
+    `${table.name}.parquet`;
+}
+
+function tableNameFromFile(fileName) {
+  return fileName
+    .replace(/[.]parquet$/i, '')
+    .replace(/[^A-Za-z0-9_]+/g, '_')
+    .replace(/^_+|_+$/g, '') || 'table';
+}
+
+async function removeBrowserDatasetFile(dataset, fileName) {
+  if (!window.confirm(`Remove ${fileName} from ${dataset.name}?`)) {
+    return;
+  }
+  try {
+    await removeFileFromBrowserDataset(dataset, fileName);
+    browserDatasets = await loadBrowserDatasets();
+    renderDatasets();
+  } catch (error) {
+    showDetails({
+      ok: false,
+      error: {
+        stage: 'browser-storage',
+        message: error.message || String(error)
+      }
+    });
+    selectTab('details');
+  }
 }
 
 function initActions() {
   $('#run-button').addEventListener('click', async () => {
     const sql = getSql();
     const dataset = activeDataset();
+    if (!dataset) {
+      showDetails({ ok: false, error: { message: 'Select a dataset first.' } });
+      selectTab('details');
+      return;
+    }
+    if (dataset.source?.kind === 'browser') {
+      showDetails({
+        ok: false,
+        error: {
+          stage: 'browser-run',
+          message: 'Browser execution is not implemented yet. The dataset is stored in OPFS and can be explained from its browser-read schema.'
+        }
+      });
+      selectTab('details');
+      return;
+    }
     const key = explainKey(sql, dataset);
     if (lastExplainKey !== key) {
       setStatus('explaining');
@@ -381,6 +563,11 @@ function initActions() {
 }
 
 async function explainCurrent(sql, dataset, selectGraph) {
+  if (!dataset) {
+    showDetails({ ok: false, error: { message: 'Select a dataset first.' } });
+    selectTab('details');
+    return false;
+  }
   setStatus('explaining');
   const request = {
     sql,
