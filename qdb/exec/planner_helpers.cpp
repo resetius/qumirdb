@@ -17,6 +17,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 
 namespace NQdb {
 namespace {
@@ -134,7 +135,9 @@ NQumir::NAst::TTypePtr BuildSourceRuntimeType(TSourceOperator& src)
 TUnaryRuntimeProcess BuildFilterRuntimeProcess(
     TFilterOperator& filter,
     const NQumir::NAst::TTypePtr& inputType,
-    std::ostream* diagnostics)
+    std::ostream* diagnostics,
+    IKernelExportBackend* exportBackend,
+    std::string stage)
 {
     auto* inputStruct = static_cast<NQumir::NAst::TStructType*>(inputType.get());
     if (!inputStruct) {
@@ -142,7 +145,11 @@ TUnaryRuntimeProcess BuildFilterRuntimeProcess(
     }
 
     auto spec = NKernel::BuildFilterKernelSpec(*inputStruct, filter.Predicate());
-    TKernelCompiler compiler(diagnostics);
+    TKernelCompiler compiler(TKernelCompilerOptions{
+        .Diagnostics = diagnostics,
+        .ExportBackend = exportBackend,
+        .Stage = std::move(stage),
+    });
     return {
         .Process = MakeFilterProcess(compiler.CompileFilter(spec)),
         .OutputType = inputType,
@@ -152,7 +159,9 @@ TUnaryRuntimeProcess BuildFilterRuntimeProcess(
 TUnaryRuntimeProcess BuildProjectRuntimeProcess(
     TProjectOperator& project,
     const NQumir::NAst::TTypePtr& inputType,
-    std::ostream* diagnostics)
+    std::ostream* diagnostics,
+    IKernelExportBackend* exportBackend,
+    std::string stage)
 {
     auto* inputStruct = static_cast<NQumir::NAst::TStructType*>(inputType.get());
     if (!inputStruct) {
@@ -207,7 +216,11 @@ TUnaryRuntimeProcess BuildProjectRuntimeProcess(
             *inputStruct,
             computedExprs,
             computedJitTypes);
-        TKernelCompiler compiler(diagnostics);
+        TKernelCompiler compiler(TKernelCompilerOptions{
+            .Diagnostics = diagnostics,
+            .ExportBackend = exportBackend,
+            .Stage = std::move(stage),
+        });
         dispatch = compiler.CompileProject(spec);
     }
 
