@@ -417,6 +417,35 @@ button:hover {
   background: #1d2b3b;
 }
 
+.dataset-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 4px;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.dataset-item:has(.dataset-action) {
+  grid-template-columns: minmax(0, 1fr) 32px 32px 32px;
+}
+
+.dataset-item.active .dataset-select {
+  border-color: var(--accent);
+  background: #1d2b3b;
+}
+
+.dataset-select {
+  width: 100%;
+  min-height: 36px;
+  text-align: left;
+  border-radius: 0;
+}
+
+.dataset-action {
+  width: 32px;
+  height: 32px;
+}
+
 .schema-panel {
   min-height: 0;
   border-top: 1px solid var(--line);
@@ -438,9 +467,25 @@ button:hover {
   margin-bottom: 14px;
 }
 
-.schema-table-name {
-  font-weight: 700;
+.schema-table-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 28px;
+  align-items: center;
+  gap: 4px;
   margin-bottom: 4px;
+}
+
+.schema-table-name {
+  min-width: 0;
+  overflow: hidden;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.schema-table-action {
+  width: 28px;
+  height: 28px;
 }
 
 .schema-column {
@@ -450,6 +495,11 @@ button:hover {
   color: var(--muted);
   font-size: 12px;
   padding: 2px 0;
+}
+
+.schema-empty {
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .details {
