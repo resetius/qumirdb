@@ -59,6 +59,13 @@ async function writeOpfsFile(datasetId, file) {
   return `datasets/${datasetId}/${file.name}`;
 }
 
+export async function readOpfsFile(datasetId, fileName) {
+  const root = await datasetsDir(false);
+  const dir = await root.getDirectoryHandle(datasetId, { create: false });
+  const handle = await dir.getFileHandle(fileName, { create: false });
+  return handle.getFile();
+}
+
 async function removeOpfsFile(datasetId, fileName) {
   try {
     const root = await datasetsDir(false);

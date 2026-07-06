@@ -1,6 +1,7 @@
 #include <qdb/kernel/gen.h>
 #include <qdb/kernel/builder.h>
 #include <qdb/kernel/column_value.h>
+#include <qdb/plan/passes/unbound_vars.h>
 #include <qdb/plan/types/nullable.h>
 
 #include <qumir/parser/ast.h>
@@ -804,6 +805,12 @@ NQumir::NAst::TExprPtr GenFilterKernelAst(
     using namespace NQumir::NAst;
     NQumir::TLocation loc{};
 
+    // Only columns the predicate actually reads need materializing. This mirrors
+    // TFilterOperator::ComputeReferencedColumns (FindUnboundVars over the
+    // predicate). Skipping unread columns avoids wasted work and, for string
+    // columns, a dead StringView build the wasm -O3 backend miscompiles.
+    const auto referenced = FindUnboundVars(predicate);
+
     std::unordered_map<std::string, std::string> fixedValues;
     std::unordered_set<std::string> stringFields;
     std::unordered_map<std::string, std::string> stringValues;
@@ -849,6 +856,9 @@ NQumir::NAst::TExprPtr GenFilterKernelAst(
     std::vector<TExprPtr> loopSetup;
     std::unordered_map<std::string, std::string> validityNames;
     for (const auto& [name, type] : inputType.Fields) {
+        if (!referenced.contains(name)) {
+            continue;
+        }
         int32_t idx = fieldIndices.at(name);
         auto colElem = std::make_shared<TIndexExpr>(loc,
             std::make_shared<TIdentExpr>(loc, "cols"),

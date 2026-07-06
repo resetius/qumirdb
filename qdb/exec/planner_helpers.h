@@ -8,10 +8,13 @@
 #include <qdb/plan/ops/sort.h>
 
 #include <iosfwd>
+#include <string>
 #include <string_view>
 #include <vector>
 
 namespace NQdb {
+
+class IKernelExportBackend;
 
 struct TUnaryRuntimeProcess {
     TUnaryStreamProcess Process;
@@ -31,12 +34,16 @@ NQumir::NAst::TTypePtr BuildSourceRuntimeType(TSourceOperator& src);
 TUnaryRuntimeProcess BuildFilterRuntimeProcess(
     TFilterOperator& filter,
     const NQumir::NAst::TTypePtr& inputType,
-    std::ostream* diagnostics);
+    std::ostream* diagnostics,
+    IKernelExportBackend* exportBackend = nullptr,
+    std::string stage = {});
 
 TUnaryRuntimeProcess BuildProjectRuntimeProcess(
     TProjectOperator& project,
     const NQumir::NAst::TTypePtr& inputType,
-    std::ostream* diagnostics);
+    std::ostream* diagnostics,
+    IKernelExportBackend* exportBackend = nullptr,
+    std::string stage = {});
 
 TSortRuntimeProcess BuildSortRuntimeProcess(
     const NQumir::NAst::TStructType& inputType,

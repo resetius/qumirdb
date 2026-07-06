@@ -28,6 +28,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 
 namespace NQdb {
 namespace {
@@ -203,9 +204,12 @@ private:
 TSchedulerUnaryStage BuildSchedulerFilterStage(
     TFilterOperator& filter,
     const NQumir::NAst::TTypePtr& inputType,
-    std::ostream* diagnostics)
+    std::ostream* diagnostics,
+    IKernelExportBackend* exportBackend = nullptr,
+    std::string stage = {})
 {
-    auto runtime = BuildFilterRuntimeProcess(filter, inputType, diagnostics);
+    auto runtime = BuildFilterRuntimeProcess(
+        filter, inputType, diagnostics, exportBackend, std::move(stage));
     auto code = std::make_shared<NScheduler::TUnaryCode>(
         [process = std::move(runtime.Process)](void* state, TRowSet& rowSet) {
             auto* kernelState = static_cast<TUnaryStreamingKernelState*>(state);
@@ -224,9 +228,12 @@ TSchedulerUnaryStage BuildSchedulerFilterStage(
 TSchedulerUnaryStage BuildSchedulerProjectStage(
     TProjectOperator& project,
     const NQumir::NAst::TTypePtr& inputType,
-    std::ostream* diagnostics)
+    std::ostream* diagnostics,
+    IKernelExportBackend* exportBackend = nullptr,
+    std::string stage = {})
 {
-    auto runtime = BuildProjectRuntimeProcess(project, inputType, diagnostics);
+    auto runtime = BuildProjectRuntimeProcess(
+        project, inputType, diagnostics, exportBackend, std::move(stage));
     auto code = std::make_shared<NScheduler::TUnaryCode>(
         [process = std::move(runtime.Process)](void* state, TRowSet& rowSet) {
             auto* kernelState = static_cast<TUnaryStreamingKernelState*>(state);
@@ -387,10 +394,12 @@ public:
     TSchedulerGraphLowerer(
         NScheduler::TTaskGraph& graph,
         NScheduler::TSettings settings,
-        std::ostream* diagnostics)
+        std::ostream* diagnostics,
+        IKernelExportBackend* exportBackend = nullptr)
         : Graph_(graph)
         , Settings_(std::move(settings))
         , Diagnostics_(diagnostics)
+        , ExportBackend_(exportBackend)
     {}
 
     size_t OutputLanes(const TOperatorPtr& op) const {
@@ -493,23 +502,35 @@ public:
         }
         if (auto n = TMaybeOp<TFilterOperator>(op)) {
             auto filter = n.Cast();
+            auto stageGroup = StageGroup("filter", filter.get());
             return LowerUnary(
                 filter->Input(),
                 "filter",
-                StageGroup("filter", filter.get()),
+                stageGroup,
                 [&](const NQumir::NAst::TTypePtr& inType) {
-                    return BuildSchedulerFilterStage(*filter, inType, Diagnostics_);
+                    return BuildSchedulerFilterStage(
+                        *filter,
+                        inType,
+                        Diagnostics_,
+                        ExportBackend_,
+                        stageGroup);
                 },
                 outConn);
         }
         if (auto n = TMaybeOp<TProjectOperator>(op)) {
             auto project = n.Cast();
+            auto stageGroup = StageGroup("project", project.get());
             return LowerUnary(
                 project->Input(),
                 "project",
-                StageGroup("project", project.get()),
+                stageGroup,
                 [&](const NQumir::NAst::TTypePtr& inType) {
-                    return BuildSchedulerProjectStage(*project, inType, Diagnostics_);
+                    return BuildSchedulerProjectStage(
+                        *project,
+                        inType,
+                        Diagnostics_,
+                        ExportBackend_,
+                        stageGroup);
                 },
                 outConn);
         }
@@ -1632,6 +1653,7 @@ private:
     NScheduler::TTaskGraph& Graph_;
     NScheduler::TSettings Settings_;
     std::ostream* Diagnostics_;
+    IKernelExportBackend* ExportBackend_ = nullptr;
 };
 
 } // namespace
@@ -1696,8 +1718,17 @@ TLoweredPlan LowerPlanToGraph(
     TSettings settings,
     std::ostream* diagnostics)
 {
+    return LowerPlanToGraph(root, std::move(settings), diagnostics, nullptr);
+}
+
+TLoweredPlan LowerPlanToGraph(
+    const TOperatorPtr& root,
+    TSettings settings,
+    std::ostream* diagnostics,
+    IKernelExportBackend* exportBackend)
+{
     auto graph = std::make_unique<TTaskGraph>();
-    TSchedulerGraphLowerer lowerer(*graph, settings, diagnostics);
+    TSchedulerGraphLowerer lowerer(*graph, settings, diagnostics, exportBackend);
     const size_t lanes = lowerer.OutputLanes(root);
     if (lanes == 0) {
         throw std::runtime_error(
