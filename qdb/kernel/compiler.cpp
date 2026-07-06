@@ -76,6 +76,17 @@ void* CompileKernelAst(
     return runner.CompileKernelAst(std::move(ast), entryName, error);
 }
 
+std::unordered_map<std::string, void*> CompileKernelAst(
+    NQumir::TLLVMRunner& runner,
+    NQumir::NAst::TExprPtr ast,
+    const std::vector<std::string>& entryNames,
+    std::string* error)
+{
+    NQumir::NRegistry::EnsureQumirDbRuntimeSymbolsLinked();
+    EnsureQumirDbUse(ast);
+    return runner.CompileKernelAst(std::move(ast), entryNames, error);
+}
+
 NQumir::NAst::TTypePtr QumirDbNamedType(const std::string& name) {
     return std::make_shared<NQumir::NAst::TNamedType>(name, nullptr);
 }
@@ -751,34 +762,31 @@ TJoinHashKernels TKernelCompiler::CompileJoinHash(
         return program;
     };
 
-    auto compileEntry = [&](const std::string& entry)
-        -> std::pair<void*, std::shared_ptr<NQumir::TLLVMRunner>>
-    {
-        auto options = Opts_;
-        options.PrintIr = Diagnostics_ != nullptr;
-        options.PrintLlvm = Diagnostics_ != nullptr;
-        auto runner = std::make_shared<NQumir::TLLVMRunner>(options);
-        auto program = std::make_shared<TBlockExpr>(NQumir::TLocation{}, buildProgram());
-        PrintKernelAst(Diagnostics_, "join_hash." + entry, program);
-        std::string error;
-        void* fn = CompileKernelAst(*runner, program, entry, &error);
-        FinishKernelDiagnostics(Diagnostics_);
-        if (!fn) {
+    auto options = Opts_;
+    options.PrintIr = Diagnostics_ != nullptr;
+    options.PrintLlvm = Diagnostics_ != nullptr;
+    auto runner = std::make_shared<NQumir::TLLVMRunner>(options);
+    auto program = std::make_shared<TBlockExpr>(NQumir::TLocation{}, buildProgram());
+    PrintKernelAst(Diagnostics_, "join_hash", program);
+    std::string error;
+    const std::vector<std::string> entries = {"jt_hash_left", "jt_hash_right"};
+    auto fns = CompileKernelAst(*runner, program, entries, &error);
+    FinishKernelDiagnostics(Diagnostics_);
+    for (const auto& entry : entries) {
+        if (!fns.contains(entry)) {
             throw std::runtime_error(
                 "CompileJoinHash: " + entry + " compilation failed: " + error);
         }
-        return {fn, std::move(runner)};
-    };
-
-    auto [leftFn, leftRunner] = compileEntry("jt_hash_left");
-    auto [rightFn, rightRunner] = compileEntry("jt_hash_right");
+    }
+    void* leftFn = fns.at("jt_hash_left");
+    void* rightFn = fns.at("jt_hash_right");
 
     using THashFn = bool(*)(TRowSet*, uint64_t*);
     return {
-        .Left = [leftFn, leftRunner](TRowSet* batch, uint64_t* hashes) {
+        .Left = [leftFn, runner](TRowSet* batch, uint64_t* hashes) {
             return reinterpret_cast<THashFn>(leftFn)(batch, hashes);
         },
-        .Right = [rightFn, rightRunner](TRowSet* batch, uint64_t* hashes) {
+        .Right = [rightFn, runner](TRowSet* batch, uint64_t* hashes) {
             return reinterpret_cast<THashFn>(rightFn)(batch, hashes);
         },
     };
@@ -865,31 +873,45 @@ TJoinKernels TKernelCompiler::CompileJoin(
         return program;
     };
 
-    auto compileEntry = [&](const std::string& entry)
-        -> std::pair<void*, std::shared_ptr<NQumir::TLLVMRunner>>
-    {
-        auto options = Opts_;
-        options.PrintIr = Diagnostics_ != nullptr;
-        options.PrintLlvm = Diagnostics_ != nullptr;
-        auto runner = std::make_shared<NQumir::TLLVMRunner>(options);
-        auto program = std::make_shared<TBlockExpr>(NQumir::TLocation{}, buildProgram());
-        PrintKernelAst(Diagnostics_, "join." + entry, program);
-        std::string error;
-        void* fn = CompileKernelAst(*runner, program, entry, &error);
-        FinishKernelDiagnostics(Diagnostics_);
-        if (!fn) {
+    std::vector<std::string> entries = {
+        "jt_init",
+        "jt_process_left",
+        "jt_process_right",
+        "jt_probe_left_stream",
+        "jt_probe_right_stream",
+        "jt_destroy",
+        "pb_destroy",
+    };
+    if (isSemiAnti) {
+        entries.push_back("jt_insert_key_only");
+        entries.push_back("jt_finalize_semi_anti");
+    }
+    if (isOuter) {
+        entries.push_back("jt_finalize_outer");
+    }
+
+    auto options = Opts_;
+    options.PrintIr = Diagnostics_ != nullptr;
+    options.PrintLlvm = Diagnostics_ != nullptr;
+    auto runner = std::make_shared<NQumir::TLLVMRunner>(options);
+    auto program = std::make_shared<TBlockExpr>(NQumir::TLocation{}, buildProgram());
+    PrintKernelAst(Diagnostics_, "join", program);
+    std::string error;
+    auto fns = CompileKernelAst(*runner, program, entries, &error);
+    FinishKernelDiagnostics(Diagnostics_);
+    for (const auto& entry : entries) {
+        if (!fns.contains(entry)) {
             throw std::runtime_error("CompileJoin: " + entry + " compilation failed: " + error);
         }
-        return {fn, std::move(runner)};
-    };
+    }
 
-    auto [initFn, initRunner] = compileEntry("jt_init");
-    auto [leftFn, leftRunner] = compileEntry("jt_process_left");
-    auto [rightFn, rightRunner] = compileEntry("jt_process_right");
-    auto [probeLeftFn, probeLeftRunner] = compileEntry("jt_probe_left_stream");
-    auto [probeRightFn, probeRightRunner] = compileEntry("jt_probe_right_stream");
-    auto [destroyTableFn, destroyTableRunner] = compileEntry("jt_destroy");
-    auto [destroyPairsFn, destroyPairsRunner] = compileEntry("pb_destroy");
+    void* initFn = fns.at("jt_init");
+    void* leftFn = fns.at("jt_process_left");
+    void* rightFn = fns.at("jt_process_right");
+    void* probeLeftFn = fns.at("jt_probe_left_stream");
+    void* probeRightFn = fns.at("jt_probe_right_stream");
+    void* destroyTableFn = fns.at("jt_destroy");
+    void* destroyPairsFn = fns.at("pb_destroy");
 
     using TInitFn = bool(*)(void*, int64_t, int64_t);
     // jt_process_left/right take the two row-store bases (for jt_residual_filter).
@@ -900,57 +922,57 @@ TJoinKernels TKernelCompiler::CompileJoin(
     using TDestroyFn = void(*)(void*);
 
     TJoinKernels kernels;
-    kernels.Init = [initFn, initRunner, keySize](void* table, int64_t capacity) {
+    kernels.Init = [initFn, runner, keySize](void* table, int64_t capacity) {
         return reinterpret_cast<TInitFn>(initFn)(table, capacity, keySize);
     };
-    kernels.ProcessLeft = [leftFn, leftRunner](void* own, void* opp, TRowSet* batch,
+    kernels.ProcessLeft = [leftFn, runner](void* own, void* opp, TRowSet* batch,
         int64_t batchIdx, void* pairs, TRowSet* leftStore, TRowSet* rightStore) {
         return reinterpret_cast<TProcessFn>(leftFn)(
             own, opp, batch, batchIdx, pairs, leftStore, rightStore);
     };
-    kernels.ProcessRight = [rightFn, rightRunner](void* own, void* opp, TRowSet* batch,
+    kernels.ProcessRight = [rightFn, runner](void* own, void* opp, TRowSet* batch,
         int64_t batchIdx, void* pairs, TRowSet* leftStore, TRowSet* rightStore) {
         return reinterpret_cast<TProcessFn>(rightFn)(
             own, opp, batch, batchIdx, pairs, leftStore, rightStore);
     };
-    kernels.ProbeLeftStream = [probeLeftFn, probeLeftRunner](void* build, TRowSet* batch,
+    kernels.ProbeLeftStream = [probeLeftFn, runner](void* build, TRowSet* batch,
         int64_t batchIdx, void* pairs, TRowSet* leftStore, TRowSet* rightStore) {
         return reinterpret_cast<TProbeFn>(probeLeftFn)(
             build, batch, batchIdx, pairs, leftStore, rightStore);
     };
-    kernels.ProbeRightStream = [probeRightFn, probeRightRunner](void* build, TRowSet* batch,
+    kernels.ProbeRightStream = [probeRightFn, runner](void* build, TRowSet* batch,
         int64_t batchIdx, void* pairs, TRowSet* leftStore, TRowSet* rightStore) {
         return reinterpret_cast<TProbeFn>(probeRightFn)(
             build, batch, batchIdx, pairs, leftStore, rightStore);
     };
-    kernels.DestroyTable = [destroyTableFn, destroyTableRunner](void* table) {
+    kernels.DestroyTable = [destroyTableFn, runner](void* table) {
         reinterpret_cast<TDestroyFn>(destroyTableFn)(table);
     };
-    kernels.DestroyPairs = [destroyPairsFn, destroyPairsRunner](void* pairs) {
+    kernels.DestroyPairs = [destroyPairsFn, runner](void* pairs) {
         reinterpret_cast<TDestroyFn>(destroyPairsFn)(pairs);
     };
 
     using TFinalizeFn = bool(*)(void*, void*, void*);
 
     if (isSemiAnti) {
-        auto [insertKeyOnlyFn, insertKeyOnlyRunner] = compileEntry("jt_insert_key_only");
-        auto [finalizeFn, finalizeRunner] = compileEntry("jt_finalize_semi_anti");
+        void* insertKeyOnlyFn = fns.at("jt_insert_key_only");
+        void* finalizeFn = fns.at("jt_finalize_semi_anti");
         kernels.InsertKeyOnly =
-            [insertKeyOnlyFn, insertKeyOnlyRunner](void* own, void* opp, TRowSet* batch,
+            [insertKeyOnlyFn, runner](void* own, void* opp, TRowSet* batch,
                 int64_t batchIdx, void* pairs) {
                 return reinterpret_cast<TInsertKeyOnlyFn>(insertKeyOnlyFn)(
                     own, opp, batch, batchIdx, pairs);
             };
         kernels.FinalizeAntiSemi =
-            [finalizeFn, finalizeRunner](void* own, void* opp, void* pairs) {
+            [finalizeFn, runner](void* own, void* opp, void* pairs) {
                 return reinterpret_cast<TFinalizeFn>(finalizeFn)(own, opp, pairs);
             };
     }
 
     if (isOuter) {
-        auto [finalizeFn, finalizeRunner] = compileEntry("jt_finalize_outer");
+        void* finalizeFn = fns.at("jt_finalize_outer");
         kernels.FinalizeOuter =
-            [finalizeFn, finalizeRunner](void* own, void* opp, void* pairs) {
+            [finalizeFn, runner](void* own, void* opp, void* pairs) {
                 return reinterpret_cast<TFinalizeFn>(finalizeFn)(own, opp, pairs);
             };
     }
