@@ -21,6 +21,7 @@
 #include <qdb/scheduler/scan_split.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <functional>
 #include <optional>
 #include <ostream>
@@ -474,6 +475,8 @@ public:
             auto filter = n.Cast();
             return LowerUnary(
                 filter->Input(),
+                "filter",
+                StageGroup("filter", filter.get()),
                 [&](const NQumir::NAst::TTypePtr& inType) {
                     return BuildSchedulerFilterStage(*filter, inType, Diagnostics_);
                 },
@@ -483,6 +486,8 @@ public:
             auto project = n.Cast();
             return LowerUnary(
                 project->Input(),
+                "project",
+                StageGroup("project", project.get()),
                 [&](const NQumir::NAst::TTypePtr& inType) {
                     return BuildSchedulerProjectStage(*project, inType, Diagnostics_);
                 },
@@ -514,6 +519,22 @@ public:
     }
 
 private:
+    static std::string StageGroup(std::string_view kind, const void* owner) {
+        return std::string(kind) + ":" +
+            std::to_string(reinterpret_cast<uintptr_t>(owner));
+    }
+
+    static void MarkNode(
+        NScheduler::TTaskNode& node,
+        std::string kind,
+        std::string group,
+        std::string label)
+    {
+        node.DebugKind = std::move(kind);
+        node.DebugGroup = std::move(group);
+        node.DebugLabel = std::move(label);
+    }
+
     struct TBlockingTail {
         std::shared_ptr<const NScheduler::TBlockingCode> Code;
         std::function<std::shared_ptr<void>()> MakeState;
@@ -653,12 +674,13 @@ private:
     }
 
     std::vector<NScheduler::TScanSplit> ScanSplits(TSourceOperator& src) const {
-        auto* parquet = dynamic_cast<TParquetSource*>(&src.GetSource());
-        if (!parquet) {
+        auto* metadata =
+            dynamic_cast<NScheduler::IScanMetadataSource*>(&src.GetSource());
+        if (!metadata) {
             return {};
         }
         return NScheduler::BuildScanSplits(
-            parquet->ScanRowGroups(),
+            metadata->ScanRowGroups(),
             Settings_.ScanSplit);
     }
 
@@ -752,7 +774,12 @@ private:
                 code,
                 std::move(state),
                 NScheduler::TOutputPort{.Connection = &outConn, .Lane = p});
-            result.Producers.push_back(&Graph_.AddOwnedNode(std::move(task)));
+            auto& node = Graph_.AddOwnedNode(std::move(task));
+            MarkNode(node,
+                "source",
+                StageGroup("source", &src),
+                src.GetAlias().empty() ? "source" : "source " + src.GetAlias());
+            result.Producers.push_back(&node);
         }
         return result;
     }
@@ -760,6 +787,8 @@ private:
     template <typename TStageBuilder>
     TLoweredOutput LowerUnary(
         const TOperatorPtr& child,
+        std::string stageKind,
+        std::string stageGroup,
         TStageBuilder buildStage,
         NScheduler::IConnection& outConn)
     {
@@ -779,6 +808,7 @@ private:
                 NScheduler::TInputPort{.Connection = &childConnRef, .Lane = p},
                 NScheduler::TOutputPort{.Connection = &outConn, .Lane = p});
             auto& node = Graph_.AddOwnedNode(std::move(task));
+            MarkNode(node, stageKind, stageGroup, stageKind);
             Graph_.AddEdge(*childOut.Producers[p], node, childConnRef, p, p);
             result.Producers.push_back(&node);
         }
@@ -788,6 +818,8 @@ private:
     template <typename TTailBuilder>
     TLoweredOutput LowerBlocking(
         const TOperatorPtr& child,
+        std::string stageKind,
+        std::string stageGroup,
         TTailBuilder buildTail,
         NScheduler::IConnection& outConn)
     {
@@ -809,6 +841,7 @@ private:
             NScheduler::TInputPort{.Connection = inputConn, .Lane = 0},
             NScheduler::TOutputPort{.Connection = &outConn, .Lane = 0});
         auto& node = Graph_.AddOwnedNode(std::move(task));
+        MarkNode(node, stageKind, stageGroup, stageKind);
         for (size_t p = 0; p < lanes; ++p) {
             Graph_.AddEdge(*childOut.Producers[p], node, *inputConn, p, 0);
         }
@@ -914,6 +947,10 @@ private:
                 NScheduler::TInputPort{.Connection = &childRef, .Lane = m},
                 NScheduler::TOutputPort{.Connection = &gatherRef, .Lane = m});
             auto& node = Graph_.AddOwnedNode(std::move(task));
+            MarkNode(node,
+                "aggregate",
+                StageGroup("aggregate-partial", &aggregate),
+                "aggregate partial");
             Graph_.AddEdge(*childOut.Producers[m], node, childRef, m, m);
             partialNodes.push_back(&node);
         }
@@ -926,6 +963,10 @@ private:
             NScheduler::TInputPort{.Connection = &gatherRef, .Lane = 0},
             NScheduler::TOutputPort{.Connection = &outConn, .Lane = 0});
         auto& finalNode = Graph_.AddOwnedNode(std::move(finalTask));
+        MarkNode(finalNode,
+            "aggregate",
+            StageGroup("aggregate-combine", &aggregate),
+            "aggregate combine");
         for (size_t m = 0; m < lanes; ++m) {
             Graph_.AddEdge(*partialNodes[m], finalNode, gatherRef, m, 0);
         }
@@ -945,6 +986,8 @@ private:
         if (childLanes <= 1) {
             return LowerBlocking(
                 aggregate.Input(),
+                "aggregate",
+                StageGroup("aggregate", &aggregate),
                 [&](const NQumir::NAst::TTypePtr& childType) {
                     return BuildAggregateTail(childType, aggregate);
                 },
@@ -961,6 +1004,8 @@ private:
             }
             return LowerBlocking(
                 aggregate.Input(),
+                "aggregate",
+                StageGroup("aggregate", &aggregate),
                 [&](const NQumir::NAst::TTypePtr& childType) {
                     return BuildAggregateTail(childType, aggregate);
                 },
@@ -999,6 +1044,10 @@ private:
                 *shufPtr,
                 i);
             auto& node = Graph_.AddOwnedNode(std::move(task));
+            MarkNode(node,
+                "hash-shuffle",
+                StageGroup("aggregate-shuffle", &aggregate),
+                "hash-shuffle");
             Graph_.AddEdge(*childOut.Producers[i], node, childConnRef, i, i);
             shufNodes.push_back(&node);
         }
@@ -1013,6 +1062,10 @@ private:
                 NScheduler::TInputPort{.Connection = &shufRef, .Lane = m},
                 NScheduler::TOutputPort{.Connection = &outConn, .Lane = m});
             auto& node = Graph_.AddOwnedNode(std::move(task));
+            MarkNode(node,
+                "aggregate",
+                StageGroup("aggregate", &aggregate),
+                "aggregate");
             for (size_t s = 0; s < childLanes; ++s) {
                 Graph_.AddEdge(*shufNodes[s], node, shufRef, s, m);
             }
@@ -1027,6 +1080,8 @@ private:
     {
         return LowerBlocking(
             limit.Input(),
+            "limit",
+            StageGroup("limit", &limit),
             [&](const NQumir::NAst::TTypePtr& childType) {
                 const int64_t limitValue = limit.Limit();
                 const int64_t offsetValue = limit.Offset();
@@ -1053,6 +1108,8 @@ private:
     {
         return LowerBlocking(
             input,
+            std::string(kernelName),
+            StageGroup(kernelName, input.get()),
             [&](const NQumir::NAst::TTypePtr& childType) {
                 auto* inputType =
                     static_cast<NQumir::NAst::TStructType*>(childType.get());
@@ -1122,6 +1179,10 @@ private:
                 NScheduler::TInputPort{.Connection = &childConnRef, .Lane = i},
                 NScheduler::TOutputPort{.Connection = &runRef, .Lane = 0});
             auto& node = Graph_.AddOwnedNode(std::move(task));
+            MarkNode(node,
+                std::string(kernelName),
+                StageGroup(kernelName, input.get()),
+                std::string(kernelName));
             Graph_.AddEdge(*childOut.Producers[i], node, childConnRef, i, i);
             runConns.push_back(&runRef);
             mergeInputs.push_back(
@@ -1173,6 +1234,10 @@ private:
             std::move(mergeInputs),
             NScheduler::TOutputPort{.Connection = &mergeOut, .Lane = 0});
         auto& mergeNode = Graph_.AddOwnedNode(std::move(merge));
+        MarkNode(mergeNode,
+            "merge",
+            StageGroup("merge", input.get()),
+            "merge");
         for (size_t i = 0; i < lanes; ++i) {
             Graph_.AddEdge(*localSorts[i], mergeNode, *runConns[i], 0, 0);
         }
@@ -1223,6 +1288,10 @@ private:
             NScheduler::TInputPort{.Connection = &mergeConnRef, .Lane = 0},
             NScheduler::TOutputPort{.Connection = &outConn, .Lane = 0});
         auto& limitNode = Graph_.AddOwnedNode(std::move(limitTask));
+        MarkNode(limitNode,
+            "limit",
+            StageGroup("top-sort-limit", &sort),
+            "limit");
         Graph_.AddEdge(*merged.Merge, limitNode, mergeConnRef, 0, 0);
 
         return TLoweredOutput{
@@ -1273,6 +1342,10 @@ private:
                 NScheduler::TInputPort{.Connection = &scalarGatherRef, .Lane = 0},
                 NScheduler::TOutputPort{.Connection = &broadcastRef, .Lane = 0});
             auto& fwdNode = Graph_.AddOwnedNode(std::move(fwd));
+            MarkNode(fwdNode,
+                "broadcast",
+                StageGroup("cross-scalar-broadcast", &join),
+                "broadcast");
             for (size_t m = 0; m < scalarLanes; ++m) {
                 Graph_.AddEdge(
                     *scalarOut.Producers[m], fwdNode, scalarGatherRef, m, 0);
@@ -1312,6 +1385,10 @@ private:
                 NScheduler::TInputPort{.Connection = scalarInput, .Lane = m},
                 NScheduler::TOutputPort{.Connection = crossOut, .Lane = m});
             auto& node = Graph_.AddOwnedNode(std::move(task));
+            MarkNode(node,
+                "join",
+                StageGroup("join", &join),
+                "join");
             Graph_.AddEdge(*vectorOut.Producers[m], node, vectorRef, m, m);
             if (directScalar) {
                 Graph_.AddEdge(*scalarOut.Producers[0], node, *scalarInput, 0, 0);
@@ -1344,6 +1421,10 @@ private:
                 NScheduler::TInputPort{.Connection = residualConn, .Lane = m},
                 NScheduler::TOutputPort{.Connection = &outConn, .Lane = m});
             auto& node = Graph_.AddOwnedNode(std::move(task));
+            MarkNode(node,
+                "filter",
+                StageGroup("cross-residual-filter", &join),
+                "filter");
             Graph_.AddEdge(*crossNodes[m], node, *residualConn, m, m);
             result.Producers.push_back(&node);
         }
@@ -1393,6 +1474,10 @@ private:
                     .Connection = &rightPipeRef, .Lane = 0},
                 NScheduler::TOutputPort{.Connection = &outConn, .Lane = 0});
             auto& node = Graph_.AddOwnedNode(std::move(task));
+            MarkNode(node,
+                "join",
+                StageGroup("join", &join),
+                "join");
             Graph_.AddEdge(*leftOut.Producers[0], node, leftPipeRef, 0, 0);
             Graph_.AddEdge(*rightOut.Producers[0], node, rightPipeRef, 0, 0);
             return TLoweredOutput{
@@ -1432,6 +1517,10 @@ private:
                     .Connection = rightShuf.Connection, .Lane = j},
                 NScheduler::TOutputPort{.Connection = &outConn, .Lane = j});
             auto& node = Graph_.AddOwnedNode(std::move(task));
+            MarkNode(node,
+                "join",
+                StageGroup("join", &join),
+                "join");
             for (size_t s = 0; s < leftLanes; ++s) {
                 Graph_.AddEdge(*leftShuf.Nodes[s], node, *leftShuf.Connection, s, j);
             }
@@ -1452,6 +1541,7 @@ private:
         std::shared_ptr<NScheduler::THashShuffleCode> hashCode,
         std::string debugName)
     {
+        const std::string label = debugName;
         auto* shufPtr = &AddConn<NScheduler::THashShuffleConnection>(
             inputLanes, joinParts, std::move(debugName), ShuffleQueueCapacity());
 
@@ -1466,6 +1556,10 @@ private:
                 *shufPtr,
                 p);
             auto& node = Graph_.AddOwnedNode(std::move(task));
+            MarkNode(node,
+                "hash-shuffle",
+                StageGroup(label, hashCode.get()),
+                label);
             Graph_.AddEdge(*input.Producers[p], node, inputConn, p, p);
             side.Nodes.push_back(&node);
         }

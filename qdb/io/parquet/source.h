@@ -13,7 +13,7 @@ namespace parquet { namespace arrow { class FileReader; } }
 
 namespace NQdb {
 
-class TParquetSource : public ISource {
+class TParquetSource : public ISource, public NScheduler::IScanMetadataSource {
 public:
     explicit TParquetSource(const std::string& path);
     ~TParquetSource();
@@ -21,7 +21,7 @@ public:
     const TSchema& Schema() const override;
     bool Next(TRowSet& rowSet) override;
     void RestrictColumns(const std::unordered_set<std::string>& names) override;
-    std::vector<NScheduler::TScanRowGroup> ScanRowGroups() const;
+    std::vector<NScheduler::TScanRowGroup> ScanRowGroups() const override;
     std::unique_ptr<TParquetSource> MakeRowGroupRangeSource(
         size_t firstRowGroup,
         size_t rowGroupCount) const;

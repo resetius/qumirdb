@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>QumirDB Workbench</title>
+  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="https://unpkg.com/codemirror@5/lib/codemirror.css">
+  <link rel="stylesheet" href="https://unpkg.com/codemirror@5/theme/material-darker.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="topbar-left">
+        <button id="queries-toggle" class="icon-button" type="button" title="Saved queries" aria-label="Saved queries"><i data-lucide="menu"></i></button>
+        <div class="brand">QumirDB</div>
+      </div>
+      <div class="toolbar">
+        <button id="run-button" type="button" class="secondary action-button"><i data-lucide="play"></i><span>Run</span></button>
+        <button id="explain-button" type="button" class="primary action-button"><i data-lucide="route"></i><span>Explain</span></button>
+      </div>
+      <div class="topbar-right">
+        <span class="status-wrap">
+          <span id="status-spinner" class="status-spinner" hidden></span>
+          <span id="status" class="status">idle</span>
+        </span>
+        <button id="datasets-toggle" class="icon-button" type="button" title="Datasets" aria-label="Datasets"><i data-lucide="database"></i></button>
+      </div>
+    </header>
+
+    <aside id="queries-pane" class="drawer drawer-left" aria-label="Saved queries">
+      <div class="drawer-header">
+        <h2>Saved Queries</h2>
+        <button id="query-new" type="button" class="icon-button" title="New query" aria-label="New query"><i data-lucide="plus"></i></button>
+      </div>
+      <div id="queries-list" class="drawer-list"></div>
+    </aside>
+
+    <aside id="datasets-pane" class="drawer drawer-right" aria-label="Datasets">
+      <div class="drawer-header">
+        <h2>Datasets</h2>
+        <button id="dataset-add-files" type="button" class="icon-button" title="Attach files" aria-label="Attach files"><i data-lucide="plus"></i></button>
+        <input id="dataset-files" type="file" multiple hidden>
+      </div>
+      <div id="datasets-list" class="drawer-list"></div>
+      <div class="schema-panel">
+        <div class="panel-title">Schema</div>
+        <div id="schema-tree" class="schema-tree"></div>
+      </div>
+    </aside>
+
+    <main class="workspace">
+      <section class="editor-pane">
+        <textarea id="sql-editor" spellcheck="false">select
+    s_name,
+    count(*) as numwait
+from
+    supplier,
+    lineitem l1,
+    orders,
+    nation
+where
+    s_suppkey = l1.l_suppkey
+    and o_orderkey = l1.l_orderkey
+    and o_orderstatus = 'F'
+    and l1.l_receiptdate > l1.l_commitdate
+    and exists (
+        select
+            *
+        from
+            lineitem l2
+        where
+            l2.l_orderkey = l1.l_orderkey
+            and l2.l_suppkey &lt;&gt; l1.l_suppkey
+    )
+    and not exists (
+        select
+            *
+        from
+            lineitem l3
+        where
+            l3.l_orderkey = l1.l_orderkey
+            and l3.l_suppkey &lt;&gt; l1.l_suppkey
+            and l3.l_receiptdate > l3.l_commitdate
+    )
+    and s_nationkey = n_nationkey
+    and n_name = 'IRAQ'
+group by
+    s_name
+order by
+    numwait desc,
+    s_name
+limit 100;
+</textarea>
+      </section>
+
+      <section class="bottom-pane">
+        <div class="bottom-tabs">
+          <button class="tab active" type="button" data-tab="graph">Graph</button>
+          <button class="tab" type="button" data-tab="logical">Logical</button>
+          <button class="tab" type="button" data-tab="result">Result</button>
+          <button class="tab" type="button" data-tab="details">Details</button>
+        </div>
+        <div class="bottom-body">
+          <div id="graph-tab" class="tab-panel active">
+            <div class="graph-pane">
+              <div class="graph-toolbar">
+                <button id="graph-logical" class="graph-mode active" type="button" data-mode="logical">Logical</button>
+                <button id="graph-physical" class="graph-mode" type="button" data-mode="physical">Physical</button>
+              </div>
+              <div class="graph-main">
+                <svg id="graph" class="graph" role="img" aria-label="Explain graph"></svg>
+                <aside class="graph-inspector" aria-label="Graph selection">
+                  <div class="inspector-header">
+                    <div id="inspector-title" class="inspector-title">Selection</div>
+                    <button id="inspector-clear" class="icon-button" type="button" title="Clear selection" aria-label="Clear selection"><i data-lucide="x"></i></button>
+                  </div>
+                  <select id="inspector-artifact-select" class="inspector-artifact-select" aria-label="Node artifact" hidden></select>
+                  <pre id="inspector-body" class="inspector-body">Select a node or connection.</pre>
+                </aside>
+              </div>
+            </div>
+          </div>
+          <div id="logical-tab" class="tab-panel">
+            <pre id="logical-plan" class="plan-text"></pre>
+          </div>
+          <div id="result-tab" class="tab-panel">
+            <div id="result-summary" class="result-summary">not run</div>
+            <table class="result-table">
+              <thead id="result-head"><tr><th>Status</th><th>Rows</th><th>Time</th></tr></thead>
+              <tbody id="result-body"><tr><td>not run</td><td>0</td><td>0 ms</td></tr></tbody>
+            </table>
+          </div>
+          <div id="details-tab" class="tab-panel">
+            <div id="details" class="details"></div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script defer src="https://unpkg.com/codemirror@5/lib/codemirror.js"></script>
+  <script defer src="https://unpkg.com/codemirror@5/mode/sql/sql.js"></script>
+  <script defer src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
