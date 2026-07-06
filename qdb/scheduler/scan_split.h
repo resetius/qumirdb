@@ -23,6 +23,12 @@ struct TScanSplit {
     bool SerialRead = false;
 };
 
+class IScanMetadataSource {
+public:
+    virtual ~IScanMetadataSource() = default;
+    virtual std::vector<TScanRowGroup> ScanRowGroups() const = 0;
+};
+
 std::vector<TScanSplit> BuildScanSplits(
     const std::vector<TScanRowGroup>& rowGroups,
     const TScanSplitSettings& settings);
