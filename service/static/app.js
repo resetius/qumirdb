@@ -1,5 +1,6 @@
 import { getJson, postJson } from './api.js';
 import { renderGraph } from './graph.js';
+import { tpchQueries } from './tpch_queries.js';
 
 const $ = selector => document.querySelector(selector);
 
@@ -134,22 +135,16 @@ function initGraphControls() {
 }
 
 function initQueries() {
-  let queries = loadQueries();
-  if (!queries.length) {
-    queries = [
-      {
-        id: crypto.randomUUID(),
-        name: 'Q21 supplier wait',
-        sql: getSql()
-      }
-    ];
-    activeQueryId = queries[0].id;
-    saveQueries(queries);
-    localStorage.setItem(ACTIVE_QUERY_KEY, activeQueryId);
-  } else if (!queries.some(query => query.id === activeQueryId)) {
-    activeQueryId = queries[0].id;
-    localStorage.setItem(ACTIVE_QUERY_KEY, activeQueryId);
+  let queries = ensureTpchQueries(loadQueries());
+  if (!activeQueryId) {
+    activeQueryId = 'tpch-q21';
   }
+  if (!queries.some(query => query.id === activeQueryId)) {
+    activeQueryId = queries[0]?.id || '';
+  }
+  saveQueries(queries);
+  localStorage.setItem(ACTIVE_QUERY_KEY, activeQueryId);
+
   const activeQuery = queries.find(query => query.id === activeQueryId);
   if (activeQuery) {
     setSql(activeQuery.sql || '');
@@ -170,6 +165,18 @@ function initQueries() {
     renderQueries();
   });
   renderQueries();
+}
+
+function ensureTpchQueries(queries) {
+  const existing = new Set(queries.map(query => query.id));
+  const missing = tpchQueries.filter(query => !existing.has(query.id));
+  if (!missing.length) {
+    return queries;
+  }
+  return [
+    ...missing,
+    ...queries
+  ];
 }
 
 function loadQueries() {
