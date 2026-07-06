@@ -180,6 +180,26 @@ void DetachSelection(TRowSet& rowSet) {
     rowSet.Private = data;
 }
 
+class TStageDiagnosticsScope {
+public:
+    TStageDiagnosticsScope(std::ostream* out, const std::string& stage)
+        : Out_(out)
+    {
+        if (Out_) {
+            *Out_ << "\n========== RUNTIME STAGE: " << stage << " ==========\n";
+        }
+    }
+
+    ~TStageDiagnosticsScope() {
+        if (Out_) {
+            *Out_ << "========== END RUNTIME STAGE ==========\n";
+        }
+    }
+
+private:
+    std::ostream* Out_;
+};
+
 TSchedulerUnaryStage BuildSchedulerFilterStage(
     TFilterOperator& filter,
     const NQumir::NAst::TTypePtr& inputType,
@@ -797,6 +817,7 @@ private:
             lanes, lanes, "unary-input");
         auto childOut = Lower(child, childConnRef);
 
+        TStageDiagnosticsScope diagnosticsScope(Diagnostics_, stageGroup);
         auto stage = buildStage(childOut.OutputType);
         TLoweredOutput result;
         result.OutputType = std::move(stage.OutputType);
@@ -834,6 +855,7 @@ private:
         }
         auto childOut = Lower(child, *inputConn);
 
+        TStageDiagnosticsScope diagnosticsScope(Diagnostics_, stageGroup);
         TBlockingTail tail = buildTail(childOut.OutputType);
         auto task = std::make_unique<NScheduler::TBlockingTask>(
             std::move(tail.Code),
@@ -932,7 +954,12 @@ private:
             lanes, lanes, "aggregate-cascade-input");
         auto childOut = Lower(aggregate.Input(), childRef);
 
-        auto partialTail = BuildAggregateTail(childOut.OutputType, aggregate);
+        const auto partialGroup = StageGroup("aggregate-partial", &aggregate);
+        TBlockingTail partialTail =
+            [&]() {
+                TStageDiagnosticsScope diagnosticsScope(Diagnostics_, partialGroup);
+                return BuildAggregateTail(childOut.OutputType, aggregate);
+            }();
         auto partialType = partialTail.OutputType;
 
         auto& gatherRef = AddConn<NScheduler::TGatherConnection>(
@@ -949,14 +976,19 @@ private:
             auto& node = Graph_.AddOwnedNode(std::move(task));
             MarkNode(node,
                 "aggregate",
-                StageGroup("aggregate-partial", &aggregate),
+                partialGroup,
                 "aggregate partial");
             Graph_.AddEdge(*childOut.Producers[m], node, childRef, m, m);
             partialNodes.push_back(&node);
         }
 
         auto combineAgg = BuildCombineAggregate(aggregate);
-        auto combineTail = BuildAggregateTail(partialType, *combineAgg);
+        const auto combineGroup = StageGroup("aggregate-combine", &aggregate);
+        TBlockingTail combineTail =
+            [&]() {
+                TStageDiagnosticsScope diagnosticsScope(Diagnostics_, combineGroup);
+                return BuildAggregateTail(partialType, *combineAgg);
+            }();
         auto finalTask = std::make_unique<NScheduler::TBlockingTask>(
             std::move(combineTail.Code),
             combineTail.MakeState(),
@@ -965,7 +997,7 @@ private:
         auto& finalNode = Graph_.AddOwnedNode(std::move(finalTask));
         MarkNode(finalNode,
             "aggregate",
-            StageGroup("aggregate-combine", &aggregate),
+            combineGroup,
             "aggregate combine");
         for (size_t m = 0; m < lanes; ++m) {
             Graph_.AddEdge(*partialNodes[m], finalNode, gatherRef, m, 0);
@@ -1027,7 +1059,12 @@ private:
             throw std::runtime_error("aggregate input must have TStructType");
         }
         auto groupHash = MakeGroupKeyHash(*childStruct, aggregate.GroupKeys());
-        auto tail = BuildAggregateTail(childType, aggregate);
+        const auto aggregateGroup = StageGroup("aggregate", &aggregate);
+        TBlockingTail tail =
+            [&]() {
+                TStageDiagnosticsScope diagnosticsScope(Diagnostics_, aggregateGroup);
+                return BuildAggregateTail(childType, aggregate);
+            }();
 
         auto& shufRef = AddConn<NScheduler::THashShuffleConnection>(
             childLanes, parts, "aggregate-shuffle");
@@ -1064,7 +1101,7 @@ private:
             auto& node = Graph_.AddOwnedNode(std::move(task));
             MarkNode(node,
                 "aggregate",
-                StageGroup("aggregate", &aggregate),
+                aggregateGroup,
                 "aggregate");
             for (size_t s = 0; s < childLanes; ++s) {
                 Graph_.AddEdge(*shufNodes[s], node, shufRef, s, m);
@@ -1153,8 +1190,13 @@ private:
         if (!inputType) {
             throw std::runtime_error("sort input must have TStructType");
         }
-        auto runtime = BuildSortRuntimeProcess(
-            *inputType, sortKeys, kernelName, Diagnostics_);
+        auto localSortGroup = StageGroup(kernelName, input.get());
+        TSortRuntimeProcess runtime =
+            [&]() {
+                TStageDiagnosticsScope diagnosticsScope(Diagnostics_, localSortGroup);
+                return BuildSortRuntimeProcess(
+                    *inputType, sortKeys, kernelName, Diagnostics_);
+            }();
         auto keys = sortKeys;
         auto keyColumns = runtime.KeyColumns;
 
@@ -1181,7 +1223,7 @@ private:
             auto& node = Graph_.AddOwnedNode(std::move(task));
             MarkNode(node,
                 std::string(kernelName),
-                StageGroup(kernelName, input.get()),
+                localSortGroup,
                 std::string(kernelName));
             Graph_.AddEdge(*childOut.Producers[i], node, childConnRef, i, i);
             runConns.push_back(&runRef);
@@ -1409,8 +1451,12 @@ private:
         // Residual predicate is a plain filter over the glued schema.
         auto filterOp =
             std::make_shared<TFilterOperator>(join.Left(), join.Filter());
-        auto stage =
-            BuildSchedulerFilterStage(*filterOp, crossType, Diagnostics_);
+        const auto residualGroup = StageGroup("cross-residual-filter", &join);
+        TSchedulerUnaryStage stage =
+            [&]() {
+                TStageDiagnosticsScope diagnosticsScope(Diagnostics_, residualGroup);
+                return BuildSchedulerFilterStage(*filterOp, crossType, Diagnostics_);
+            }();
         TLoweredOutput result;
         result.OutputType = std::move(stage.OutputType);
         result.Producers.reserve(lanes);
@@ -1423,7 +1469,7 @@ private:
             auto& node = Graph_.AddOwnedNode(std::move(task));
             MarkNode(node,
                 "filter",
-                StageGroup("cross-residual-filter", &join),
+                residualGroup,
                 "filter");
             Graph_.AddEdge(*crossNodes[m], node, *residualConn, m, m);
             result.Producers.push_back(&node);
@@ -1458,8 +1504,12 @@ private:
         auto kernelSpec = NKernel::BuildJoinKernelSpec(
             *leftStruct, *rightStruct, join.Keys(), join.JoinType(), join.Filter());
         TKernelCompiler compiler(Diagnostics_);
+        const auto joinGroup = StageGroup("join", &join);
         auto joinKernels = std::make_shared<TJoinKernels>(
-            compiler.CompileJoin(kernelSpec));
+            [&]() {
+                TStageDiagnosticsScope diagnosticsScope(Diagnostics_, joinGroup);
+                return compiler.CompileJoin(kernelSpec);
+            }());
         auto joinCode = MakeBinaryJoinCode<TSchedulerInnerJoinState>();
 
         if (leftLanes == 1 && rightLanes == 1 && joinParts == 1) {
@@ -1476,7 +1526,7 @@ private:
             auto& node = Graph_.AddOwnedNode(std::move(task));
             MarkNode(node,
                 "join",
-                StageGroup("join", &join),
+                joinGroup,
                 "join");
             Graph_.AddEdge(*leftOut.Producers[0], node, leftPipeRef, 0, 0);
             Graph_.AddEdge(*rightOut.Producers[0], node, rightPipeRef, 0, 0);
@@ -1519,7 +1569,7 @@ private:
             auto& node = Graph_.AddOwnedNode(std::move(task));
             MarkNode(node,
                 "join",
-                StageGroup("join", &join),
+                joinGroup,
                 "join");
             for (size_t s = 0; s < leftLanes; ++s) {
                 Graph_.AddEdge(*leftShuf.Nodes[s], node, *leftShuf.Connection, s, j);
