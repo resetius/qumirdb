@@ -17,6 +17,9 @@ struct TTaskEdge;
 
 struct TTaskNode {
     ITaskNode* Task = nullptr;
+    std::string DebugKind;
+    std::string DebugGroup;
+    std::string DebugLabel;
     std::vector<TTaskEdge*> Inbound;
     std::vector<TTaskEdge*> Outbound;
     std::atomic<ETaskState> State = ETaskState::Idle;
