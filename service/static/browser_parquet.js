@@ -1,12 +1,24 @@
 const HYPARQUET_URL = 'https://cdn.jsdelivr.net/npm/hyparquet@latest/+esm';
+const HYPARQUET_COMPRESSORS_URL =
+  'https://cdn.jsdelivr.net/npm/hyparquet-compressors@latest/+esm';
 
 let hyparquetPromise = null;
+let compressorsPromise = null;
 
 async function loadHyparquet() {
   if (!hyparquetPromise) {
     hyparquetPromise = import(HYPARQUET_URL);
   }
   return hyparquetPromise;
+}
+
+async function loadCompressors() {
+  if (!compressorsPromise) {
+    compressorsPromise = import(HYPARQUET_COMPRESSORS_URL)
+      .then(module => module.compressors)
+      .catch(() => undefined);
+  }
+  return compressorsPromise;
 }
 
 function asyncBufferFromBlob(file) {
@@ -156,4 +168,26 @@ export async function readParquetTable(file) {
     columns: schemaFields(metadata),
     stats: rowGroupStats(metadata)
   };
+}
+
+// Reads the requested columns as raw JS value arrays keyed by column name.
+// Values keep hyparquet's native representation (BigInt for INT64, number for
+// INT32/DOUBLE, string for BYTE_ARRAY, Date for logical DATE); the runtime
+// normalizes them per the execution plan's column types.
+export async function readParquetColumns(file, columnNames) {
+  const parquet = await loadHyparquet();
+  const asyncBuffer = parquet.asyncBufferFromFile
+    ? await parquet.asyncBufferFromFile(file)
+    : asyncBufferFromBlob(file);
+  const compressors = await loadCompressors();
+  const rows = await parquet.parquetReadObjects({
+    file: asyncBuffer,
+    columns: columnNames,
+    compressors
+  });
+  const columns = {};
+  for (const name of columnNames) {
+    columns[name] = rows.map(row => row[name]);
+  }
+  return { rowCount: rows.length, columns };
 }

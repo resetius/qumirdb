@@ -6,10 +6,12 @@ import {
   createBrowserDataset,
   deleteBrowserDataset,
   listBrowserDatasets,
+  readOpfsFile,
   removeFileFromBrowserDataset,
   renameBrowserDataset
 } from './browser_storage.js';
-import { readParquetTable } from './browser_parquet.js';
+import { readParquetColumns, readParquetTable } from './browser_parquet.js';
+import { executeBrowserPipeline } from './browser_runtime.js';
 
 const $ = selector => document.querySelector(selector);
 
@@ -512,14 +514,7 @@ function initActions() {
       return;
     }
     if (dataset.source?.kind === 'browser') {
-      showDetails({
-        ok: false,
-        error: {
-          stage: 'browser-run',
-          message: 'Browser execution is not implemented yet. The dataset is stored in OPFS and can be explained from its browser-read schema.'
-        }
-      });
-      selectTab('details');
+      await runBrowser(sql, dataset);
       return;
     }
     const key = explainKey(sql, dataset);
@@ -600,6 +595,115 @@ async function explainCurrent(sql, dataset, selectGraph) {
       selectTab('graph');
     }
     return true;
+}
+
+async function runBrowser(sql, dataset) {
+  setStatus('explaining');
+  const request = {
+    sql,
+    dataset,
+    options: {
+      scheduler: 'single',
+      scanTasks: 1,
+      shufflePartitions: 1,
+      format: 'runtime-bundle',
+      embedWasm: true
+    }
+  };
+  const bundle = await postJson('/api/explain', request);
+  lastBundle = bundle;
+  if (bundle.ok === false) {
+    setStatus('run failed');
+    showDetails(bundle);
+    selectTab('details');
+    return;
+  }
+  lastExplainKey = explainKey(sql, dataset);
+  renderCurrentGraph();
+  renderPlans(bundle);
+
+  const exec = bundle.exec;
+  if (!exec || exec.supported !== true) {
+    setStatus('run failed');
+    showDetails({
+      ok: false,
+      error: {
+        stage: 'browser-exec',
+        message: exec?.reason ||
+          'This query is not supported for browser execution yet.'
+      }
+    });
+    selectTab('details');
+    return;
+  }
+
+  const resolvedExec = {
+    ...exec,
+    stages: exec.stages.map(stage =>
+      stage.wasm
+        ? { ...stage, wasm: bundle.artifacts?.[stage.wasm]?.data || '' }
+        : stage)
+  };
+
+  setStatus('running');
+  const started = performance.now();
+  try {
+    const result = await executeBrowserPipeline(
+      resolvedExec,
+      stage => readBrowserSource(dataset, stage));
+    const elapsedMs = performance.now() - started;
+    renderBrowserResult(result, elapsedMs);
+    showDetails({ mode: 'browser', rows: result.rows.length, elapsedMs });
+    setStatus('finished');
+    selectTab('result');
+  } catch (error) {
+    setStatus('run failed');
+    showDetails({
+      ok: false,
+      error: { stage: 'browser-exec', message: error.message || String(error) }
+    });
+    selectTab('details');
+  }
+}
+
+async function readBrowserSource(dataset, stage) {
+  const table = (dataset.tables || []).find(item => item.name === stage.table);
+  if (!table) {
+    throw new Error(`table not found in dataset: ${stage.table}`);
+  }
+  const fileName = table.sourceFile || `${table.name}.parquet`;
+  const file = await readOpfsFile(dataset.id, fileName);
+  const names = stage.columns.map(column => column.name);
+  const { rowCount, columns } = await readParquetColumns(file, names);
+  return {
+    rowCount,
+    columns: stage.columns.map(column => ({
+      name: column.name,
+      type: column.type,
+      values: (columns[column.name] || []).map(value =>
+        normalizeSourceValue(column.type, value))
+    }))
+  };
+}
+
+function normalizeSourceValue(type, value) {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  if (value instanceof Date) {
+    // Parquet logical DATE -> days since epoch (qdb models dates as i32).
+    return Math.floor(value.getTime() / 86400000);
+  }
+  return value;
+}
+
+function renderBrowserResult(result, elapsedMs) {
+  resultRows = [result.columns, ...result.rows];
+  resultSort = null;
+  renderResultSummary(
+    { rows: result.rows.length, elapsedMs, processingMs: elapsedMs },
+    resultRows);
+  renderResultTable(resultRows, { elapsedMs });
 }
 
 function explainKey(sql, dataset) {
@@ -798,10 +902,13 @@ function collectArtifacts(node) {
           kind: item.kind || name,
           label: item.label || '',
           stage: item.stage || '',
-          text: item.text || ''
+          text: item.text || '',
+          data: item.data || '',
+          encoding: item.encoding || '',
+          byteLength: item.byteLength || 0
         };
       })
-      .filter(item => item.text)
+      .filter(item => item.text || item.data)
       .filter(item => !item.stage || !node.taskGroup || item.stage === node.taskGroup);
   }
   return result;
@@ -844,7 +951,8 @@ function flattenArtifacts(artifacts) {
   for (const [name, title] of [
     ['ast', 'AST'],
     ['ir', 'IR'],
-    ['llvm', 'LLVM IR']
+    ['llvm', 'LLVM IR'],
+    ['wasm', 'WASM']
   ]) {
     const artifactItems = artifacts[name] || [];
     artifactItems.forEach((item, index) => {
@@ -852,7 +960,12 @@ function flattenArtifacts(artifacts) {
       const label = item.label ? ` · ${item.label}` : '';
       items.push({
         title: `${title}${suffix}${label}`,
-        text: item.text
+        text: item.text || [
+          `encoding: ${item.encoding || 'base64'}`,
+          `byteLength: ${item.byteLength || 0}`,
+          '',
+          item.data
+        ].join('\n')
       });
     });
   }

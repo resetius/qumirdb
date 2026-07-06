@@ -14,9 +14,30 @@
 #include <memory>
 #include <ostream>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace NQdb {
+
+struct TGeneratedKernel {
+    std::string Name;
+    std::string Stage;
+    std::vector<std::string> Entrypoints;
+    NQumir::NAst::TExprPtr Ast;
+};
+
+class IKernelExportBackend {
+public:
+    virtual ~IKernelExportBackend() = default;
+    virtual bool SkipJit() const = 0;
+    virtual void CompileKernel(TGeneratedKernel kernel) = 0;
+};
+
+struct TKernelCompilerOptions {
+    std::ostream* Diagnostics = nullptr;
+    IKernelExportBackend* ExportBackend = nullptr;
+    std::string Stage;
+};
 
 // agg_dispatch(ref HashTable ht, ref TRowSet batch, i64 arg, i64 op) -> i64
 //   op == 0: init(ht, capacity = arg)
@@ -132,7 +153,13 @@ struct TJoinHashKernels {
 class TKernelCompiler {
 public:
     explicit TKernelCompiler(std::ostream* diagnostics = nullptr)
-        : Diagnostics_(diagnostics)
+        : TKernelCompiler(TKernelCompilerOptions{.Diagnostics = diagnostics})
+    {}
+
+    explicit TKernelCompiler(TKernelCompilerOptions options)
+        : Diagnostics_(options.Diagnostics)
+        , ExportBackend_(options.ExportBackend)
+        , Stage_(std::move(options.Stage))
     {
         Opts_.CoreInput = true;
         Opts_.ResolveCoreInput = true;
@@ -229,6 +256,8 @@ private:
         size_t leftFieldCount = 0);
 
     std::ostream* Diagnostics_ = nullptr;
+    IKernelExportBackend* ExportBackend_ = nullptr;
+    std::string Stage_;
     NQumir::TLLVMRunnerOptions Opts_;
 };
 

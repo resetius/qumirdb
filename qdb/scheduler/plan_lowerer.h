@@ -12,6 +12,9 @@
 #include <vector>
 
 namespace NQdb {
+
+class IKernelExportBackend;
+
 namespace NScheduler {
 
 // A plan lowered into a scheduler task graph, without a terminal sink attached.
@@ -30,6 +33,12 @@ TLoweredPlan LowerPlanToGraph(
     const TOperatorPtr& root,
     TSettings settings,
     std::ostream* diagnostics);
+
+TLoweredPlan LowerPlanToGraph(
+    const TOperatorPtr& root,
+    TSettings settings,
+    std::ostream* diagnostics,
+    IKernelExportBackend* exportBackend);
 
 // Attach a terminal sink that writes every output rowset to `sink`, then run the
 // graph on the configured scheduler. Returns false and sets `error` on failure.

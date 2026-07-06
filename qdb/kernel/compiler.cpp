@@ -228,6 +228,17 @@ TKernelCompiler::TFilterDispatch TKernelCompiler::CompileFilter(
     }
     PrintKernelAst(Diagnostics_, "filter", *kernelAst);
 
+    if (ExportBackend_ && ExportBackend_->SkipJit()) {
+        ExportBackend_->CompileKernel(TGeneratedKernel{
+            .Name = "filter",
+            .Stage = Stage_,
+            .Entrypoints = {"<kernel>"},
+            .Ast = std::move(*kernelAst),
+        });
+        FinishKernelDiagnostics(Diagnostics_);
+        return [](TRowSet&) {};
+    }
+
     std::string err;
     void* fnPtr = CompileKernelAst(
         *runner,
@@ -298,6 +309,17 @@ TKernelCompiler::TProjectDispatch TKernelCompiler::CompileProject(
         NKernel::PrintKernelSpec(*Diagnostics_, spec);
     }
     PrintKernelAst(Diagnostics_, "project", kernelAst);
+
+    if (ExportBackend_ && ExportBackend_->SkipJit()) {
+        ExportBackend_->CompileKernel(TGeneratedKernel{
+            .Name = "project",
+            .Stage = Stage_,
+            .Entrypoints = {"<project>"},
+            .Ast = std::move(kernelAst),
+        });
+        FinishKernelDiagnostics(Diagnostics_);
+        return [](TRowSet*, void**) {};
+    }
 
     std::string err;
     void* fnPtr = CompileKernelAst(*runner, std::move(kernelAst), "<project>", &err);

@@ -14,15 +14,30 @@
 #include <qdb/plan/passes/qualify_columns.h>
 #include <qdb/plan/passes/top_sort.h>
 #include <qdb/plan/passes/typing.h>
+#include <qdb/plan/passes/unbound_vars.h>
+#include <qdb/plan/types/nullable.h>
+#include <qdb/kernel/compiler.h>
+#include <qdb/kernel/project_type.h>
 #include <qdb/scheduler/plan_lowerer.h>
 #include <qdb/scheduler/scan_split.h>
 #include <qdb/sexp/printer.h>
 #include <qdb/sql/parser.h>
 
+#include <qumir/codegen/llvm/llvm_codegen.h>
 #include <qumir/codegen/llvm/llvm_initializer.h>
+#include <qumir/frontend/compose.h>
+#include <qumir/frontend/source_module_loader.h>
+#include <qumir/ir/builder.h>
+#include <qumir/ir/lowering/lower_ast.h>
+#include <qumir/ir/passes/transforms/pipeline.h>
+#include <qumir/parser/core/parser.h>
 #include <qumir/parser/core/printer.h>
+#include <qumir/parser/pragma.h>
 #include <qumir/parser/type.h>
+#include <qumir/semantics/name_resolution/name_resolver.h>
+#include <qumir/semantics/transform/transform.h>
 
+#include <llvm/Support/Base64.h>
 #include <llvm/Support/JSON.h>
 #include <llvm/Support/raw_ostream.h>
 
@@ -32,15 +47,19 @@
 #include <cstdio>
 #include <expected>
 #include <fcntl.h>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <iterator>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include <sys/wait.h>
 #include <unistd.h>
 
 namespace {
@@ -139,6 +158,7 @@ struct TExportRequest {
     std::string Sql;
     TCatalog Catalog;
     NQdb::NScheduler::TSettings Scheduler;
+    bool EmbedWasm = false;
 };
 
 struct TKernelArtifacts {
@@ -147,6 +167,7 @@ struct TKernelArtifacts {
     std::string Ast;
     std::string Ir;
     std::string Llvm;
+    std::string Wasm;
 };
 
 class TArtifactStore {
@@ -162,6 +183,29 @@ public:
             {"kind", std::move(kind)},
             {"encoding", "utf-8"},
             {"text", std::move(text)},
+        };
+        if (!label.empty()) {
+            item["label"] = std::move(label);
+        }
+        if (!stage.empty()) {
+            item["stage"] = std::move(stage);
+        }
+        Items_[id] = std::move(item);
+        return id;
+    }
+
+    std::string AddBinary(
+        std::string kind,
+        std::string bytes,
+        std::string label = {},
+        std::string stage = {})
+    {
+        auto id = "a" + std::to_string(NextId_++);
+        llvm::json::Object item{
+            {"kind", std::move(kind)},
+            {"encoding", "base64"},
+            {"data", llvm::encodeBase64(bytes)},
+            {"byteLength", static_cast<int64_t>(bytes.size())},
         };
         if (!label.empty()) {
             item["label"] = std::move(label);
@@ -246,6 +290,172 @@ int PrintError(std::string stage, std::string message) {
     std::cout << ToJsonString(ErrorObject(std::move(stage), std::move(message)))
               << "\n";
     return 0;
+}
+
+std::filesystem::path TempPath(std::string_view suffix) {
+    static uint64_t nextId = 0;
+    auto name = "qdb-plan-export-" + std::to_string(::getpid()) + "-" +
+        std::to_string(nextId++) + std::string(suffix);
+    return std::filesystem::temp_directory_path() / name;
+}
+
+std::string ReadBinaryFile(const std::filesystem::path& path) {
+    std::ifstream in(path, std::ios::binary);
+    return std::string(
+        std::istreambuf_iterator<char>(in),
+        std::istreambuf_iterator<char>());
+}
+
+std::expected<std::monostate, std::string> RunWasmLd(
+    const std::filesystem::path& objPath,
+    const std::filesystem::path& wasmPath)
+{
+    std::vector<std::string> args{
+        "wasm-ld",
+        "--no-entry",
+        "--export-all",
+        "--allow-undefined",
+        "-o",
+        wasmPath.string(),
+        objPath.string(),
+    };
+    std::vector<char*> argv;
+    argv.reserve(args.size() + 1);
+    for (auto& arg : args) {
+        argv.push_back(arg.data());
+    }
+    argv.push_back(nullptr);
+
+    const pid_t pid = fork();
+    if (pid < 0) {
+        return std::unexpected("fork failed");
+    }
+    if (pid == 0) {
+        int nullFd = open("/dev/null", O_WRONLY);
+        if (nullFd >= 0) {
+            dup2(nullFd, STDOUT_FILENO);
+            dup2(nullFd, STDERR_FILENO);
+            close(nullFd);
+        }
+        execvp(argv[0], argv.data());
+        _exit(127);
+    }
+
+    int status = 0;
+    if (waitpid(pid, &status, 0) < 0) {
+        return std::unexpected("waitpid failed");
+    }
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        return std::unexpected(
+            "wasm-ld failed with code " +
+            std::to_string(WIFEXITED(status) ? WEXITSTATUS(status) : -1));
+    }
+    return std::monostate{};
+}
+
+void EnsureQumirDbUse(const NQumir::NAst::TExprPtr& ast) {
+    using namespace NQumir::NAst;
+    auto block = TMaybeNode<TBlockExpr>(ast);
+    if (!block) {
+        return;
+    }
+    for (const auto& stmt : block.Cast()->Stmts) {
+        auto use = TMaybeNode<TUseExpr>(stmt);
+        if (use && use.Cast()->ModuleName == "qumirdb") {
+            return;
+        }
+    }
+    block.Cast()->Stmts.insert(
+        block.Cast()->Stmts.begin(),
+        std::make_shared<TUseExpr>(NQumir::TLocation{}, "qumirdb"));
+}
+
+// Compiles an in-memory kernel AST (the same TExprPtr the native JIT path uses)
+// directly to WASM. We intentionally do NOT round-trip through printed text +
+// re-parse: the AST printer emits self-referential type aliases such as
+// `(type StringView <named StringView>)`, which, once re-parsed and composed
+// with qumirdb.oz, collide as "declared twice". Consuming the AST directly (like
+// runner.CompileKernelAst) avoids that and is cheaper. See PLAN_BROWSER_EXECUTION.md.
+std::expected<std::string, std::string> CompileKernelAstToWasm(
+    NQumir::NAst::TExprPtr ast)
+{
+    EnsureQumirDbUse(ast);
+
+    NQumir::NFrontend::TSourceModuleLoader loader;
+    if (auto reg = loader.RegisterSourceModule(
+            std::string(QDB_SOURCE_DIR) + "/modules/qumirdb.oz"); !reg) {
+        return std::unexpected(reg.error().ToString());
+    }
+
+    std::vector<NQumir::NAst::TPragma> pragmas;
+    pragmas.push_back(NQumir::NAst::TPragma{"language", {"overloads"}, {}});
+    auto composed = NQumir::NFrontend::LoadAndCompose(loader, ast, pragmas);
+    if (!composed) {
+        return std::unexpected(composed.error().ToString());
+    }
+    ast = std::move(composed->Ast);
+
+    NQumir::NSemantics::TNameResolver resolver;
+    resolver.ApplyPragmas(composed->Pragmas);
+    auto scope = resolver.GetOrCreateRootScope();
+    scope->RootLevel = false;
+    if (auto err = resolver.Resolve(ast)) {
+        return std::unexpected(err->ToString());
+    }
+
+    auto transformResult = NQumir::NTransform::Pipeline(ast, resolver, {});
+    if (!transformResult) {
+        return std::unexpected(transformResult.error().ToString());
+    }
+
+    NQumir::NIR::TModule module;
+    NQumir::NIR::TBuilder builder(module);
+    NQumir::NIR::TAstLowerer lowerer(module, builder, resolver);
+    auto lowerRes = lowerer.LowerTop(ast);
+    if (!lowerRes) {
+        return std::unexpected(lowerRes.error().ToString());
+    }
+
+    constexpr int optLevel = 3;
+    NQumir::NIR::NPasses::Pipeline(module);
+
+    NQumir::NCodeGen::TLLVMCodeGen codegen({
+        .NativeCode = false,
+        .TargetTriple = "wasm32-unknown-unknown",
+    });
+    std::unique_ptr<NQumir::NCodeGen::ILLVMModuleArtifacts> artifacts;
+    try {
+        artifacts = codegen.Emit(module, optLevel);
+    } catch (const std::exception& e) {
+        return std::unexpected(std::string("llvm wasm codegen: ") + e.what());
+    }
+
+    const auto objPath = TempPath(".o");
+    const auto wasmPath = TempPath(".wasm");
+    {
+        std::ofstream obj(objPath, std::ios::binary);
+        if (!obj) {
+            return std::unexpected("cannot create temporary wasm object");
+        }
+        artifacts->Generate(obj, /*generateAsm=*/false, /*generateObj=*/true);
+    }
+
+    auto cleanup = [&]() {
+        std::error_code ec;
+        std::filesystem::remove(objPath, ec);
+        std::filesystem::remove(wasmPath, ec);
+    };
+    if (auto linked = RunWasmLd(objPath, wasmPath); !linked) {
+        cleanup();
+        return std::unexpected(linked.error());
+    }
+
+    auto wasm = ReadBinaryFile(wasmPath);
+    cleanup();
+    if (wasm.empty()) {
+        return std::unexpected("empty wasm output");
+    }
+    return wasm;
 }
 
 NQumir::NAst::TTypePtr ParseType(std::string_view typeName) {
@@ -428,6 +638,15 @@ NQdb::NScheduler::TSettings ParseSchedulerSettings(const llvm::json::Object& roo
     return settings;
 }
 
+bool ParseEmbedWasm(const llvm::json::Object& root) {
+    const auto* optionsValue = root.get("options");
+    const auto* options = optionsValue ? optionsValue->getAsObject() : nullptr;
+    if (!options) {
+        return false;
+    }
+    return options->getBoolean("embedWasm").value_or(false);
+}
+
 std::expected<TExportRequest, std::string> ParseRequest(std::string_view text) {
     auto parsed = llvm::json::parse(text);
     if (!parsed) {
@@ -449,6 +668,7 @@ std::expected<TExportRequest, std::string> ParseRequest(std::string_view text) {
             .Sql = std::string(*sql),
             .Catalog = ParseCatalog(*root),
             .Scheduler = ParseSchedulerSettings(*root),
+            .EmbedWasm = ParseEmbedWasm(*root),
         };
     } catch (const std::exception& e) {
         return std::unexpected(std::string(e.what()));
@@ -1009,6 +1229,7 @@ llvm::json::Object GraphJson(
             AddArrayArtifactRef(artifactRefs, "ast", item.Ast);
             AddArrayArtifactRef(artifactRefs, "ir", item.Ir);
             AddArrayArtifactRef(artifactRefs, "llvm", item.Llvm);
+            AddArrayArtifactRef(artifactRefs, "wasm", item.Wasm);
         }
 
         llvm::json::Object node{
@@ -1155,6 +1376,400 @@ llvm::json::Object LogicalGraphJson(
     };
 }
 
+std::string AstText(const NQumir::NAst::TExprPtr& ast) {
+    std::ostringstream out;
+    NQumir::NAst::NCore::PrintAst(out, ast);
+    return out.str();
+}
+
+class TWasmKernelExportBackend final : public NQdb::IKernelExportBackend {
+public:
+    TWasmKernelExportBackend(
+        TArtifactStore& artifacts,
+        std::vector<TKernelArtifacts>& kernels,
+        llvm::json::Array& diagnostics,
+        bool embedWasm)
+        : Artifacts_(artifacts)
+        , Kernels_(kernels)
+        , Diagnostics_(diagnostics)
+        , EmbedWasm_(embedWasm)
+    {}
+
+    bool SkipJit() const override {
+        return true;
+    }
+
+    void CompileKernel(NQdb::TGeneratedKernel kernel) override {
+        auto astText = AstText(kernel.Ast);
+        TKernelArtifacts item{
+            .Stage = std::move(kernel.Stage),
+            .Name = std::move(kernel.Name),
+        };
+        item.Ast = Artifacts_.Add("ast", astText, item.Name, item.Stage);
+        if (EmbedWasm_) {
+            auto wasm = CompileKernelAstToWasm(std::move(kernel.Ast));
+            if (wasm) {
+                item.Wasm = Artifacts_.AddBinary(
+                    "wasm",
+                    std::move(*wasm),
+                    item.Name,
+                    item.Stage);
+            } else {
+                Diagnostics_.push_back(llvm::json::Object{
+                    {"stage", item.Stage},
+                    {"message", wasm.error()},
+                });
+            }
+        }
+        Kernels_.push_back(std::move(item));
+    }
+
+private:
+    TArtifactStore& Artifacts_;
+    std::vector<TKernelArtifacts>& Kernels_;
+    llvm::json::Array& Diagnostics_;
+    bool EmbedWasm_ = false;
+};
+
+// Captures a single filter/project kernel compiled to WASM for the exec plan.
+// SkipJit keeps CompileFilter/CompileProject on the export path (no native JIT).
+class TExecKernelBackend final : public NQdb::IKernelExportBackend {
+public:
+    TExecKernelBackend(
+        TArtifactStore& artifacts,
+        llvm::json::Array& diagnostics,
+        bool embedWasm)
+        : Artifacts_(artifacts)
+        , Diagnostics_(diagnostics)
+        , EmbedWasm_(embedWasm)
+    {}
+
+    bool SkipJit() const override {
+        return true;
+    }
+
+    void CompileKernel(NQdb::TGeneratedKernel kernel) override {
+        Compiled_ = true;
+        if (!EmbedWasm_) {
+            return;
+        }
+        auto wasm = CompileKernelAstToWasm(std::move(kernel.Ast));
+        if (wasm) {
+            WasmId_ = Artifacts_.AddBinary(
+                "wasm", std::move(*wasm), kernel.Name, kernel.Stage);
+        } else {
+            Failed_ = true;
+            Diagnostics_.push_back(llvm::json::Object{
+                {"stage", "exec:" + kernel.Name},
+                {"message", wasm.error()},
+            });
+        }
+    }
+
+    const std::string& WasmId() const { return WasmId_; }
+    bool Compiled() const { return Compiled_; }
+    bool Failed() const { return Failed_; }
+
+private:
+    TArtifactStore& Artifacts_;
+    llvm::json::Array& Diagnostics_;
+    bool EmbedWasm_ = false;
+    std::string WasmId_;
+    bool Compiled_ = false;
+    bool Failed_ = false;
+};
+
+std::string BareColumnName(std::string_view qualified) {
+    auto dot = qualified.rfind('.');
+    return std::string(
+        dot == std::string_view::npos ? qualified : qualified.substr(dot + 1));
+}
+
+llvm::json::Object CoreTypeJson(const NQumir::NAst::TTypePtr& type) {
+    using namespace NQumir::NAst;
+    const bool nullable = NQdb::IsNullableType(type);
+    auto inner = UnwrapNamedType(NQdb::UnwrapNullableType(type));
+    std::string name;
+    if (auto integer = TMaybeType<TIntegerType>(inner)) {
+        name = integer.Cast()->ToString();
+    } else if (TMaybeType<TFloatType>(inner)) {
+        name = "f64";
+    } else if (TMaybeType<TBoolType>(inner)) {
+        name = "bool";
+    } else if (TMaybeType<TStringType>(inner)) {
+        name = "string";
+    } else {
+        name = inner ? inner->ToString() : "unknown";
+    }
+    return llvm::json::Object{
+        {"type", std::move(name)},
+        {"nullable", nullable},
+    };
+}
+
+bool IsStringCoreType(const NQumir::NAst::TTypePtr& type) {
+    using namespace NQumir::NAst;
+    return static_cast<bool>(TMaybeType<TStringType>(
+        UnwrapNamedType(NQdb::UnwrapNullableType(type))));
+}
+
+// True if `expr` reads a string-typed column of `input`. Filter/project kernels
+// that read a string column currently miscompile on the wasm -O3 backend (the
+// StringView build is treated as UB and the whole kernel body is deleted), so
+// such pipelines are reported unsupported rather than silently returning wrong
+// rows. See PLAN_BROWSER_EXECUTION.md and the qumir string-codegen issue.
+bool ReferencesStringColumn(
+    const NQumir::NAst::TExprPtr& expr,
+    const NQumir::NAst::TStructType& input)
+{
+    auto refs = NQdb::FindUnboundVars(expr);
+    for (const auto& [name, type] : input.Fields) {
+        if (refs.contains(name) && IsStringCoreType(type)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+size_t ExecProjectWidth(const NQumir::NAst::TTypePtr& outType) {
+    using namespace NQumir::NAst;
+    auto inner = UnwrapNamedType(NQdb::UnwrapNullableType(outType));
+    if (auto integer = TMaybeType<TIntegerType>(inner)) {
+        return static_cast<size_t>(integer.Cast()->BitWidth() / 8);
+    }
+    if (TMaybeType<TFloatType>(inner)) {
+        return 8;
+    }
+    if (TMaybeType<TBoolType>(inner)) {
+        return 1;
+    }
+    if (TMaybeType<TStringType>(inner)) {
+        return 16; // sizeof(StringView)
+    }
+    return 0;
+}
+
+// Struct layout constants for the wasm32 target (verified against compiled
+// kernels): qumir models pointers as 8 bytes on every target, so these offsets
+// also match the native 64-bit layout. See PLAN_BROWSER_EXECUTION.md and
+// docs/issues/qumir_pointer_width_and_pointer_cast.md.
+llvm::json::Object ExecLayoutJson() {
+    return llvm::json::Object{
+        {"pointerSize", 8},
+        {"column", llvm::json::Object{
+            {"size", 48},
+            {"data", 0},
+            {"mask", 16},
+            {"offsets", 32},
+            {"offsetWidth", 40},
+        }},
+        {"rowset", llvm::json::Object{
+            {"size", 56},
+            {"columns", 0},
+            {"columnCount", 8},
+            {"rowCount", 16},
+            {"selection", 24},
+        }},
+        {"stringView", llvm::json::Object{
+            {"size", 16},
+            {"data", 0},
+            {"length", 8},
+        }},
+    };
+}
+
+llvm::json::Array ProjectOutputJson(
+    NQdb::TProjectOperator& project,
+    const NQumir::NAst::TStructType& inputStruct,
+    const NQumir::NAst::TTypePtr& outputType)
+{
+    using namespace NQumir::NAst;
+    auto* outStruct = static_cast<TStructType*>(outputType.get());
+    llvm::json::Array out;
+    size_t computedIndex = 0;
+    const auto& projections = project.Projections();
+    for (size_t i = 0; i < projections.size(); ++i) {
+        const auto& projection = projections[i];
+        const auto& outType = outStruct->Fields[i].second;
+        auto entry = CoreTypeJson(outType);
+        entry["name"] = projection.Name;
+        if (auto identNode = TMaybeNode<TIdentExpr>(projection.Expression)) {
+            const std::string& refName = identNode.Cast()->Name;
+            int32_t inputIndex = -1;
+            for (size_t f = 0; f < inputStruct.Fields.size(); ++f) {
+                if (inputStruct.Fields[f].first == refName) {
+                    inputIndex = static_cast<int32_t>(f);
+                    break;
+                }
+            }
+            entry["source"] = "passthrough";
+            entry["inputIndex"] = inputIndex;
+        } else {
+            const bool isString = static_cast<bool>(TMaybeType<TStringType>(
+                UnwrapNamedType(NQdb::UnwrapNullableType(outType))));
+            entry["source"] = "computed";
+            entry["computedIndex"] = static_cast<int64_t>(computedIndex++);
+            entry["width"] = static_cast<int64_t>(ExecProjectWidth(outType));
+            entry["isString"] = isString;
+        }
+        out.push_back(std::move(entry));
+    }
+    return out;
+}
+
+llvm::json::Array SourceColumnsJson(const NQumir::NAst::TTypePtr& sourceType) {
+    auto* st = static_cast<NQumir::NAst::TStructType*>(sourceType.get());
+    llvm::json::Array out;
+    for (const auto& [qname, type] : st->Fields) {
+        auto entry = CoreTypeJson(type);
+        entry["name"] = BareColumnName(qname);
+        out.push_back(std::move(entry));
+    }
+    return out;
+}
+
+// Collect a root-to-source linear chain of {source, filter, project, limit}.
+// Returns source-first order, or nullopt if the plan is not a supported chain.
+std::optional<std::vector<NQdb::TOperatorPtr>> LinearExecChain(
+    const NQdb::TOperatorPtr& root)
+{
+    using namespace NQdb;
+    std::vector<TOperatorPtr> chain;
+    TOperatorPtr cur = root;
+    while (cur) {
+        if (TMaybeOp<TSourceOperator>(cur)) {
+            chain.push_back(cur);
+            break;
+        }
+        if (TMaybeOp<TFilterOperator>(cur) ||
+            TMaybeOp<TProjectOperator>(cur) ||
+            TMaybeOp<TLimitOperator>(cur))
+        {
+            chain.push_back(cur);
+            auto children = ChildOps(cur);
+            if (children.size() != 1) {
+                return std::nullopt;
+            }
+            cur = children[0];
+            continue;
+        }
+        return std::nullopt;
+    }
+    std::reverse(chain.begin(), chain.end());
+    return chain;
+}
+
+llvm::json::Object UnsupportedExec(std::string reason) {
+    return llvm::json::Object{
+        {"supported", false},
+        {"reason", std::move(reason)},
+    };
+}
+
+llvm::json::Object BuildExecPlan(
+    const NQdb::TOperatorPtr& plan,
+    TArtifactStore& artifacts,
+    llvm::json::Array& diagnostics,
+    bool embedWasm)
+{
+    using namespace NQdb;
+    auto chain = LinearExecChain(plan);
+    if (!chain) {
+        return UnsupportedExec(
+            "plan is not a linear source/filter/project/limit pipeline");
+    }
+
+    llvm::json::Array stages;
+    NQumir::NAst::TTypePtr curType;
+    try {
+        for (const auto& op : *chain) {
+            if (auto source = TMaybeOp<TSourceOperator>(op)) {
+                curType = BuildSourceRuntimeType(*source.Cast());
+                stages.push_back(llvm::json::Object{
+                    {"kind", "source"},
+                    {"table", source.Cast()->SourcePath()},
+                    {"columns", SourceColumnsJson(curType)},
+                });
+            } else if (auto filter = TMaybeOp<TFilterOperator>(op)) {
+                auto* inputStruct =
+                    static_cast<NQumir::NAst::TStructType*>(curType.get());
+                if (ReferencesStringColumn(filter.Cast()->Predicate(), *inputStruct)) {
+                    return UnsupportedExec(
+                        "filter over string columns is not supported in browser "
+                        "execution yet");
+                }
+                TExecKernelBackend backend(artifacts, diagnostics, embedWasm);
+                BuildFilterRuntimeProcess(
+                    *filter.Cast(), curType, nullptr, &backend, "exec:filter");
+                if (backend.Failed()) {
+                    return UnsupportedExec("filter kernel failed to compile to wasm");
+                }
+                stages.push_back(llvm::json::Object{
+                    {"kind", "filter"},
+                    {"wasm", backend.WasmId()},
+                });
+            } else if (auto project = TMaybeOp<TProjectOperator>(op)) {
+                auto* inputStruct =
+                    static_cast<NQumir::NAst::TStructType*>(curType.get());
+                for (const auto& proj : project.Cast()->Projections()) {
+                    if (!NQumir::NAst::TMaybeNode<NQumir::NAst::TIdentExpr>(
+                            proj.Expression) &&
+                        ReferencesStringColumn(proj.Expression, *inputStruct))
+                    {
+                        return UnsupportedExec(
+                            "project computing over string columns is not "
+                            "supported in browser execution yet");
+                    }
+                }
+                TExecKernelBackend backend(artifacts, diagnostics, embedWasm);
+                auto runtime = BuildProjectRuntimeProcess(
+                    *project.Cast(), curType, nullptr, &backend, "exec:project");
+                if (backend.Failed()) {
+                    return UnsupportedExec(
+                        "project kernel failed to compile to wasm");
+                }
+                auto* outStruct = static_cast<NQumir::NAst::TStructType*>(
+                    runtime.OutputType.get());
+                const auto& projections = project.Cast()->Projections();
+                for (size_t i = 0; i < projections.size(); ++i) {
+                    if (!NQumir::NAst::TMaybeNode<NQumir::NAst::TIdentExpr>(
+                            projections[i].Expression) &&
+                        IsStringCoreType(outStruct->Fields[i].second))
+                    {
+                        return UnsupportedExec(
+                            "computed string columns are not supported in "
+                            "browser execution yet");
+                    }
+                }
+                stages.push_back(llvm::json::Object{
+                    {"kind", "project"},
+                    {"wasm", backend.WasmId()},
+                    {"output", ProjectOutputJson(
+                        *project.Cast(), *inputStruct, runtime.OutputType)},
+                });
+                curType = runtime.OutputType;
+            } else if (auto limit = TMaybeOp<TLimitOperator>(op)) {
+                stages.push_back(llvm::json::Object{
+                    {"kind", "limit"},
+                    {"limit", limit.Cast()->Limit()},
+                    {"offset", limit.Cast()->Offset()},
+                });
+            }
+        }
+    } catch (const NQumir::TError& e) {
+        return UnsupportedExec(e.ToString());
+    } catch (const std::exception& e) {
+        return UnsupportedExec(e.what());
+    }
+
+    return llvm::json::Object{
+        {"supported", true},
+        {"embedWasm", embedWasm},
+        {"layout", ExecLayoutJson()},
+        {"stages", std::move(stages)},
+    };
+}
+
 llvm::json::Object BuildBundle(TExportRequest& request) {
     auto plan = ParseSql(request.Sql, request.Catalog);
     if (!plan) {
@@ -1176,16 +1791,28 @@ llvm::json::Object BuildBundle(TExportRequest& request) {
     llvm::json::Object physicalGraph = EmptyGraphJson();
     llvm::json::Array diagnostics;
     std::ostringstream schedulerText;
+    std::vector<TKernelArtifacts> kernelArtifacts;
     try {
         std::ostringstream lowerDiagnostics;
+        std::unique_ptr<TWasmKernelExportBackend> wasmBackend;
+        if (request.EmbedWasm) {
+            wasmBackend = std::make_unique<TWasmKernelExportBackend>(
+                artifacts,
+                kernelArtifacts,
+                diagnostics,
+                request.EmbedWasm);
+        }
         auto lowered = NQdb::NScheduler::LowerPlanToGraph(
             *plan,
             request.Scheduler,
-            &lowerDiagnostics);
+            &lowerDiagnostics,
+            wasmBackend.get());
         lowered.Graph->Build();
 
         auto lowerDiagnosticsText = lowerDiagnostics.str();
-        auto kernelArtifacts = ParseKernelArtifacts(lowerDiagnosticsText, artifacts);
+        if (!wasmBackend) {
+            kernelArtifacts = ParseKernelArtifacts(lowerDiagnosticsText, artifacts);
+        }
         schedulerText << lowerDiagnosticsText;
         schedulerText << "\n========== SCHEDULER GRAPH ==========\n";
         schedulerText << "mode=" << static_cast<int>(request.Scheduler.Scheduler.Mode)
@@ -1206,6 +1833,8 @@ llvm::json::Object BuildBundle(TExportRequest& request) {
         });
     }
 
+    auto execPlan = BuildExecPlan(*plan, artifacts, diagnostics, request.EmbedWasm);
+
     return llvm::json::Object{
             {"ok", true},
             {"format", "qdb.runtime.bundle"},
@@ -1214,6 +1843,7 @@ llvm::json::Object BuildBundle(TExportRequest& request) {
             {"dataset", llvm::json::Object{
                 {"source", "browser"},
             }},
+            {"exec", std::move(execPlan)},
             {"plans", llvm::json::Object{
                 {"logicalText", LogicalPlanTreeText(*plan)},
                 {"logicalAstText", LogicalPlanAstText(*plan)},
