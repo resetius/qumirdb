@@ -142,6 +142,7 @@ struct TExportRequest {
 };
 
 struct TKernelArtifacts {
+    std::string Stage;
     std::string Name;
     std::string Ast;
     std::string Ir;
@@ -150,7 +151,12 @@ struct TKernelArtifacts {
 
 class TArtifactStore {
 public:
-    std::string Add(std::string kind, std::string text, std::string label = {}) {
+    std::string Add(
+        std::string kind,
+        std::string text,
+        std::string label = {},
+        std::string stage = {})
+    {
         auto id = "a" + std::to_string(NextId_++);
         llvm::json::Object item{
             {"kind", std::move(kind)},
@@ -159,6 +165,9 @@ public:
         };
         if (!label.empty()) {
             item["label"] = std::move(label);
+        }
+        if (!stage.empty()) {
+            item["stage"] = std::move(stage);
         }
         Items_[id] = std::move(item);
         return id;
@@ -635,11 +644,6 @@ std::string Trim(std::string_view text) {
     return std::string(text);
 }
 
-bool StartsWith(std::string_view value, std::string_view prefix) {
-    return value.size() >= prefix.size() &&
-        value.substr(0, prefix.size()) == prefix;
-}
-
 std::string ArtifactSlice(
     std::string_view text,
     std::string_view beginMarker,
@@ -692,6 +696,10 @@ std::vector<TKernelArtifacts> ParseKernelArtifacts(
     std::string_view diagnostics,
     TArtifactStore& artifacts)
 {
+    static constexpr std::string_view stageHeader = "========== RUNTIME STAGE: ";
+    static constexpr std::string_view stageHeaderEnd = " ==========";
+    static constexpr std::string_view stageEnd =
+        "========== END RUNTIME STAGE ==========";
     static constexpr std::string_view header = "========== RUNTIME NODE: ";
     static constexpr std::string_view headerEnd = " ==========";
     static constexpr std::string_view blockEnd =
@@ -699,12 +707,34 @@ std::vector<TKernelArtifacts> ParseKernelArtifacts(
 
     std::vector<TKernelArtifacts> out;
     size_t pos = 0;
+    std::string currentStage;
     while (true) {
-        auto begin = diagnostics.find(header, pos);
-        if (begin == std::string_view::npos) {
+        const auto stageBegin = diagnostics.find(stageHeader, pos);
+        const auto stageFinish = diagnostics.find(stageEnd, pos);
+        const auto nodeBegin = diagnostics.find(header, pos);
+        auto next = std::min({stageBegin, stageFinish, nodeBegin});
+        if (next == std::string_view::npos) {
             break;
         }
-        auto nameBegin = begin + header.size();
+
+        if (next == stageBegin) {
+            const auto valueBegin = stageBegin + stageHeader.size();
+            const auto valueEnd = diagnostics.find(stageHeaderEnd, valueBegin);
+            if (valueEnd == std::string_view::npos) {
+                break;
+            }
+            currentStage = Trim(
+                diagnostics.substr(valueBegin, valueEnd - valueBegin));
+            pos = valueEnd + stageHeaderEnd.size();
+            continue;
+        }
+        if (next == stageFinish) {
+            currentStage.clear();
+            pos = stageFinish + stageEnd.size();
+            continue;
+        }
+
+        auto nameBegin = nodeBegin + header.size();
         auto nameEnd = diagnostics.find(headerEnd, nameBegin);
         if (nameEnd == std::string_view::npos) {
             break;
@@ -721,48 +751,29 @@ std::vector<TKernelArtifacts> ParseKernelArtifacts(
 
         const auto name = Trim(diagnostics.substr(nameBegin, nameEnd - nameBegin));
         const auto body = diagnostics.substr(bodyBegin, end - bodyBegin);
-        TKernelArtifacts item{.Name = name};
+        TKernelArtifacts item{
+            .Stage = currentStage,
+            .Name = name,
+        };
         auto ast = ArtifactSlice(body, "----- AST -----", "----- IR / LLVM -----");
         if (!ast.empty()) {
-            item.Ast = artifacts.Add("ast", std::move(ast), name);
+            item.Ast = artifacts.Add("ast", std::move(ast), name, currentStage);
         }
 
         auto ir = ArtifactSlice(body, "=========== IR: ============", "============================");
         if (!ir.empty()) {
-            item.Ir = artifacts.Add("ir", std::move(ir), name);
+            item.Ir = artifacts.Add("ir", std::move(ir), name, currentStage);
         }
 
         auto llvm = ArtifactSlice(body, "=========== LLVM: ==========", "============================");
         if (!llvm.empty()) {
-            item.Llvm = artifacts.Add("llvm-ir", std::move(llvm), name);
+            item.Llvm = artifacts.Add("llvm-ir", std::move(llvm), name, currentStage);
         }
 
         out.push_back(std::move(item));
         pos = end + blockEnd.size();
     }
     return out;
-}
-
-bool KernelMatchesGroup(std::string_view kernel, std::string_view groupKind) {
-    if (kernel == groupKind || StartsWith(kernel, std::string(groupKind) + ".")) {
-        return true;
-    }
-    if (groupKind.find("filter") != std::string_view::npos) {
-        return StartsWith(kernel, "filter");
-    }
-    if (groupKind.find("project") != std::string_view::npos) {
-        return StartsWith(kernel, "project");
-    }
-    if (groupKind.find("aggregate") != std::string_view::npos) {
-        return StartsWith(kernel, "aggregate");
-    }
-    if (groupKind.find("join") != std::string_view::npos) {
-        return kernel.find("join") != std::string_view::npos;
-    }
-    if (groupKind.find("sort") != std::string_view::npos) {
-        return kernel.find("sort") != std::string_view::npos;
-    }
-    return false;
 }
 
 std::string ConnectionKindName(NQdb::NScheduler::EConnectionKind kind) {
@@ -992,7 +1003,7 @@ llvm::json::Object GraphJson(
         }
         llvm::json::Object artifactRefs;
         for (const auto& item : kernelArtifacts) {
-            if (!KernelMatchesGroup(item.Name, group.Kind)) {
+            if (item.Stage != group.Group) {
                 continue;
             }
             AddArrayArtifactRef(artifactRefs, "ast", item.Ast);

@@ -610,10 +610,12 @@ function collectArtifacts(node) {
           id,
           kind: item.kind || name,
           label: item.label || '',
+          stage: item.stage || '',
           text: item.text || ''
         };
       })
-      .filter(item => item.text);
+      .filter(item => item.text)
+      .filter(item => !item.stage || !node.taskGroup || item.stage === node.taskGroup);
   }
   return result;
 }
