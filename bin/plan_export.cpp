@@ -34,6 +34,7 @@
 #include <qumir/parser/core/printer.h>
 #include <qumir/parser/pragma.h>
 #include <qumir/parser/type.h>
+#include <qumir/runner/runner_llvm.h>
 #include <qumir/semantics/name_resolution/name_resolver.h>
 #include <qumir/semantics/transform/transform.h>
 
@@ -315,6 +316,7 @@ std::expected<std::monostate, std::string> RunWasmLd(
         "--no-entry",
         "--export-all",
         "--allow-undefined",
+        "-mwasm64",
         "-o",
         wasmPath.string(),
         objPath.string(),
@@ -353,81 +355,24 @@ std::expected<std::monostate, std::string> RunWasmLd(
     return std::monostate{};
 }
 
-void EnsureQumirDbUse(const NQumir::NAst::TExprPtr& ast) {
-    using namespace NQumir::NAst;
-    auto block = TMaybeNode<TBlockExpr>(ast);
-    if (!block) {
-        return;
-    }
-    for (const auto& stmt : block.Cast()->Stmts) {
-        auto use = TMaybeNode<TUseExpr>(stmt);
-        if (use && use.Cast()->ModuleName == "qumirdb") {
-            return;
-        }
-    }
-    block.Cast()->Stmts.insert(
-        block.Cast()->Stmts.begin(),
-        std::make_shared<TUseExpr>(NQumir::TLocation{}, "qumirdb"));
-}
-
-// Compiles an in-memory kernel AST (the same TExprPtr the native JIT path uses)
-// directly to WASM. We intentionally do NOT round-trip through printed text +
-// re-parse: the AST printer emits self-referential type aliases such as
-// `(type StringView <named StringView>)`, which, once re-parsed and composed
-// with qumirdb.oz, collide as "declared twice". Consuming the AST directly (like
-// runner.CompileKernelAst) avoids that and is cheaper. See PLAN_BROWSER_EXECUTION.md.
+// Compiles a kernel AST to WASM through the same path as the native JIT
+// (NQdb::CompileKernelAstToObject), only swapping the codegen target. The target
+// is wasm64 (8-byte pointers): the kernel/runtime layout assumes 8-byte pointers
+// and wasm32 miscompiles it. See docs/issues/browser-wasm64-layout.md.
 std::expected<std::string, std::string> CompileKernelAstToWasm(
     NQumir::NAst::TExprPtr ast)
 {
-    EnsureQumirDbUse(ast);
+    auto opts = NQdb::KernelRunnerOptions();
+    opts.NativeCode = false;
+    opts.TargetTriple = "wasm64-unknown-unknown";
+    NQumir::TLLVMRunner runner(std::move(opts));
 
-    NQumir::NFrontend::TSourceModuleLoader loader;
-    if (auto reg = loader.RegisterSourceModule(
-            std::string(QDB_SOURCE_DIR) + "/modules/qumirdb.oz"); !reg) {
-        return std::unexpected(reg.error().ToString());
-    }
-
-    std::vector<NQumir::NAst::TPragma> pragmas;
-    pragmas.push_back(NQumir::NAst::TPragma{"language", {"overloads"}, {}});
-    auto composed = NQumir::NFrontend::LoadAndCompose(loader, ast, pragmas);
-    if (!composed) {
-        return std::unexpected(composed.error().ToString());
-    }
-    ast = std::move(composed->Ast);
-
-    NQumir::NSemantics::TNameResolver resolver;
-    resolver.ApplyPragmas(composed->Pragmas);
-    auto scope = resolver.GetOrCreateRootScope();
-    scope->RootLevel = false;
-    if (auto err = resolver.Resolve(ast)) {
-        return std::unexpected(err->ToString());
-    }
-
-    auto transformResult = NQumir::NTransform::Pipeline(ast, resolver, {});
-    if (!transformResult) {
-        return std::unexpected(transformResult.error().ToString());
-    }
-
-    NQumir::NIR::TModule module;
-    NQumir::NIR::TBuilder builder(module);
-    NQumir::NIR::TAstLowerer lowerer(module, builder, resolver);
-    auto lowerRes = lowerer.LowerTop(ast);
-    if (!lowerRes) {
-        return std::unexpected(lowerRes.error().ToString());
-    }
-
-    constexpr int optLevel = 3;
-    NQumir::NIR::NPasses::Pipeline(module);
-
-    NQumir::NCodeGen::TLLVMCodeGen codegen({
-        .NativeCode = false,
-        .TargetTriple = "wasm32-unknown-unknown",
-    });
-    std::unique_ptr<NQumir::NCodeGen::ILLVMModuleArtifacts> artifacts;
-    try {
-        artifacts = codegen.Emit(module, optLevel);
-    } catch (const std::exception& e) {
-        return std::unexpected(std::string("llvm wasm codegen: ") + e.what());
+    std::string err;
+    auto object =
+        NQdb::CompileKernelAstToObject(runner, std::move(ast), {}, &err);
+    if (!object) {
+        return std::unexpected(
+            err.empty() ? "wasm kernel compilation failed" : err);
     }
 
     const auto objPath = TempPath(".o");
@@ -437,7 +382,7 @@ std::expected<std::string, std::string> CompileKernelAstToWasm(
         if (!obj) {
             return std::unexpected("cannot create temporary wasm object");
         }
-        artifacts->Generate(obj, /*generateAsm=*/false, /*generateObj=*/true);
+        obj.write(object->data(), static_cast<std::streamsize>(object->size()));
     }
 
     auto cleanup = [&]() {
@@ -1723,13 +1668,8 @@ llvm::json::Object BuildExecPlan(
                     {"columns", SourceColumnsJson(curType)},
                 });
             } else if (auto filter = TMaybeOp<TFilterOperator>(op)) {
-                auto* inputStruct =
-                    static_cast<NQumir::NAst::TStructType*>(curType.get());
-                if (ReferencesStringColumn(filter.Cast()->Predicate(), *inputStruct)) {
-                    return UnsupportedExec(
-                        "filter over string columns is not supported in browser "
-                        "execution yet");
-                }
+                // String predicates compile to qdb_sv_* extern calls that the
+                // browser runtime implements as wasm imports.
                 TExecKernelBackend backend(artifacts, diagnostics, embedWasm);
                 BuildFilterRuntimeProcess(
                     *filter.Cast(), curType, nullptr, &backend, "exec:filter");
@@ -1743,35 +1683,15 @@ llvm::json::Object BuildExecPlan(
             } else if (auto project = TMaybeOp<TProjectOperator>(op)) {
                 auto* inputStruct =
                     static_cast<NQumir::NAst::TStructType*>(curType.get());
-                for (const auto& proj : project.Cast()->Projections()) {
-                    if (!NQumir::NAst::TMaybeNode<NQumir::NAst::TIdentExpr>(
-                            proj.Expression) &&
-                        ReferencesStringColumn(proj.Expression, *inputStruct))
-                    {
-                        return UnsupportedExec(
-                            "project computing over string columns is not "
-                            "supported in browser execution yet");
-                    }
-                }
+                // Projections reading/producing strings compile to qdb_sv_*
+                // extern calls (and StringView outputs) that the browser runtime
+                // implements as wasm imports.
                 TExecKernelBackend backend(artifacts, diagnostics, embedWasm);
                 auto runtime = BuildProjectRuntimeProcess(
                     *project.Cast(), curType, nullptr, &backend, "exec:project");
                 if (backend.Failed()) {
                     return UnsupportedExec(
                         "project kernel failed to compile to wasm");
-                }
-                auto* outStruct = static_cast<NQumir::NAst::TStructType*>(
-                    runtime.OutputType.get());
-                const auto& projections = project.Cast()->Projections();
-                for (size_t i = 0; i < projections.size(); ++i) {
-                    if (!NQumir::NAst::TMaybeNode<NQumir::NAst::TIdentExpr>(
-                            projections[i].Expression) &&
-                        IsStringCoreType(outStruct->Fields[i].second))
-                    {
-                        return UnsupportedExec(
-                            "computed string columns are not supported in "
-                            "browser execution yet");
-                    }
                 }
                 stages.push_back(llvm::json::Object{
                     {"kind", "project"},

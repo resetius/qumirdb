@@ -87,6 +87,30 @@ std::unordered_map<std::string, void*> CompileKernelAst(
     return runner.CompileKernelAst(std::move(ast), entryNames, error);
 }
 
+} // namespace
+
+NQumir::TLLVMRunnerOptions KernelRunnerOptions() {
+    NQumir::TLLVMRunnerOptions opts;
+    opts.CoreInput = true;
+    opts.ResolveCoreInput = true;
+    opts.AllowOverloads = true;
+    opts.OptLevel = 3;
+    opts.ModuleFiles = {std::string(QDB_SOURCE_DIR) + "/modules/qumirdb.oz"};
+    return opts;
+}
+
+std::optional<std::string> CompileKernelAstToObject(
+    NQumir::TLLVMRunner& runner,
+    NQumir::NAst::TExprPtr ast,
+    const std::vector<std::string>& entryNames,
+    std::string* error)
+{
+    EnsureQumirDbUse(ast);
+    return runner.CompileKernelAstToObject(std::move(ast), entryNames, error);
+}
+
+namespace {
+
 NQumir::NAst::TTypePtr QumirDbNamedType(const std::string& name) {
     return std::make_shared<NQumir::NAst::TNamedType>(name, nullptr);
 }
