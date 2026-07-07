@@ -1,4 +1,5 @@
 #include <qdb/kernel/column_value.h>
+#include <qdb/kernel/gen.h>
 #include <qdb/plan/types/nullable.h>
 
 #include <qumir/location.h>
@@ -135,8 +136,7 @@ TColumnValueAst BuildColumnValueAst(
         };
     }
     if (TMaybeType<TStringType>(type)) {
-        auto namedStringView = std::make_shared<TNamedType>(
-            "StringView", stringViewType);
+        auto namedStringView = AsNamed("StringView", stringViewType);
         const std::string offsets32Name = temporaryPrefix + "_offsets32";
         const std::string offsets64Name = temporaryPrefix + "_offsets64";
         const std::string startName = temporaryPrefix + "_start";
