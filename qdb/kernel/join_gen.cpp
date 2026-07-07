@@ -17,6 +17,14 @@ TTypePtr NamedType(const std::string& name) {
     return std::make_shared<TNamedType>(name, nullptr);
 }
 
+// Avoid re-wrapping an already same-named type (would self-reference).
+TTypePtr AsNamed(const std::string& name, const TTypePtr& type) {
+    if (auto named = TMaybeType<TNamedType>(type); named && named.Cast()->Name == name) {
+        return type;
+    }
+    return std::make_shared<TNamedType>(name, type);
+}
+
 TTypePtr ColumnPointerType(const TTypePtr& columnType, const TTypePtr& rowSetType) {
     auto rowSetStruct = TMaybeType<TStructType>(UnwrapNamedType(rowSetType));
     if (rowSetStruct) {
@@ -120,11 +128,11 @@ NQumir::NAst::TExprPtr GenJoinInsertKeyOnlyAst(
     };
 
     auto hashTableRefType = std::make_shared<TReferenceType>(
-        std::make_shared<TNamedType>("HashTable", hashTableType));
+        AsNamed("HashTable", hashTableType));
     auto rowSetRefType = std::make_shared<TReferenceType>(
-        std::make_shared<TNamedType>("TRowSet", rowSetType));
+        AsNamed("TRowSet", rowSetType));
     auto pairBufferRefType = std::make_shared<TReferenceType>(
-        std::make_shared<TNamedType>("PairBuffer", pairBufferType));
+        AsNamed("PairBuffer", pairBufferType));
 
     // Same ABI as GenJoinProcessAst: (own, opp, batch, batch_idx, pairs) -> bool
     std::vector<TParam> params = {
@@ -274,9 +282,9 @@ NQumir::NAst::TExprPtr GenJoinFinalizeSemiAntiAst(
     };
 
     auto hashTableRefType = std::make_shared<TReferenceType>(
-        std::make_shared<TNamedType>("HashTable", hashTableType));
+        AsNamed("HashTable", hashTableType));
     auto pairBufferRefType = std::make_shared<TReferenceType>(
-        std::make_shared<TNamedType>("PairBuffer", pairBufferType));
+        AsNamed("PairBuffer", pairBufferType));
 
     // Key pointer types for GroupKeys (own) and Keys (opp)
     auto ptrKeyType = std::make_shared<TPointerType>(key.KeyType);
@@ -435,13 +443,13 @@ NQumir::NAst::TExprPtr GenJoinBatchAst(
     };
 
     auto hashTableRefType = std::make_shared<TReferenceType>(
-        std::make_shared<TNamedType>("HashTable", hashTableType));
+        AsNamed("HashTable", hashTableType));
     auto rowSetRefType = std::make_shared<TReferenceType>(
-        std::make_shared<TNamedType>("TRowSet", rowSetType));
+        AsNamed("TRowSet", rowSetType));
     auto rowSetPtrType = std::make_shared<TPointerType>(
-        std::make_shared<TNamedType>("TRowSet", rowSetType));
+        AsNamed("TRowSet", rowSetType));
     auto pairBufferRefType = std::make_shared<TReferenceType>(
-        std::make_shared<TNamedType>("PairBuffer", pairBufferType));
+        AsNamed("PairBuffer", pairBufferType));
     std::vector<TParam> params;
     if (insertRows) {
         params.push_back(std::make_shared<TVarStmt>(loc, "own", hashTableRefType));
@@ -652,7 +660,7 @@ NQumir::NAst::TExprPtr GenJoinHashBatchAst(
     };
 
     auto rowSetRefType = std::make_shared<TReferenceType>(
-        std::make_shared<TNamedType>("TRowSet", rowSetType));
+        AsNamed("TRowSet", rowSetType));
     std::vector<TParam> params{
         std::make_shared<TVarStmt>(loc, "batch", rowSetRefType),
         std::make_shared<TVarStmt>(loc, "hashes", ptrU64Type),
