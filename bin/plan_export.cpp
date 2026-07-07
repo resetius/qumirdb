@@ -1643,6 +1643,8 @@ std::optional<std::vector<NQdb::TOperatorPtr>> LinearExecChain(
         }
         if (TMaybeOp<TFilterOperator>(cur) ||
             TMaybeOp<TProjectOperator>(cur) ||
+            TMaybeOp<TSortOperator>(cur) ||
+            TMaybeOp<TTopSortOperator>(cur) ||
             TMaybeOp<TLimitOperator>(cur))
         {
             chain.push_back(cur);
@@ -1657,6 +1659,35 @@ std::optional<std::vector<NQdb::TOperatorPtr>> LinearExecChain(
     }
     std::reverse(chain.begin(), chain.end());
     return chain;
+}
+
+// Resolve sort keys to indices into the current batch's columns (matching by
+// bare column name). Returns nullopt if any key column is not present.
+std::optional<llvm::json::Array> ExecSortKeysJson(
+    const std::vector<NQdb::TSortKey>& keys,
+    const NQumir::NAst::TStructType& inputStruct)
+{
+    llvm::json::Array out;
+    for (const auto& key : keys) {
+        int32_t index = -1;
+        for (size_t f = 0; f < inputStruct.Fields.size(); ++f) {
+            if (BareColumnName(inputStruct.Fields[f].first) ==
+                BareColumnName(key.Column))
+            {
+                index = static_cast<int32_t>(f);
+                break;
+            }
+        }
+        if (index < 0) {
+            return std::nullopt;
+        }
+        out.push_back(llvm::json::Object{
+            {"index", index},
+            {"direction", std::string(NQdb::SortDirectionName(key.Direction))},
+            {"nulls", std::string(NQdb::SortNullsName(key.Nulls))},
+        });
+    }
+    return out;
 }
 
 llvm::json::Object UnsupportedExec(std::string reason) {
@@ -1676,7 +1707,8 @@ llvm::json::Object BuildExecPlan(
     auto chain = LinearExecChain(plan);
     if (!chain) {
         return UnsupportedExec(
-            "plan is not a linear source/filter/project/limit pipeline");
+            "plan is not a linear "
+            "source/filter/project/sort/top-sort/limit pipeline");
     }
 
     llvm::json::Array stages;
@@ -1748,6 +1780,31 @@ llvm::json::Object BuildExecPlan(
                         *project.Cast(), *inputStruct, runtime.OutputType)},
                 });
                 curType = runtime.OutputType;
+            } else if (auto sort = TMaybeOp<TSortOperator>(op)) {
+                auto* inputStruct =
+                    static_cast<NQumir::NAst::TStructType*>(curType.get());
+                auto keys = ExecSortKeysJson(sort.Cast()->Keys(), *inputStruct);
+                if (!keys) {
+                    return UnsupportedExec(
+                        "sort key references an unknown column");
+                }
+                stages.push_back(llvm::json::Object{
+                    {"kind", "sort"},
+                    {"keys", std::move(*keys)},
+                });
+            } else if (auto top = TMaybeOp<TTopSortOperator>(op)) {
+                auto* inputStruct =
+                    static_cast<NQumir::NAst::TStructType*>(curType.get());
+                auto keys = ExecSortKeysJson(top.Cast()->Keys(), *inputStruct);
+                if (!keys) {
+                    return UnsupportedExec(
+                        "top-sort key references an unknown column");
+                }
+                stages.push_back(llvm::json::Object{
+                    {"kind", "top-sort"},
+                    {"keys", std::move(*keys)},
+                    {"limit", top.Cast()->Limit()},
+                });
             } else if (auto limit = TMaybeOp<TLimitOperator>(op)) {
                 stages.push_back(llvm::json::Object{
                     {"kind", "limit"},

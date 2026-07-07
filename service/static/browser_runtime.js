@@ -282,6 +282,12 @@ export async function executeBrowserPipeline(exec, readSource) {
         }));
       }
       batch = { rowCount: batch.rowCount, columns };
+    } else if (stage.kind === 'sort') {
+      batch = applySort(batch, selection, stage.keys, null);
+      selection = null;
+    } else if (stage.kind === 'top-sort') {
+      batch = applySort(batch, selection, stage.keys, Number(stage.limit));
+      selection = null;
     } else if (stage.kind === 'limit') {
       limit = { limit: Number(stage.limit), offset: Number(stage.offset || 0) };
     } else {
@@ -290,6 +296,70 @@ export async function executeBrowserPipeline(exec, readSource) {
   }
 
   return materialize(batch, selection, limit);
+}
+
+// Sort a batch by `keys` (each { index, direction, nulls }), folding any
+// pending selection into a compacted, reordered batch. When `limit` is set
+// (top-sort), only the first `limit` rows are kept. Returns a new batch with no
+// selection; downstream stages see fully materialized ordered rows.
+function applySort(batch, selection, keys, limit) {
+  const indices = [];
+  for (let i = 0; i < batch.rowCount; ++i) {
+    if (selection && !selection[i]) {
+      continue;
+    }
+    indices.push(i);
+  }
+
+  indices.sort((a, b) => {
+    for (const key of keys) {
+      const values = batch.columns[key.index].values;
+      const c = compareByKey(values[a], values[b], key);
+      if (c !== 0) {
+        return c;
+      }
+    }
+    return 0;
+  });
+
+  const keep = (limit != null && limit < indices.length) ? limit : indices.length;
+  const kept = indices.slice(0, Math.max(keep, 0));
+  const columns = batch.columns.map(col => ({
+    name: col.name,
+    type: col.type,
+    values: kept.map(idx => col.values[idx]),
+  }));
+  return { rowCount: kept.length, columns };
+}
+
+// Compare two column values under one sort key, returning final order
+// (direction and null placement already applied). Null default follows the
+// Postgres convention: NULLS LAST for asc, NULLS FIRST for desc.
+function compareByKey(a, b, key) {
+  const aNull = a === null || a === undefined;
+  const bNull = b === null || b === undefined;
+  if (aNull || bNull) {
+    if (aNull && bNull) {
+      return 0;
+    }
+    let nullsFirst;
+    if (key.nulls === 'nulls-first') {
+      nullsFirst = true;
+    } else if (key.nulls === 'nulls-last') {
+      nullsFirst = false;
+    } else {
+      nullsFirst = key.direction === 'desc';
+    }
+    return aNull === nullsFirst ? -1 : 1;
+  }
+
+  let c = 0;
+  if (a < b) {
+    c = -1;
+  } else if (a > b) {
+    c = 1;
+  }
+  return key.direction === 'desc' ? -c : c;
 }
 
 // Apply selection + limit and produce { columns: string[], rows: any[][] }.
