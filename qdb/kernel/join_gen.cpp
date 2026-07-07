@@ -17,14 +17,6 @@ TTypePtr NamedType(const std::string& name) {
     return std::make_shared<TNamedType>(name, nullptr);
 }
 
-// Avoid re-wrapping an already same-named type (would self-reference).
-TTypePtr AsNamed(const std::string& name, const TTypePtr& type) {
-    if (auto named = TMaybeType<TNamedType>(type); named && named.Cast()->Name == name) {
-        return type;
-    }
-    return std::make_shared<TNamedType>(name, type);
-}
-
 TTypePtr ColumnPointerType(const TTypePtr& columnType, const TTypePtr& rowSetType) {
     auto rowSetStruct = TMaybeType<TStructType>(UnwrapNamedType(rowSetType));
     if (rowSetStruct) {

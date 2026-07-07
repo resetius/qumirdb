@@ -54,6 +54,17 @@ TAggReducerLayout BuildAggReducerLayout(
     const std::vector<std::string>& funcs,
     const std::vector<TAggArg>& args);
 
+// Avoid re-wrapping an already same-named type (would self-reference).
+inline NQumir::NAst::TTypePtr AsNamed(
+    const std::string& name, const NQumir::NAst::TTypePtr& type)
+{
+    using namespace NQumir::NAst;
+    if (auto named = TMaybeType<TNamedType>(type); named && named.Cast()->Name == name) {
+        return type;
+    }
+    return std::make_shared<TNamedType>(name, type);
+}
+
 // Generates concrete hash and equality overloads for lookup and stored keys.
 std::vector<NQumir::NAst::TExprPtr> GenKeyOperationFunDecls(
     const TAggregateKeyDescriptor& key);

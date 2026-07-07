@@ -1043,9 +1043,9 @@ NQumir::NAst::TExprPtr GenJoinResidualFilterAst(
     SubstFieldsInPlace(predicate, fixedValues);
 
     auto rowSetPtrType = std::make_shared<TPointerType>(
-        std::make_shared<TNamedType>("TRowSet", rowSetType));
+        AsNamed("TRowSet", rowSetType));
     auto rowSetRefType = std::make_shared<TReferenceType>(
-        std::make_shared<TNamedType>("TRowSet", rowSetType));
+        AsNamed("TRowSet", rowSetType));
     std::vector<TParam> params = {
         std::make_shared<TVarStmt>(loc, "left_store", rowSetPtrType),
         std::make_shared<TVarStmt>(loc, "right_store", rowSetPtrType),
@@ -1383,9 +1383,9 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
     };
 
     auto hashTableRefType = std::make_shared<TReferenceType>(
-        std::make_shared<TNamedType>("HashTable", hashTableType));
+        AsNamed("HashTable", hashTableType));
     auto rowSetRefType = std::make_shared<TReferenceType>(
-        std::make_shared<TNamedType>("TRowSet", rowSetType));
+        AsNamed("TRowSet", rowSetType));
     std::vector<TParam> params = {
         std::make_shared<TVarStmt>(loc, "ht", hashTableRefType),
         std::make_shared<TVarStmt>(loc, "batch", rowSetRefType),
@@ -1657,10 +1657,10 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
     auto ptrPtrI64Type = std::make_shared<TPointerType>(ptrI64Type);
     auto ptrColumnType = columnType
         ? std::make_shared<TPointerType>(
-            std::make_shared<TNamedType>("TColumn", columnType))
+            AsNamed("TColumn", columnType))
         : nullptr;
     auto hashTableRefType = std::make_shared<TReferenceType>(
-        std::make_shared<TNamedType>("HashTable", std::move(hashTableType)));
+        AsNamed("HashTable", std::move(hashTableType)));
     auto ident = [&](const std::string& name) -> TExprPtr {
         return std::make_shared<TIdentExpr>(loc, name);
     };
@@ -1895,7 +1895,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateMeasureAst(
     auto ptrI64Type = std::make_shared<TPointerType>(i64Type);
     auto ptrKeyType = std::make_shared<TPointerType>(key.StoredType);
     auto hashTableRefType = std::make_shared<TReferenceType>(
-        std::make_shared<TNamedType>("HashTable", std::move(hashTableType)));
+        AsNamed("HashTable", std::move(hashTableType)));
     auto ident = [&](const std::string& name) -> TExprPtr {
         return std::make_shared<TIdentExpr>(loc, name);
     };
