@@ -194,13 +194,13 @@ for scale in "${SCALES[@]}"; do
             [[ -f "$template" ]] || continue
             tmp_sql="$tmpdir/q${q_num}_sf${sf_num}.sql"
             render "$template" "$data_dir" > "$tmp_sql"
-            read -r seconds rc <<< "$(run_query "Q${q_num} sf${sf_num}" "${EXTRA_QDB_ARGS[@]}" --sql -i "$tmp_sql" --data "$data_dir")"
+            read -r seconds rc <<< "$(run_query "Q${q_num} sf${sf_num}" ${EXTRA_QDB_ARGS[@]+"${EXTRA_QDB_ARGS[@]}"} --sql -i "$tmp_sql" --data "$data_dir")"
         else
             template="$SEXPR_DIR/q${q_num}.sexp"
             [[ -f "$template" ]] || continue
             tmp_sexp="$tmpdir/q${q_num}_sf${sf_num}.sexp"
             render "$template" "$data_dir" > "$tmp_sexp"
-            read -r seconds rc <<< "$(run_query "Q${q_num} sf${sf_num}" "${EXTRA_QDB_ARGS[@]}" -i "$tmp_sexp")"
+            read -r seconds rc <<< "$(run_query "Q${q_num} sf${sf_num}" ${EXTRA_QDB_ARGS[@]+"${EXTRA_QDB_ARGS[@]}"} -i "$tmp_sexp")"
         fi
 
         total_s=$(python3 -c "print(round($total_s + $seconds, 3))")
