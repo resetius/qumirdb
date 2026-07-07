@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <ostream>
 #include <string>
 #include <utility>
@@ -38,6 +39,17 @@ struct TKernelCompilerOptions {
     IKernelExportBackend* ExportBackend = nullptr;
     std::string Stage;
 };
+
+// Shared kernel-pipeline options; caller overrides NativeCode/TargetTriple.
+NQumir::TLLVMRunnerOptions KernelRunnerOptions();
+
+// Like the native CompileKernelAst, but emits a target object (per
+// runner.Options.TargetTriple) instead of JIT. Returns object bytes.
+std::optional<std::string> CompileKernelAstToObject(
+    NQumir::TLLVMRunner& runner,
+    NQumir::NAst::TExprPtr ast,
+    const std::vector<std::string>& entryNames,
+    std::string* error);
 
 // agg_dispatch(ref HashTable ht, ref TRowSet batch, i64 arg, i64 op) -> i64
 //   op == 0: init(ht, capacity = arg)
@@ -161,13 +173,9 @@ public:
         , ExportBackend_(options.ExportBackend)
         , Stage_(std::move(options.Stage))
     {
-        Opts_.CoreInput = true;
-        Opts_.ResolveCoreInput = true;
+        Opts_ = KernelRunnerOptions();
         Opts_.NativeCode = true;
-        Opts_.OptLevel = 3;
-        Opts_.AllowOverloads = true;
         Opts_.EnablePerfJitEventListener = true;
-        Opts_.ModuleFiles = {std::string(QDB_SOURCE_DIR) + "/modules/qumirdb.oz"};
         Opts_.PrintIr = Diagnostics_ != nullptr;
         Opts_.PrintLlvm = Diagnostics_ != nullptr;
     }

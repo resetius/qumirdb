@@ -6,6 +6,7 @@
 // reads results back. See PLAN_BROWSER_EXECUTION.md for the ABI/layout facts.
 
 const PAGE = 65536;
+const EMPTY_BYTES = new Uint8Array(0);
 
 function alignUp(value, align) {
   return (value + (align - 1)) & ~(align - 1);
@@ -54,7 +55,13 @@ class Arena {
     const need = this.offset;
     const have = this.memory.buffer.byteLength;
     if (need > have) {
-      this.memory.grow(Math.ceil((need - have) / PAGE));
+      const pages = Math.ceil((need - have) / PAGE);
+      // memory64 engines may require a BigInt page delta.
+      try {
+        this.memory.grow(pages);
+      } catch {
+        this.memory.grow(BigInt(pages));
+      }
     }
     return ptr;
   }
@@ -104,16 +111,102 @@ function readNumericValue(dv, address, type) {
   }
 }
 
-// Compile + instantiate a kernel module. The numeric MVP kernels have no
-// imports; anything that does (string/date externs) is rejected up front.
+// memcmp-style byte comparison matching qdb_filter_string_compare: -1/0/1 with
+// length as tiebreak.
+function compareBytes(a, b) {
+  const n = Math.min(a.length, b.length);
+  for (let i = 0; i < n; ++i) {
+    if (a[i] !== b[i]) return a[i] < b[i] ? -1 : 1;
+  }
+  return a.length === b.length ? 0 : (a.length < b.length ? -1 : 1);
+}
+
+// SQL LIKE over bytes (case-sensitive, % = any run, _ = one byte, no escape),
+// matching qdb_string_view_sql_like. Latin1 keeps one byte == one char.
+function sqlLikeBytes(value, pattern) {
+  let re = '^';
+  for (const b of pattern) {
+    const ch = String.fromCharCode(b);
+    if (ch === '%') re += '.*';
+    else if (ch === '_') re += '.';
+    else re += ch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+  re += '$';
+  let s = '';
+  for (const b of value) s += String.fromCharCode(b);
+  return new RegExp(re, 's').test(s) ? 1 : 0;
+}
+
+// The `env` imports the string/predicate kernels need. Pointer + size args are
+// i64 (BigInt under memory64); bool results are i32 (0/1), compare/like are i64.
+// `getMemory` is read lazily since the instance doesn't exist yet at build time.
+function createQdbEnv(getMemory) {
+  const bytesAt = (ptr, size) => {
+    const mem = new Uint8Array(getMemory().buffer);
+    const start = Number(ptr);
+    return mem.subarray(start, start + Number(size));
+  };
+  const cstrAt = (ptr) => {
+    const mem = new Uint8Array(getMemory().buffer);
+    let start = Number(ptr);
+    let end = start;
+    while (mem[end] !== 0) ++end;
+    return mem.subarray(start, end);
+  };
+
+  const svLit = (t) => (d, s, lit) => (t(compareBytes(bytesAt(d, s), cstrAt(lit))) ? 1 : 0);
+  const litSv = (t) => (lit, d, s) => (t(compareBytes(cstrAt(lit), bytesAt(d, s))) ? 1 : 0);
+  const litLit = (t) => (l, r) => (t(compareBytes(cstrAt(l), cstrAt(r))) ? 1 : 0);
+  const EQ = c => c === 0, NE = c => c !== 0;
+  const LT = c => c < 0, LE = c => c <= 0, GT = c => c > 0, GE = c => c >= 0;
+
+  const norm = v => (v < 0n ? 1n : v);
+  return {
+    qdb_filter_string_compare: (ld, ls, rd, rs) =>
+      BigInt(compareBytes(bytesAt(ld, ls), bytesAt(rd, rs))),
+    qdb_string_view_cmp_cstr: (d, s, c) => BigInt(compareBytes(bytesAt(d, s), cstrAt(c))),
+    qdb_cstr_cmp_cstr: (a, b) => BigInt(compareBytes(cstrAt(a), cstrAt(b))),
+    qdb_string_view_sql_like: (d, s, p) => BigInt(sqlLikeBytes(bytesAt(d, s), cstrAt(p))),
+
+    qdb_sv_lit_eq: svLit(EQ), qdb_sv_lit_ne: svLit(NE), qdb_sv_lit_lt: svLit(LT),
+    qdb_sv_lit_le: svLit(LE), qdb_sv_lit_gt: svLit(GT), qdb_sv_lit_ge: svLit(GE),
+    qdb_lit_sv_eq: litSv(EQ), qdb_lit_sv_ne: litSv(NE), qdb_lit_sv_lt: litSv(LT),
+    qdb_lit_sv_le: litSv(LE), qdb_lit_sv_gt: litSv(GT), qdb_lit_sv_ge: litSv(GE),
+    qdb_lit_lit_eq: litLit(EQ), qdb_lit_lit_ne: litLit(NE), qdb_lit_lit_lt: litLit(LT),
+    qdb_lit_lit_le: litLit(LE), qdb_lit_lit_gt: litLit(GT), qdb_lit_lit_ge: litLit(GE),
+
+    // SQL three-valued booleans (0 false, 1 true, 2 unknown); negatives => true.
+    qdb_sql_bool_and: (l, r) => {
+      l = norm(l); r = norm(r);
+      if (l === 0n || r === 0n) return 0n;
+      return (l === 1n && r === 1n) ? 1n : 2n;
+    },
+    qdb_sql_bool_or: (l, r) => {
+      l = norm(l); r = norm(r);
+      if (l === 1n || r === 1n) return 1n;
+      return (l === 0n && r === 0n) ? 0n : 2n;
+    },
+    qdb_sql_bool_not: (v) => {
+      v = norm(v);
+      return v === 2n ? 2n : 1n - v;
+    },
+  };
+}
+
+// Compile + instantiate a kernel module, wiring the `env` string runtime. Any
+// import we don't implement is reported so the caller can fall back to server
+// execution rather than run a partially-linked kernel.
 export async function instantiateKernel(base64, entryName) {
   const module = await WebAssembly.compile(base64ToBytes(base64));
-  const imports = WebAssembly.Module.imports(module);
-  if (imports.length > 0) {
-    const names = imports.map(item => item.name).join(', ');
-    throw new Error(`kernel needs unsupported imports: ${names}`);
+  const holder = { memory: null };
+  const env = createQdbEnv(() => holder.memory);
+  for (const imp of WebAssembly.Module.imports(module)) {
+    if (imp.module !== 'env' || typeof env[imp.name] !== 'function') {
+      throw new Error(`kernel needs unsupported import: ${imp.module}.${imp.name}`);
+    }
   }
-  const instance = await WebAssembly.instantiate(module, {});
+  const instance = await WebAssembly.instantiate(module, { env });
+  holder.memory = instance.exports.memory;
   if (instance.exports.__wasm_call_ctors) {
     instance.exports.__wasm_call_ctors();
   }
@@ -125,20 +218,43 @@ export async function instantiateKernel(base64, entryName) {
 }
 
 // Marshal `columns` (source column order) into a fresh TRowSet inside `arena`.
-// Numeric columns get a real data buffer; string columns (passthrough only in
-// the MVP) get a zeroed scratch so any dead kernel read stays in-bounds.
+// Numeric columns get a data buffer; string columns get a concatenated UTF-8
+// bytes buffer plus an i32 offsets array (OffsetWidth = 4), matching the layout
+// the kernel reads (Data + Offsets[row]).
 function marshalRowSet(arena, layout, columns, rowCount, wantSelection) {
   const colLayout = layout.column;
   const rsLayout = layout.rowset;
+  const encoder = new TextEncoder();
+
+  // Pre-encode string columns before any allocation (a mid-write grow would
+  // detach views): parts hold each row's bytes, offsets are cumulative.
+  const encoded = columns.map(column => {
+    if (column.type !== 'string') return null;
+    const parts = new Array(rowCount);
+    const offsets = new Int32Array(rowCount + 1);
+    let total = 0;
+    for (let i = 0; i < rowCount; ++i) {
+      const value = column.values[i];
+      const b = (value === null || value === undefined)
+        ? EMPTY_BYTES
+        : encoder.encode(String(value));
+      parts[i] = b;
+      offsets[i] = total;
+      total += b.length;
+    }
+    offsets[rowCount] = total;
+    return { parts, offsets, total };
+  });
 
   const columnsBase = arena.alloc(columns.length * colLayout.size, 8);
   const dataPtrs = new Array(columns.length).fill(0);
-  const scratch = arena.alloc(16, 8);
+  const offsetsPtrs = new Array(columns.length).fill(0);
 
   for (let c = 0; c < columns.length; ++c) {
     const column = columns[c];
     if (column.type === 'string') {
-      dataPtrs[c] = scratch;
+      dataPtrs[c] = arena.alloc(Math.max(encoded[c].total, 1), 1);
+      offsetsPtrs[c] = arena.alloc((rowCount + 1) * 4, 4);
     } else {
       const width = coreTypeWidth(column.type);
       dataPtrs[c] = arena.alloc(Math.max(rowCount, 1) * width, 8);
@@ -148,15 +264,28 @@ function marshalRowSet(arena, layout, columns, rowCount, wantSelection) {
   const selectionPtr = wantSelection ? arena.alloc(Math.max(rowCount, 1), 8) : 0;
   const rowsetPtr = arena.alloc(rsLayout.size, 8);
 
-  // All allocations done; safe to take a view and write.
+  // All allocations done; safe to take views and write.
   const dv = arena.view();
+  const memBytes = arena.bytes();
 
   for (let c = 0; c < columns.length; ++c) {
     const column = columns[c];
     const colPtr = columnsBase + c * colLayout.size;
     new Uint8Array(arena.memory.buffer, colPtr, colLayout.size).fill(0);
     writePointer(dv, colPtr + colLayout.data, dataPtrs[c]);
-    if (column.type !== 'string') {
+    if (column.type === 'string') {
+      const enc = encoded[c];
+      let p = dataPtrs[c];
+      for (let i = 0; i < rowCount; ++i) {
+        memBytes.set(enc.parts[i], p);
+        p += enc.parts[i].length;
+      }
+      for (let i = 0; i <= rowCount; ++i) {
+        dv.setInt32(offsetsPtrs[c] + i * 4, enc.offsets[i], true);
+      }
+      writePointer(dv, colPtr + colLayout.offsets, offsetsPtrs[c]);
+      dv.setUint8(colPtr + colLayout.offsetWidth, 4);
+    } else {
       const width = coreTypeWidth(column.type);
       const values = column.values;
       for (let i = 0; i < rowCount; ++i) {
@@ -182,7 +311,8 @@ export function runFilter(kernel, layout, batch) {
   const arena = new Arena(kernel.instance);
   const { rowsetPtr, selectionPtr } =
     marshalRowSet(arena, layout, batch.columns, batch.rowCount, true);
-  kernel.fn(rowsetPtr);
+  // memory64 entry: the rowset pointer is an i64 param.
+  kernel.fn(BigInt(rowsetPtr));
   // Copy the selection out before the buffer can be reused.
   return arena.bytes().slice(selectionPtr, selectionPtr + batch.rowCount);
 }
@@ -209,7 +339,8 @@ export function runProject(kernel, layout, batch, output) {
   }
 
   if (computed.length > 0) {
-    kernel.fn(rowsetPtr, outArrayPtr);
+    // memory64 entry: rowset and out-array pointers are i64 params.
+    kernel.fn(BigInt(rowsetPtr), BigInt(outArrayPtr));
   }
 
   // Re-take the view: the kernel may have grown memory internally.
