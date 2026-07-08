@@ -73,6 +73,156 @@ function copyNumericColumnFromMemory(memory, ptr, type, rowCount) {
   return new Ctor(memory.buffer, ptr, rowCount).slice();
 }
 
+function encodeStringColumn(values, rowCount, encoder) {
+  const parts = new Array(rowCount);
+  const offsets = new Int32Array(rowCount + 1);
+  const cache = new Map();
+  let total = 0;
+  for (let i = 0; i < rowCount; ++i) {
+    const value = values[i];
+    let b = EMPTY_BYTES;
+    if (value !== null && value !== undefined) {
+      const text = String(value);
+      b = cache.get(text);
+      if (!b) {
+        b = encoder.encode(text);
+        cache.set(text, b);
+      }
+    }
+    parts[i] = b;
+    offsets[i] = total;
+    total += b.length;
+  }
+  offsets[rowCount] = total;
+  return { parts, offsets, total };
+}
+
+class RowSetWriter {
+  constructor(arena, layout) {
+    this.arena = arena;
+    this.layout = layout;
+    this.columnsBase = 0;
+    this.rowsetPtr = 0;
+    this.dataPtrs = [];
+    this.dataCaps = [];
+    this.offsetsPtrs = [];
+    this.offsetsCaps = [];
+    this.selectionPtr = 0;
+    this.selectionCap = 0;
+  }
+
+  write(columns, rowCount, wantSelection, selection = null) {
+    this.ensureStructs(columns.length);
+
+    const encoder = new TextEncoder();
+    const encoded = columns.map(column => {
+      if (column.type !== 'string') return null;
+      return encodeStringColumn(column.values, rowCount, encoder);
+    });
+
+    for (let c = 0; c < columns.length; ++c) {
+      const column = columns[c];
+      if (column.type === 'string') {
+        this.ensureData(c, Math.max(encoded[c].total, 1), 1);
+        this.ensureOffsets(c, (rowCount + 1) * 4);
+      } else {
+        const width = coreTypeWidth(column.type);
+        this.ensureData(c, Math.max(rowCount, 1) * width, 8);
+      }
+    }
+    if (wantSelection || selection) {
+      this.ensureSelection(Math.max(rowCount, 1));
+    }
+
+    const colLayout = this.layout.column;
+    const rsLayout = this.layout.rowset;
+    const dv = this.arena.view();
+    const memBytes = this.arena.bytes();
+
+    for (let c = 0; c < columns.length; ++c) {
+      const column = columns[c];
+      const colPtr = this.columnsBase + c * colLayout.size;
+      new Uint8Array(this.arena.memory.buffer, colPtr, colLayout.size).fill(0);
+      writePointer(dv, colPtr + colLayout.data, this.dataPtrs[c]);
+      if (column.type === 'string') {
+        const enc = encoded[c];
+        let p = this.dataPtrs[c];
+        for (let i = 0; i < rowCount; ++i) {
+          memBytes.set(enc.parts[i], p);
+          p += enc.parts[i].length;
+        }
+        for (let i = 0; i <= rowCount; ++i) {
+          dv.setInt32(this.offsetsPtrs[c] + i * 4, enc.offsets[i], true);
+        }
+        writePointer(dv, colPtr + colLayout.offsets, this.offsetsPtrs[c]);
+        dv.setUint8(colPtr + colLayout.offsetWidth, 4);
+      } else {
+        const width = coreTypeWidth(column.type);
+        const values = column.values;
+        const bytes = typedColumnBytes(values, column.type, rowCount);
+        if (bytes) {
+          memBytes.set(bytes, this.dataPtrs[c]);
+        } else {
+          for (let i = 0; i < rowCount; ++i) {
+            writeNumericValue(dv, this.dataPtrs[c] + i * width, column.type, values[i]);
+          }
+        }
+      }
+    }
+
+    new Uint8Array(this.arena.memory.buffer, this.rowsetPtr, rsLayout.size).fill(0);
+    writePointer(dv, this.rowsetPtr + rsLayout.columns, this.columnsBase);
+    dv.setBigInt64(this.rowsetPtr + rsLayout.columnCount, BigInt(columns.length), true);
+    dv.setBigInt64(this.rowsetPtr + rsLayout.rowCount, BigInt(rowCount), true);
+    if (selection) {
+      memBytes.set(selection.subarray(0, rowCount), this.selectionPtr);
+      writePointer(dv, this.rowsetPtr + rsLayout.selection, this.selectionPtr);
+    } else if (wantSelection) {
+      writePointer(dv, this.rowsetPtr + rsLayout.selection, this.selectionPtr);
+    }
+
+    return { rowsetPtr: this.rowsetPtr, selectionPtr: this.selectionPtr };
+  }
+
+  ensureStructs(columnCount) {
+    if (this.rowsetPtr && this.dataPtrs.length === columnCount) {
+      return;
+    }
+    const colLayout = this.layout.column;
+    const rsLayout = this.layout.rowset;
+    this.columnsBase = this.arena.alloc(columnCount * colLayout.size, 8);
+    this.rowsetPtr = this.arena.alloc(rsLayout.size, 8);
+    this.dataPtrs = new Array(columnCount).fill(0);
+    this.dataCaps = new Array(columnCount).fill(0);
+    this.offsetsPtrs = new Array(columnCount).fill(0);
+    this.offsetsCaps = new Array(columnCount).fill(0);
+  }
+
+  ensureData(index, bytes, align) {
+    if (this.dataCaps[index] >= bytes) {
+      return;
+    }
+    this.dataPtrs[index] = this.arena.alloc(bytes, align);
+    this.dataCaps[index] = bytes;
+  }
+
+  ensureOffsets(index, bytes) {
+    if (this.offsetsCaps[index] >= bytes) {
+      return;
+    }
+    this.offsetsPtrs[index] = this.arena.alloc(bytes, 4);
+    this.offsetsCaps[index] = bytes;
+  }
+
+  ensureSelection(bytes) {
+    if (this.selectionCap >= bytes) {
+      return;
+    }
+    this.selectionPtr = this.arena.alloc(bytes, 8);
+    this.selectionCap = bytes;
+  }
+}
+
 // A bump allocator over one kernel module's linear memory. All allocations are
 // performed before any writes so a mid-write memory.grow() never detaches a view.
 class Arena {
@@ -393,27 +543,7 @@ function marshalRowSet(arena, layout, columns, rowCount, wantSelection, selectio
   // detach views): parts hold each row's bytes, offsets are cumulative.
   const encoded = columns.map(column => {
     if (column.type !== 'string') return null;
-    const parts = new Array(rowCount);
-    const offsets = new Int32Array(rowCount + 1);
-    const cache = new Map();
-    let total = 0;
-    for (let i = 0; i < rowCount; ++i) {
-      const value = column.values[i];
-      let b = EMPTY_BYTES;
-      if (value !== null && value !== undefined) {
-        const text = String(value);
-        b = cache.get(text);
-        if (!b) {
-          b = encoder.encode(text);
-          cache.set(text, b);
-        }
-      }
-      parts[i] = b;
-      offsets[i] = total;
-      total += b.length;
-    }
-    offsets[rowCount] = total;
-    return { parts, offsets, total };
+    return encodeStringColumn(column.values, rowCount, encoder);
   });
 
   const columnsBase = arena.alloc(columns.length * colLayout.size, 8);
@@ -571,6 +701,12 @@ function readValidityBits(memBytes, maskPtr, count) {
 // linear memory). Mirrors the native TAggregateProcessor protocol; the arena
 // is also the kernel's qdb_alloc backing, so nothing ever overlaps.
 export function runAggregate(kernel, layout, batch, selection, stage) {
+  const state = createAggregateState(kernel, layout, stage);
+  updateAggregateState(state, batch, selection);
+  return finishAggregateState(state);
+}
+
+function createAggregateState(kernel, layout, stage) {
   const dispatch = kernel.instance.exports['agg_dispatch'];
   const measure = kernel.instance.exports['agg_measure_keys'];
   const finalize = kernel.instance.exports['agg_finalize'];
@@ -590,10 +726,50 @@ export function runAggregate(kernel, layout, batch, selection, stage) {
   new Uint8Array(arena.memory.buffer, ht, layout.hashTable.size).fill(0);
   dispatch(BigInt(ht), 0n, 4n, 0n);
 
+  return {
+    kernel,
+    layout,
+    stage,
+    dispatch,
+    measure,
+    finalize,
+    arena,
+    ht,
+    keyCount,
+    output,
+    aggCount,
+    inputWriter: new RowSetWriter(arena, layout),
+    finished: false,
+  };
+}
+
+function updateAggregateState(state, batch, selection) {
+  if (state.finished) {
+    throw new Error('aggregate state is already finalized');
+  }
   // update(ht, batch) — the kernel honors rowset.Selection.
-  const { rowsetPtr } = marshalRowSet(
-    arena, layout, batch.columns, batch.rowCount, false, selection);
-  dispatch(BigInt(ht), BigInt(rowsetPtr), 0n, 1n);
+  const { rowsetPtr } = state.inputWriter.write(
+    batch.columns, batch.rowCount, false, selection);
+  state.dispatch(BigInt(state.ht), BigInt(rowsetPtr), 0n, 1n);
+}
+
+function finishAggregateState(state) {
+  if (state.finished) {
+    throw new Error('aggregate state is already finalized');
+  }
+  state.finished = true;
+  const {
+    kernel,
+    layout,
+    dispatch,
+    measure,
+    finalize,
+    arena,
+    ht,
+    keyCount,
+    output,
+    aggCount,
+  } = state;
 
   const size = Number(
     arena.view().getBigInt64(ht + layout.hashTable.sizeOffset, true));
@@ -852,6 +1028,493 @@ export async function executeBrowserPipeline(exec, readSource) {
   return result;
 }
 
+const TaskResult = {
+  OK: 'OK',
+  NEED_DATA: 'NEED_DATA',
+  BLOCKED_OUTPUT: 'BLOCKED_OUTPUT',
+  FINISHED: 'FINISHED',
+};
+
+const FetchResult = {
+  OK: 'OK',
+  NO_DATA: 'NO_DATA',
+  FINISHED: 'FINISHED',
+};
+
+class OneToOneConnection {
+  constructor(capacity = 1) {
+    this.capacity = capacity;
+    this.queue = [];
+    this.finished = false;
+    this.stats = {
+      pushed: 0,
+      popped: 0,
+      finished: 0,
+      blockedPush: 0,
+      emptyFetch: 0,
+      finishedFetch: 0,
+    };
+  }
+
+  canPush() {
+    return this.queue.length < this.capacity;
+  }
+
+  push(rowSet) {
+    if (!this.canPush()) {
+      ++this.stats.blockedPush;
+      return false;
+    }
+    this.queue.push(rowSet);
+    ++this.stats.pushed;
+    return true;
+  }
+
+  finish() {
+    if (!this.finished) {
+      this.finished = true;
+      ++this.stats.finished;
+    }
+  }
+
+  fetch() {
+    if (this.queue.length > 0) {
+      ++this.stats.popped;
+      return { result: FetchResult.OK, rowSet: this.queue.shift() };
+    }
+    if (this.finished) {
+      ++this.stats.finishedFetch;
+      return { result: FetchResult.FINISHED, rowSet: null };
+    }
+    ++this.stats.emptyFetch;
+    return { result: FetchResult.NO_DATA, rowSet: null };
+  }
+}
+
+class SchedulerNode {
+  constructor(task, label) {
+    this.task = task;
+    this.label = label;
+    this.inbound = [];
+    this.outbound = [];
+    this.elapsedMs = 0;
+    this.rows = 0;
+  }
+}
+
+class SingleThreadedScheduler {
+  constructor(root) {
+    this.root = root;
+    this.ready = [];
+    this.scheduled = new Set();
+    this.stats = {
+      scheduled: 0,
+      popped: 0,
+      executed: 0,
+      needData: 0,
+      blockedOutput: 0,
+      ok: 0,
+      finished: 0,
+    };
+  }
+
+  async run() {
+    this.schedule(this.root);
+    while (this.ready.length > 0) {
+      const node = this.ready.shift();
+      this.scheduled.delete(node);
+      ++this.stats.popped;
+
+      const started = nowMs();
+      const state = await node.task.execute();
+      node.elapsedMs += nowMs() - started;
+      node.rows = node.task.rows || node.rows || 0;
+      ++this.stats.executed;
+
+      if (state === TaskResult.NEED_DATA) {
+        ++this.stats.needData;
+        this.scheduleInput(node);
+      } else if (state === TaskResult.BLOCKED_OUTPUT || state === TaskResult.FINISHED) {
+        if (state === TaskResult.BLOCKED_OUTPUT) {
+          ++this.stats.blockedOutput;
+        } else {
+          ++this.stats.finished;
+        }
+        this.scheduleOutput(node);
+      } else if (state === TaskResult.OK) {
+        ++this.stats.ok;
+        this.schedule(node);
+        this.scheduleOutput(node);
+      }
+    }
+  }
+
+  schedule(node) {
+    if (!node || this.scheduled.has(node)) {
+      return;
+    }
+    this.ready.push(node);
+    this.scheduled.add(node);
+    ++this.stats.scheduled;
+  }
+
+  scheduleInput(node) {
+    for (const edge of node.inbound) {
+      this.schedule(edge.src);
+    }
+  }
+
+  scheduleOutput(node) {
+    for (const edge of node.outbound) {
+      this.schedule(edge.dst);
+    }
+  }
+}
+
+function connect(src, dst, connection = new OneToOneConnection(1)) {
+  const edge = { src, dst, connection };
+  src.outbound.push(edge);
+  dst.inbound.push(edge);
+  return edge;
+}
+
+class SourceTask {
+  constructor(stage, readSourceBatches, onProgress) {
+    this.stage = stage;
+    this.readSourceBatches = readSourceBatches;
+    this.onProgress = onProgress;
+    this.iterator = null;
+    this.done = false;
+    this.rows = 0;
+  }
+
+  async execute() {
+    if (this.done) {
+      return TaskResult.FINISHED;
+    }
+    const out = this.outbound.connection;
+    if (!out.canPush()) {
+      return TaskResult.BLOCKED_OUTPUT;
+    }
+    if (!this.iterator) {
+      this.iterator = this.readSourceBatches(this.stage, this.onProgress)[Symbol.asyncIterator]();
+    }
+    const next = await this.iterator.next();
+    if (next.done) {
+      out.finish();
+      this.done = true;
+      return TaskResult.FINISHED;
+    }
+    this.rows += next.value.rowCount;
+    out.push({ batch: next.value, selection: null });
+    return TaskResult.OK;
+  }
+
+  get outbound() {
+    return this.node.outbound[0];
+  }
+}
+
+class FilterTask {
+  constructor(stage, layout) {
+    this.stage = stage;
+    this.layout = layout;
+    this.kernel = null;
+    this.done = false;
+    this.rows = 0;
+  }
+
+  async execute() {
+    if (this.done) return TaskResult.FINISHED;
+    const input = this.node.inbound[0].connection;
+    const output = this.node.outbound[0].connection;
+    if (!output.canPush()) return TaskResult.BLOCKED_OUTPUT;
+
+    const fetched = input.fetch();
+    if (fetched.result === FetchResult.NO_DATA) return TaskResult.NEED_DATA;
+    if (fetched.result === FetchResult.FINISHED) {
+      output.finish();
+      this.done = true;
+      return TaskResult.FINISHED;
+    }
+    if (!this.kernel) {
+      this.kernel = await instantiateKernel(this.stage.wasm, '<kernel>');
+    }
+    const selection = runFilter(this.kernel, this.layout, fetched.rowSet.batch);
+    this.rows += fetched.rowSet.batch.rowCount;
+    output.push({ batch: fetched.rowSet.batch, selection });
+    return TaskResult.OK;
+  }
+}
+
+class ProjectTask {
+  constructor(stage, layout) {
+    this.stage = stage;
+    this.layout = layout;
+    this.kernel = null;
+    this.done = false;
+    this.rows = 0;
+  }
+
+  async execute() {
+    if (this.done) return TaskResult.FINISHED;
+    const input = this.node.inbound[0].connection;
+    const output = this.node.outbound[0].connection;
+    if (!output.canPush()) return TaskResult.BLOCKED_OUTPUT;
+
+    const fetched = input.fetch();
+    if (fetched.result === FetchResult.NO_DATA) return TaskResult.NEED_DATA;
+    if (fetched.result === FetchResult.FINISHED) {
+      output.finish();
+      this.done = true;
+      return TaskResult.FINISHED;
+    }
+
+    let columns;
+    if (this.stage.wasm) {
+      if (!this.kernel) {
+        this.kernel = await instantiateKernel(this.stage.wasm, '<project>');
+      }
+      columns = runProject(this.kernel, this.layout, fetched.rowSet.batch, this.stage.output);
+    } else {
+      columns = this.stage.output.map(col => ({
+        name: col.name,
+        type: col.type,
+        values: fetched.rowSet.batch.columns[col.inputIndex].values,
+      }));
+    }
+    const batch = { rowCount: fetched.rowSet.batch.rowCount, columns };
+    this.rows += batch.rowCount;
+    output.push({ batch, selection: fetched.rowSet.selection });
+    return TaskResult.OK;
+  }
+}
+
+class AggregateTask {
+  constructor(stage, layout) {
+    this.stage = stage;
+    this.layout = layout;
+    this.kernel = null;
+    this.state = null;
+    this.pending = null;
+    this.done = false;
+    this.rows = 0;
+  }
+
+  async execute() {
+    if (this.done) return TaskResult.FINISHED;
+    const input = this.node.inbound[0].connection;
+    const output = this.node.outbound[0].connection;
+
+    if (this.pending) {
+      if (!output.canPush()) return TaskResult.BLOCKED_OUTPUT;
+      output.push({ batch: this.pending, selection: null });
+      output.finish();
+      this.pending = null;
+      this.done = true;
+      return TaskResult.FINISHED;
+    }
+
+    const fetched = input.fetch();
+    if (fetched.result === FetchResult.NO_DATA) return TaskResult.NEED_DATA;
+    if (fetched.result === FetchResult.FINISHED) {
+      if (!this.state) {
+        if (!this.kernel) {
+          this.kernel = await instantiateKernel(this.stage.wasm, 'agg_dispatch');
+        }
+        this.state = createAggregateState(this.kernel, this.layout, this.stage);
+      }
+      this.pending = finishAggregateState(this.state);
+      return this.execute();
+    }
+
+    if (!this.kernel) {
+      this.kernel = await instantiateKernel(this.stage.wasm, 'agg_dispatch');
+      this.state = createAggregateState(this.kernel, this.layout, this.stage);
+    }
+    updateAggregateState(this.state, fetched.rowSet.batch, fetched.rowSet.selection);
+    this.rows += fetched.rowSet.batch.rowCount;
+    return TaskResult.OK;
+  }
+}
+
+class SortTask {
+  constructor(stage, layout) {
+    this.stage = stage;
+    this.layout = layout;
+    this.inputs = [];
+    this.pending = null;
+    this.done = false;
+    this.rows = 0;
+  }
+
+  async execute() {
+    if (this.done) return TaskResult.FINISHED;
+    const input = this.node.inbound[0].connection;
+    const output = this.node.outbound[0].connection;
+
+    if (this.pending) {
+      if (!output.canPush()) return TaskResult.BLOCKED_OUTPUT;
+      output.push({ batch: this.pending, selection: null });
+      output.finish();
+      this.pending = null;
+      this.done = true;
+      return TaskResult.FINISHED;
+    }
+
+    const fetched = input.fetch();
+    if (fetched.result === FetchResult.NO_DATA) return TaskResult.NEED_DATA;
+    if (fetched.result === FetchResult.OK) {
+      this.inputs.push(fetched.rowSet);
+      this.rows += fetched.rowSet.batch.rowCount;
+      return TaskResult.OK;
+    }
+
+    const batch = compactRowSets(this.inputs);
+    const rowLimit = this.stage.kind === 'top-sort' ? Number(this.stage.limit) : null;
+    if (this.stage.wasm) {
+      const kernel = await instantiateKernel(
+        this.stage.wasm, 'qdb_radix_sort_indices_composite');
+      this.pending = runRadixSort(
+        kernel, this.layout, batch, null, this.stage.radixKeys, rowLimit);
+    } else {
+      this.pending = applySort(batch, null, this.stage.keys, rowLimit);
+    }
+    return this.execute();
+  }
+}
+
+class SinkTask {
+  constructor(limit) {
+    this.limit = limit;
+    this.rowSets = [];
+    this.done = false;
+    this.rows = 0;
+  }
+
+  async execute() {
+    if (this.done) return TaskResult.FINISHED;
+    const input = this.node.inbound[0].connection;
+    const fetched = input.fetch();
+    if (fetched.result === FetchResult.NO_DATA) return TaskResult.NEED_DATA;
+    if (fetched.result === FetchResult.FINISHED) {
+      this.done = true;
+      return TaskResult.FINISHED;
+    }
+    this.rowSets.push(fetched.rowSet);
+    this.rows += fetched.rowSet.batch.rowCount;
+    return TaskResult.OK;
+  }
+
+  result() {
+    return materializeRowSets(this.rowSets, this.limit);
+  }
+}
+
+function makeNode(task, label) {
+  const node = new SchedulerNode(task, label);
+  task.node = node;
+  return node;
+}
+
+export async function executeBrowserPipelineScheduled(exec, readSourceBatches, options = {}) {
+  if (!exec || exec.supported !== true) {
+    throw new Error(exec?.reason || 'pipeline is not supported for browser execution');
+  }
+  if (exec.embedWasm !== true) {
+    throw new Error('exec plan was produced without embedded wasm kernels');
+  }
+
+  const layout = exec.layout;
+  let root = null;
+  let previous = null;
+  let limit = null;
+  const nodes = [];
+
+  for (const stage of exec.stages) {
+    let node = null;
+    if (stage.kind === 'source') {
+      node = makeNode(
+        new SourceTask(stage, readSourceBatches, options.onProgress || null),
+        stage.kind);
+      root = node;
+    } else if (stage.kind === 'filter') {
+      node = makeNode(new FilterTask(stage, layout), stage.kind);
+    } else if (stage.kind === 'project') {
+      node = makeNode(new ProjectTask(stage, layout), stage.kind);
+    } else if (stage.kind === 'aggregate') {
+      node = makeNode(new AggregateTask(stage, layout), stage.kind);
+    } else if (stage.kind === 'sort' || stage.kind === 'top-sort') {
+      node = makeNode(new SortTask(stage, layout), stage.kind);
+    } else if (stage.kind === 'limit') {
+      limit = { limit: Number(stage.limit), offset: Number(stage.offset || 0) };
+      continue;
+    } else {
+      throw new Error(`unsupported exec stage: ${stage.kind}`);
+    }
+
+    nodes.push(node);
+    if (previous) {
+      connect(previous, node, new OneToOneConnection(1));
+    }
+    previous = node;
+  }
+
+  if (!root || !previous) {
+    throw new Error('exec plan has no runnable stages');
+  }
+
+  const sink = makeNode(new SinkTask(limit), 'materialize');
+  nodes.push(sink);
+  connect(previous, sink, new OneToOneConnection(1));
+
+  const scheduler = new SingleThreadedScheduler(root);
+  await scheduler.run();
+
+  const result = sink.task.result();
+  result.timings = nodes.map(node => ({
+    stage: node.label,
+    rows: node.rows,
+    elapsedMs: node.elapsedMs,
+  }));
+  result.scheduler = scheduler.stats;
+  result.connections = nodes.flatMap(node =>
+    node.outbound.map(edge => ({
+      from: edge.src.label,
+      to: edge.dst.label,
+      ...edge.connection.stats,
+    })));
+  return result;
+}
+
+function compactRowSets(rowSets) {
+  if (rowSets.length === 0) {
+    return { rowCount: 0, columns: [] };
+  }
+  if (rowSets.length === 1 && !rowSets[0].selection) {
+    return rowSets[0].batch;
+  }
+
+  const specs = rowSets[0].batch.columns.map(col => ({
+    name: col.name,
+    type: col.type,
+  }));
+  const rows = [];
+  for (const rowSet of rowSets) {
+    const { batch, selection } = rowSet;
+    for (let r = 0; r < batch.rowCount; ++r) {
+      if (selection && !selection[r]) continue;
+      rows.push(batch.columns.map(col => col.values[r]));
+    }
+  }
+
+  const columns = specs.map((spec, c) => ({
+    ...spec,
+    values: rows.map(row => row[c]),
+  }));
+  return { rowCount: rows.length, columns };
+}
+
 // Sort a batch by `keys` (each { index, direction, nulls }), folding any
 // pending selection into a compacted, reordered batch. When `limit` is set
 // (top-sort), only the first `limit` rows are kept. Returns a new batch with no
@@ -945,6 +1608,31 @@ function materialize(batch, selection, limit) {
       break;
     }
     rows.push(batch.columns.map(col => formatValue(col.values[i])));
+  }
+  return { columns, rows };
+}
+
+function materializeRowSets(rowSets, limit) {
+  const first = rowSets.find(rowSet => rowSet.batch.columns.length > 0);
+  const columns = first ? first.batch.columns.map(col => col.name) : [];
+  const rows = [];
+  const offset = limit ? limit.offset : 0;
+  const max = limit ? limit.limit : Infinity;
+  let skipped = 0;
+
+  for (const rowSet of rowSets) {
+    const { batch, selection } = rowSet;
+    for (let i = 0; i < batch.rowCount; ++i) {
+      if (selection && !selection[i]) continue;
+      if (skipped < offset) {
+        ++skipped;
+        continue;
+      }
+      if (rows.length >= max) {
+        return { columns, rows };
+      }
+      rows.push(batch.columns.map(col => formatValue(col.values[i])));
+    }
   }
   return { columns, rows };
 }
