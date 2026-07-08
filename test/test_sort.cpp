@@ -84,24 +84,75 @@ uint64_t RadixKey(const TStringKey& key) {
     return key.Prefix;
 }
 
+void CountSort(TStringKey* dest, TStringKey* work, int n, int digit)
+{
+    // base-16, 8 bits
+    uint32_t counts[256] = {0};
+    // count digits
+    for (int i = 0; i < n; i++) {
+        counts[(RadixKey(dest[i]) >> digit) & 0xffU]++;
+    }
+    // counts -> places
+    for (int i = 1; i < 256; i++) {
+        counts[i] += counts[i - 1];
+    }
+
+    for (int i = n-1; i >= 0; --i) {
+        auto index = (RadixKey(dest[i]) >> digit) & 0xffU;
+        auto place = counts[index]-1;
+        work[place] = dest[i];
+        counts[index]--;
+    }
+
+    for (int i = 0; i < n; i++) {
+        dest[i] = work[i];
+    }
+}
+
+uint64_t MakePrefix(std::string_view s) {
+    uint64_t x = 0;
+    const size_t n = std::min<size_t>(8, s.size());
+
+    for (size_t i = 0; i < n; ++i) {
+        x = (x << 8) | static_cast<unsigned char>(s[i]);
+    }
+
+    x <<= 8 * (8 - n); // padding zeroes
+    return x;
+}
+
 void SortStrings(std::vector<std::string_view>& strings, std::vector<uint32_t>& indices)
 {
     int n = strings.size();
-    std::vector<TStringKey> keys(n);
+    std::vector<TStringKey> keys(n), work(n);
     for (int i = 0; i < n; i++) {
-        keys[i].Prefix = 0;
-        memcpy(&keys[i].Prefix, strings[i].data(), std::min(8, static_cast<int>(strings[i].size())));
-        keys[i].Prefix = ntohll(keys[i].Prefix);
+        keys[i].Prefix = MakePrefix(strings[i]);
         keys[i].RowIndex = i;
     }
-    std::vector<uint32_t> work(n);
-    std::iota(indices.begin(), indices.end(), 0);
     for (int i = 0; i < sizeof(uint64_t) * 8; i += 8) {
-        CountSortIndices(keys.data(), indices.data(), work.data(), n, i);
+        CountSort(keys.data(), work.data(), n, i);
     }
-    //for (int i = 0; i < n; i++) {
-    //    indices[i] = keys[i].RowIndex;
-    //}
+
+    int i, j = 0;
+    auto sort_range = [&](int start, int end) {
+        std::stable_sort(keys.begin() + start, keys.begin() + end, [&](const TStringKey& lhs, const TStringKey& rhs) {
+            return strings[lhs.RowIndex] < strings[rhs.RowIndex];
+        });
+    };
+    for (i = 0; i < n; i++) {
+        if (keys[i].Prefix != keys[j].Prefix) {
+            if (i - j > 1) {
+                sort_range(j, i);
+            }
+            j = i;
+        }
+    }
+    if (i - j > 1) {
+        sort_range(j, i);
+    }
+    for (int i = 0; i < n; i++) {
+        indices[i] = keys[i].RowIndex;
+    }
 }
 
 template<typename T>
@@ -749,7 +800,7 @@ TEST(SortRadixOz, GenericSortUsesI32RadixKeyOverload) {
 
 TEST(SortStrings, Basic) {
     std::vector<std::string_view> strings = {
-        "banana", "apple", "cherry", "apple", "date", "fig", "grape", "elderberry"
+        "banana", "apple", "cherry", "apple", "12345678y", "date", "fig", "grape", "elderberry", "12345678x",
     };
     std::vector<uint32_t> indices(strings.size());
     std::iota(indices.begin(), indices.end(), 0);
