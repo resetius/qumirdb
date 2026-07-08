@@ -43,14 +43,9 @@ struct TTopSortState {
 struct TTopSortScratch {
     std::unique_ptr<TTopSortState> State = std::make_unique<TTopSortState>();
     std::vector<uint32_t> TempRows;
-    std::vector<uint32_t> TempLocalIndices;
-    std::vector<uint32_t> TempRowsSorted;
-    std::vector<uint32_t> Work;
+    std::vector<TRowId> TempRowIds;
+    std::vector<TRowId> Work;
     std::vector<uint32_t> Counts;
-    std::vector<std::vector<char>> ValueStorage;
-    std::vector<void*> ValuePtrs;
-    std::vector<std::vector<uint8_t>> ValidStorage;
-    std::vector<uint8_t*> ValidPtrs;
     std::unique_ptr<bool[]> Descs;
     std::unique_ptr<bool[]> NullsFirsts;
     size_t KeyCapacity = 0;
@@ -60,10 +55,6 @@ struct TTopSortScratch {
         if (KeyCapacity == keyCount) {
             return;
         }
-        ValueStorage.resize(keyCount);
-        ValuePtrs.resize(keyCount);
-        ValidStorage.resize(keyCount);
-        ValidPtrs.resize(keyCount);
         Descs = std::make_unique<bool[]>(keyCount);
         NullsFirsts = std::make_unique<bool[]>(keyCount);
         KeyCapacity = keyCount;
@@ -505,45 +496,21 @@ void GatherColumn(const TRowStore& store, const std::vector<TRowId>& rowIds,
     }
 }
 
-size_t RadixValueWidth(const TTypePtr& type) {
-    auto valueType = UnwrapNamedType(UnwrapNullableType(type));
-    if (auto integer = TMaybeType<TIntegerType>(valueType)) {
-        return static_cast<size_t>(integer.Cast()->BitWidth() / 8);
-    }
-    if (TMaybeType<TFloatType>(valueType)) {
-        return 8;
-    }
-    return 0;
+bool IsStringKeyType(const TTypePtr& type) {
+    return static_cast<bool>(TMaybeType<TStringType>(
+        UnwrapNamedType(UnwrapNullableType(type))));
 }
 
-std::vector<char> MaterializeRadixValues(const TRowStore& store,
-    const std::vector<TRowId>& rows, const TSortColumnRef& keyColumn)
-{
-    const size_t width = RadixValueWidth(keyColumn.Type);
-    if (width == 0) {
-        return {};
+// The cascade's `work` scratch is shared by every key. Numeric/bool keys need
+// one row-id array; string keys sort {prefix, rowId} pairs and need two pair
+// arrays (32 bytes/row = 4 i64/row).
+size_t RadixWorkStride(const std::vector<TSortColumnRef>& keyColumns) {
+    for (const auto& keyColumn : keyColumns) {
+        if (IsStringKeyType(keyColumn.Type)) {
+            return 4;
+        }
     }
-    std::vector<char> values(rows.size() * width);
-    for (size_t i = 0; i < rows.size(); ++i) {
-        const TRowId rowId = rows[i];
-        const auto& column = store.Column(rowId, keyColumn.Index);
-        std::memcpy(values.data() + i * width,
-            column.Data + static_cast<int64_t>(RowIndex(rowId)) * width,
-            width);
-    }
-    return values;
-}
-
-std::vector<uint8_t> MaterializeRadixValidity(const TRowStore& store,
-    const std::vector<TRowId>& rows, const TSortColumnRef& keyColumn)
-{
-    std::vector<uint8_t> valid(rows.size(), uint8_t{1});
-    for (size_t i = 0; i < rows.size(); ++i) {
-        const TRowId rowId = rows[i];
-        const auto& column = store.Column(rowId, keyColumn.Index);
-        valid[i] = SourceValid(column, RowIndex(rowId)) ? uint8_t{1} : uint8_t{0};
-    }
-    return valid;
+    return 1;
 }
 
 bool HasAnyNullMask(const TRowSet& batch, const std::vector<uint32_t>& rows,
@@ -551,36 +518,6 @@ bool HasAnyNullMask(const TRowSet& batch, const std::vector<uint32_t>& rows,
 {
     const TColumn& column = batch.Columns[columnIdx];
     return column.Mask && !rows.empty();
-}
-
-std::vector<char> MaterializeRadixValues(const TRowSet& batch,
-    const std::vector<uint32_t>& rows, const TSortColumnRef& keyColumn)
-{
-    const size_t width = RadixValueWidth(keyColumn.Type);
-    if (width == 0) {
-        return {};
-    }
-    std::vector<char> values(rows.size() * width);
-    const TColumn& column = batch.Columns[keyColumn.Index];
-    for (size_t i = 0; i < rows.size(); ++i) {
-        std::memcpy(values.data() + i * width,
-            column.Data + static_cast<int64_t>(rows[i]) * width,
-            width);
-    }
-    return values;
-}
-
-std::vector<uint8_t> MaterializeRadixValidity(const TRowSet& batch,
-    const std::vector<uint32_t>& rows, const TSortColumnRef& keyColumn)
-{
-    std::vector<uint8_t> valid(rows.size(), uint8_t{1});
-    const TColumn& column = batch.Columns[keyColumn.Index];
-    for (size_t i = 0; i < rows.size(); ++i) {
-        valid[i] = SourceValid(column, static_cast<int32_t>(rows[i]))
-            ? uint8_t{1}
-            : uint8_t{0};
-    }
-    return valid;
 }
 
 } // namespace
@@ -620,47 +557,23 @@ bool TSortProcessor::TryRadixSort()
         return false;
     }
 
-    std::vector<uint32_t> indices(Rows_.size());
-    std::vector<uint32_t> work(Rows_.size());
+    std::vector<TRowId> work(Rows_.size() * RadixWorkStride(KeyColumns_));
     std::vector<uint32_t> counts(hasAnyNulls ? 257 : 256);
-    std::vector<std::vector<char>> valueStorage(Keys_.size());
-    std::vector<void*> valuePtrs(Keys_.size());
-    std::vector<std::vector<uint8_t>> validStorage(Keys_.size());
-    std::vector<uint8_t*> validPtrs(Keys_.size());
     auto descs = std::make_unique<bool[]>(Keys_.size());
     auto nullsFirsts = std::make_unique<bool[]>(Keys_.size());
-    for (uint32_t i = 0; i < static_cast<uint32_t>(indices.size()); ++i) {
-        indices[i] = i;
-    }
     for (size_t k = 0; k < Keys_.size(); ++k) {
-        valueStorage[k] = MaterializeRadixValues(Store_, Rows_, KeyColumns_[k]);
-        if (valueStorage[k].empty() && !Rows_.empty()) {
-            return false;
-        }
-        valuePtrs[k] = valueStorage[k].data();
         descs[k] = Keys_[k].Direction == ESortDirection::Desc;
         nullsFirsts[k] = EffectiveNulls(Keys_[k]) == ESortNulls::First;
-        if (hasAnyNulls) {
-            validStorage[k] = MaterializeRadixValidity(Store_, Rows_, KeyColumns_[k]);
-            validPtrs[k] = validStorage[k].data();
-        }
     }
 
+    auto* store = const_cast<TRowSet*>(Store_.Data());
     if (hasAnyNulls) {
-        RadixKernel_.NullableDispatch(valuePtrs.data(), validPtrs.data(),
-            indices.data(), work.data(), counts.data(),
-            static_cast<int64_t>(indices.size()), descs.get(), nullsFirsts.get());
+        RadixKernel_.NullableDispatch(store, Rows_.data(), work.data(), counts.data(),
+            static_cast<int64_t>(Rows_.size()), descs.get(), nullsFirsts.get());
     } else {
-        RadixKernel_.Dispatch(valuePtrs.data(), indices.data(), work.data(), counts.data(),
-            static_cast<int64_t>(indices.size()), descs.get());
+        RadixKernel_.Dispatch(store, Rows_.data(), work.data(), counts.data(),
+            static_cast<int64_t>(Rows_.size()), descs.get());
     }
-
-    std::vector<TRowId> sorted;
-    sorted.reserve(Rows_.size());
-    for (uint32_t index : indices) {
-        sorted.push_back(Rows_[index]);
-    }
-    Rows_ = std::move(sorted);
     return true;
 }
 
@@ -883,43 +796,33 @@ bool TTopSortProcessor::TryRadixSortBatch(
 
     auto& scratch = *Scratch_;
     scratch.EnsureKeyCapacity(Keys_.size());
-    scratch.TempLocalIndices.resize(rows.size());
-    scratch.Work.resize(rows.size());
+    scratch.TempRowIds.resize(rows.size());
+    scratch.Work.resize(rows.size() * RadixWorkStride(KeyColumns_));
     scratch.Counts.assign(hasAnyNulls ? 257 : 256, 0);
-    scratch.TempRowsSorted.resize(rows.size());
-    for (uint32_t i = 0; i < static_cast<uint32_t>(scratch.TempLocalIndices.size()); ++i) {
-        scratch.TempLocalIndices[i] = i;
+    for (size_t i = 0; i < rows.size(); ++i) {
+        scratch.TempRowIds[i] = MakeRowId(0, static_cast<int32_t>(rows[i]));
     }
 
     for (size_t k = 0; k < Keys_.size(); ++k) {
-        scratch.ValueStorage[k] = MaterializeRadixValues(batch, rows, KeyColumns_[k]);
-        if (scratch.ValueStorage[k].empty()) {
-            return false;
-        }
-        scratch.ValuePtrs[k] = scratch.ValueStorage[k].data();
         scratch.Descs[k] = Keys_[k].Direction == ESortDirection::Desc;
         scratch.NullsFirsts[k] = EffectiveNulls(Keys_[k]) == ESortNulls::First;
-        if (hasAnyNulls) {
-            scratch.ValidStorage[k] = MaterializeRadixValidity(batch, rows, KeyColumns_[k]);
-            scratch.ValidPtrs[k] = scratch.ValidStorage[k].data();
-        }
     }
 
+    auto* store = const_cast<TRowSet*>(&batch);
     if (hasAnyNulls) {
-        RadixKernel_.NullableDispatch(scratch.ValuePtrs.data(), scratch.ValidPtrs.data(),
-            scratch.TempLocalIndices.data(), scratch.Work.data(), scratch.Counts.data(),
-            static_cast<int64_t>(scratch.TempLocalIndices.size()),
+        RadixKernel_.NullableDispatch(store, scratch.TempRowIds.data(),
+            scratch.Work.data(), scratch.Counts.data(),
+            static_cast<int64_t>(scratch.TempRowIds.size()),
             scratch.Descs.get(), scratch.NullsFirsts.get());
     } else {
-        RadixKernel_.Dispatch(scratch.ValuePtrs.data(),
-            scratch.TempLocalIndices.data(), scratch.Work.data(), scratch.Counts.data(),
-            static_cast<int64_t>(scratch.TempLocalIndices.size()), scratch.Descs.get());
+        RadixKernel_.Dispatch(store, scratch.TempRowIds.data(),
+            scratch.Work.data(), scratch.Counts.data(),
+            static_cast<int64_t>(scratch.TempRowIds.size()), scratch.Descs.get());
     }
 
     for (size_t i = 0; i < rows.size(); ++i) {
-        scratch.TempRowsSorted[i] = rows[scratch.TempLocalIndices[i]];
+        rows[i] = static_cast<uint32_t>(RowIndex(scratch.TempRowIds[i]));
     }
-    rows.swap(scratch.TempRowsSorted);
     return true;
 }
 

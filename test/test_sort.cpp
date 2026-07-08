@@ -10,6 +10,7 @@
 #include <bit>
 #include <limits>
 #include <numeric>
+#include <random>
 #include <type_traits>
 #include <vector>
 
@@ -864,6 +865,188 @@ TEST(SortStrings, Basic) {
     }
 
     // EXPECT_TRUE(std::is_sorted(sortedStrings.begin(), sortedStrings.end()));
+}
+
+std::unique_ptr<NQumir::TLLVMRunner> CompileSortStringsOperation(
+    const std::string& entryName,
+    void*& entry)
+{
+    std::vector<NQumir::NAst::TExprPtr> programStmts;
+    auto library = NQdb::NKernel::ParseFunctionLibrary(
+        NQdb::NKernel::ReadSortKernel("sort_strings.oz"));
+    if (!library) {
+        ADD_FAILURE() << library.error().ToString();
+        return {};
+    }
+    for (auto& stmt : *library) {
+        programStmts.push_back(std::move(stmt));
+    }
+
+    NQumir::TLLVMRunnerOptions options;
+    options.CoreInput = true;
+    options.NativeCode = true;
+    options.AllowOverloads = true;
+    auto runner = std::make_unique<NQumir::TLLVMRunner>(options);
+    auto program = std::make_shared<NQumir::NAst::TBlockExpr>(
+        NQumir::TLocation{}, std::move(programStmts));
+    std::string error;
+    entry = runner->CompileKernelAst(program, entryName, &error);
+    EXPECT_NE(entry, nullptr) << error;
+    return runner;
+}
+
+// String column in kernel terms: concatenated bytes + (n+1) offsets + the
+// 3-word { data, offsets, offset_width } descriptor the entries take.
+struct TTestStringColumn {
+    std::string Data;
+    std::vector<int64_t> Offsets;
+    std::array<int64_t, 3> View;
+
+    explicit TTestStringColumn(
+        const std::vector<std::string>& strings, int64_t offsetBase = 0)
+    {
+        Offsets.push_back(offsetBase);
+        for (const auto& value : strings) {
+            Data += value;
+            Offsets.push_back(offsetBase + static_cast<int64_t>(Data.size()));
+        }
+        View = {
+            reinterpret_cast<int64_t>(Data.data()),
+            reinterpret_cast<int64_t>(Offsets.data()),
+            8,
+        };
+    }
+};
+
+using TSortStringsFn =
+    void(*)(int64_t*, uint32_t*, uint32_t*, uint32_t*, int64_t, bool);
+using TSortStringsNullableFn =
+    void(*)(int64_t*, uint8_t*, uint32_t*, uint32_t*, uint32_t*, int64_t, bool, bool);
+
+std::vector<uint32_t> RunSortStringsKernel(
+    const std::vector<std::string>& strings, bool desc, int64_t offsetBase = 0)
+{
+    void* entry = nullptr;
+    auto runner = CompileSortStringsOperation("sort_strings_indices", entry);
+    if (!entry) {
+        return {};
+    }
+    TTestStringColumn column(strings, offsetBase);
+    const int64_t n = static_cast<int64_t>(strings.size());
+    std::vector<uint32_t> indices(n);
+    std::iota(indices.begin(), indices.end(), 0);
+    // Pair scratch: two arrays of 16-byte {prefix, row} pairs.
+    std::vector<uint32_t> work(8 * n);
+    std::vector<uint32_t> counts(257);
+    reinterpret_cast<TSortStringsFn>(entry)(
+        column.View.data(), indices.data(), work.data(), counts.data(), n, desc);
+    return indices;
+}
+
+std::vector<uint32_t> StableSortedStringIndices(
+    const std::vector<std::string>& strings, bool desc)
+{
+    std::vector<uint32_t> expected(strings.size());
+    std::iota(expected.begin(), expected.end(), 0);
+    std::stable_sort(expected.begin(), expected.end(), [&](uint32_t lhs, uint32_t rhs) {
+        return desc ? strings[rhs] < strings[lhs] : strings[lhs] < strings[rhs];
+    });
+    return expected;
+}
+
+TEST(SortStringsOz, MatchesStableSortWithPrefixCollisions) {
+    // Long shared prefixes force the merge tie-break past the 8-byte radix.
+    const std::vector<std::string> strings = {
+        "banana", "apple", "cherry", "apple", "12345678y", "date", "fig",
+        "grape", "elderberry", "12345678x", "12345678", "1234567",
+        "same-prefix-aaaa", "same-prefix-aaab", "same-prefix-aa",
+        "", "z", "same-prefix-aaaa",
+    };
+    EXPECT_EQ(RunSortStringsKernel(strings, false),
+              StableSortedStringIndices(strings, false));
+    EXPECT_EQ(RunSortStringsKernel(strings, true),
+              StableSortedStringIndices(strings, true));
+}
+
+TEST(SortStringsOz, StableOnDuplicates) {
+    const std::vector<std::string> strings = {
+        "dup", "dup", "aaa", "dup", "aaa", "dup",
+    };
+    const auto indices = RunSortStringsKernel(strings, false);
+    EXPECT_EQ(indices, StableSortedStringIndices(strings, false));
+    // Explicit stability check: equal keys keep source order.
+    EXPECT_EQ(indices, (std::vector<uint32_t>{2, 4, 0, 1, 3, 5}));
+}
+
+TEST(SortStringsOz, HonorsOffsetBase) {
+    const std::vector<std::string> strings = {"beta", "alpha", "gamma"};
+    EXPECT_EQ(RunSortStringsKernel(strings, false, /*offsetBase=*/1000),
+              StableSortedStringIndices(strings, false));
+}
+
+TEST(SortStringsOz, MatchesPrototypeOnRandomStrings) {
+    std::mt19937 rng(42);
+    std::vector<std::string> strings;
+    for (int i = 0; i < 500; ++i) {
+        // Bias toward shared prefixes to stress tie-break runs.
+        std::string value = (i % 3 == 0) ? "shared-prefix-longer-than-8-" : "";
+        const int len = static_cast<int>(rng() % 12);
+        for (int j = 0; j < len; ++j) {
+            value += static_cast<char>('a' + rng() % 4);
+        }
+        strings.push_back(std::move(value));
+    }
+    EXPECT_EQ(RunSortStringsKernel(strings, false),
+              StableSortedStringIndices(strings, false));
+    EXPECT_EQ(RunSortStringsKernel(strings, true),
+              StableSortedStringIndices(strings, true));
+
+    // Cross-check against the C++ prototype (SortStrings above).
+    std::vector<std::string_view> views(strings.begin(), strings.end());
+    std::vector<uint32_t> prototype(strings.size());
+    SortStrings(views, prototype);
+    EXPECT_EQ(RunSortStringsKernel(strings, false), prototype);
+}
+
+TEST(SortStringsOz, NullableGroupsNullsAndSortsValid) {
+    void* entry = nullptr;
+    auto runner = CompileSortStringsOperation("sort_strings_indices_nullable", entry);
+    ASSERT_NE(entry, nullptr);
+    auto sort = reinterpret_cast<TSortStringsNullableFn>(entry);
+
+    const std::vector<std::string> strings = {
+        "banana", "", "apple", "", "cherry", "apple",
+    };
+    const std::vector<uint8_t> valid = {1, 0, 1, 0, 1, 1};
+    TTestStringColumn column(strings);
+    const int64_t n = static_cast<int64_t>(strings.size());
+    std::vector<uint32_t> work(8 * n);
+    std::vector<uint32_t> counts(257);
+
+    for (bool nullsFirst : {true, false}) {
+        for (bool desc : {false, true}) {
+            std::vector<uint32_t> indices(n);
+            std::iota(indices.begin(), indices.end(), 0);
+            sort(column.View.data(), const_cast<uint8_t*>(valid.data()),
+                 indices.data(), work.data(), counts.data(), n, desc, nullsFirst);
+
+            std::vector<uint32_t> expected;
+            std::vector<uint32_t> validIdx = {0, 2, 4, 5};
+            std::stable_sort(validIdx.begin(), validIdx.end(), [&](uint32_t a, uint32_t b) {
+                return desc ? strings[b] < strings[a] : strings[a] < strings[b];
+            });
+            if (nullsFirst) {
+                expected = {1, 3};
+                expected.insert(expected.end(), validIdx.begin(), validIdx.end());
+            } else {
+                expected = validIdx;
+                expected.push_back(1);
+                expected.push_back(3);
+            }
+            EXPECT_EQ(indices, expected)
+                << "nullsFirst=" << nullsFirst << " desc=" << desc;
+        }
+    }
 }
 
 int main(int argc, char** argv) {
