@@ -136,6 +136,16 @@ button:hover {
   display: none;
 }
 
+.run-progress {
+  width: 72px;
+  height: 6px;
+  accent-color: var(--accent);
+}
+
+.run-progress[hidden] {
+  display: none;
+}
+
 @keyframes spin {
   to {
     transform: rotate(360deg);

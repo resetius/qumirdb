@@ -6,12 +6,10 @@ import {
   createBrowserDataset,
   deleteBrowserDataset,
   listBrowserDatasets,
-  readOpfsFile,
   removeFileFromBrowserDataset,
   renameBrowserDataset
 } from './browser_storage.js';
-import { readParquetColumns, readParquetTable } from './browser_parquet.js';
-import { executeBrowserPipeline } from './browser_runtime.js';
+import { readParquetTable } from './browser_parquet.js';
 
 const $ = selector => document.querySelector(selector);
 
@@ -646,23 +644,26 @@ async function runBrowser(sql, dataset) {
   };
 
   setStatus('running');
+  setRunProgress(0);
   const started = performance.now();
   try {
-    const result = await executeBrowserPipeline(
-      resolvedExec,
-      stage => readBrowserSource(dataset, stage));
+    const result = await runBrowserWorker(resolvedExec, dataset, updateRunProgress);
     const elapsedMs = performance.now() - started;
     renderBrowserResult(result, elapsedMs);
     showDetails({
       mode: 'browser',
       rows: result.rows.length,
       elapsedMs,
-      timings: result.timings || []
+      timings: result.timings || [],
+      scheduler: result.scheduler || null,
+      connections: result.connections || []
     });
     setStatus('finished');
+    setRunProgress(null);
     selectTab('result');
   } catch (error) {
     setStatus('run failed');
+    setRunProgress(null);
     showDetails({
       ok: false,
       error: { stage: 'browser-exec', message: error.message || String(error) }
@@ -671,23 +672,31 @@ async function runBrowser(sql, dataset) {
   }
 }
 
-async function readBrowserSource(dataset, stage) {
-  const table = (dataset.tables || []).find(item => item.name === stage.table);
-  if (!table) {
-    throw new Error(`table not found in dataset: ${stage.table}`);
-  }
-  const fileName = table.sourceFile || `${table.name}.parquet`;
-  const file = await readOpfsFile(dataset.id, fileName);
-  const names = stage.columns.map(column => column.name);
-  const { rowCount, columns } = await readParquetColumns(file, names);
-  return {
-    rowCount,
-    columns: stage.columns.map(column => ({
-      name: column.name,
-      type: column.type,
-      values: columns[column.name] || []
-    }))
-  };
+function runBrowserWorker(exec, dataset, onProgress) {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(new URL('./browser_worker.js', import.meta.url), {
+      type: 'module'
+    });
+    worker.onmessage = event => {
+      const message = event.data || {};
+      if (message.type === 'progress') {
+        onProgress(message.progress);
+      } else if (message.type === 'result') {
+        worker.terminate();
+        resolve(message.result);
+      } else if (message.type === 'error') {
+        worker.terminate();
+        const error = new Error(message.error?.message || 'browser worker failed');
+        error.stack = message.error?.stack || error.stack;
+        reject(error);
+      }
+    };
+    worker.onerror = event => {
+      worker.terminate();
+      reject(new Error(event.message || 'browser worker failed'));
+    };
+    worker.postMessage({ type: 'run', exec, dataset });
+  });
 }
 
 function renderBrowserResult(result, elapsedMs) {
@@ -1045,6 +1054,24 @@ function selectTab(name) {
 function setStatus(text) {
   $('#status').textContent = text;
   $('#status-spinner').hidden = !['explaining', 'running'].includes(text);
+}
+
+function setRunProgress(value) {
+  const progress = $('#run-progress');
+  if (value === null || value === undefined) {
+    progress.hidden = true;
+    progress.value = 0;
+    return;
+  }
+  progress.hidden = false;
+  progress.value = Math.max(0, Math.min(Number(value) || 0, 1));
+}
+
+function updateRunProgress(progress) {
+  if (!progress || !progress.totalUnits) {
+    return;
+  }
+  setRunProgress(Math.min(progress.completedUnits / progress.totalUnits, 0.95));
 }
 
 function formatNumber(value) {

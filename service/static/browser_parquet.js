@@ -176,6 +176,42 @@ export async function readParquetColumns(file, requestedColumns) {
   const specs = requestedColumns.map(column =>
     typeof column === 'string' ? { name: column } : column);
   const columnNames = specs.map(column => column.name);
+  return readParquetColumnsRange(file, specs, columnNames, null);
+}
+
+export async function* readParquetColumnBatches(file, requestedColumns, options = {}) {
+  const specs = requestedColumns.map(column =>
+    typeof column === 'string' ? { name: column } : column);
+  const columnNames = specs.map(column => column.name);
+  const metadata = await readMetadata(file);
+  const ranges = rowGroupRanges(metadata);
+  const totalRows = Number(metadata.num_rows ?? metadata.numRows ?? 0);
+  const totalUnits = Math.max(totalRows * Math.max(columnNames.length, 1), 1);
+  let completedUnits = 0;
+
+  for (let index = 0; index < ranges.length; ++index) {
+    const range = ranges[index];
+    let rangeUnits = 0;
+    const batch = await readParquetColumnsRange(file, specs, columnNames, range, progress => {
+      rangeUnits += progress.units;
+      if (options.onProgress) {
+        options.onProgress({
+          phase: 'read',
+          rowGroup: index,
+          rowGroupCount: ranges.length,
+          rows: range.end,
+          totalRows,
+          completedUnits: completedUnits + rangeUnits,
+          totalUnits,
+        });
+      }
+    });
+    completedUnits += (range.end - range.start) * Math.max(columnNames.length, 1);
+    yield batch;
+  }
+}
+
+async function readParquetColumnsRange(file, specs, columnNames, range, onProgress = null) {
   const parquet = await loadHyparquet();
   const asyncBuffer = parquet.asyncBufferFromFile
     ? await parquet.asyncBufferFromFile(file)
@@ -188,15 +224,17 @@ export async function readParquetColumns(file, requestedColumns) {
 
   if (columnNames.length === 0) {
     const metadata = await readMetadata(file);
+    const rows = range
+      ? range.end - range.start
+      : Number(metadata.num_rows ?? metadata.numRows ?? 0);
     return {
-      rowCount: Number(metadata.num_rows ?? metadata.numRows ?? 0),
+      rowCount: rows,
       columns: {},
     };
   }
 
   const chunks = Object.fromEntries(columnNames.map(name => [name, []]));
-  let rowCount = 0;
-  await parquet.parquetRead({
+  const readOptions = {
     file: asyncBuffer,
     columns: columnNames,
     compressors,
@@ -205,17 +243,55 @@ export async function readParquetColumns(file, requestedColumns) {
       const columnChunks = chunks[name];
       if (!columnChunks) return;
 
-      const start = Number(rowStart);
-      const end = Number(rowEnd);
-      rowCount = Math.max(rowCount, end);
+      const rawStart = Number(rowStart);
+      const rawEnd = Number(rowEnd);
+      const start = range && rawStart >= range.start ? rawStart - range.start : rawStart;
+      const end = range && rawEnd > range.start ? rawEnd - range.start : rawEnd;
       columnChunks.push({ start, end, data: columnData });
+      if (onProgress) {
+        onProgress({ units: Math.max(end - start, 0) });
+      }
     },
-  });
+  };
+  if (range) {
+    readOptions.rowStart = range.start;
+    readOptions.rowEnd = range.end;
+  }
+  await parquet.parquetRead(readOptions);
+
+  const rowCount = range
+    ? range.end - range.start
+    : maxChunkRowCount(chunks);
   const columns = {};
   for (const spec of specs) {
     columns[spec.name] = assembleColumn(chunks[spec.name], rowCount);
   }
   return { rowCount, columns };
+}
+
+function rowGroupRanges(metadata) {
+  const rowGroups = metadata.row_groups || metadata.rowGroups || [];
+  if (!rowGroups.length) {
+    return [{ start: 0, end: Number(metadata.num_rows ?? metadata.numRows ?? 0) }];
+  }
+  const ranges = [];
+  let start = 0;
+  for (const group of rowGroups) {
+    const rows = Number(group.num_rows ?? group.numRows ?? 0);
+    ranges.push({ start, end: start + rows });
+    start += rows;
+  }
+  return ranges;
+}
+
+function maxChunkRowCount(chunksByName) {
+  let rowCount = 0;
+  for (const chunks of Object.values(chunksByName)) {
+    for (const chunk of chunks) {
+      rowCount = Math.max(rowCount, chunk.end);
+    }
+  }
+  return rowCount;
 }
 
 function assembleColumn(chunks, rowCount) {
