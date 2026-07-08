@@ -137,10 +137,47 @@ function sqlLikeBytes(value, pattern) {
   return new RegExp(re, 's').test(s) ? 1 : 0;
 }
 
-// The `env` imports the string/predicate kernels need. Pointer + size args are
-// i64 (BigInt under memory64); bool results are i32 (0/1), compare/like are i64.
-// `getMemory` is read lazily since the instance doesn't exist yet at build time.
-function createQdbEnv(getMemory) {
+function divTrunc(n, d) {
+  return Math.trunc(n / d);
+}
+
+function daysFromCivil(y, m, d) {
+  y -= m <= 2 ? 1 : 0;
+  const era = divTrunc(y >= 0 ? y : y - 399, 400);
+  const yoe = y - era * 400;
+  const doy = divTrunc(153 * (m + (m > 2 ? -3 : 9)) + 2, 5) + d - 1;
+  const doe = yoe * 365 + divTrunc(yoe, 4) - divTrunc(yoe, 100) + doy;
+  return (era * 146097 + doe - 719468) | 0;
+}
+
+function dateYear(days) {
+  const z = (Number(days) | 0) + 719468;
+  const era = divTrunc(z >= 0 ? z : z - 146096, 146097);
+  const doe = z - era * 146097;
+  const yoe = divTrunc(doe - divTrunc(doe, 1460) + divTrunc(doe, 36524) - divTrunc(doe, 146096), 365);
+  let y = yoe + era * 400;
+  const doy = doe - (365 * yoe + divTrunc(yoe, 4) - divTrunc(yoe, 100));
+  const mp = divTrunc(5 * doy + 2, 153);
+  y += mp >= 10 ? 1 : 0;
+  return y | 0;
+}
+
+// The `env` imports the kernels need. Pointer + size args are i64 (BigInt
+// under memory64); bool results are i32 (0/1), compare/like are i64.
+// `getMemory` is read lazily since the instance doesn't exist yet at build
+// time; `holder.arena` is bound by drivers whose kernels allocate
+// (qdb_alloc/realloc/free — e.g. the aggregate hash table).
+function createQdbEnv(getMemory, holder) {
+  const allocSizes = new Map();
+  const alloc = (size) => {
+    if (!holder.arena) {
+      throw new Error('kernel called qdb_alloc but no allocator is bound');
+    }
+    const n = Number(size);
+    const ptr = holder.arena.alloc(Math.max(n, 1), 8);
+    allocSizes.set(ptr, n);
+    return ptr;
+  };
   const bytesAt = (ptr, size) => {
     const mem = new Uint8Array(getMemory().buffer);
     const start = Number(ptr);
@@ -153,6 +190,32 @@ function createQdbEnv(getMemory) {
     while (mem[end] !== 0) ++end;
     return mem.subarray(start, end);
   };
+  const cstrEquals = (ptr, text) => {
+    if (Number(ptr) === 0) return false;
+    const bytes = cstrAt(ptr);
+    if (bytes.length !== text.length) return false;
+    for (let i = 0; i < bytes.length; ++i) {
+      if (bytes[i] !== text.charCodeAt(i)) return false;
+    }
+    return true;
+  };
+  const atoi = (ptr) => {
+    if (Number(ptr) === 0) return 0;
+    const bytes = cstrAt(ptr);
+    let i = 0;
+    while (i < bytes.length && (bytes[i] === 32 || (bytes[i] >= 9 && bytes[i] <= 13))) ++i;
+    let sign = 1;
+    if (bytes[i] === 45 || bytes[i] === 43) {
+      sign = bytes[i] === 45 ? -1 : 1;
+      ++i;
+    }
+    let value = 0;
+    while (i < bytes.length && bytes[i] >= 48 && bytes[i] <= 57) {
+      value = value * 10 + (bytes[i] - 48);
+      ++i;
+    }
+    return (sign * value) | 0;
+  };
 
   const svLit = (t) => (d, s, lit) => (t(compareBytes(bytesAt(d, s), cstrAt(lit))) ? 1 : 0);
   const litSv = (t) => (lit, d, s) => (t(compareBytes(cstrAt(lit), bytesAt(d, s))) ? 1 : 0);
@@ -160,13 +223,77 @@ function createQdbEnv(getMemory) {
   const EQ = c => c === 0, NE = c => c !== 0;
   const LT = c => c < 0, LE = c => c <= 0, GT = c => c > 0, GE = c => c >= 0;
 
+  const sqlDate = (date) => {
+    if (Number(date) === 0) return 0;
+    const bytes = cstrAt(date);
+    const parts = [0, 0, 0];
+    let idx = 0;
+    for (const b of bytes) {
+      if (idx >= 3) break;
+      if (b === 45) {
+        ++idx;
+      } else if (b >= 48 && b <= 57) {
+        parts[idx] = parts[idx] * 10 + (b - 48);
+      }
+    }
+    return daysFromCivil(parts[0], parts[1], parts[2]);
+  };
+  const sqlInterval = (amount, unit) => {
+    const n = atoi(amount);
+    if (cstrEquals(unit, 'year') || cstrEquals(unit, 'years')) return (n * 365) | 0;
+    if (cstrEquals(unit, 'month') || cstrEquals(unit, 'months')) return (n * 30) | 0;
+    return n;
+  };
+  const substring = (out, data, size, start, length) => {
+    const strSize = Number(size);
+    let offset = Number(start) - 1;
+    if (offset < 0) offset = 0;
+    let len = Number(length);
+    if (offset >= strSize) {
+      offset = strSize;
+      len = 0;
+    } else {
+      if (len < 0) len = 0;
+      if (offset + len > strSize) len = strSize - offset;
+    }
+    const dv = new DataView(getMemory().buffer);
+    dv.setBigUint64(Number(out), BigInt(data) + BigInt(offset), true);
+    dv.setBigInt64(Number(out) + 8, BigInt(len), true);
+  };
+
   const norm = v => (v < 0n ? 1n : v);
   return {
+    // malloc family over the instance's own linear memory (bump; free no-op).
+    qdb_alloc: (size) => BigInt(alloc(size)),
+    qdb_realloc: (ptr, size) => {
+      const oldPtr = Number(ptr);
+      const newPtr = alloc(size);
+      if (oldPtr) {
+        const oldSize = allocSizes.get(oldPtr) || 0;
+        const mem = new Uint8Array(getMemory().buffer);
+        mem.copyWithin(newPtr, oldPtr, oldPtr + Math.min(oldSize, Number(size)));
+      }
+      return BigInt(newPtr);
+    },
+    qdb_free: () => {},
+
     qdb_filter_string_compare: (ld, ls, rd, rs) =>
       BigInt(compareBytes(bytesAt(ld, ls), bytesAt(rd, rs))),
     qdb_string_view_cmp_cstr: (d, s, c) => BigInt(compareBytes(bytesAt(d, s), cstrAt(c))),
     qdb_cstr_cmp_cstr: (a, b) => BigInt(compareBytes(cstrAt(a), cstrAt(b))),
     qdb_string_view_sql_like: (d, s, p) => BigInt(sqlLikeBytes(bytesAt(d, s), cstrAt(p))),
+    qdb_substring: substring,
+    qdb_date_year: dateYear,
+    qdb_sql_date: sqlDate,
+    qdb_sql_interval: sqlInterval,
+    qdb_bitmap_set_valid: (bitmap, index, valid) => {
+      const mem = new Uint8Array(getMemory().buffer);
+      const i = BigInt(index);
+      const byteIndex = Number(bitmap) + Number(i >> 3n);
+      const bit = 1 << Number(i & 7n);
+      if (valid) mem[byteIndex] |= bit;
+      else mem[byteIndex] &= ~bit;
+    },
 
     qdb_sv_lit_eq: svLit(EQ), qdb_sv_lit_ne: svLit(NE), qdb_sv_lit_lt: svLit(LT),
     qdb_sv_lit_le: svLit(LE), qdb_sv_lit_gt: svLit(GT), qdb_sv_lit_ge: svLit(GE),
@@ -198,8 +325,8 @@ function createQdbEnv(getMemory) {
 // execution rather than run a partially-linked kernel.
 export async function instantiateKernel(base64, entryName) {
   const module = await WebAssembly.compile(base64ToBytes(base64));
-  const holder = { memory: null };
-  const env = createQdbEnv(() => holder.memory);
+  const holder = { memory: null, arena: null };
+  const env = createQdbEnv(() => holder.memory, holder);
   for (const imp of WebAssembly.Module.imports(module)) {
     if (imp.module !== 'env' || typeof env[imp.name] !== 'function') {
       throw new Error(`kernel needs unsupported import: ${imp.module}.${imp.name}`);
@@ -214,14 +341,14 @@ export async function instantiateKernel(base64, entryName) {
   if (typeof fn !== 'function') {
     throw new Error(`kernel is missing entry ${entryName}`);
   }
-  return { instance, fn };
+  return { instance, fn, holder };
 }
 
 // Marshal `columns` (source column order) into a fresh TRowSet inside `arena`.
 // Numeric columns get a data buffer; string columns get a concatenated UTF-8
 // bytes buffer plus an i32 offsets array (OffsetWidth = 4), matching the layout
 // the kernel reads (Data + Offsets[row]).
-function marshalRowSet(arena, layout, columns, rowCount, wantSelection) {
+function marshalRowSet(arena, layout, columns, rowCount, wantSelection, selection = null) {
   const colLayout = layout.column;
   const rsLayout = layout.rowset;
   const encoder = new TextEncoder();
@@ -261,7 +388,9 @@ function marshalRowSet(arena, layout, columns, rowCount, wantSelection) {
     }
   }
 
-  const selectionPtr = wantSelection ? arena.alloc(Math.max(rowCount, 1), 8) : 0;
+  const selectionPtr = (wantSelection || selection)
+    ? arena.alloc(Math.max(rowCount, 1), 8)
+    : 0;
   const rowsetPtr = arena.alloc(rsLayout.size, 8);
 
   // All allocations done; safe to take views and write.
@@ -298,7 +427,10 @@ function marshalRowSet(arena, layout, columns, rowCount, wantSelection) {
   writePointer(dv, rowsetPtr + rsLayout.columns, columnsBase);
   dv.setBigInt64(rowsetPtr + rsLayout.columnCount, BigInt(columns.length), true);
   dv.setBigInt64(rowsetPtr + rsLayout.rowCount, BigInt(rowCount), true);
-  if (wantSelection) {
+  if (selection) {
+    memBytes.set(selection.subarray(0, rowCount), selectionPtr);
+    writePointer(dv, rowsetPtr + rsLayout.selection, selectionPtr);
+  } else if (wantSelection) {
     writePointer(dv, rowsetPtr + rsLayout.selection, selectionPtr);
   }
 
@@ -375,6 +507,162 @@ export function runProject(kernel, layout, batch, output) {
     }
   }
   return columns;
+}
+
+// Read `count` validity bits (LSB-first per byte, qdb_bitmap_set_valid order).
+function readValidityBits(memBytes, maskPtr, count) {
+  const valid = new Array(count);
+  for (let i = 0; i < count; ++i) {
+    valid[i] = (memBytes[maskPtr + (i >> 3)] & (1 << (i & 7))) !== 0;
+  }
+  return valid;
+}
+
+// Drive the fused aggregate kernel (agg_dispatch / agg_measure_keys /
+// agg_finalize in one module — they share the hash table through the module's
+// linear memory). Mirrors the native TAggregateProcessor protocol; the arena
+// is also the kernel's qdb_alloc backing, so nothing ever overlaps.
+export function runAggregate(kernel, layout, batch, selection, stage) {
+  const dispatch = kernel.instance.exports['agg_dispatch'];
+  const measure = kernel.instance.exports['agg_measure_keys'];
+  const finalize = kernel.instance.exports['agg_finalize'];
+  if (!dispatch || !measure || !finalize) {
+    throw new Error('aggregate kernel is missing an entry');
+  }
+
+  const arena = new Arena(kernel.instance);
+  kernel.holder.arena = arena; // qdb_alloc draws from the same bump pointer
+
+  const keyCount = Number(stage.keyCount);
+  const output = stage.output;
+  const aggCount = output.length - keyCount;
+
+  // init(ht, capacity)
+  const ht = arena.alloc(layout.hashTable.size, 8);
+  new Uint8Array(arena.memory.buffer, ht, layout.hashTable.size).fill(0);
+  dispatch(BigInt(ht), 0n, 4n, 0n);
+
+  // update(ht, batch) — the kernel honors rowset.Selection.
+  const { rowsetPtr } = marshalRowSet(
+    arena, layout, batch.columns, batch.rowCount, false, selection);
+  dispatch(BigInt(ht), BigInt(rowsetPtr), 0n, 1n);
+
+  const size = Number(
+    arena.view().getBigInt64(ht + layout.hashTable.sizeOffset, true));
+
+  // measure(ht, outputKeyBytes, size) → per-key Data byte counts.
+  const keyBytesPtr = arena.alloc(Math.max(keyCount, 1) * 8, 8);
+  new Uint8Array(arena.memory.buffer, keyBytesPtr, Math.max(keyCount, 1) * 8).fill(0);
+  if (Number(measure(BigInt(ht), BigInt(keyBytesPtr), BigInt(size))) !== size) {
+    throw new Error('aggregate measure returned an unexpected row count');
+  }
+
+  // Output buffers. Key columns are TColumn structs the kernel fills; agg
+  // values land in i64 buffers with optional validity bitmaps.
+  const colLayout = layout.column;
+  const dv0 = arena.view();
+  const keyBytes = [];
+  for (let i = 0; i < keyCount; ++i) {
+    keyBytes.push(Number(dv0.getBigInt64(keyBytesPtr + i * 8, true)));
+  }
+
+  const maskBytes = (size + 7) >> 3;
+  const keyCols = [];
+  for (let i = 0; i < keyCount; ++i) {
+    const isString = output[i].type === 'string';
+    keyCols.push({
+      colPtr: arena.alloc(colLayout.size, 8),
+      dataPtr: arena.alloc(Math.max(keyBytes[i], 1), 8),
+      offsetsPtr: isString ? arena.alloc((size + 1) * 8, 8) : 0,
+      maskPtr: output[i].nullable ? arena.alloc(Math.max(maskBytes, 1), 8) : 0,
+      isString,
+    });
+  }
+  const keyColArrPtr = arena.alloc(Math.max(keyCount, 1) * 8, 8);
+  const aggBufPtrs = [];
+  const aggMaskPtrs = [];
+  for (let i = 0; i < aggCount; ++i) {
+    aggBufPtrs.push(arena.alloc(Math.max(size, 1) * 8, 8));
+    aggMaskPtrs.push(output[keyCount + i].nullable
+      ? arena.alloc(Math.max(maskBytes, 1), 8)
+      : 0);
+  }
+  const aggBufArrPtr = arena.alloc(Math.max(aggCount, 1) * 8, 8);
+  const aggMaskArrPtr = arena.alloc(Math.max(aggCount, 1) * 8, 8);
+
+  // All allocations done; take views and wire the pointer tables.
+  const dv = arena.view();
+  for (let i = 0; i < keyCount; ++i) {
+    const col = keyCols[i];
+    new Uint8Array(arena.memory.buffer, col.colPtr, colLayout.size).fill(0);
+    writePointer(dv, col.colPtr + colLayout.data, col.dataPtr);
+    if (col.maskPtr) {
+      writePointer(dv, col.colPtr + colLayout.mask, col.maskPtr);
+    }
+    if (col.isString) {
+      writePointer(dv, col.colPtr + colLayout.offsets, col.offsetsPtr);
+      dv.setUint8(col.colPtr + colLayout.offsetWidth, 8);
+    }
+    writePointer(dv, keyColArrPtr + i * 8, col.colPtr);
+  }
+  for (let i = 0; i < aggCount; ++i) {
+    writePointer(dv, aggBufArrPtr + i * 8, aggBufPtrs[i]);
+    writePointer(dv, aggMaskArrPtr + i * 8, aggMaskPtrs[i]);
+  }
+
+  if (Number(finalize(
+      BigInt(ht), BigInt(keyColArrPtr), BigInt(aggBufArrPtr),
+      BigInt(aggMaskArrPtr), BigInt(size))) !== size) {
+    throw new Error('aggregate finalize returned an unexpected row count');
+  }
+  dispatch(BigInt(ht), 0n, 0n, 2n); // destroy
+
+  // Materialize output columns into JS values.
+  const outDv = arena.view();
+  const memBytes = arena.bytes();
+  const decoder = new TextDecoder();
+  const columns = [];
+  for (let i = 0; i < output.length; ++i) {
+    const spec = output[i];
+    const values = new Array(size);
+    const isKey = i < keyCount;
+    const valid = (isKey ? keyCols[i].maskPtr : aggMaskPtrs[i - keyCount])
+      ? readValidityBits(
+          memBytes,
+          isKey ? keyCols[i].maskPtr : aggMaskPtrs[i - keyCount],
+          size)
+      : null;
+    if (isKey && keyCols[i].isString) {
+      const { dataPtr, offsetsPtr } = keyCols[i];
+      for (let r = 0; r < size; ++r) {
+        if (valid && !valid[r]) { values[r] = null; continue; }
+        const begin = Number(outDv.getBigInt64(offsetsPtr + r * 8, true));
+        const end = Number(outDv.getBigInt64(offsetsPtr + (r + 1) * 8, true));
+        values[r] = decoder.decode(
+          memBytes.subarray(dataPtr + begin, dataPtr + end));
+      }
+    } else if (isKey) {
+      const width = coreTypeWidth(spec.type);
+      const { dataPtr } = keyCols[i];
+      for (let r = 0; r < size; ++r) {
+        values[r] = (valid && !valid[r])
+          ? null
+          : readNumericValue(outDv, dataPtr + r * width, spec.type);
+      }
+    } else {
+      // Agg buffers are i64 slots; f64 results are stored as raw f64 bits.
+      const bufPtr = aggBufPtrs[i - keyCount];
+      for (let r = 0; r < size; ++r) {
+        values[r] = (valid && !valid[r])
+          ? null
+          : (spec.type === 'f64'
+              ? outDv.getFloat64(bufPtr + r * 8, true)
+              : outDv.getBigInt64(bufPtr + r * 8, true));
+      }
+    }
+    columns.push({ name: spec.name, type: spec.type, values });
+  }
+  return { rowCount: size, columns };
 }
 
 // Drive the radix composite sort kernel. Marshals each key column into a
@@ -474,6 +762,10 @@ export async function executeBrowserPipeline(exec, readSource) {
         }));
       }
       batch = { rowCount: batch.rowCount, columns };
+    } else if (stage.kind === 'aggregate') {
+      const kernel = await instantiateKernel(stage.wasm, 'agg_dispatch');
+      batch = runAggregate(kernel, layout, batch, selection, stage);
+      selection = null;
     } else if (stage.kind === 'sort' || stage.kind === 'top-sort') {
       const rowLimit = stage.kind === 'top-sort' ? Number(stage.limit) : null;
       if (stage.wasm) {

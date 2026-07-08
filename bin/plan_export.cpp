@@ -1376,6 +1376,11 @@ llvm::json::Object ExecLayoutJson() {
             {"data", 0},
             {"length", 8},
         }},
+        // THashTable per modules/qumirdb.cpp; the runtime only reads Size.
+        {"hashTable", llvm::json::Object{
+            {"size", static_cast<int64_t>(NQdb::TKernelCompiler::kHashTableSize)},
+            {"sizeOffset", 72},
+        }},
     };
 }
 
@@ -1444,6 +1449,7 @@ std::optional<std::vector<NQdb::TOperatorPtr>> LinearExecChain(
         }
         if (TMaybeOp<TFilterOperator>(cur) ||
             TMaybeOp<TProjectOperator>(cur) ||
+            TMaybeOp<TAggregateOperator>(cur) ||
             TMaybeOp<TSortOperator>(cur) ||
             TMaybeOp<TTopSortOperator>(cur) ||
             TMaybeOp<TLimitOperator>(cur))
@@ -1650,6 +1656,42 @@ llvm::json::Object BuildExecPlan(
                         *project.Cast(), *inputStruct, columnPlan.OutputType)},
                 });
                 curType = columnPlan.OutputType;
+            } else if (auto aggregate = TMaybeOp<TAggregateOperator>(op)) {
+                const auto* ref =
+                    FindKernel(kernels, aggregate.Cast().get(), "aggregate");
+                if (!ref) {
+                    return UnsupportedExec("aggregate kernel was not generated");
+                }
+                if (embedWasm && ref->Artifacts->Wasm.empty()) {
+                    return UnsupportedExec(
+                        "aggregate kernel failed to compile to wasm");
+                }
+                auto outputType = ComputeAggregateOutputType(
+                    curType, aggregate.Cast()->GroupKeys(), aggregate.Cast()->Aggs());
+                auto* outStruct =
+                    static_cast<NQumir::NAst::TStructType*>(outputType.get());
+                const size_t keyCount = ref->Kernel->AggKeys.size();
+                llvm::json::Array output;
+                for (size_t i = 0; i < outStruct->Fields.size(); ++i) {
+                    auto entry = CoreTypeJson(outStruct->Fields[i].second);
+                    entry["name"] = BareColumnName(outStruct->Fields[i].first);
+                    // Nullability is a kernel property the plan schema does not
+                    // carry (e.g. i64 sum over a nullable column).
+                    if (i < keyCount) {
+                        entry["nullable"] = ref->Kernel->AggKeys[i].IsNullable;
+                    } else if (i - keyCount < ref->Kernel->AggValues.size()) {
+                        entry["nullable"] =
+                            ref->Kernel->AggValues[i - keyCount].IsNullable;
+                    }
+                    output.push_back(std::move(entry));
+                }
+                stages.push_back(llvm::json::Object{
+                    {"kind", "aggregate"},
+                    {"wasm", ref->Artifacts->Wasm},
+                    {"keyCount", static_cast<int64_t>(keyCount)},
+                    {"output", std::move(output)},
+                });
+                curType = outputType;
             } else if (auto sort = TMaybeOp<TSortOperator>(op)) {
                 auto* inputStruct =
                     static_cast<NQumir::NAst::TStructType*>(curType.get());
