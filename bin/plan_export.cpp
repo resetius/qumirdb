@@ -17,6 +17,7 @@
 #include <qdb/plan/passes/unbound_vars.h>
 #include <qdb/plan/types/nullable.h>
 #include <qdb/kernel/compiler.h>
+#include <qdb/kernel/join_key.h>
 #include <qdb/kernel/project_type.h>
 #include <qdb/scheduler/plan_lowerer.h>
 #include <qdb/scheduler/scan_split.h>
@@ -1381,6 +1382,12 @@ llvm::json::Object ExecLayoutJson() {
             {"size", static_cast<int64_t>(NQdb::TKernelCompiler::kHashTableSize)},
             {"sizeOffset", 72},
         }},
+        {"pairBuffer", llvm::json::Object{
+            {"size", static_cast<int64_t>(NQdb::TKernelCompiler::kPairBufferSize)},
+            {"count", 0},
+            {"capacity", 8},
+            {"data", 16},
+        }},
     };
 }
 
@@ -1428,6 +1435,16 @@ llvm::json::Array SourceColumnsJson(const NQumir::NAst::TTypePtr& sourceType) {
     llvm::json::Array out;
     for (const auto& [qname, type] : st->Fields) {
         auto entry = CoreTypeJson(type);
+        entry["name"] = BareColumnName(qname);
+        out.push_back(std::move(entry));
+    }
+    return out;
+}
+
+llvm::json::Array StructColumnsJson(const NQumir::NAst::TStructType& type) {
+    llvm::json::Array out;
+    for (const auto& [qname, fieldType] : type.Fields) {
+        auto entry = CoreTypeJson(fieldType);
         entry["name"] = BareColumnName(qname);
         out.push_back(std::move(entry));
     }
@@ -1502,6 +1519,17 @@ llvm::json::Object UnsupportedExec(std::string reason) {
         {"supported", false},
         {"reason", std::move(reason)},
     };
+}
+
+bool BrowserSupportsJoin(NQdb::EJoinType type, bool hasResidual) {
+    using NQdb::EJoinType;
+    if (type == EJoinType::Inner) {
+        return true;
+    }
+    if ((type == EJoinType::LeftSemi || type == EJoinType::LeftAnti) && !hasResidual) {
+        return true;
+    }
+    return false;
 }
 
 // One lowered kernel joined with its exported artifacts, indexed by the
@@ -1595,17 +1623,300 @@ std::optional<llvm::json::Object> BuildSortStageJson(
     return llvm::json::Object{{"keys", std::move(*keys)}};
 }
 
+struct TExecGraphBuildResult {
+    int64_t NodeId = -1;
+    NQumir::NAst::TTypePtr OutputType;
+};
+
+struct TExecGraphBuilder {
+    const TKernelIndex& Kernels;
+    bool EmbedWasm = false;
+    llvm::json::Array Nodes;
+    llvm::json::Array Edges;
+    int64_t NextNodeId = 0;
+    std::optional<llvm::json::Object> Unsupported;
+    std::optional<llvm::json::Object> Limit;
+
+    int64_t AddNode(llvm::json::Object node) {
+        const int64_t id = NextNodeId++;
+        node["id"] = id;
+        Nodes.push_back(std::move(node));
+        return id;
+    }
+
+    void AddEdge(int64_t from, int64_t to, int64_t input) {
+        Edges.push_back(llvm::json::Object{
+            {"from", from},
+            {"to", to},
+            {"input", input},
+            {"kind", "one-to-one"},
+        });
+    }
+
+    TExecGraphBuildResult Build(const NQdb::TOperatorPtr& op) {
+        using namespace NQdb;
+        if (Unsupported) {
+            return {};
+        }
+
+        try {
+            if (auto source = TMaybeOp<TSourceOperator>(op)) {
+                auto outputType = BuildSourceRuntimeType(*source.Cast());
+                const int64_t id = AddNode(llvm::json::Object{
+                    {"kind", "source"},
+                    {"table", source.Cast()->SourcePath()},
+                    {"columns", SourceColumnsJson(outputType)},
+                });
+                return {.NodeId = id, .OutputType = outputType};
+            }
+
+            if (auto filter = TMaybeOp<TFilterOperator>(op)) {
+                auto input = Build(filter.Cast()->Input());
+                if (Unsupported) return {};
+                const auto* ref = FindKernel(Kernels, filter.Cast().get(), "filter");
+                if (!ref) {
+                    Unsupported = UnsupportedExec("filter kernel was not generated");
+                    return {};
+                }
+                if (EmbedWasm && ref->Artifacts->Wasm.empty()) {
+                    Unsupported = UnsupportedExec("filter kernel failed to compile to wasm");
+                    return {};
+                }
+                const int64_t id = AddNode(llvm::json::Object{
+                    {"kind", "filter"},
+                    {"wasm", ref->Artifacts->Wasm},
+                });
+                AddEdge(input.NodeId, id, 0);
+                return {.NodeId = id, .OutputType = input.OutputType};
+            }
+
+            if (auto project = TMaybeOp<TProjectOperator>(op)) {
+                auto input = Build(project.Cast()->Input());
+                if (Unsupported) return {};
+                auto* inputStruct =
+                    static_cast<NQumir::NAst::TStructType*>(input.OutputType.get());
+                auto columnPlan = BuildProjectColumnPlan(*project.Cast(), *inputStruct);
+                std::string wasmId;
+                if (!columnPlan.ComputedExprs.empty()) {
+                    const auto* ref = FindKernel(Kernels, project.Cast().get(), "project");
+                    if (!ref) {
+                        Unsupported = UnsupportedExec("project kernel was not generated");
+                        return {};
+                    }
+                    if (EmbedWasm && ref->Artifacts->Wasm.empty()) {
+                        Unsupported = UnsupportedExec("project kernel failed to compile to wasm");
+                        return {};
+                    }
+                    wasmId = ref->Artifacts->Wasm;
+                }
+                const int64_t id = AddNode(llvm::json::Object{
+                    {"kind", "project"},
+                    {"wasm", wasmId},
+                    {"output", ProjectOutputJson(
+                        *project.Cast(), *inputStruct, columnPlan.OutputType)},
+                });
+                AddEdge(input.NodeId, id, 0);
+                return {.NodeId = id, .OutputType = columnPlan.OutputType};
+            }
+
+            if (auto aggregate = TMaybeOp<TAggregateOperator>(op)) {
+                auto input = Build(aggregate.Cast()->Input());
+                if (Unsupported) return {};
+                const auto* ref = FindKernel(Kernels, aggregate.Cast().get(), "aggregate");
+                if (!ref) {
+                    Unsupported = UnsupportedExec("aggregate kernel was not generated");
+                    return {};
+                }
+                if (EmbedWasm && ref->Artifacts->Wasm.empty()) {
+                    Unsupported = UnsupportedExec("aggregate kernel failed to compile to wasm");
+                    return {};
+                }
+                auto outputType = ComputeAggregateOutputType(
+                    input.OutputType,
+                    aggregate.Cast()->GroupKeys(),
+                    aggregate.Cast()->Aggs());
+                auto* outStruct =
+                    static_cast<NQumir::NAst::TStructType*>(outputType.get());
+                const size_t keyCount = ref->Kernel->AggKeys.size();
+                llvm::json::Array output;
+                for (size_t i = 0; i < outStruct->Fields.size(); ++i) {
+                    auto entry = CoreTypeJson(outStruct->Fields[i].second);
+                    entry["name"] = BareColumnName(outStruct->Fields[i].first);
+                    if (i < keyCount) {
+                        entry["nullable"] = ref->Kernel->AggKeys[i].IsNullable;
+                    } else if (i - keyCount < ref->Kernel->AggValues.size()) {
+                        entry["nullable"] =
+                            ref->Kernel->AggValues[i - keyCount].IsNullable;
+                    }
+                    output.push_back(std::move(entry));
+                }
+                const int64_t id = AddNode(llvm::json::Object{
+                    {"kind", "aggregate"},
+                    {"wasm", ref->Artifacts->Wasm},
+                    {"keyCount", static_cast<int64_t>(keyCount)},
+                    {"output", std::move(output)},
+                });
+                AddEdge(input.NodeId, id, 0);
+                return {.NodeId = id, .OutputType = outputType};
+            }
+
+            if (auto join = TMaybeOp<TJoinOperator>(op)) {
+                auto left = Build(join.Cast()->Left());
+                auto right = Build(join.Cast()->Right());
+                if (Unsupported) return {};
+                const bool hasResidual = join.Cast()->Filter() != nullptr;
+                if (!BrowserSupportsJoin(join.Cast()->JoinType(), hasResidual)) {
+                    Unsupported = UnsupportedExec(
+                        "browser join type is not supported yet: " +
+                        std::string(JoinTypeName(join.Cast()->JoinType())) +
+                        (hasResidual ? " with residual" : ""));
+                    return {};
+                }
+                const auto* ref = FindKernel(Kernels, join.Cast().get(), "join");
+                if (!ref) {
+                    Unsupported = UnsupportedExec("join kernel was not generated");
+                    return {};
+                }
+                if (EmbedWasm && ref->Artifacts->Wasm.empty()) {
+                    Unsupported = UnsupportedExec("join kernel failed to compile to wasm");
+                    return {};
+                }
+                auto outputType = ComputeJoinOutputType(
+                    left.OutputType, right.OutputType, join.Cast()->JoinType());
+                if (!outputType) {
+                    Unsupported = UnsupportedExec(outputType.error().ToString());
+                    return {};
+                }
+                auto* leftStruct =
+                    static_cast<NQumir::NAst::TStructType*>(left.OutputType.get());
+                auto* rightStruct =
+                    static_cast<NQumir::NAst::TStructType*>(right.OutputType.get());
+                auto* outStruct =
+                    static_cast<NQumir::NAst::TStructType*>(outputType->get());
+                llvm::json::Array keys;
+                std::vector<std::pair<std::string, std::string>> keyPairs;
+                for (const auto& key : join.Cast()->Keys()) {
+                    keyPairs.emplace_back(key.Left, key.Right);
+                    keys.push_back(llvm::json::Object{
+                        {"left", BareColumnName(key.Left)},
+                        {"right", BareColumnName(key.Right)},
+                    });
+                }
+                const auto keyDesc =
+                    NKernel::BuildJoinKeyDescriptor(*leftStruct, *rightStruct, keyPairs);
+                const int64_t id = AddNode(llvm::json::Object{
+                    {"kind", "join"},
+                    {"joinType", std::string(JoinTypeName(join.Cast()->JoinType()))},
+                    {"wasm", ref->Artifacts->Wasm},
+                    {"keySize", static_cast<int64_t>(keyDesc.Size)},
+                    {"hasResidual", hasResidual},
+                    {"keys", std::move(keys)},
+                    {"leftColumns", StructColumnsJson(*leftStruct)},
+                    {"rightColumns", StructColumnsJson(*rightStruct)},
+                    {"output", StructColumnsJson(*outStruct)},
+                });
+                AddEdge(left.NodeId, id, 0);
+                AddEdge(right.NodeId, id, 1);
+                return {.NodeId = id, .OutputType = *outputType};
+            }
+
+            if (auto sort = TMaybeOp<TSortOperator>(op)) {
+                auto input = Build(sort.Cast()->Input());
+                if (Unsupported) return {};
+                auto* inputStruct =
+                    static_cast<NQumir::NAst::TStructType*>(input.OutputType.get());
+                auto stage = BuildSortStageJson(
+                    sort.Cast()->Keys(), *inputStruct, Kernels,
+                    sort.Cast().get(), EmbedWasm);
+                if (!stage) {
+                    Unsupported = UnsupportedExec("sort key references an unknown column");
+                    return {};
+                }
+                stage->insert({"kind", "sort"});
+                const int64_t id = AddNode(std::move(*stage));
+                AddEdge(input.NodeId, id, 0);
+                return {.NodeId = id, .OutputType = input.OutputType};
+            }
+
+            if (auto top = TMaybeOp<TTopSortOperator>(op)) {
+                auto input = Build(top.Cast()->Input());
+                if (Unsupported) return {};
+                auto* inputStruct =
+                    static_cast<NQumir::NAst::TStructType*>(input.OutputType.get());
+                auto stage = BuildSortStageJson(
+                    top.Cast()->Keys(), *inputStruct, Kernels,
+                    top.Cast().get(), EmbedWasm);
+                if (!stage) {
+                    Unsupported = UnsupportedExec("top-sort key references an unknown column");
+                    return {};
+                }
+                stage->insert({"kind", "top-sort"});
+                stage->insert({"limit", top.Cast()->Limit()});
+                const int64_t id = AddNode(std::move(*stage));
+                AddEdge(input.NodeId, id, 0);
+                return {.NodeId = id, .OutputType = input.OutputType};
+            }
+
+            if (auto limit = TMaybeOp<TLimitOperator>(op)) {
+                auto input = Build(limit.Cast()->Input());
+                if (Unsupported) return {};
+                Limit = llvm::json::Object{
+                    {"limit", limit.Cast()->Limit()},
+                    {"offset", limit.Cast()->Offset()},
+                };
+                return input;
+            }
+        } catch (const NQumir::TError& e) {
+            Unsupported = UnsupportedExec(e.ToString());
+            return {};
+        } catch (const std::exception& e) {
+            Unsupported = UnsupportedExec(e.what());
+            return {};
+        }
+
+        Unsupported = UnsupportedExec("plan contains an unsupported browser exec operator");
+        return {};
+    }
+};
+
+llvm::json::Object BuildExecGraphPlan(
+    const NQdb::TOperatorPtr& plan,
+    const TKernelIndex& kernels,
+    bool embedWasm)
+{
+    TExecGraphBuilder builder{.Kernels = kernels, .EmbedWasm = embedWasm};
+    auto root = builder.Build(plan);
+    if (builder.Unsupported) {
+        return std::move(*builder.Unsupported);
+    }
+    llvm::json::Object out{
+        {"supported", true},
+        {"embedWasm", embedWasm},
+        {"layout", ExecLayoutJson()},
+        {"nodes", std::move(builder.Nodes)},
+        {"edges", std::move(builder.Edges)},
+        {"root", root.NodeId},
+    };
+    if (builder.Limit) {
+        out["limit"] = std::move(*builder.Limit);
+    }
+    return out;
+}
+
 llvm::json::Object BuildExecPlan(
     const NQdb::TOperatorPtr& plan,
     const TKernelIndex& kernels,
     bool embedWasm)
 {
+    auto graph = BuildExecGraphPlan(plan, kernels, embedWasm);
+    if (graph.getBoolean("supported").value_or(false)) {
+        return graph;
+    }
+
     using namespace NQdb;
     auto chain = LinearExecChain(plan);
     if (!chain) {
-        return UnsupportedExec(
-            "plan is not a linear "
-            "source/filter/project/sort/top-sort/limit pipeline");
+        return graph;
     }
 
     llvm::json::Array stages;

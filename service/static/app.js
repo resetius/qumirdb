@@ -596,57 +596,51 @@ async function explainCurrent(sql, dataset, selectGraph) {
 }
 
 async function runBrowser(sql, dataset) {
-  setStatus('explaining');
-  const request = {
-    sql,
-    dataset,
-    options: {
-      scheduler: 'single',
-      scanTasks: 1,
-      shufflePartitions: 1,
-      format: 'runtime-bundle',
-      embedWasm: true
-    }
-  };
-  const bundle = await postJson('/api/explain', request);
-  lastBundle = bundle;
-  if (bundle.ok === false) {
-    setStatus('run failed');
-    showDetails(bundle);
-    selectTab('details');
-    return;
-  }
-  lastExplainKey = explainKey(sql, dataset);
-  renderCurrentGraph();
-  renderPlans(bundle);
-
-  const exec = bundle.exec;
-  if (!exec || exec.supported !== true) {
-    setStatus('run failed');
-    showDetails({
-      ok: false,
-      error: {
-        stage: 'browser-exec',
-        message: exec?.reason ||
-          'This query is not supported for browser execution yet.'
-      }
-    });
-    selectTab('details');
-    return;
-  }
-
-  const resolvedExec = {
-    ...exec,
-    stages: exec.stages.map(stage =>
-      stage.wasm
-        ? { ...stage, wasm: bundle.artifacts?.[stage.wasm]?.data || '' }
-        : stage)
-  };
-
-  setStatus('running');
-  setRunProgress(0);
-  const started = performance.now();
   try {
+    setStatus('explaining');
+    const request = {
+      sql,
+      dataset,
+      options: {
+        scheduler: 'single',
+        scanTasks: 1,
+        shufflePartitions: 1,
+        format: 'runtime-bundle',
+        embedWasm: true
+      }
+    };
+    const bundle = await postJson('/api/explain', request);
+    lastBundle = bundle;
+    if (bundle.ok === false) {
+      setStatus('run failed');
+      showDetails(bundle);
+      selectTab('details');
+      return;
+    }
+    lastExplainKey = explainKey(sql, dataset);
+    renderCurrentGraph();
+    renderPlans(bundle);
+
+    const exec = bundle.exec;
+    if (!exec || exec.supported !== true) {
+      setStatus('run failed');
+      showDetails({
+        ok: false,
+        error: {
+          stage: 'browser-exec',
+          message: exec?.reason ||
+            'This query is not supported for browser execution yet.'
+        }
+      });
+      selectTab('details');
+      return;
+    }
+
+    const resolvedExec = resolveExecArtifacts(exec, bundle.artifacts || {});
+
+    setStatus('running');
+    setRunProgress(0);
+    const started = performance.now();
     const result = await runBrowserWorker(resolvedExec, dataset, updateRunProgress);
     const elapsedMs = performance.now() - started;
     renderBrowserResult(result, elapsedMs);
@@ -670,6 +664,24 @@ async function runBrowser(sql, dataset) {
     });
     selectTab('details');
   }
+}
+
+function resolveExecArtifacts(exec, artifacts) {
+  const resolveWasm = item =>
+    item.wasm ? { ...item, wasm: artifacts?.[item.wasm]?.data || '' } : item;
+  if (Array.isArray(exec.nodes)) {
+    return {
+      ...exec,
+      nodes: exec.nodes.map(resolveWasm)
+    };
+  }
+  if (Array.isArray(exec.stages)) {
+    return {
+      ...exec,
+      stages: exec.stages.map(resolveWasm)
+    };
+  }
+  return exec;
 }
 
 function runBrowserWorker(exec, dataset, onProgress) {
