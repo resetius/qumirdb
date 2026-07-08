@@ -32,9 +32,10 @@ self.onmessage = async event => {
 };
 
 function createProgressTracker(exec, dataset) {
-  const sources = exec.nodes
-    ? exec.nodes.filter(node => node.kind === 'source')
-    : (exec.stages || []).filter(stage => stage.kind === 'source');
+  if (!Array.isArray(exec.nodes)) {
+    throw new Error('exec plan is missing graph nodes');
+  }
+  const sources = exec.nodes.filter(node => node.kind === 'source');
   const items = sources.map((stage, index) => {
     const key = String(stage.id ?? `${stage.table}:${index}`);
     return {

@@ -675,13 +675,7 @@ function resolveExecArtifacts(exec, artifacts) {
       nodes: exec.nodes.map(resolveWasm)
     };
   }
-  if (Array.isArray(exec.stages)) {
-    return {
-      ...exec,
-      stages: exec.stages.map(resolveWasm)
-    };
-  }
-  return exec;
+  throw new Error('exec plan is missing graph nodes');
 }
 
 function runBrowserWorker(exec, dataset, onProgress) {
