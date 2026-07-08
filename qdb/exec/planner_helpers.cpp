@@ -59,23 +59,28 @@ bool IsRadixSortableType(const NQumir::NAst::TTypePtr& type) {
     using namespace NQumir::NAst;
     auto inner = UnwrapNamedType(UnwrapNullableType(type));
     return static_cast<bool>(TMaybeType<TIntegerType>(inner)) ||
-        static_cast<bool>(TMaybeType<TFloatType>(inner));
+        static_cast<bool>(TMaybeType<TFloatType>(inner)) ||
+        static_cast<bool>(TMaybeType<TBoolType>(inner)) ||
+        static_cast<bool>(TMaybeType<TStringType>(inner));
 }
 
 struct TSortKernelInputs {
     std::vector<TSortColumnRef> KeyColumns;
-    std::vector<NQumir::NAst::TTypePtr> RadixTypes;
+    std::vector<TSortRadixKeyInput> RadixKeys;
     bool AllKeysRadixSortable = true;
 };
 
 TSortKernelInputs BuildSortKernelInputs(const NKernel::TOperatorKernelSpec& spec) {
     TSortKernelInputs inputs;
     inputs.KeyColumns.reserve(spec.SortKeys.size());
-    inputs.RadixTypes.reserve(spec.SortKeys.size());
+    inputs.RadixKeys.reserve(spec.SortKeys.size());
     for (const auto& key : spec.SortKeys) {
         inputs.AllKeysRadixSortable =
             inputs.AllKeysRadixSortable && IsRadixSortableType(key.Column.Type);
-        inputs.RadixTypes.push_back(key.Column.Type);
+        inputs.RadixKeys.push_back({
+            .ColumnIndex = key.Column.Index,
+            .Type = key.Column.Type,
+        });
         inputs.KeyColumns.push_back({
             .Index = key.Column.Index,
             .Type = key.Column.Type,
@@ -237,7 +242,19 @@ int32_t RadixKeyWidthBytes(const NQumir::NAst::TTypePtr& type) {
     if (auto integer = TMaybeType<TIntegerType>(inner)) {
         return static_cast<int32_t>(integer.Cast()->BitWidth() / 8);
     }
-    return 8;
+    if (TMaybeType<TFloatType>(inner)) {
+        return 8;
+    }
+    if (TMaybeType<TBoolType>(inner)) {
+        return 1;
+    }
+    return 0;
+}
+
+bool IsStringRadixKey(const NQumir::NAst::TTypePtr& type) {
+    using namespace NQumir::NAst;
+    return static_cast<bool>(TMaybeType<TStringType>(
+        UnwrapNamedType(UnwrapNullableType(type))));
 }
 
 TSortRuntimeProcess BuildSortRuntimeProcess(
@@ -250,22 +267,22 @@ TSortRuntimeProcess BuildSortRuntimeProcess(
     PrintKernelSpec(options.Diagnostics, spec);
     auto sortInputs = BuildSortKernelInputs(spec);
     TSortRadixKernel radixKernel;
-    if (sortInputs.AllKeysRadixSortable && !sortInputs.RadixTypes.empty()) {
+    if (sortInputs.AllKeysRadixSortable && !sortInputs.RadixKeys.empty()) {
         auto* sink = options.Sink;
         const size_t sinkBefore = sink ? sink->size() : 0;
         // The nullable variant is only reachable when a key column can carry a
         // null mask; with all keys non-nullable by schema it is dead code, so
         // skip generating it.
         bool anyNullableKey = false;
-        for (const auto& type : sortInputs.RadixTypes) {
-            anyNullableKey = anyNullableKey || IsNullableType(type);
+        for (const auto& key : sortInputs.RadixKeys) {
+            anyNullableKey = anyNullableKey || IsNullableType(key.Type);
         }
         TKernelCompiler compiler(std::move(options));
         radixKernel = {
             .Enabled = true,
-            .Dispatch = compiler.CompileRadixSortComposite(sortInputs.RadixTypes),
+            .Dispatch = compiler.CompileRadixSortComposite(sortInputs.RadixKeys),
             .NullableDispatch = anyNullableKey
-                ? compiler.CompileRadixSortCompositeNullable(sortInputs.RadixTypes)
+                ? compiler.CompileRadixSortCompositeNullable(sortInputs.RadixKeys)
                 : TKernelCompiler::TSortRadixCompositeNullableDispatch{},
         };
         if (sink) {
@@ -277,6 +294,7 @@ TSortRuntimeProcess BuildSortRuntimeProcess(
                 meta.push_back({
                     .Index = sortInputs.KeyColumns[k].Index,
                     .WidthBytes = RadixKeyWidthBytes(sortInputs.KeyColumns[k].Type),
+                    .IsString = IsStringRadixKey(sortInputs.KeyColumns[k].Type),
                     .Desc = keys[k].Direction == ESortDirection::Desc,
                 });
             }

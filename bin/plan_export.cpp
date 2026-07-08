@@ -1573,9 +1573,9 @@ const TKernelRef* FindKernel(
 }
 
 // Builds a sort stage body from the operator's lowered kernels. When the sort
-// compiled to a radix kernel with wasm and no key is nullable, emits the
-// kernel plus its per-key {index,width,desc} metadata; otherwise emits
-// JS-comparison keys. Returns nullopt if a key references an unknown column.
+// compiled to a radix kernel with wasm, emits the kernel plus its per-key
+// metadata; otherwise emits JS-comparison keys. Returns nullopt if a key
+// references an unknown column.
 std::optional<llvm::json::Object> BuildSortStageJson(
     const std::vector<NQdb::TSortKey>& sortKeys,
     const NQumir::NAst::TStructType& inputStruct,
@@ -1599,23 +1599,31 @@ std::optional<llvm::json::Object> BuildSortStageJson(
             NQdb::IsNullableType(inputStruct.Fields[index].second);
     }
 
-    // The browser runtime's radix driver does not marshal validity bitmaps, so
-    // nullable keys fall back to JS-comparison sort.
-    const auto* radix = FindKernel(kernels, op, "sort.radix.fused");
-    if (embedWasm && !anyNullableKey && radix &&
+    const auto* radix = FindKernel(
+        kernels, op,
+        anyNullableKey ? "sort.radix.nullable.fused" : "sort.radix.fused");
+    if (embedWasm && radix &&
         !radix->Artifacts->Wasm.empty())
     {
         llvm::json::Array keys;
-        for (const auto& key : radix->Kernel->SortKeys) {
+        for (size_t i = 0; i < radix->Kernel->SortKeys.size(); ++i) {
+            const auto& key = radix->Kernel->SortKeys[i];
+            const auto& sortKey = sortKeys[i];
+            const bool nullsFirst = sortKey.Nulls == NQdb::ESortNulls::First ||
+                (sortKey.Nulls == NQdb::ESortNulls::Default &&
+                    sortKey.Direction == NQdb::ESortDirection::Desc);
             keys.push_back(llvm::json::Object{
                 {"index", key.Index},
                 {"width", key.WidthBytes},
+                {"isString", key.IsString},
                 {"desc", key.Desc},
+                {"nullsFirst", nullsFirst},
             });
         }
         return llvm::json::Object{
             {"wasm", radix->Artifacts->Wasm},
             {"radixKeys", std::move(keys)},
+            {"radixNullable", anyNullableKey},
         };
     }
 

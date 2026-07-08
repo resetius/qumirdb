@@ -140,6 +140,9 @@ std::string SortCoreTypeName(const NQumir::NAst::TTypePtr& type) {
     if (TMaybeType<TFloatType>(valueType)) {
         return "f64";
     }
+    if (TMaybeType<TBoolType>(valueType)) {
+        return "u8";
+    }
     return {};
 }
 
@@ -152,36 +155,86 @@ int64_t SortRadixKeyBits(const NQumir::NAst::TTypePtr& type) {
     if (TMaybeType<TFloatType>(valueType)) {
         return 64;
     }
+    if (TMaybeType<TBoolType>(valueType)) {
+        return 8;
+    }
     return 0;
 }
 
+bool SortKeyIsString(const NQumir::NAst::TTypePtr& type) {
+    using namespace NQumir::NAst;
+    return static_cast<bool>(TMaybeType<TStringType>(
+        UnwrapNamedType(UnwrapNullableType(type))));
+}
+
+bool SortKeyIsBool(const NQumir::NAst::TTypePtr& type) {
+    using namespace NQumir::NAst;
+    return static_cast<bool>(TMaybeType<TBoolType>(
+        UnwrapNamedType(UnwrapNullableType(type))));
+}
+
+void EmitRowIdSortCall(
+    std::ostringstream& out,
+    const TSortRadixKeyInput& key,
+    size_t keyIdx,
+    bool nullable)
+{
+    const auto desc = "(index descs (: " + std::to_string(keyIdx) + " i64))";
+    if (SortKeyIsString(key.Type)) {
+        out << "      (call sort_string_rowids" << (nullable ? "_nullable" : "")
+            << " store (: " << key.ColumnIndex << " i64)"
+            << " row_ids (cast work <ptr u64>) counts n " << desc;
+        if (nullable) {
+            out << " (index nulls_firsts (: " << keyIdx << " i64))";
+        }
+        out << ")\n";
+        return;
+    }
+    if (SortKeyIsBool(key.Type)) {
+        out << "      (call sort_bool_rowids" << (nullable ? "_nullable" : "")
+            << " store (: " << key.ColumnIndex << " i64)"
+            << " row_ids work counts n " << desc;
+        if (nullable) {
+            out << " (index nulls_firsts (: " << keyIdx << " i64))";
+        }
+        out << ")\n";
+        return;
+    }
+
+    const auto coreType = SortCoreTypeName(key.Type);
+    const int64_t keyBits = SortRadixKeyBits(key.Type);
+    if (coreType.empty() || keyBits == 0) {
+        throw NQumir::TError(
+            "CompileRadixSortComposite: unsupported key type " +
+            (key.Type ? key.Type->ToString() : std::string("<null>")));
+    }
+    out << "      (call sort_fixed_rowids" << (nullable ? "_nullable" : "")
+        << " store (: " << key.ColumnIndex << " i64)"
+        << " row_ids work counts n (: " << keyBits << " i64) " << desc;
+    if (nullable) {
+        out << " (index nulls_firsts (: " << keyIdx << " i64))";
+    }
+    out << " (cast (: 0 i64) <ptr " << coreType << ">))\n";
+}
+
 std::string BuildRadixCompositeWrapperSource(
-    const std::vector<NQumir::NAst::TTypePtr>& types)
+    const std::vector<TSortRadixKeyInput>& keys)
 {
     std::ostringstream out;
-    out << "(block\n"
+    out << "(block\n";
+    out
         << "  (fun qdb_radix_sort_indices_composite\n"
-        << "       ((var values <ptr <ptr i8>>)\n"
-        << "        (var indices <ptr u32>)\n"
-        << "        (var work <ptr u32>)\n"
+        << "       ((var store <ptr TRowSet>)\n"
+        << "        (var row_ids <ptr i64>)\n"
+        << "        (var work <ptr i64>)\n"
         << "        (var counts <ptr u32>)\n"
         << "        (var n i64)\n"
         << "        (var descs <ptr bool>))\n"
         << "    (block\n";
 
-    for (size_t k = types.size(); k > 0; --k) {
+    for (size_t k = keys.size(); k > 0; --k) {
         const size_t keyIdx = k - 1;
-        const auto coreType = SortCoreTypeName(types[keyIdx]);
-        const int64_t keyBits = SortRadixKeyBits(types[keyIdx]);
-        if (coreType.empty() || keyBits == 0) {
-            throw NQumir::TError(
-                "CompileRadixSortComposite: unsupported key type " +
-                (types[keyIdx] ? types[keyIdx]->ToString() : std::string("<null>")));
-        }
-        out << "      (call radix_sort_indices"
-            << " (cast (index values (: " << keyIdx << " i64)) <ptr " << coreType << ">)"
-            << " indices work counts n (: " << keyBits << " i64)"
-            << " (index descs (: " << keyIdx << " i64)))\n";
+        EmitRowIdSortCall(out, keys[keyIdx], keyIdx, false);
     }
 
     out << "      )))\n";
@@ -189,36 +242,24 @@ std::string BuildRadixCompositeWrapperSource(
 }
 
 std::string BuildRadixCompositeNullableWrapperSource(
-    const std::vector<NQumir::NAst::TTypePtr>& types)
+    const std::vector<TSortRadixKeyInput>& keys)
 {
     std::ostringstream out;
-    out << "(block\n"
+    out << "(block\n";
+    out
         << "  (fun qdb_radix_sort_indices_composite_nullable\n"
-        << "       ((var values <ptr <ptr i8>>)\n"
-        << "        (var valids <ptr <ptr u8>>)\n"
-        << "        (var indices <ptr u32>)\n"
-        << "        (var work <ptr u32>)\n"
+        << "       ((var store <ptr TRowSet>)\n"
+        << "        (var row_ids <ptr i64>)\n"
+        << "        (var work <ptr i64>)\n"
         << "        (var counts <ptr u32>)\n"
         << "        (var n i64)\n"
         << "        (var descs <ptr bool>)\n"
         << "        (var nulls_firsts <ptr bool>))\n"
         << "    (block\n";
 
-    for (size_t k = types.size(); k > 0; --k) {
+    for (size_t k = keys.size(); k > 0; --k) {
         const size_t keyIdx = k - 1;
-        const auto coreType = SortCoreTypeName(types[keyIdx]);
-        const int64_t keyBits = SortRadixKeyBits(types[keyIdx]);
-        if (coreType.empty() || keyBits == 0) {
-            throw NQumir::TError(
-                "CompileRadixSortCompositeNullable: unsupported key type " +
-                (types[keyIdx] ? types[keyIdx]->ToString() : std::string("<null>")));
-        }
-        out << "      (call radix_sort_indices_nullable"
-            << " (cast (index values (: " << keyIdx << " i64)) <ptr " << coreType << ">)"
-            << " (cast (index valids (: " << keyIdx << " i64)) <ptr u8>)"
-            << " indices work counts n (: " << keyBits << " i64)"
-            << " (index descs (: " << keyIdx << " i64))"
-            << " (index nulls_firsts (: " << keyIdx << " i64)))\n";
+        EmitRowIdSortCall(out, keys[keyIdx], keyIdx, true);
     }
 
     out << "      )))\n";
@@ -228,21 +269,29 @@ std::string BuildRadixCompositeNullableWrapperSource(
 } // namespace
 
 NQumir::NAst::TExprPtr BuildRadixSortProgramAst(
-    const std::vector<NQumir::NAst::TTypePtr>& types)
+    const std::vector<TSortRadixKeyInput>& keys)
 {
     using namespace NQumir::NAst;
-    if (types.empty()) {
+    if (keys.empty()) {
         throw NQumir::TError("BuildRadixSortProgramAst: empty key list");
     }
     std::vector<TExprPtr> programStmts;
-    auto library = NKernel::ParseFunctionLibrary(NKernel::ReadSortKernel("radix.oz"));
-    if (!library) {
-        throw NQumir::TError("BuildRadixSortProgramAst: " + library.error().ToString());
-    }
-    for (auto& stmt : *library) {
-        programStmts.push_back(std::move(stmt));
-    }
-    auto wrapper = NKernel::ParseFunctionLibrary(BuildRadixCompositeWrapperSource(types));
+    auto addLibrary = [&](const std::string& name, bool skipUse) {
+        auto library = NKernel::ParseFunctionLibrary(NKernel::ReadSortKernel(name));
+        if (!library) {
+            throw NQumir::TError(
+                "BuildRadixSortProgramAst: " + library.error().ToString());
+        }
+        for (auto& stmt : *library) {
+            if (skipUse && TMaybeNode<TUseExpr>(stmt)) {
+                continue;
+            }
+            programStmts.push_back(std::move(stmt));
+        }
+    };
+    addLibrary("radix.oz", false);
+    addLibrary("sort_rowids.oz", true);
+    auto wrapper = NKernel::ParseFunctionLibrary(BuildRadixCompositeWrapperSource(keys));
     if (!wrapper) {
         throw NQumir::TError("BuildRadixSortProgramAst: " + wrapper.error().ToString());
     }
@@ -253,10 +302,10 @@ NQumir::NAst::TExprPtr BuildRadixSortProgramAst(
 }
 
 NQumir::NAst::TExprPtr BuildRadixSortNullableProgramAst(
-    const std::vector<NQumir::NAst::TTypePtr>& types)
+    const std::vector<TSortRadixKeyInput>& keys)
 {
     using namespace NQumir::NAst;
-    if (types.empty()) {
+    if (keys.empty()) {
         throw NQumir::TError("BuildRadixSortNullableProgramAst: empty key list");
     }
     std::vector<TExprPtr> programStmts;
@@ -274,10 +323,10 @@ NQumir::NAst::TExprPtr BuildRadixSortNullableProgramAst(
         }
     };
     addLibrary("radix.oz", false);
-    addLibrary("radix_nullable.oz", true);
+    addLibrary("sort_rowids.oz", true);
 
     auto wrapper = NKernel::ParseFunctionLibrary(
-        BuildRadixCompositeNullableWrapperSource(types));
+        BuildRadixCompositeNullableWrapperSource(keys));
     if (!wrapper) {
         throw NQumir::TError(
             "BuildRadixSortNullableProgramAst: " + wrapper.error().ToString());
@@ -398,15 +447,15 @@ TKernelCompiler::TProjectDispatch TKernelCompiler::CompileProject(
 }
 
 TKernelCompiler::TSortRadixCompositeDispatch TKernelCompiler::CompileRadixSortComposite(
-    const std::vector<NQumir::NAst::TTypePtr>& types)
+    const std::vector<TSortRadixKeyInput>& keys)
 {
     using namespace NQumir::NAst;
 
-    if (types.empty()) {
+    if (keys.empty()) {
         throw NQumir::TError("CompileRadixSortComposite: empty key list");
     }
 
-    auto program = BuildRadixSortProgramAst(types);
+    auto program = BuildRadixSortProgramAst(keys);
     PrintKernelAst(Diagnostics_, "sort.radix.fused", program);
 
     auto kernel = EmitKernel(
@@ -415,20 +464,20 @@ TKernelCompiler::TSortRadixCompositeDispatch TKernelCompiler::CompileRadixSortCo
         std::move(program));
     FinishKernelDiagnostics(Diagnostics_);
 
-    using TSortFn = void(*)(void**, uint32_t*, uint32_t*, uint32_t*, int64_t, bool*);
-    return [slot = kernel.Slot](void** values, uint32_t* indices, uint32_t* work,
+    using TSortFn = void(*)(TRowSet*, int64_t*, int64_t*, uint32_t*, int64_t, bool*);
+    return [slot = kernel.Slot](TRowSet* store, int64_t* rowIds, int64_t* work,
         uint32_t* counts, int64_t n, bool* descs) {
-        reinterpret_cast<TSortFn>(slot->Fns[0])(values, indices, work, counts, n, descs);
+        reinterpret_cast<TSortFn>(slot->Fns[0])(store, rowIds, work, counts, n, descs);
     };
 }
 
 TKernelCompiler::TSortRadixCompositeNullableDispatch
 TKernelCompiler::CompileRadixSortCompositeNullable(
-    const std::vector<NQumir::NAst::TTypePtr>& types)
+    const std::vector<TSortRadixKeyInput>& keys)
 {
     using namespace NQumir::NAst;
 
-    auto program = BuildRadixSortNullableProgramAst(types);
+    auto program = BuildRadixSortNullableProgramAst(keys);
     PrintKernelAst(Diagnostics_, "sort.radix.nullable.fused", program);
 
     auto kernel = EmitKernel(
@@ -437,12 +486,12 @@ TKernelCompiler::CompileRadixSortCompositeNullable(
         std::move(program));
     FinishKernelDiagnostics(Diagnostics_);
 
-    using TSortFn = void(*)(void**, uint8_t**, uint32_t*, uint32_t*, uint32_t*,
+    using TSortFn = void(*)(TRowSet*, int64_t*, int64_t*, uint32_t*,
         int64_t, bool*, bool*);
-    return [slot = kernel.Slot](void** values, uint8_t** valids, uint32_t* indices,
-        uint32_t* work, uint32_t* counts, int64_t n, bool* descs, bool* nullsFirsts) {
+    return [slot = kernel.Slot](TRowSet* store, int64_t* rowIds,
+        int64_t* work, uint32_t* counts, int64_t n, bool* descs, bool* nullsFirsts) {
         reinterpret_cast<TSortFn>(slot->Fns[0])(
-            values, valids, indices, work, counts, n, descs, nullsFirsts);
+            store, rowIds, work, counts, n, descs, nullsFirsts);
     };
 }
 

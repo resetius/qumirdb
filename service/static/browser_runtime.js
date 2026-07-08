@@ -1096,6 +1096,10 @@ function createJoinState(kernel, layout, stage) {
       }
     }
   }
+  if (isResidualSemiAntiJoin(stage) &&
+      typeof exports.jt_probe_right_stream !== 'function') {
+    throw new Error('join kernel is missing entry jt_probe_right_stream');
+  }
   if (isOuterJoin(stage) && typeof exports.jt_finalize_outer !== 'function') {
     throw new Error('join kernel is missing entry jt_finalize_outer');
   }
@@ -1149,20 +1153,38 @@ function updateJoinState(state, side, rowSet) {
         arena, layout, batch.columns, batch.rowCount, false, selection).rowsetPtr;
   const isLeft = side === 0;
   const semiAnti = isLeftSemiAntiJoin(state.stage);
+  const exports = kernel.instance.exports;
+
+  if (semiAnti && !isLeft) {
+    const ok = state.stage.hasResidual
+      ? exports.jt_probe_right_stream(
+          BigInt(state.leftTable),
+          BigInt(rowsetPtr),
+          -1n,
+          BigInt(state.pairBuffer),
+          BigInt(state.leftStore.dataPtr()),
+          BigInt(state.rightStore.dataPtr()))
+      : exports.jt_insert_key_only(
+          BigInt(state.rightTable),
+          0n,
+          BigInt(rowsetPtr),
+          0n,
+          BigInt(state.pairBuffer));
+    if (!ok) {
+      throw new Error('join kernel update failed');
+    }
+    if (!state.stage.hasResidual) {
+      clearJoinPairBuffer(state);
+    }
+    return;
+  }
+
   const store = isLeft ? state.leftStore : state.rightStore;
   const batchIdx = store.push(batch, rowsetPtr);
   if (isLeft) {
     state.leftSelections[batchIdx] = selection || null;
   }
-  const exports = kernel.instance.exports;
-  const ok = semiAnti && !state.stage.hasResidual && !isLeft
-    ? exports.jt_insert_key_only(
-        BigInt(state.rightTable),
-        0n,
-        BigInt(store.dataPtr() + batchIdx * layout.rowset.size),
-        BigInt(batchIdx),
-        BigInt(state.pairBuffer))
-    : isLeft
+  const ok = isLeft
     ? exports.jt_process_left(
         BigInt(state.leftTable),
         BigInt(state.rightTable),
@@ -1182,6 +1204,11 @@ function updateJoinState(state, side, rowSet) {
   if (!ok) {
     throw new Error('join kernel update failed');
   }
+}
+
+function clearJoinPairBuffer(state) {
+  state.arena.view().setBigInt64(
+    state.pairBuffer + state.layout.pairBuffer.count, 0n, true);
 }
 
 function isLeftSemiAntiJoin(stage) {
@@ -1384,10 +1411,9 @@ function finishJoinState(state) {
   exports.pb_destroy(BigInt(state.pairBuffer));
 }
 
-// Drive the radix composite sort kernel. Marshals each key column into a
-// contiguous raw buffer, runs qdb_radix_sort_indices_composite to get a sorted
-// permutation, then gathers all columns by it (top-`limit` if given). No
-// ordering logic lives here — the kernel owns it, exactly as the native path.
+// Drive the radix composite sort kernel. The kernel sorts a row-id permutation
+// in place and reads key values directly from the marshaled TRowSet, matching
+// the native sort path.
 export function runRadixSort(kernel, layout, batch, selection, radixKeys, limit) {
   const arena = kernel.holder.arena;
 
@@ -1398,41 +1424,46 @@ export function runRadixSort(kernel, layout, batch, selection, radixKeys, limit)
   }
   const n = live.length;
   const keyCount = radixKeys.length;
+  const rowset = marshalRowSet(
+    arena, layout, batch.columns, batch.rowCount, false, null);
+  const nullable = !!kernel.nullable;
+  const workStride = radixKeys.some(key => key.isString) ? 4 : 1;
 
   // Allocate everything up front (a mid-write grow would detach views).
-  const valueBufs = radixKeys.map(key => {
-    const width = coreTypeWidth(batch.columns[key.index].type);
-    return { ptr: arena.alloc(Math.max(n, 1) * width, 8), width, key };
-  });
-  const valuesArrPtr = arena.alloc(Math.max(keyCount, 1) * 8, 8);
-  const indicesPtr = arena.alloc(Math.max(n, 1) * 4, 4);
-  const workPtr = arena.alloc(Math.max(n, 1) * 4, 4);
-  const countsPtr = arena.alloc(256 * 4, 4);
+  const rowIdsPtr = arena.alloc(Math.max(n, 1) * 8, 8);
+  const workPtr = arena.alloc(Math.max(n, 1) * workStride * 8, 8);
+  const countsPtr = arena.alloc((nullable ? 257 : 256) * 4, 4);
   const descsPtr = arena.alloc(Math.max(keyCount, 1), 1);
+  const nullsFirstsPtr = nullable ? arena.alloc(Math.max(keyCount, 1), 1) : 0;
 
   const dv = arena.view();
   for (let k = 0; k < keyCount; ++k) {
-    const { ptr, width, key } = valueBufs[k];
-    const column = batch.columns[key.index];
-    for (let i = 0; i < n; ++i) {
-      writeNumericValue(dv, ptr + i * width, column.type, column.values[live[i]]);
-    }
-    writePointer(dv, valuesArrPtr + k * 8, ptr);
+    const key = radixKeys[k];
     dv.setUint8(descsPtr + k, key.desc ? 1 : 0);
+    if (nullable) {
+      dv.setUint8(nullsFirstsPtr + k, key.nullsFirst ? 1 : 0);
+    }
   }
+
   for (let i = 0; i < n; ++i) {
-    dv.setUint32(indicesPtr + i * 4, i, true);
+    dv.setBigInt64(rowIdsPtr + i * 8, makeRowId(0, live[i]), true);
   }
 
   // memory64: every pointer/count is an i64 param.
-  kernel.fn(
-    BigInt(valuesArrPtr), BigInt(indicesPtr), BigInt(workPtr),
-    BigInt(countsPtr), BigInt(n), BigInt(descsPtr));
+  if (nullable) {
+    kernel.fn(
+      BigInt(rowset.rowsetPtr), BigInt(rowIdsPtr), BigInt(workPtr),
+      BigInt(countsPtr), BigInt(n), BigInt(descsPtr), BigInt(nullsFirstsPtr));
+  } else {
+    kernel.fn(
+      BigInt(rowset.rowsetPtr), BigInt(rowIdsPtr), BigInt(workPtr),
+      BigInt(countsPtr), BigInt(n), BigInt(descsPtr));
+  }
 
   const outDv = arena.view();
   const order = new Array(n);
   for (let i = 0; i < n; ++i) {
-    order[i] = live[outDv.getUint32(indicesPtr + i * 4, true)];
+    order[i] = rowIdRow(outDv.getBigInt64(rowIdsPtr + i * 8, true));
   }
 
   const keep = (limit != null && limit < n) ? Math.max(limit, 0) : n;
@@ -2098,11 +2129,149 @@ function selectedRowIndices(item) {
   return rows;
 }
 
+class TopSortState {
+  constructor(stage) {
+    this.limit = Math.max(Number(stage.limit || 0), 0);
+    this.keys = sortKeysForStage(stage);
+    this.heap = [];
+    this.specs = null;
+    this.nextSeq = 0;
+    this.encoder = new TextEncoder();
+  }
+
+  add(rowSet) {
+    const { batch, selection } = rowSet;
+    if (!this.specs) {
+      this.specs = batch.columns.map(col => ({ name: col.name, type: col.type }));
+    }
+    if (this.limit <= 0) {
+      return;
+    }
+    for (let row = 0; row < batch.rowCount; ++row) {
+      if (selection && !selection[row]) {
+        continue;
+      }
+      this.offer(makeTopSortCandidate(
+        batch, row, this.keys, this.nextSeq++, this.encoder), batch, row);
+    }
+  }
+
+  offer(candidate, batch, row) {
+    if (this.heap.length < this.limit) {
+      this.heap.push(materializeTopSortRecord(candidate, batch, row));
+      this.siftUp(this.heap.length - 1);
+      return;
+    }
+    if (compareTopSortRecords(candidate, this.heap[0]) >= 0) {
+      return;
+    }
+    this.heap[0] = materializeTopSortRecord(candidate, batch, row);
+    this.siftDown(0);
+  }
+
+  finish() {
+    const records = [...this.heap].sort(compareTopSortRecords);
+    const specs = this.specs || [];
+    const columns = specs.map((spec, c) => ({
+      name: spec.name,
+      type: spec.type,
+      values: records.map(record => record.values[c]),
+    }));
+    return { rowCount: records.length, columns };
+  }
+
+  siftUp(index) {
+    while (index > 0) {
+      const parent = (index - 1) >> 1;
+      if (!topSortRecordWorse(this.heap[index], this.heap[parent])) {
+        break;
+      }
+      [this.heap[index], this.heap[parent]] = [this.heap[parent], this.heap[index]];
+      index = parent;
+    }
+  }
+
+  siftDown(index) {
+    for (;;) {
+      const left = index * 2 + 1;
+      const right = left + 1;
+      let worst = index;
+      if (left < this.heap.length &&
+          topSortRecordWorse(this.heap[left], this.heap[worst])) {
+        worst = left;
+      }
+      if (right < this.heap.length &&
+          topSortRecordWorse(this.heap[right], this.heap[worst])) {
+        worst = right;
+      }
+      if (worst === index) {
+        break;
+      }
+      [this.heap[index], this.heap[worst]] = [this.heap[worst], this.heap[index]];
+      index = worst;
+    }
+  }
+}
+
+function sortKeysForStage(stage) {
+  if (Array.isArray(stage.keys)) {
+    return stage.keys;
+  }
+  if (Array.isArray(stage.radixKeys)) {
+    return stage.radixKeys.map(key => ({
+      index: key.index,
+      direction: key.desc ? 'desc' : 'asc',
+      nulls: key.nullsFirst ? 'nulls-first' : 'nulls-last',
+    }));
+  }
+  throw new Error('top-sort stage is missing sort keys');
+}
+
+function makeTopSortCandidate(batch, row, keys, seq, encoder) {
+  const keyValues = keys.map(key => {
+    const column = batch.columns[key.index];
+    const value = column.values[row];
+    if (column.type === 'string') {
+      return (value === null || value === undefined)
+        ? null
+        : encoder.encode(String(value));
+    }
+    return value;
+  });
+  return { seq, keyValues, keys };
+}
+
+function materializeTopSortRecord(candidate, batch, row) {
+  return {
+    ...candidate,
+    values: batch.columns.map(col => col.values[row]),
+  };
+}
+
+function compareTopSortRecords(left, right) {
+  for (let i = 0; i < left.keys.length; ++i) {
+    const key = left.keys[i];
+    const columnCompare = left.keyValues[i] instanceof Uint8Array
+      ? compareBytes
+      : compareScalar;
+    const c = compareKey(left.keyValues[i], right.keyValues[i], key, columnCompare);
+    if (c !== 0) {
+      return c;
+    }
+  }
+  return left.seq - right.seq;
+}
+
+function topSortRecordWorse(left, right) {
+  return compareTopSortRecords(left, right) > 0;
+}
+
 class SortTask {
   constructor(stage, layout, shared) {
     this.stage = stage;
     this.layout = layout;
     this.shared = shared;
+    this.topSort = stage.kind === 'top-sort' ? new TopSortState(stage) : null;
     this.inputs = [];
     this.pending = null;
     this.done = false;
@@ -2126,20 +2295,33 @@ class SortTask {
     const fetched = input.fetch();
     if (fetched.result === FetchResult.NO_DATA) return TaskResult.NEED_DATA;
     if (fetched.result === FetchResult.OK) {
-      this.inputs.push(fetched.rowSet);
+      if (this.topSort) {
+        this.topSort.add(fetched.rowSet);
+      } else {
+        this.inputs.push(fetched.rowSet);
+      }
       this.rows += fetched.rowSet.batch.rowCount;
       return TaskResult.OK;
     }
 
-    const batch = compactRowSets(this.inputs);
-    const rowLimit = this.stage.kind === 'top-sort' ? Number(this.stage.limit) : null;
-    if (this.stage.wasm) {
-      const kernel = await instantiateKernel(
-        this.stage.wasm, 'qdb_radix_sort_indices_composite', this.shared);
-      this.pending = runRadixSort(
-        kernel, this.layout, batch, null, this.stage.radixKeys, rowLimit);
+    if (this.topSort) {
+      this.pending = this.topSort.finish();
     } else {
-      this.pending = applySort(batch, null, this.stage.keys, rowLimit);
+      const batch = compactRowSets(this.inputs);
+      if (this.stage.wasm) {
+        const radixNullable = !!this.stage.radixNullable;
+        const kernel = await instantiateKernel(
+          this.stage.wasm,
+          radixNullable
+            ? 'qdb_radix_sort_indices_composite_nullable'
+            : 'qdb_radix_sort_indices_composite',
+          this.shared);
+        kernel.nullable = radixNullable;
+        this.pending = runRadixSort(
+          kernel, this.layout, batch, null, this.stage.radixKeys, null);
+      } else {
+        this.pending = applySort(batch, null, this.stage.keys, null);
+      }
     }
     return this.execute();
   }

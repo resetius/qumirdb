@@ -53,14 +53,20 @@ std::optional<std::string> CompileKernelAstToObject(
     const std::vector<std::string>& entryNames,
     std::string* error);
 
-// Radix composite sort program (entry qdb_radix_sort_indices_composite): the
-// same kernel the native sort uses. Throws on an unsupported key type.
+struct TSortRadixKeyInput {
+    int32_t ColumnIndex = 0;
+    NQumir::NAst::TTypePtr Type;
+};
+
+// Radix composite sort program (entry qdb_radix_sort_indices_composite): sorts
+// packed TRowId values in-place and reads key columns directly from TRowSet
+// storage. Throws on an unsupported key type.
 NQumir::NAst::TExprPtr BuildRadixSortProgramAst(
-    const std::vector<NQumir::NAst::TTypePtr>& types);
+    const std::vector<TSortRadixKeyInput>& keys);
 
 // Nullable variant (entry qdb_radix_sort_indices_composite_nullable).
 NQumir::NAst::TExprPtr BuildRadixSortNullableProgramAst(
-    const std::vector<NQumir::NAst::TTypePtr>& types);
+    const std::vector<TSortRadixKeyInput>& keys);
 
 // agg_dispatch(ref HashTable ht, ref TRowSet batch, i64 arg, i64 op) -> i64
 //   op == 0: init(ht, capacity = arg)
@@ -203,12 +209,12 @@ public:
     using TProjectDispatch = std::function<void(TRowSet* in, void** outBuffers)>;
 
     using TSortRadixCompositeDispatch = std::function<void(
-        void** values, uint32_t* indices, uint32_t* work, uint32_t* counts,
+        TRowSet* store, int64_t* rowIds, int64_t* work, uint32_t* counts,
         int64_t n, bool* descs)>;
 
     using TSortRadixCompositeNullableDispatch = std::function<void(
-        void** values, uint8_t** valids, uint32_t* indices, uint32_t* work,
-        uint32_t* counts, int64_t n, bool* descs, bool* nullsFirsts)>;
+        TRowSet* store, int64_t* rowIds, int64_t* work, uint32_t* counts,
+        int64_t n, bool* descs, bool* nullsFirsts)>;
 
     // sizeof(HashTable) per modules/qumirdb.cpp's layout — callers of
     // CompileAggregate must allocate a zero-initialized buffer this large
@@ -232,9 +238,9 @@ public:
     TProjectDispatch CompileProject(const NKernel::TOperatorKernelSpec& spec);
 
     TSortRadixCompositeDispatch CompileRadixSortComposite(
-        const std::vector<NQumir::NAst::TTypePtr>& types);
+        const std::vector<TSortRadixKeyInput>& keys);
     TSortRadixCompositeNullableDispatch CompileRadixSortCompositeNullable(
-        const std::vector<NQumir::NAst::TTypePtr>& types);
+        const std::vector<TSortRadixKeyInput>& keys);
 
     // Compiles the per-query generic update and finalize programs for `aggs`
     // grouped by `groupKeys`, over rows of `inputType`.
