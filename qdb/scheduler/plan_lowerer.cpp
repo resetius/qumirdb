@@ -1491,9 +1491,11 @@ private:
         TSchedulerUnaryStage stage =
             [&]() {
                 TStageDiagnosticsScope diagnosticsScope(Diagnostics_, residualGroup);
+                // The residual filter kernel belongs to the join operator: the
+                // exec exporter looks it up by the join's identity.
                 return BuildSchedulerFilterStage(
                     *filterOp, crossType,
-                    KernelOptions(residualGroup, filterOp.get()));
+                    KernelOptions(residualGroup, &join));
             }();
         TLoweredOutput result;
         result.OutputType = std::move(stage.OutputType);
