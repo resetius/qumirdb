@@ -1,6 +1,7 @@
 #pragma once
 
 #include <qdb/io/io.h>
+#include <qdb/kernel/generated.h>
 #include <qdb/kernel/spec.h>
 #include <qdb/plan/ops/aggregate.h>
 #include <qdb/plan/ops/join.h>
@@ -15,33 +16,34 @@
 #include <optional>
 #include <ostream>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
 namespace NQdb {
 
-struct TGeneratedKernel {
-    std::string Name;
-    std::string Stage;
-    std::vector<std::string> Entrypoints;
-    NQumir::NAst::TExprPtr Ast;
-};
-
-class IKernelExportBackend {
-public:
-    virtual ~IKernelExportBackend() = default;
-    virtual bool SkipJit() const = 0;
-    virtual void CompileKernel(TGeneratedKernel kernel) = 0;
-};
-
+// Kernel generation appends TGeneratedKernels to Sink (when set); BindNow
+// additionally JIT-finalizes them immediately so the returned dispatches are
+// live (the default; deferred callers finalize via JitFinalizeKernels).
 struct TKernelCompilerOptions {
     std::ostream* Diagnostics = nullptr;
-    IKernelExportBackend* ExportBackend = nullptr;
     std::string Stage;
+    const void* Operator = nullptr;
+    std::vector<TGeneratedKernel>* Sink = nullptr;
+    bool BindNow = true;
 };
 
 // Shared kernel-pipeline options; caller overrides NativeCode/TargetTriple.
 NQumir::TLLVMRunnerOptions KernelRunnerOptions();
+
+// Native-JIT kernel compilation (prepends `use qumirdb`, links runtime
+// symbols); one function pointer per entry. The pointers live as long as
+// `runner`.
+std::unordered_map<std::string, void*> CompileKernelAst(
+    NQumir::TLLVMRunner& runner,
+    NQumir::NAst::TExprPtr ast,
+    const std::vector<std::string>& entryNames,
+    std::string* error);
 
 // Like the native CompileKernelAst, but emits a target object (per
 // runner.Options.TargetTriple) instead of JIT. Returns object bytes.
@@ -50,6 +52,15 @@ std::optional<std::string> CompileKernelAstToObject(
     NQumir::NAst::TExprPtr ast,
     const std::vector<std::string>& entryNames,
     std::string* error);
+
+// Radix composite sort program (entry qdb_radix_sort_indices_composite): the
+// same kernel the native sort uses. Throws on an unsupported key type.
+NQumir::NAst::TExprPtr BuildRadixSortProgramAst(
+    const std::vector<NQumir::NAst::TTypePtr>& types);
+
+// Nullable variant (entry qdb_radix_sort_indices_composite_nullable).
+NQumir::NAst::TExprPtr BuildRadixSortNullableProgramAst(
+    const std::vector<NQumir::NAst::TTypePtr>& types);
 
 // agg_dispatch(ref HashTable ht, ref TRowSet batch, i64 arg, i64 op) -> i64
 //   op == 0: init(ht, capacity = arg)
@@ -170,8 +181,10 @@ public:
 
     explicit TKernelCompiler(TKernelCompilerOptions options)
         : Diagnostics_(options.Diagnostics)
-        , ExportBackend_(options.ExportBackend)
         , Stage_(std::move(options.Stage))
+        , Operator_(options.Operator)
+        , Sink_(options.Sink)
+        , BindNow_(options.BindNow)
     {
         Opts_ = KernelRunnerOptions();
         Opts_.NativeCode = true;
@@ -263,9 +276,20 @@ private:
         const NQumir::NAst::TStructType* innerType = nullptr,
         size_t leftFieldCount = 0);
 
+    // Wrap a freshly built kernel program: create its slot, append to Sink_,
+    // and (if BindNow_) JIT-finalize immediately. Returns the emitted kernel
+    // (its Slot backs the caller's dispatch closures).
+    TGeneratedKernel EmitKernel(
+        std::string name,
+        std::vector<std::string> entrypoints,
+        NQumir::NAst::TExprPtr ast,
+        std::shared_ptr<void> storage = nullptr);
+
     std::ostream* Diagnostics_ = nullptr;
-    IKernelExportBackend* ExportBackend_ = nullptr;
     std::string Stage_;
+    const void* Operator_ = nullptr;
+    std::vector<TGeneratedKernel>* Sink_ = nullptr;
+    bool BindNow_ = true;
     NQumir::TLLVMRunnerOptions Opts_;
 };
 

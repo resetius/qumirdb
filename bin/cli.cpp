@@ -1,6 +1,7 @@
 #include <qdb/exec/planner_helpers.h>
 #include <qdb/io/parquet/source.h>
 #include <qdb/io/text/sink.h>
+#include <qdb/kernel/finalize.h>
 #include <qdb/scheduler/plan_lowerer.h>
 #include <qdb/plan/build.h>
 #include <qdb/plan/ops/aggregate.h>
@@ -409,6 +410,9 @@ int RunQuery(ESyntax syntax, std::istream& in, const TConfig& config) {
 
     auto lowered = NQdb::NScheduler::LowerPlanToGraph(
         *plan, config.Scheduler, diagnostics);
+    // JIT the kernels up front so the reported query time excludes kernel
+    // compilation (RunPlanIntoSink's own finalize pass is then a no-op).
+    NQdb::JitFinalizeKernels(lowered.Kernels, diagnostics);
 
     std::vector<std::string> outputNames;
     std::vector<NQdb::TColumnSchema> outputColumns;

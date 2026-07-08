@@ -5,6 +5,7 @@
 #include <qdb/exec/sort_exec.h>
 #include <qdb/io/parquet/source.h>
 #include <qdb/kernel/compiler.h>
+#include <qdb/kernel/finalize.h>
 #include <qdb/kernel/spec.h>
 #include <qdb/plan/ops/aggregate.h>
 #include <qdb/plan/ops/filter.h>
@@ -204,12 +205,10 @@ private:
 TSchedulerUnaryStage BuildSchedulerFilterStage(
     TFilterOperator& filter,
     const NQumir::NAst::TTypePtr& inputType,
-    std::ostream* diagnostics,
-    IKernelExportBackend* exportBackend = nullptr,
-    std::string stage = {})
+    TKernelCompilerOptions options)
 {
     auto runtime = BuildFilterRuntimeProcess(
-        filter, inputType, diagnostics, exportBackend, std::move(stage));
+        filter, inputType, std::move(options));
     auto code = std::make_shared<NScheduler::TUnaryCode>(
         [process = std::move(runtime.Process)](void* state, TRowSet& rowSet) {
             auto* kernelState = static_cast<TUnaryStreamingKernelState*>(state);
@@ -228,12 +227,10 @@ TSchedulerUnaryStage BuildSchedulerFilterStage(
 TSchedulerUnaryStage BuildSchedulerProjectStage(
     TProjectOperator& project,
     const NQumir::NAst::TTypePtr& inputType,
-    std::ostream* diagnostics,
-    IKernelExportBackend* exportBackend = nullptr,
-    std::string stage = {})
+    TKernelCompilerOptions options)
 {
     auto runtime = BuildProjectRuntimeProcess(
-        project, inputType, diagnostics, exportBackend, std::move(stage));
+        project, inputType, std::move(options));
     auto code = std::make_shared<NScheduler::TUnaryCode>(
         [process = std::move(runtime.Process)](void* state, TRowSet& rowSet) {
             auto* kernelState = static_cast<TUnaryStreamingKernelState*>(state);
@@ -395,12 +392,26 @@ public:
         NScheduler::TTaskGraph& graph,
         NScheduler::TSettings settings,
         std::ostream* diagnostics,
-        IKernelExportBackend* exportBackend = nullptr)
+        std::vector<TGeneratedKernel>* kernelSink)
         : Graph_(graph)
         , Settings_(std::move(settings))
         , Diagnostics_(diagnostics)
-        , ExportBackend_(exportBackend)
+        , KernelSink_(kernelSink)
     {}
+
+    // Kernel options for one stage: generation only (deferred finalization),
+    // kernels collected into the lowered plan.
+    TKernelCompilerOptions KernelOptions(
+        std::string stage, const void* op) const
+    {
+        return TKernelCompilerOptions{
+            .Diagnostics = Diagnostics_,
+            .Stage = std::move(stage),
+            .Operator = op,
+            .Sink = KernelSink_,
+            .BindNow = false,
+        };
+    }
 
     size_t OutputLanes(const TOperatorPtr& op) const {
         if (auto n = TMaybeOp<TSourceOperator>(op)) {
@@ -511,9 +522,7 @@ public:
                     return BuildSchedulerFilterStage(
                         *filter,
                         inType,
-                        Diagnostics_,
-                        ExportBackend_,
-                        stageGroup);
+                        KernelOptions(stageGroup, filter.get()));
                 },
                 outConn);
         }
@@ -528,9 +537,7 @@ public:
                     return BuildSchedulerProjectStage(
                         *project,
                         inType,
-                        Diagnostics_,
-                        ExportBackend_,
-                        stageGroup);
+                        KernelOptions(stageGroup, project.get()));
                 },
                 outConn);
         }
@@ -899,7 +906,8 @@ private:
     // shared across all partition states.
     TBlockingTail BuildAggregateTail(
         const NQumir::NAst::TTypePtr& childType,
-        TAggregateOperator& aggregate)
+        TAggregateOperator& aggregate,
+        std::string stage)
     {
         auto* inputType =
             static_cast<NQumir::NAst::TStructType*>(childType.get());
@@ -908,7 +916,7 @@ private:
         }
         auto spec = NKernel::BuildAggregateKernelSpec(
             *inputType, aggregate.GroupKeys(), aggregate.Aggs());
-        TKernelCompiler compiler(Diagnostics_);
+        TKernelCompiler compiler(KernelOptions(std::move(stage), &aggregate));
         auto kernels = std::make_shared<TAggregateKernels>(
             compiler.CompileAggregate(spec));
         auto code = std::make_shared<NScheduler::TBlockingCode>(
@@ -979,7 +987,7 @@ private:
         TBlockingTail partialTail =
             [&]() {
                 TStageDiagnosticsScope diagnosticsScope(Diagnostics_, partialGroup);
-                return BuildAggregateTail(childOut.OutputType, aggregate);
+                return BuildAggregateTail(childOut.OutputType, aggregate, partialGroup);
             }();
         auto partialType = partialTail.OutputType;
 
@@ -1008,7 +1016,7 @@ private:
         TBlockingTail combineTail =
             [&]() {
                 TStageDiagnosticsScope diagnosticsScope(Diagnostics_, combineGroup);
-                return BuildAggregateTail(partialType, *combineAgg);
+                return BuildAggregateTail(partialType, *combineAgg, combineGroup);
             }();
         auto finalTask = std::make_unique<NScheduler::TBlockingTask>(
             std::move(combineTail.Code),
@@ -1037,12 +1045,13 @@ private:
         const size_t childLanes = OutputLanes(aggregate.Input());
         // Non-parallel input: single aggregate, nothing to parallelize.
         if (childLanes <= 1) {
+            auto group = StageGroup("aggregate", &aggregate);
             return LowerBlocking(
                 aggregate.Input(),
                 "aggregate",
-                StageGroup("aggregate", &aggregate),
-                [&](const NQumir::NAst::TTypePtr& childType) {
-                    return BuildAggregateTail(childType, aggregate);
+                group,
+                [&, group](const NQumir::NAst::TTypePtr& childType) {
+                    return BuildAggregateTail(childType, aggregate, group);
                 },
                 outConn);
         }
@@ -1055,12 +1064,13 @@ private:
             if (Settings_.Aggregate.CascadeGlobal) {
                 return LowerAggregateCascade(aggregate, childLanes, outConn);
             }
+            auto group = StageGroup("aggregate", &aggregate);
             return LowerBlocking(
                 aggregate.Input(),
                 "aggregate",
-                StageGroup("aggregate", &aggregate),
-                [&](const NQumir::NAst::TTypePtr& childType) {
-                    return BuildAggregateTail(childType, aggregate);
+                group,
+                [&, group](const NQumir::NAst::TTypePtr& childType) {
+                    return BuildAggregateTail(childType, aggregate, group);
                 },
                 outConn);
         }
@@ -1084,7 +1094,7 @@ private:
         TBlockingTail tail =
             [&]() {
                 TStageDiagnosticsScope diagnosticsScope(Diagnostics_, aggregateGroup);
-                return BuildAggregateTail(childType, aggregate);
+                return BuildAggregateTail(childType, aggregate, aggregateGroup);
             }();
 
         auto& shufRef = AddConn<NScheduler::THashShuffleConnection>(
@@ -1162,13 +1172,15 @@ private:
         const std::vector<TSortKey>& sortKeys,
         std::string_view kernelName,
         std::optional<int64_t> topLimit,
+        const void* sortOp,
         NScheduler::IConnection& outConn)
     {
+        auto group = StageGroup(kernelName, input.get());
         return LowerBlocking(
             input,
             std::string(kernelName),
-            StageGroup(kernelName, input.get()),
-            [&](const NQumir::NAst::TTypePtr& childType) {
+            group,
+            [&, group](const NQumir::NAst::TTypePtr& childType) {
                 auto* inputType =
                     static_cast<NQumir::NAst::TStructType*>(childType.get());
                 if (!inputType) {
@@ -1176,7 +1188,8 @@ private:
                         "sort input must have TStructType");
                 }
                 auto runtime = BuildSortRuntimeProcess(
-                    *inputType, sortKeys, kernelName, Diagnostics_);
+                    *inputType, sortKeys, kernelName,
+                    KernelOptions(group, sortOp));
                 return MakeSortTail(
                     childType, sortKeys,
                     std::move(runtime.KeyColumns),
@@ -1198,6 +1211,7 @@ private:
         const std::vector<TSortKey>& sortKeys,
         std::string_view kernelName,
         std::optional<int64_t> topLimit,
+        const void* sortOp,
         NScheduler::IConnection& mergeOut)
     {
         const size_t lanes = OutputLanes(input);
@@ -1216,7 +1230,8 @@ private:
             [&]() {
                 TStageDiagnosticsScope diagnosticsScope(Diagnostics_, localSortGroup);
                 return BuildSortRuntimeProcess(
-                    *inputType, sortKeys, kernelName, Diagnostics_);
+                    *inputType, sortKeys, kernelName,
+                    KernelOptions(localSortGroup, sortOp));
             }();
         auto keys = sortKeys;
         auto keyColumns = runtime.KeyColumns;
@@ -1317,10 +1332,10 @@ private:
     {
         if (OutputLanes(sort.Input()) <= 1) {
             return LowerSortLike(
-                sort.Input(), sort.Keys(), "sort", std::nullopt, outConn);
+                sort.Input(), sort.Keys(), "sort", std::nullopt, &sort, outConn);
         }
         auto merged = BuildSortMerge(
-            sort.Input(), sort.Keys(), "sort", std::nullopt, outConn);
+            sort.Input(), sort.Keys(), "sort", std::nullopt, &sort, outConn);
         return TLoweredOutput{
             .Producers = {merged.Merge},
             .OutputType = std::move(merged.OutputType),
@@ -1336,12 +1351,12 @@ private:
     {
         if (OutputLanes(sort.Input()) <= 1) {
             return LowerSortLike(
-                sort.Input(), sort.Keys(), "top-sort", sort.Limit(), outConn);
+                sort.Input(), sort.Keys(), "top-sort", sort.Limit(), &sort, outConn);
         }
         auto& mergeConnRef = AddConn<NScheduler::TOneToOneConnection>(
             1, 1, "top-sort-merge-output");
         auto merged = BuildSortMerge(
-            sort.Input(), sort.Keys(), "top-sort", sort.Limit(), mergeConnRef);
+            sort.Input(), sort.Keys(), "top-sort", sort.Limit(), &sort, mergeConnRef);
 
         auto limitCode = MakeLimitBlockingCode();
         const int64_t limit = sort.Limit();
@@ -1476,7 +1491,9 @@ private:
         TSchedulerUnaryStage stage =
             [&]() {
                 TStageDiagnosticsScope diagnosticsScope(Diagnostics_, residualGroup);
-                return BuildSchedulerFilterStage(*filterOp, crossType, Diagnostics_);
+                return BuildSchedulerFilterStage(
+                    *filterOp, crossType,
+                    KernelOptions(residualGroup, filterOp.get()));
             }();
         TLoweredOutput result;
         result.OutputType = std::move(stage.OutputType);
@@ -1524,8 +1541,8 @@ private:
 
         auto kernelSpec = NKernel::BuildJoinKernelSpec(
             *leftStruct, *rightStruct, join.Keys(), join.JoinType(), join.Filter());
-        TKernelCompiler compiler(Diagnostics_);
         const auto joinGroup = StageGroup("join", &join);
+        TKernelCompiler compiler(KernelOptions(joinGroup, &join));
         auto joinKernels = std::make_shared<TJoinKernels>(
             [&]() {
                 TStageDiagnosticsScope diagnosticsScope(Diagnostics_, joinGroup);
@@ -1653,7 +1670,7 @@ private:
     NScheduler::TTaskGraph& Graph_;
     NScheduler::TSettings Settings_;
     std::ostream* Diagnostics_;
-    IKernelExportBackend* ExportBackend_ = nullptr;
+    std::vector<TGeneratedKernel>* KernelSink_ = nullptr;
 };
 
 } // namespace
@@ -1718,17 +1735,9 @@ TLoweredPlan LowerPlanToGraph(
     TSettings settings,
     std::ostream* diagnostics)
 {
-    return LowerPlanToGraph(root, std::move(settings), diagnostics, nullptr);
-}
-
-TLoweredPlan LowerPlanToGraph(
-    const TOperatorPtr& root,
-    TSettings settings,
-    std::ostream* diagnostics,
-    IKernelExportBackend* exportBackend)
-{
     auto graph = std::make_unique<TTaskGraph>();
-    TSchedulerGraphLowerer lowerer(*graph, settings, diagnostics, exportBackend);
+    std::vector<TGeneratedKernel> kernels;
+    TSchedulerGraphLowerer lowerer(*graph, settings, diagnostics, &kernels);
     const size_t lanes = lowerer.OutputLanes(root);
     if (lanes == 0) {
         throw std::runtime_error(
@@ -1755,6 +1764,7 @@ TLoweredPlan LowerPlanToGraph(
         .FinalGather = finalRef,
         .Producers = std::move(out.Producers),
         .Lanes = lanes,
+        .Kernels = std::move(kernels),
     };
 }
 
@@ -1765,6 +1775,10 @@ bool RunPlanIntoSink(
     std::ostream* diagnostics,
     std::string* error)
 {
+    // Bind every kernel generated during lowering before any task can execute
+    // (no-op for kernels the caller already finalized).
+    JitFinalizeKernels(lowered.Kernels, diagnostics);
+
     // Aliasing shared_ptr: the sink task's state points at the caller-owned
     // sink without taking ownership of it.
     std::shared_ptr<void> sinkState(std::shared_ptr<void>{}, &sink);

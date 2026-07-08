@@ -135,9 +135,7 @@ NQumir::NAst::TTypePtr BuildSourceRuntimeType(TSourceOperator& src)
 TUnaryRuntimeProcess BuildFilterRuntimeProcess(
     TFilterOperator& filter,
     const NQumir::NAst::TTypePtr& inputType,
-    std::ostream* diagnostics,
-    IKernelExportBackend* exportBackend,
-    std::string stage)
+    TKernelCompilerOptions options)
 {
     auto* inputStruct = static_cast<NQumir::NAst::TStructType*>(inputType.get());
     if (!inputStruct) {
@@ -145,116 +143,147 @@ TUnaryRuntimeProcess BuildFilterRuntimeProcess(
     }
 
     auto spec = NKernel::BuildFilterKernelSpec(*inputStruct, filter.Predicate());
-    TKernelCompiler compiler(TKernelCompilerOptions{
-        .Diagnostics = diagnostics,
-        .ExportBackend = exportBackend,
-        .Stage = std::move(stage),
-    });
+    TKernelCompiler compiler(std::move(options));
     return {
         .Process = MakeFilterProcess(compiler.CompileFilter(spec)),
         .OutputType = inputType,
     };
 }
 
-TUnaryRuntimeProcess BuildProjectRuntimeProcess(
+TProjectColumnPlan BuildProjectColumnPlan(
     TProjectOperator& project,
-    const NQumir::NAst::TTypePtr& inputType,
-    std::ostream* diagnostics,
-    IKernelExportBackend* exportBackend,
-    std::string stage)
+    const NQumir::NAst::TStructType& inputStruct)
 {
-    auto* inputStruct = static_cast<NQumir::NAst::TStructType*>(inputType.get());
-    if (!inputStruct) {
-        throw std::runtime_error("project input must have TStructType");
-    }
-
-    std::vector<TProjectColumn> columns;
-    std::vector<NQumir::NAst::TExprPtr> computedExprs;
-    std::vector<NQumir::NAst::TTypePtr> computedJitTypes;
-    std::vector<size_t> computedWidths;
-    std::vector<bool> computedIsString;
+    TProjectColumnPlan plan;
     std::vector<std::pair<std::string, NQumir::NAst::TTypePtr>> outFields;
     for (const auto& projection : project.Projections()) {
         if (auto identNode = NQumir::NAst::TMaybeNode<NQumir::NAst::TIdentExpr>(
                 projection.Expression)) {
             const std::string& exprName = identNode.Cast()->Name;
             auto it = std::find_if(
-                inputStruct->Fields.begin(), inputStruct->Fields.end(),
+                inputStruct.Fields.begin(), inputStruct.Fields.end(),
                 [&](const auto& field) { return field.first == exprName; });
-            if (it == inputStruct->Fields.end()) {
+            if (it == inputStruct.Fields.end()) {
                 throw std::runtime_error("project column not found: " + exprName);
             }
-            columns.push_back({
+            plan.Columns.push_back({
                 .Computed = false,
                 .Index = static_cast<int32_t>(
-                    std::distance(inputStruct->Fields.begin(), it)),
+                    std::distance(inputStruct.Fields.begin(), it)),
             });
             outFields.emplace_back(projection.Name, it->second);
         } else {
             auto outType = NKernel::InferProjectExprType(
                 projection.Expression,
-                *inputStruct);
+                inputStruct);
             auto jitType = ProjectJitType(outType);
             using namespace NQumir::NAst;
             bool isStr = static_cast<bool>(TMaybeType<TStringType>(
                 UnwrapNamedType(UnwrapNullableType(outType))));
-            columns.push_back({
+            plan.Columns.push_back({
                 .Computed = true,
-                .Index = static_cast<int32_t>(computedExprs.size()),
+                .Index = static_cast<int32_t>(plan.ComputedExprs.size()),
             });
-            computedExprs.push_back(projection.Expression);
-            computedJitTypes.push_back(jitType);
-            computedWidths.push_back(ProjectColumnWidth(outType));
-            computedIsString.push_back(isStr);
+            plan.ComputedExprs.push_back(projection.Expression);
+            plan.ComputedJitTypes.push_back(jitType);
+            plan.ComputedWidths.push_back(ProjectColumnWidth(outType));
+            plan.ComputedIsString.push_back(isStr);
             outFields.emplace_back(projection.Name, outType);
         }
     }
+    plan.OutputType = std::make_shared<NQumir::NAst::TStructType>(
+        std::move(outFields));
+    return plan;
+}
+
+TUnaryRuntimeProcess BuildProjectRuntimeProcess(
+    TProjectOperator& project,
+    const NQumir::NAst::TTypePtr& inputType,
+    TKernelCompilerOptions options)
+{
+    auto* inputStruct = static_cast<NQumir::NAst::TStructType*>(inputType.get());
+    if (!inputStruct) {
+        throw std::runtime_error("project input must have TStructType");
+    }
+
+    auto plan = BuildProjectColumnPlan(project, *inputStruct);
 
     TKernelCompiler::TProjectDispatch dispatch;
-    if (!computedExprs.empty()) {
+    if (!plan.ComputedExprs.empty()) {
         auto spec = NKernel::BuildProjectKernelSpec(
             *inputStruct,
-            computedExprs,
-            computedJitTypes);
-        TKernelCompiler compiler(TKernelCompilerOptions{
-            .Diagnostics = diagnostics,
-            .ExportBackend = exportBackend,
-            .Stage = std::move(stage),
-        });
+            plan.ComputedExprs,
+            plan.ComputedJitTypes);
+        TKernelCompiler compiler(std::move(options));
         dispatch = compiler.CompileProject(spec);
     }
 
     auto process = MakeProjectProcess(
-        std::move(columns),
+        std::move(plan.Columns),
         std::move(dispatch),
-        std::move(computedWidths),
-        std::move(computedIsString));
+        std::move(plan.ComputedWidths),
+        std::move(plan.ComputedIsString));
 
     return {
         .Process = std::move(process),
-        .OutputType = std::make_shared<NQumir::NAst::TStructType>(
-            std::move(outFields)),
+        .OutputType = std::move(plan.OutputType),
     };
+}
+
+// Radix key byte width: integer width, or 8 for f64.
+int32_t RadixKeyWidthBytes(const NQumir::NAst::TTypePtr& type) {
+    using namespace NQumir::NAst;
+    auto inner = UnwrapNamedType(UnwrapNullableType(type));
+    if (auto integer = TMaybeType<TIntegerType>(inner)) {
+        return static_cast<int32_t>(integer.Cast()->BitWidth() / 8);
+    }
+    return 8;
 }
 
 TSortRuntimeProcess BuildSortRuntimeProcess(
     const NQumir::NAst::TStructType& inputType,
     const std::vector<TSortKey>& keys,
     std::string_view kernelName,
-    std::ostream* diagnostics)
+    TKernelCompilerOptions options)
 {
     auto spec = NKernel::BuildSortKernelSpec(inputType, keys, std::string(kernelName));
-    PrintKernelSpec(diagnostics, spec);
+    PrintKernelSpec(options.Diagnostics, spec);
     auto sortInputs = BuildSortKernelInputs(spec);
     TSortRadixKernel radixKernel;
     if (sortInputs.AllKeysRadixSortable && !sortInputs.RadixTypes.empty()) {
-        TKernelCompiler compiler(diagnostics);
+        auto* sink = options.Sink;
+        const size_t sinkBefore = sink ? sink->size() : 0;
+        // The nullable variant is only reachable when a key column can carry a
+        // null mask; with all keys non-nullable by schema it is dead code, so
+        // skip generating it.
+        bool anyNullableKey = false;
+        for (const auto& type : sortInputs.RadixTypes) {
+            anyNullableKey = anyNullableKey || IsNullableType(type);
+        }
+        TKernelCompiler compiler(std::move(options));
         radixKernel = {
             .Enabled = true,
             .Dispatch = compiler.CompileRadixSortComposite(sortInputs.RadixTypes),
-            .NullableDispatch = compiler.CompileRadixSortCompositeNullable(
-                sortInputs.RadixTypes),
+            .NullableDispatch = anyNullableKey
+                ? compiler.CompileRadixSortCompositeNullable(sortInputs.RadixTypes)
+                : TKernelCompiler::TSortRadixCompositeNullableDispatch{},
         };
+        if (sink) {
+            // Resolved key metadata for the exec exporter, on both emitted
+            // sort kernels.
+            std::vector<TGeneratedKernel::TSortKeyMeta> meta;
+            meta.reserve(keys.size());
+            for (size_t k = 0; k < sortInputs.KeyColumns.size(); ++k) {
+                meta.push_back({
+                    .Index = sortInputs.KeyColumns[k].Index,
+                    .WidthBytes = RadixKeyWidthBytes(sortInputs.KeyColumns[k].Type),
+                    .Desc = keys[k].Direction == ESortDirection::Desc,
+                });
+            }
+            for (size_t i = sinkBefore; i < sink->size(); ++i) {
+                (*sink)[i].SortKeys = meta;
+            }
+        }
     }
     return {
         .KeyColumns = std::move(sortInputs.KeyColumns),
