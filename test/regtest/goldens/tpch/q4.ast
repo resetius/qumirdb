@@ -12,8 +12,7 @@
       (table orders)
     )
     (where
-      (&& (&& (>= o_orderdate (call qdb_sql_date "1995-12-01"))
-          (< o_orderdate (+ (call qdb_sql_date "1995-12-01") (call qdb_sql_interval "3" "month"))))
+      (&& (&& (>= o_orderdate (: 9465 i32)) (< o_orderdate (+ (: 9465 i32) (: 90 i32))))
         (subquery exists (query
         (select
           (select-list

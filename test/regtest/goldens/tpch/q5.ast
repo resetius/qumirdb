@@ -22,8 +22,8 @@
                 (== s_nationkey n_nationkey))
               (== n_regionkey r_regionkey))
             (== r_name "MIDDLE EAST"))
-          (>= o_orderdate (call qdb_sql_date "1995-01-01")))
-        (< o_orderdate (+ (call qdb_sql_date "1995-01-01") (call qdb_sql_interval "1" "year"))))
+          (>= o_orderdate (: 9131 i32)))
+        (< o_orderdate (+ (: 9131 i32) (: 365 i32))))
     )
     (group-by
       n_name

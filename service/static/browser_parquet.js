@@ -170,24 +170,74 @@ export async function readParquetTable(file) {
   };
 }
 
-// Reads the requested columns as raw JS value arrays keyed by column name.
-// Values keep hyparquet's native representation (BigInt for INT64, number for
-// INT32/DOUBLE, string for BYTE_ARRAY, Date for logical DATE); the runtime
-// normalizes them per the execution plan's column types.
-export async function readParquetColumns(file, columnNames) {
+// Reads the requested columns as raw column arrays keyed by column name.
+// Numeric chunks stay as TypedArrays when hyparquet provides them.
+export async function readParquetColumns(file, requestedColumns) {
+  const specs = requestedColumns.map(column =>
+    typeof column === 'string' ? { name: column } : column);
+  const columnNames = specs.map(column => column.name);
   const parquet = await loadHyparquet();
   const asyncBuffer = parquet.asyncBufferFromFile
     ? await parquet.asyncBufferFromFile(file)
     : asyncBufferFromBlob(file);
   const compressors = await loadCompressors();
-  const rows = await parquet.parquetReadObjects({
+
+  if (typeof parquet.parquetRead !== 'function') {
+    throw new Error('hyparquet parquetRead API is not available');
+  }
+
+  if (columnNames.length === 0) {
+    const metadata = await readMetadata(file);
+    return {
+      rowCount: Number(metadata.num_rows ?? metadata.numRows ?? 0),
+      columns: {},
+    };
+  }
+
+  const chunks = Object.fromEntries(columnNames.map(name => [name, []]));
+  let rowCount = 0;
+  await parquet.parquetRead({
     file: asyncBuffer,
     columns: columnNames,
-    compressors
+    compressors,
+    onChunk({ columnName, columnData, rowStart, rowEnd }) {
+      const name = String(columnName);
+      const columnChunks = chunks[name];
+      if (!columnChunks) return;
+
+      const start = Number(rowStart);
+      const end = Number(rowEnd);
+      rowCount = Math.max(rowCount, end);
+      columnChunks.push({ start, end, data: columnData });
+    },
   });
   const columns = {};
-  for (const name of columnNames) {
-    columns[name] = rows.map(row => row[name]);
+  for (const spec of specs) {
+    columns[spec.name] = assembleColumn(chunks[spec.name], rowCount);
   }
-  return { rowCount: rows.length, columns };
+  return { rowCount, columns };
+}
+
+function assembleColumn(chunks, rowCount) {
+  if (!chunks || chunks.length === 0) return [];
+  if (chunks.length === 1 && chunks[0].start === 0 && chunks[0].end === rowCount) {
+    return chunks[0].data;
+  }
+
+  const first = chunks[0].data;
+  if (ArrayBuffer.isView(first) && typeof first.BYTES_PER_ELEMENT === 'number') {
+    const out = new first.constructor(rowCount);
+    for (const chunk of chunks) {
+      out.set(chunk.data, chunk.start);
+    }
+    return out;
+  }
+
+  const out = new Array(rowCount);
+  for (const chunk of chunks) {
+    for (let i = chunk.start; i < chunk.end; ++i) {
+      out[i] = chunk.data[i - chunk.start];
+    }
+  }
+  return out;
 }

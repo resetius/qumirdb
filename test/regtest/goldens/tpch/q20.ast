@@ -52,8 +52,8 @@
                   (table lineitem)
                 )
                 (where
-                  (&& (&& (&& (== l_partkey ps_partkey) (== l_suppkey ps_suppkey)) (>= l_shipdate (call qdb_sql_date "1995-01-01")))
-                    (< l_shipdate (+ (call qdb_sql_date "1995-01-01") (call qdb_sql_interval "1" "year"))))
+                  (&& (&& (&& (== l_partkey ps_partkey) (== l_suppkey ps_suppkey)) (>= l_shipdate (: 9131 i32)))
+                    (< l_shipdate (+ (: 9131 i32) (: 365 i32))))
                 )
               )
             )

@@ -653,7 +653,12 @@ async function runBrowser(sql, dataset) {
       stage => readBrowserSource(dataset, stage));
     const elapsedMs = performance.now() - started;
     renderBrowserResult(result, elapsedMs);
-    showDetails({ mode: 'browser', rows: result.rows.length, elapsedMs });
+    showDetails({
+      mode: 'browser',
+      rows: result.rows.length,
+      elapsedMs,
+      timings: result.timings || []
+    });
     setStatus('finished');
     selectTab('result');
   } catch (error) {
@@ -680,21 +685,9 @@ async function readBrowserSource(dataset, stage) {
     columns: stage.columns.map(column => ({
       name: column.name,
       type: column.type,
-      values: (columns[column.name] || []).map(value =>
-        normalizeSourceValue(column.type, value))
+      values: columns[column.name] || []
     }))
   };
-}
-
-function normalizeSourceValue(type, value) {
-  if (value === null || value === undefined) {
-    return null;
-  }
-  if (value instanceof Date) {
-    // Parquet logical DATE -> days since epoch (qdb models dates as i32).
-    return Math.floor(value.getTime() / 86400000);
-  }
-  return value;
 }
 
 function renderBrowserResult(result, elapsedMs) {

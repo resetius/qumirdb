@@ -3,8 +3,7 @@
     (rel project
       (rel filter
         (rel join (rel source "lineitem") (rel source "part") () (inner))
-        (&& (&& (== l_partkey p_partkey) (>= l_shipdate (call qdb_sql_date "1993-03-01")))
-          (< l_shipdate (+ (call qdb_sql_date "1993-03-01") (call qdb_sql_interval "1" "month")))))
+        (&& (&& (== l_partkey p_partkey) (>= l_shipdate (: 8460 i32))) (< l_shipdate (+ (: 8460 i32) (: 30 i32)))))
       (arg_0 (if (call qdb_string_view_sql_like p_type "PROMO%") (* l_extendedprice (- 1 l_discount)) 0))
       (arg_1 (* l_extendedprice (- 1 l_discount)))
       (__group__ 1))
