@@ -65,6 +65,35 @@ function typedColumnBytes(values, type, rowCount) {
   return new Uint8Array(values.buffer, values.byteOffset, rowCount * width);
 }
 
+// Validity bitmap (LSB-first, 1 = valid) for a column whose values contain
+// null; null when the column has no nulls (kernels treat a null mask pointer
+// as all-valid, mirroring the native arrow source). Typed arrays cannot hold
+// nulls.
+function columnValidityMask(values, rowCount) {
+  if (!values || ArrayBuffer.isView(values)) {
+    return null;
+  }
+  let hasNull = false;
+  for (let i = 0; i < rowCount; ++i) {
+    const value = values[i];
+    if (value === null || value === undefined) {
+      hasNull = true;
+      break;
+    }
+  }
+  if (!hasNull) {
+    return null;
+  }
+  const mask = new Uint8Array((rowCount + 7) >> 3);
+  for (let i = 0; i < rowCount; ++i) {
+    const value = values[i];
+    if (value !== null && value !== undefined) {
+      mask[i >> 3] |= 1 << (i & 7);
+    }
+  }
+  return mask;
+}
+
 function copyNumericColumnFromMemory(memory, ptr, type, rowCount) {
   const Ctor = numericArrayConstructor(type);
   if (!Ctor) {
@@ -131,6 +160,7 @@ class RowSetWriter {
       if (column.type !== 'string') return null;
       return encodeStringColumn(column.values, rowCount, encoder);
     });
+    const masks = columns.map(column => columnValidityMask(column.values, rowCount));
 
     for (let c = 0; c < columns.length; ++c) {
       const column = columns[c];
@@ -140,6 +170,9 @@ class RowSetWriter {
       } else {
         const width = coreTypeWidth(column.type);
         this.ensureData(c, Math.max(rowCount, 1) * width, 8);
+      }
+      if (masks[c]) {
+        this.ensureMask(c, masks[c].length);
       }
     }
     if (wantSelection || selection) {
@@ -156,6 +189,10 @@ class RowSetWriter {
       const colPtr = this.columnsBase + c * colLayout.size;
       new Uint8Array(this.arena.memory.buffer, colPtr, colLayout.size).fill(0);
       writePointer(dv, colPtr + colLayout.data, this.dataPtrs[c]);
+      if (masks[c]) {
+        memBytes.set(masks[c], this.maskPtrs[c]);
+        writePointer(dv, colPtr + colLayout.mask, this.maskPtrs[c]);
+      }
       if (column.type === 'string') {
         const enc = encoded[c];
         let p = this.dataPtrs[c];
@@ -208,6 +245,16 @@ class RowSetWriter {
     this.dataCaps = new Array(columnCount).fill(0);
     this.offsetsPtrs = new Array(columnCount).fill(0);
     this.offsetsCaps = new Array(columnCount).fill(0);
+    this.maskPtrs = new Array(columnCount).fill(0);
+    this.maskCaps = new Array(columnCount).fill(0);
+  }
+
+  ensureMask(index, bytes) {
+    if (this.maskCaps[index] >= bytes) {
+      return;
+    }
+    this.maskPtrs[index] = this.arena.alloc(bytes, 8);
+    this.maskCaps[index] = bytes;
   }
 
   ensureData(index, bytes, align) {
@@ -608,6 +655,8 @@ function marshalRowSet(arena, layout, columns, rowCount, wantSelection, selectio
   const columnsBase = arena.alloc(columns.length * colLayout.size, 8);
   const dataPtrs = new Array(columns.length).fill(0);
   const offsetsPtrs = new Array(columns.length).fill(0);
+  const masks = columns.map(column => columnValidityMask(column.values, rowCount));
+  const maskPtrs = new Array(columns.length).fill(0);
 
   for (let c = 0; c < columns.length; ++c) {
     const column = columns[c];
@@ -617,6 +666,9 @@ function marshalRowSet(arena, layout, columns, rowCount, wantSelection, selectio
     } else {
       const width = coreTypeWidth(column.type);
       dataPtrs[c] = arena.alloc(Math.max(rowCount, 1) * width, 8);
+    }
+    if (masks[c]) {
+      maskPtrs[c] = arena.alloc(masks[c].length, 8);
     }
   }
 
@@ -634,6 +686,10 @@ function marshalRowSet(arena, layout, columns, rowCount, wantSelection, selectio
     const colPtr = columnsBase + c * colLayout.size;
     new Uint8Array(arena.memory.buffer, colPtr, colLayout.size).fill(0);
     writePointer(dv, colPtr + colLayout.data, dataPtrs[c]);
+    if (masks[c]) {
+      memBytes.set(masks[c], maskPtrs[c]);
+      writePointer(dv, colPtr + colLayout.mask, maskPtrs[c]);
+    }
     if (column.type === 'string') {
       const enc = encoded[c];
       let p = dataPtrs[c];
@@ -974,6 +1030,9 @@ function createJoinState(kernel, layout, stage) {
       }
     }
   }
+  if (isOuterJoin(stage) && typeof exports.jt_finalize_outer !== 'function') {
+    throw new Error('join kernel is missing entry jt_finalize_outer');
+  }
 
   const arena = new Arena(kernel.instance);
   kernel.holder.arena = arena;
@@ -999,14 +1058,20 @@ function createJoinState(kernel, layout, stage) {
     pairBuffer,
     leftStore: new WasmRowStore(arena, layout),
     rightStore: new WasmRowStore(arena, layout),
+    // Selections of stored left batches (parallel to leftStore.batches); the
+    // residual semi/anti finalize scan must skip unselected rows.
+    leftSelections: [],
+    matchedLeftIds: isResidualSemiAntiJoin(stage) ? new Set() : null,
     semiAntiFinalized: false,
+    outerFinalized: false,
     finalized: false,
   };
 }
 
 function browserRuntimeSupportsJoin(stage) {
   if (stage.joinType === 'inner') return true;
-  return isLeftSemiAntiJoin(stage) && !stage.hasResidual;
+  if (isOuterJoin(stage) && !stage.hasResidual) return true;
+  return isLeftSemiAntiJoin(stage);
 }
 
 function updateJoinState(state, side, batch, selection) {
@@ -1017,6 +1082,9 @@ function updateJoinState(state, side, batch, selection) {
   const semiAnti = isLeftSemiAntiJoin(state.stage);
   const store = isLeft ? state.leftStore : state.rightStore;
   const batchIdx = store.push(batch, rowsetPtr);
+  if (isLeft) {
+    state.leftSelections[batchIdx] = selection || null;
+  }
   const exports = kernel.instance.exports;
   const ok = semiAnti && !state.stage.hasResidual && !isLeft
     ? exports.jt_insert_key_only(
@@ -1054,12 +1122,24 @@ function isLeftSemiAntiJoin(stage) {
     stage.joinType === 'left-anti';
 }
 
+function isLeftAntiJoin(stage) {
+  return stage.joinType === 'left_anti' || stage.joinType === 'left-anti';
+}
+
+function isOuterJoin(stage) {
+  return stage.joinType === 'left' || stage.joinType === 'right';
+}
+
+// Semi/anti with a residual predicate: the kernel is compiled as INNER (it
+// emits raw pairs); the runtime collects matched left ids and finalizes with
+// a JS scan over the stored left rows, mirroring the native executor.
+function isResidualSemiAntiJoin(stage) {
+  return isLeftSemiAntiJoin(stage) && !!stage.hasResidual;
+}
+
 function finalizeSemiAntiJoinState(state) {
   if (state.semiAntiFinalized) {
     return;
-  }
-  if (state.stage.hasResidual) {
-    throw new Error('browser residual semi/anti join is not implemented yet');
   }
   const ok = state.kernel.instance.exports.jt_finalize_semi_anti(
     BigInt(state.leftTable),
@@ -1071,7 +1151,77 @@ function finalizeSemiAntiJoinState(state) {
   state.semiAntiFinalized = true;
 }
 
-function drainJoinPairs(state, maxRows = 1024) {
+// Outer join: after both sides are consumed, emit own-side rows that never
+// matched, with kNullRowId on the opposite side. For RIGHT the kernel runs
+// with the sides flipped, so the drained pairs are swapped back to keep left
+// ids in slot 0 (mirrors the native FinalizeOuterJoin).
+function finalizeOuterJoinState(state) {
+  if (state.outerFinalized) {
+    return;
+  }
+  const right = state.stage.joinType === 'right';
+  const own = right ? state.rightTable : state.leftTable;
+  const opp = right ? state.leftTable : state.rightTable;
+  const ok = state.kernel.instance.exports.jt_finalize_outer(
+    BigInt(own), BigInt(opp), BigInt(state.pairBuffer));
+  if (!ok) {
+    throw new Error('join outer finalize failed');
+  }
+  state.outerFinalized = true;
+  return drainJoinPairs(state, 1024, right);
+}
+
+// Residual semi/anti: consume the inner kernel's raw pairs into the
+// matched-left-id set (dedup) instead of emitting output.
+function collectJoinPairIds(state) {
+  const pairLayout = state.layout.pairBuffer;
+  const dv = state.arena.view();
+  const count = Number(dv.getBigInt64(state.pairBuffer + pairLayout.count, true));
+  if (count <= 0) {
+    return;
+  }
+  const dataPtr = Number(dv.getBigInt64(state.pairBuffer + pairLayout.data, true));
+  for (let i = 0; i < count; ++i) {
+    state.matchedLeftIds.add(dv.getBigInt64(dataPtr + i * 16, true));
+  }
+  dv.setBigInt64(state.pairBuffer + pairLayout.count, 0n, true);
+}
+
+// Residual semi/anti finalize: emit each selected stored left row once —
+// SEMI keeps matched, ANTI keeps unmatched (native FinalizeResidualSemiAntiJoin).
+function finalizeResidualSemiAntiJoinState(state, maxRows = 1024) {
+  const anti = isLeftAntiJoin(state.stage);
+  const outputs = [];
+  let ids = [];
+  const flush = () => {
+    if (ids.length > 0) {
+      outputs.push(materializeJoinOutput(
+        state, ids, new Array(ids.length).fill(-1n)));
+      ids = [];
+    }
+  };
+  for (let b = 0; b < state.leftStore.batches.length; ++b) {
+    const batch = state.leftStore.batches[b];
+    const selection = state.leftSelections[b];
+    for (let r = 0; r < batch.rowCount; ++r) {
+      if (selection && !selection[r]) {
+        continue;
+      }
+      const matched = state.matchedLeftIds.has(makeRowId(b, r));
+      if (matched !== anti) {
+        ids.push(makeRowId(b, r));
+        if (ids.length >= maxRows) {
+          flush();
+        }
+      }
+    }
+  }
+  flush();
+  state.semiAntiFinalized = true;
+  return outputs;
+}
+
+function drainJoinPairs(state, maxRows = 1024, swapPairs = false) {
   const layout = state.layout;
   const pairLayout = layout.pairBuffer;
   const dv = state.arena.view();
@@ -1088,8 +1238,10 @@ function drainJoinPairs(state, maxRows = 1024) {
     const rightIds = new Array(n);
     for (let i = 0; i < n; ++i) {
       const pair = cursor + i;
-      leftIds[i] = dv.getBigInt64(dataPtr + pair * 16, true);
-      rightIds[i] = dv.getBigInt64(dataPtr + pair * 16 + 8, true);
+      const a = dv.getBigInt64(dataPtr + pair * 16, true);
+      const b = dv.getBigInt64(dataPtr + pair * 16 + 8, true);
+      leftIds[i] = swapPairs ? b : a;
+      rightIds[i] = swapPairs ? a : b;
     }
     outputs.push(materializeJoinOutput(state, leftIds, rightIds));
     cursor += n;
@@ -1124,19 +1276,30 @@ function gatherJoinColumn(store, ids, columnIndex, type) {
     return ids.map(id => {
       if (id === -1n) return null;
       const batch = store.batch(rowIdBatch(id));
-      return batch.columns[columnIndex].values[rowIdRow(id)];
+      const value = batch.columns[columnIndex].values[rowIdRow(id)];
+      return value === undefined ? null : value;
     });
   }
-  const Ctor = numericArrayConstructor(type);
+  // Unmatched rows (outer join) become real nulls, so the output must be a
+  // plain array; the typed fast path is only for all-matched gathers.
+  let hasNullIds = false;
+  for (let i = 0; i < ids.length; ++i) {
+    if (ids[i] === -1n) {
+      hasNullIds = true;
+      break;
+    }
+  }
+  const Ctor = hasNullIds ? null : numericArrayConstructor(type);
   const out = Ctor ? new Ctor(ids.length) : new Array(ids.length);
   for (let i = 0; i < ids.length; ++i) {
     const id = ids[i];
     if (id === -1n) {
-      out[i] = Ctor && (type === 'i64' || type === 'u64') ? 0n : 0;
+      out[i] = null;
       continue;
     }
     const batch = store.batch(rowIdBatch(id));
-    out[i] = batch.columns[columnIndex].values[rowIdRow(id)];
+    const value = batch.columns[columnIndex].values[rowIdRow(id)];
+    out[i] = value === undefined ? null : value;
   }
   return out;
 }
@@ -1699,7 +1862,12 @@ class JoinTask {
 
     const progressed = this.pullOneInputBatch();
     if (progressed) {
-      this.ready.push(...drainJoinPairs(this.state));
+      if (isResidualSemiAntiJoin(this.stage)) {
+        // Inner-typed kernel: pairs feed the matched-id set, not the output.
+        collectJoinPairIds(this.state);
+      } else {
+        this.ready.push(...drainJoinPairs(this.state));
+      }
       if (this.ready.length > 0) {
         return this.execute();
       }
@@ -1708,8 +1876,18 @@ class JoinTask {
 
     if (this.leftDone && this.rightDone) {
       if (isLeftSemiAntiJoin(this.stage) && !this.state.semiAntiFinalized) {
-        finalizeSemiAntiJoinState(this.state);
-        this.ready.push(...drainJoinPairs(this.state));
+        if (isResidualSemiAntiJoin(this.stage)) {
+          this.ready.push(...finalizeResidualSemiAntiJoinState(this.state));
+        } else {
+          finalizeSemiAntiJoinState(this.state);
+          this.ready.push(...drainJoinPairs(this.state));
+        }
+        if (this.ready.length > 0) {
+          return this.execute();
+        }
+      }
+      if (isOuterJoin(this.stage) && !this.state.outerFinalized) {
+        this.ready.push(...finalizeOuterJoinState(this.state));
         if (this.ready.length > 0) {
           return this.execute();
         }
@@ -1779,9 +1957,6 @@ class JoinTask {
         updateJoinState(
           this.state, 1, fetched.rowSet.batch, fetched.rowSet.selection);
         this.rows += fetched.rowSet.batch.rowCount;
-        if (this.stage.hasResidual) {
-          this.collectResidualSemiAntiMatches();
-        }
         return true;
       }
       if (fetched.result === FetchResult.FINISHED) {
@@ -1792,10 +1967,114 @@ class JoinTask {
 
     return false;
   }
+}
 
-  collectResidualSemiAntiMatches() {
-    throw new Error('browser residual semi/anti join is not implemented yet');
+// Cross product of two inputs (in practice: a scalar-subquery broadcast, the
+// right side is one row). Buffers both sides, then emits left-batch × right-row
+// chunks; any residual predicate runs as the downstream filter node.
+class CrossJoinTask {
+  constructor(stage) {
+    this.stage = stage;
+    this.leftBatches = [];
+    this.rightBatches = [];
+    this.leftDone = false;
+    this.rightDone = false;
+    this.emitLeft = 0;
+    this.emitRight = 0;
+    this.done = false;
+    this.rows = 0;
   }
+
+  async execute() {
+    if (this.done) return TaskResult.FINISHED;
+    const output = this.node.outbound[0].connection;
+
+    if (!this.leftDone || !this.rightDone) {
+      const progressed = this.pullOneInputBatch();
+      if (progressed) return TaskResult.OK;
+      if (!this.leftDone || !this.rightDone) return TaskResult.NEED_DATA;
+    }
+
+    const rightRows = this.rightBatches.reduce((n, item) => n + item.batch.rowCount, 0);
+    while (this.emitLeft < this.leftBatches.length) {
+      if (rightRows === 0) break; // empty right side: empty cross product
+      if (!output.canPush()) return TaskResult.BLOCKED_OUTPUT;
+      const glued = this.glue(
+        this.leftBatches[this.emitLeft], this.rightBatches[this.emitRight]);
+      if (glued) {
+        output.push({ batch: glued, selection: null });
+        this.rows += glued.rowCount;
+      }
+      this.emitRight += 1;
+      if (this.emitRight >= this.rightBatches.length) {
+        this.emitRight = 0;
+        this.emitLeft += 1;
+      }
+      if (glued) return TaskResult.OK;
+    }
+
+    output.finish();
+    this.done = true;
+    return TaskResult.FINISHED;
+  }
+
+  pullOneInputBatch() {
+    for (const [idx, list, doneKey] of [
+      [0, this.leftBatches, 'leftDone'],
+      [1, this.rightBatches, 'rightDone'],
+    ]) {
+      if (this[doneKey]) continue;
+      const fetched = this.node.inbound[idx].connection.fetch();
+      if (fetched.result === FetchResult.OK) {
+        list.push(fetched.rowSet);
+        return true;
+      }
+      if (fetched.result === FetchResult.FINISHED) {
+        this[doneKey] = true;
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // One output batch = selected left rows × selected right rows of one
+  // left-batch/right-batch pair, columns glued left ++ right.
+  glue(leftItem, rightItem) {
+    const leftRows = selectedRowIndices(leftItem);
+    const rightRows = selectedRowIndices(rightItem);
+    const total = leftRows.length * rightRows.length;
+    if (total === 0) return null;
+    const columns = [];
+    for (let c = 0; c < leftItem.batch.columns.length; ++c) {
+      const src = leftItem.batch.columns[c];
+      const values = new Array(total);
+      let k = 0;
+      for (const lr of leftRows) {
+        const value = src.values[lr];
+        for (let j = 0; j < rightRows.length; ++j) values[k++] = value;
+      }
+      columns.push({ name: src.name, type: src.type, values });
+    }
+    for (let c = 0; c < rightItem.batch.columns.length; ++c) {
+      const src = rightItem.batch.columns[c];
+      const values = new Array(total);
+      let k = 0;
+      for (let i = 0; i < leftRows.length; ++i) {
+        for (const rr of rightRows) values[k++] = src.values[rr];
+      }
+      columns.push({ name: src.name, type: src.type, values });
+    }
+    return { rowCount: total, columns };
+  }
+}
+
+function selectedRowIndices(item) {
+  const rows = [];
+  for (let r = 0; r < item.batch.rowCount; ++r) {
+    if (item.selection && !item.selection[r]) continue;
+    rows.push(r);
+  }
+  return rows;
 }
 
 class SortTask {
@@ -1894,6 +2173,9 @@ function taskNodeForStage(stage, layout, readSourceBatches, onProgress) {
   }
   if (stage.kind === 'join') {
     return makeNode(new JoinTask(stage, layout), stage.kind);
+  }
+  if (stage.kind === 'cross-join') {
+    return makeNode(new CrossJoinTask(stage), stage.kind);
   }
   if (stage.kind === 'sort' || stage.kind === 'top-sort') {
     return makeNode(new SortTask(stage, layout), stage.kind);

@@ -1526,7 +1526,12 @@ bool BrowserSupportsJoin(NQdb::EJoinType type, bool hasResidual) {
     if (type == EJoinType::Inner) {
         return true;
     }
-    if ((type == EJoinType::LeftSemi || type == EJoinType::LeftAnti) && !hasResidual) {
+    if ((type == EJoinType::Left || type == EJoinType::Right) && !hasResidual) {
+        return true;
+    }
+    // Semi/anti with residual compiles as an inner kernel; the runtime dedups
+    // matched left ids and finalizes with a JS scan.
+    if (type == EJoinType::LeftSemi || type == EJoinType::LeftAnti) {
         return true;
     }
     return false;
@@ -1653,6 +1658,65 @@ struct TExecGraphBuilder {
         });
     }
 
+    // Keyless join = cross product (a scalar-subquery broadcast in practice).
+    // The glue is pure column stitching; the residual predicate runs as a
+    // plain filter node over the glued schema, reusing the kernel the lowerer
+    // generated for the join operator.
+    TExecGraphBuildResult BuildCrossJoin(
+        NQdb::TJoinOperator& join,
+        const TExecGraphBuildResult& left,
+        const TExecGraphBuildResult& right,
+        bool hasResidual)
+    {
+        using namespace NQdb;
+        if (join.JoinType() != EJoinType::Inner) {
+            Unsupported = UnsupportedExec(
+                "browser keyless join type is not supported yet: " +
+                std::string(JoinTypeName(join.JoinType())));
+            return {};
+        }
+        auto outputType = ComputeJoinOutputType(
+            left.OutputType, right.OutputType, EJoinType::Inner);
+        if (!outputType) {
+            Unsupported = UnsupportedExec(outputType.error().ToString());
+            return {};
+        }
+        auto* leftStruct =
+            static_cast<NQumir::NAst::TStructType*>(left.OutputType.get());
+        auto* rightStruct =
+            static_cast<NQumir::NAst::TStructType*>(right.OutputType.get());
+        auto* outStruct =
+            static_cast<NQumir::NAst::TStructType*>(outputType->get());
+        const int64_t crossId = AddNode(llvm::json::Object{
+            {"kind", "cross-join"},
+            {"leftColumns", StructColumnsJson(*leftStruct)},
+            {"rightColumns", StructColumnsJson(*rightStruct)},
+            {"output", StructColumnsJson(*outStruct)},
+        });
+        AddEdge(left.NodeId, crossId, 0);
+        AddEdge(right.NodeId, crossId, 1);
+        if (!hasResidual) {
+            return {.NodeId = crossId, .OutputType = *outputType};
+        }
+        const auto* ref = FindKernel(Kernels, &join, "filter");
+        if (!ref) {
+            Unsupported = UnsupportedExec(
+                "cross join residual kernel was not generated");
+            return {};
+        }
+        if (EmbedWasm && ref->Artifacts->Wasm.empty()) {
+            Unsupported = UnsupportedExec(
+                "cross join residual kernel failed to compile to wasm");
+            return {};
+        }
+        const int64_t filterId = AddNode(llvm::json::Object{
+            {"kind", "filter"},
+            {"wasm", ref->Artifacts->Wasm},
+        });
+        AddEdge(crossId, filterId, 0);
+        return {.NodeId = filterId, .OutputType = *outputType};
+    }
+
     TExecGraphBuildResult Build(const NQdb::TOperatorPtr& op) {
         using namespace NQdb;
         if (Unsupported) {
@@ -1765,6 +1829,10 @@ struct TExecGraphBuilder {
                 auto right = Build(join.Cast()->Right());
                 if (Unsupported) return {};
                 const bool hasResidual = join.Cast()->Filter() != nullptr;
+                if (join.Cast()->Keys().empty()) {
+                    return BuildCrossJoin(
+                        *join.Cast(), left, right, hasResidual);
+                }
                 if (!BrowserSupportsJoin(join.Cast()->JoinType(), hasResidual)) {
                     Unsupported = UnsupportedExec(
                         "browser join type is not supported yet: " +
