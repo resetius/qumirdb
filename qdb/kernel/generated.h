@@ -42,6 +42,19 @@ struct TGeneratedKernel {
         bool Desc = false;
     };
     std::vector<TSortKeyMeta> SortKeys;
+
+    // Aggregate kernels only: output layout for the exec exporter. Agg-output
+    // nullability is a kernel property (sum/min/max over a nullable argument)
+    // that the plan's output schema does not carry.
+    struct TAggKeyMeta {
+        bool IsString = false;
+        bool IsNullable = false;
+    };
+    struct TAggValueMeta {
+        bool IsNullable = false;
+    };
+    std::vector<TAggKeyMeta> AggKeys;
+    std::vector<TAggValueMeta> AggValues;
 };
 
 } // namespace NQdb

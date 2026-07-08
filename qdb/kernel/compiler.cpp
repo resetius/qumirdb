@@ -568,24 +568,12 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
     auto rowSetType = QumirDbNamedType("TRowSet");
     auto hashTableType = QumirDbNamedType("HashTable");
 
-    auto dispatchProgram = NKernel::BuildGenericAggregateProgramAst(
+    auto program = NKernel::BuildGenericAggregateFusedProgramAst(
         inputType, keyDescriptor, layout,
         columnType, rowSetType, hashTableType);
-    if (!dispatchProgram) {
+    if (!program) {
         throw NQumir::TError(
-            "CompileAggregate: dispatch program: " + dispatchProgram.error().ToString());
-    }
-    auto measureProgram = NKernel::BuildGenericAggregateMeasureProgramAst(
-        keyDescriptor, hashTableType);
-    if (!measureProgram) {
-        throw NQumir::TError(
-            "CompileAggregate: measure program: " + measureProgram.error().ToString());
-    }
-    auto finalizeProgram = NKernel::BuildGenericAggregateFinalizeProgramAst(
-        keyDescriptor, layout, hashTableType, columnType);
-    if (!finalizeProgram) {
-        throw NQumir::TError(
-            "CompileAggregate: finalize program: " + finalizeProgram.error().ToString());
+            "CompileAggregate: " + program.error().ToString());
     }
 
     TAggregateKernels kernels;
@@ -607,28 +595,48 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
         });
     }
 
-    auto emit = [&](const char* name, const char* entry, NQumir::NAst::TExprPtr ast) {
-        PrintKernelAst(Diagnostics_, name, ast);
-        auto kernel = EmitKernel(name, {entry}, std::move(ast));
-        FinishKernelDiagnostics(Diagnostics_);
-        return kernel.Slot;
-    };
-    auto dispatchSlot = emit("aggregate.update", "agg_dispatch", std::move(*dispatchProgram));
-    auto measureSlot = emit("aggregate.measure", "agg_measure_keys", std::move(*measureProgram));
-    auto finalizeSlot = emit("aggregate.finalize", "agg_finalize", std::move(*finalizeProgram));
+    const size_t sinkBefore = Sink_ ? Sink_->size() : 0;
+    PrintKernelAst(Diagnostics_, "aggregate", *program);
+    auto kernel = EmitKernel(
+        "aggregate",
+        {"agg_dispatch", "agg_measure_keys", "agg_finalize"},
+        std::move(*program));
+    FinishKernelDiagnostics(Diagnostics_);
+
+    if (Sink_) {
+        // Output-layout metadata for the exec exporter.
+        std::vector<TGeneratedKernel::TAggKeyMeta> keyMeta;
+        keyMeta.reserve(kernels.OutputKeys.size());
+        for (const auto& outputKey : kernels.OutputKeys) {
+            keyMeta.push_back({
+                .IsString = outputKey.Kind == EAggregateOutputKeyKind::String,
+                .IsNullable = outputKey.IsNullable,
+            });
+        }
+        std::vector<TGeneratedKernel::TAggValueMeta> valueMeta;
+        valueMeta.reserve(kernels.OutputAggs.size());
+        for (const auto& outputAgg : kernels.OutputAggs) {
+            valueMeta.push_back({.IsNullable = outputAgg.IsNullable});
+        }
+        for (size_t i = sinkBefore; i < Sink_->size(); ++i) {
+            (*Sink_)[i].AggKeys = keyMeta;
+            (*Sink_)[i].AggValues = valueMeta;
+        }
+    }
 
     using TDispatchFn = int64_t(*)(void*, TRowSet*, int64_t, int64_t);
     using TMeasureFn = int64_t(*)(void*, int64_t*, int64_t);
     using TFinalizeFn = int64_t(*)(void*, void**, int64_t**, uint8_t**, int64_t);
 
-    kernels.Dispatch = [slot = dispatchSlot](void* ht, TRowSet* batch, int64_t arg, int64_t op) {
+    auto slot = kernel.Slot;
+    kernels.Dispatch = [slot](void* ht, TRowSet* batch, int64_t arg, int64_t op) {
         return reinterpret_cast<TDispatchFn>(slot->Fns[0])(ht, batch, arg, op);
     };
-    kernels.Measure = [slot = measureSlot](void* ht, int64_t* outputKeyBytes, int64_t outputCapacity) {
-        return reinterpret_cast<TMeasureFn>(slot->Fns[0])(ht, outputKeyBytes, outputCapacity);
+    kernels.Measure = [slot](void* ht, int64_t* outputKeyBytes, int64_t outputCapacity) {
+        return reinterpret_cast<TMeasureFn>(slot->Fns[1])(ht, outputKeyBytes, outputCapacity);
     };
-    kernels.Finalize = [slot = finalizeSlot](void* ht, void** outputKeyBuffers, int64_t** outputBuffers, uint8_t** outputAggMasks, int64_t outputCapacity) {
-        return reinterpret_cast<TFinalizeFn>(slot->Fns[0])(ht, outputKeyBuffers, outputBuffers, outputAggMasks, outputCapacity);
+    kernels.Finalize = [slot](void* ht, void** outputKeyBuffers, int64_t** outputBuffers, uint8_t** outputAggMasks, int64_t outputCapacity) {
+        return reinterpret_cast<TFinalizeFn>(slot->Fns[2])(ht, outputKeyBuffers, outputBuffers, outputAggMasks, outputCapacity);
     };
     return kernels;
 }

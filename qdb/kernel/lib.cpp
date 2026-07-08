@@ -284,6 +284,99 @@ BuildGenericAggregateFinalizeProgramAst(
 }
 
 std::expected<NQumir::NAst::TExprPtr, NQumir::TError>
+BuildGenericAggregateFusedProgramAst(
+    const NQumir::NAst::TStructType& inputType,
+    const TAggregateKeyDescriptor& key,
+    const TAggReducerLayout& layout,
+    NQumir::NAst::TTypePtr columnType,
+    NQumir::NAst::TTypePtr rowSetType,
+    NQumir::NAst::TTypePtr hashTableType)
+{
+    using namespace NQumir::NAst;
+
+    std::vector<TExprPtr> stmts;
+    if (!key.LookupTypeName.empty()) {
+        stmts.push_back(std::make_shared<TTypeDeclStmt>(
+            NQumir::TLocation{}, key.LookupType));
+    }
+    if (!key.StoredTypeName.empty()) {
+        stmts.push_back(std::make_shared<TTypeDeclStmt>(
+            NQumir::TLocation{}, key.StoredType));
+    } else if (TMaybeType<TNamedType>(key.KeyType)) {
+        stmts.push_back(std::make_shared<TTypeDeclStmt>(
+            NQumir::TLocation{}, key.KeyType));
+    }
+
+    if (key.HasDistinctLookupType()) {
+        auto stringOperations = ParseFunctionLibrary(
+            ReadAggregationKernel("string_ops.oz"));
+        if (!stringOperations) {
+            return std::unexpected(NQumir::TError(
+                "string_ops.oz: " + stringOperations.error().ToString()));
+        }
+        stmts.insert(
+            stmts.end(), stringOperations->begin(), stringOperations->end());
+    }
+    auto keyOperations = GenKeyOperationFunDecls(key);
+    stmts.insert(stmts.end(), keyOperations.begin(), keyOperations.end());
+    auto ownership = GenKeyOwnershipFunDecls(key);
+    stmts.insert(stmts.end(), ownership.begin(), ownership.end());
+    auto reducerDecls = GenReducerFunDecls(layout);
+    stmts.insert(stmts.end(), reducerDecls.begin(), reducerDecls.end());
+    stmts.push_back(GenApplyReducersFunDecl(layout));
+
+    auto lifecycle = ParseFunctionLibrary(
+        ReadAggregationKernel("aggregation_hashtable_generic.oz"),
+        {"rh_lookup_slot", "rh_insert_displace", "aht_rehash", "aht_update"});
+    if (!lifecycle) {
+        return std::unexpected(NQumir::TError(
+            "aggregation_hashtable_generic.oz: " +
+            lifecycle.error().ToString()));
+    }
+    stmts.insert(stmts.end(), lifecycle->begin(), lifecycle->end());
+
+    for (const char* name :
+         {"owned_blocks.oz", "robin_hood_dual_key.oz",
+          "aggregation_finalize_states.oz"}) {
+        auto parsed = ParseFunctionLibrary(ReadAggregationKernel(name));
+        if (!parsed) {
+            return std::unexpected(NQumir::TError(
+                std::string(name) + ": " + parsed.error().ToString()));
+        }
+        stmts.insert(stmts.end(), parsed->begin(), parsed->end());
+    }
+
+    auto appendEntry = [&](TExprPtr entry,
+                           const char* what) -> std::optional<NQumir::TError> {
+        auto block = TMaybeNode<TBlockExpr>(entry);
+        if (!block || block.Cast()->Stmts.size() != 1) {
+            return NQumir::TError(
+                std::string(what) + " generator returned an invalid entry block");
+        }
+        stmts.push_back(block.Cast()->Stmts.front());
+        return std::nullopt;
+    };
+    if (auto err = appendEntry(
+            GenGenericAggregateDispatchAst(
+                inputType, key, layout, columnType, rowSetType, hashTableType),
+            "generic aggregate dispatch")) {
+        return std::unexpected(*err);
+    }
+    if (auto err = appendEntry(
+            GenGenericAggregateMeasureAst(key, hashTableType),
+            "generic aggregate measure")) {
+        return std::unexpected(*err);
+    }
+    if (auto err = appendEntry(
+            GenGenericAggregateFinalizeAst(key, layout, hashTableType, columnType),
+            "generic aggregate finalize")) {
+        return std::unexpected(*err);
+    }
+
+    return std::make_shared<TBlockExpr>(NQumir::TLocation{}, std::move(stmts));
+}
+
+std::expected<NQumir::NAst::TExprPtr, NQumir::TError>
 BuildGenericAggregateMeasureProgramAst(
     const TAggregateKeyDescriptor& key,
     NQumir::NAst::TTypePtr hashTableType)
