@@ -121,6 +121,57 @@ uint64_t MakePrefix(std::string_view s) {
     return x;
 }
 
+void StableInsertionSort(TStringKey* keys, int n, std::vector<std::string_view>& strings) {
+    for (int i = 1; i < n; ++i) {
+        TStringKey key = keys[i];
+        std::string_view str = strings[key.RowIndex];
+        int j = i - 1;
+        while (j >= 0 && strings[keys[j].RowIndex] > str) {
+            keys[j + 1] = keys[j];
+            --j;
+        }
+        keys[j + 1] = key;
+    }
+}
+
+void MergeSort(TStringKey* keys, TStringKey* work, int n, std::vector<std::string_view>& strings) {
+    static constexpr size_t SmallSortThreshold = 32;
+
+    if (n <= 1) {
+        return;
+    }
+
+    if (n <= SmallSortThreshold) {
+        StableInsertionSort(keys, n, strings);
+        return;
+    }
+
+    const size_t mid = n / 2;
+    MergeSort(keys, work, mid, strings);
+    MergeSort(keys + mid, work, n - mid, strings);
+
+    size_t i = 0, j = mid, k = 0;
+    while (i < mid && j < n) {
+        if (strings[keys[i].RowIndex] <= strings[keys[j].RowIndex]) {
+            work[k++] = keys[i++];
+        } else {
+            work[k++] = keys[j++];
+        }
+    }
+
+    while (i < mid) {
+        work[k++] = keys[i++];
+    }
+
+    while (j < n) {
+        work[k++] = keys[j++];
+    }
+
+    for (size_t i = 0; i < n; ++i) {
+        keys[i] = work[i];
+    }
+}
+
 void SortStrings(std::vector<std::string_view>& strings, std::vector<uint32_t>& indices)
 {
     int n = strings.size();
@@ -135,9 +186,7 @@ void SortStrings(std::vector<std::string_view>& strings, std::vector<uint32_t>& 
 
     int i, j = 0;
     auto sort_range = [&](int start, int end) {
-        std::stable_sort(keys.begin() + start, keys.begin() + end, [&](const TStringKey& lhs, const TStringKey& rhs) {
-            return strings[lhs.RowIndex] < strings[rhs.RowIndex];
-        });
+        MergeSort(keys.data() + start, work.data() + start, end - start, strings);
     };
     for (i = 0; i < n; i++) {
         if (keys[i].Prefix != keys[j].Prefix) {
