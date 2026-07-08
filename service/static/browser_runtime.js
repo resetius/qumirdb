@@ -377,6 +377,67 @@ export function runProject(kernel, layout, batch, output) {
   return columns;
 }
 
+// Drive the radix composite sort kernel. Marshals each key column into a
+// contiguous raw buffer, runs qdb_radix_sort_indices_composite to get a sorted
+// permutation, then gathers all columns by it (top-`limit` if given). No
+// ordering logic lives here — the kernel owns it, exactly as the native path.
+export function runRadixSort(kernel, layout, batch, selection, radixKeys, limit) {
+  const arena = new Arena(kernel.instance);
+
+  const live = [];
+  for (let i = 0; i < batch.rowCount; ++i) {
+    if (selection && !selection[i]) continue;
+    live.push(i);
+  }
+  const n = live.length;
+  const keyCount = radixKeys.length;
+
+  // Allocate everything up front (a mid-write grow would detach views).
+  const valueBufs = radixKeys.map(key => {
+    const width = coreTypeWidth(batch.columns[key.index].type);
+    return { ptr: arena.alloc(Math.max(n, 1) * width, 8), width, key };
+  });
+  const valuesArrPtr = arena.alloc(Math.max(keyCount, 1) * 8, 8);
+  const indicesPtr = arena.alloc(Math.max(n, 1) * 4, 4);
+  const workPtr = arena.alloc(Math.max(n, 1) * 4, 4);
+  const countsPtr = arena.alloc(256 * 4, 4);
+  const descsPtr = arena.alloc(Math.max(keyCount, 1), 1);
+
+  const dv = arena.view();
+  for (let k = 0; k < keyCount; ++k) {
+    const { ptr, width, key } = valueBufs[k];
+    const column = batch.columns[key.index];
+    for (let i = 0; i < n; ++i) {
+      writeNumericValue(dv, ptr + i * width, column.type, column.values[live[i]]);
+    }
+    writePointer(dv, valuesArrPtr + k * 8, ptr);
+    dv.setUint8(descsPtr + k, key.desc ? 1 : 0);
+  }
+  for (let i = 0; i < n; ++i) {
+    dv.setUint32(indicesPtr + i * 4, i, true);
+  }
+
+  // memory64: every pointer/count is an i64 param.
+  kernel.fn(
+    BigInt(valuesArrPtr), BigInt(indicesPtr), BigInt(workPtr),
+    BigInt(countsPtr), BigInt(n), BigInt(descsPtr));
+
+  const outDv = arena.view();
+  const order = new Array(n);
+  for (let i = 0; i < n; ++i) {
+    order[i] = live[outDv.getUint32(indicesPtr + i * 4, true)];
+  }
+
+  const keep = (limit != null && limit < n) ? Math.max(limit, 0) : n;
+  const kept = order.slice(0, keep);
+  const columns = batch.columns.map(col => ({
+    name: col.name,
+    type: col.type,
+    values: kept.map(idx => col.values[idx]),
+  }));
+  return { rowCount: kept.length, columns };
+}
+
 // Execute a linear exec pipeline. `readSource(stage)` must return
 // { rowCount, columns: [{ name, type, values }] } in the stage's column order.
 export async function executeBrowserPipeline(exec, readSource) {
@@ -413,11 +474,18 @@ export async function executeBrowserPipeline(exec, readSource) {
         }));
       }
       batch = { rowCount: batch.rowCount, columns };
-    } else if (stage.kind === 'sort') {
-      batch = applySort(batch, selection, stage.keys, null);
-      selection = null;
-    } else if (stage.kind === 'top-sort') {
-      batch = applySort(batch, selection, stage.keys, Number(stage.limit));
+    } else if (stage.kind === 'sort' || stage.kind === 'top-sort') {
+      const rowLimit = stage.kind === 'top-sort' ? Number(stage.limit) : null;
+      if (stage.wasm) {
+        // Radix sort kernel: JS only marshals key bytes and gathers by the
+        // returned permutation — all ordering happens in the kernel.
+        const kernel =
+          await instantiateKernel(stage.wasm, 'qdb_radix_sort_indices_composite');
+        batch = runRadixSort(kernel, layout, batch, selection, stage.radixKeys, rowLimit);
+      } else {
+        // Non-radix keys (strings): comparison sort in JS.
+        batch = applySort(batch, selection, stage.keys, rowLimit);
+      }
       selection = null;
     } else if (stage.kind === 'limit') {
       limit = { limit: Number(stage.limit), offset: Number(stage.offset || 0) };
@@ -442,10 +510,24 @@ function applySort(batch, selection, keys, limit) {
     indices.push(i);
   }
 
+  // Per-key comparison context. String keys are pre-encoded to UTF-8 once so
+  // ordering matches the native host compare (byte order, not JS UTF-16).
+  const encoder = new TextEncoder();
+  const keyCtx = keys.map(key => {
+    const column = batch.columns[key.index];
+    if (column.type === 'string') {
+      const bytes = column.values.map(v =>
+        (v === null || v === undefined) ? null : encoder.encode(String(v)));
+      return { key, isString: true, bytes };
+    }
+    return { key, isString: false, values: column.values };
+  });
+
   indices.sort((a, b) => {
-    for (const key of keys) {
-      const values = batch.columns[key.index].values;
-      const c = compareByKey(values[a], values[b], key);
+    for (const ctx of keyCtx) {
+      const c = ctx.isString
+        ? compareKey(ctx.bytes[a], ctx.bytes[b], ctx.key, compareBytes)
+        : compareKey(ctx.values[a], ctx.values[b], ctx.key, compareScalar);
       if (c !== 0) {
         return c;
       }
@@ -463,33 +545,28 @@ function applySort(batch, selection, keys, limit) {
   return { rowCount: kept.length, columns };
 }
 
-// Compare two column values under one sort key, returning final order
-// (direction and null placement already applied). Null default follows the
-// Postgres convention: NULLS LAST for asc, NULLS FIRST for desc.
-function compareByKey(a, b, key) {
+function compareScalar(a, b) {
+  if (a < b) return -1;
+  if (a > b) return 1;
+  return 0;
+}
+
+// One sort key, mirroring native LessByKey: nulls are placed by EffectiveNulls
+// (default = Postgres: NULLS LAST for asc, NULLS FIRST for desc) independent of
+// the value direction, which only flips the present-value comparison.
+function compareKey(a, b, key, compare) {
   const aNull = a === null || a === undefined;
   const bNull = b === null || b === undefined;
   if (aNull || bNull) {
     if (aNull && bNull) {
       return 0;
     }
-    let nullsFirst;
-    if (key.nulls === 'nulls-first') {
-      nullsFirst = true;
-    } else if (key.nulls === 'nulls-last') {
-      nullsFirst = false;
-    } else {
-      nullsFirst = key.direction === 'desc';
-    }
+    const nullsFirst = key.nulls === 'nulls-first' ? true
+      : key.nulls === 'nulls-last' ? false
+      : key.direction === 'desc';
     return aNull === nullsFirst ? -1 : 1;
   }
-
-  let c = 0;
-  if (a < b) {
-    c = -1;
-  } else if (a > b) {
-    c = 1;
-  }
+  const c = compare(a, b);
   return key.direction === 'desc' ? -c : c;
 }
 

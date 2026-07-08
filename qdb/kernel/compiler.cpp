@@ -1,4 +1,5 @@
 #include <qdb/kernel/compiler.h>
+#include <qdb/kernel/finalize.h>
 #include <qdb/plan/clone_expr.h>
 #include <qdb/plan/types/nullable.h>
 #include <qdb/kernel/aggregate_key.h>
@@ -13,6 +14,7 @@
 #include <qumir/error.h>
 #include <qumir/parser/core/printer.h>
 
+#include <span>
 #include <sstream>
 #include <stdexcept>
 #include <unordered_map>
@@ -65,16 +67,7 @@ void EnsureQumirDbUse(const NQumir::NAst::TExprPtr& ast) {
         std::make_shared<TUseExpr>(NQumir::TLocation{}, "qumirdb"));
 }
 
-void* CompileKernelAst(
-    NQumir::TLLVMRunner& runner,
-    NQumir::NAst::TExprPtr ast,
-    const std::string& entryName,
-    std::string* error)
-{
-    NQumir::NRegistry::EnsureQumirDbRuntimeSymbolsLinked();
-    EnsureQumirDbUse(ast);
-    return runner.CompileKernelAst(std::move(ast), entryName, error);
-}
+} // namespace
 
 std::unordered_map<std::string, void*> CompileKernelAst(
     NQumir::TLLVMRunner& runner,
@@ -87,7 +80,30 @@ std::unordered_map<std::string, void*> CompileKernelAst(
     return runner.CompileKernelAst(std::move(ast), entryNames, error);
 }
 
-} // namespace
+TGeneratedKernel TKernelCompiler::EmitKernel(
+    std::string name,
+    std::vector<std::string> entrypoints,
+    NQumir::NAst::TExprPtr ast,
+    std::shared_ptr<void> storage)
+{
+    TGeneratedKernel kernel{
+        .Name = std::move(name),
+        .Stage = Stage_,
+        .Entrypoints = std::move(entrypoints),
+        .Ast = std::move(ast),
+        .Storage = std::move(storage),
+        .Operator = Operator_,
+        .Slot = std::make_shared<TKernelSlot>(),
+    };
+    kernel.Slot->Fns.resize(kernel.Entrypoints.size(), nullptr);
+    if (Sink_) {
+        Sink_->push_back(kernel);
+    }
+    if (BindNow_) {
+        JitFinalizeKernels(std::span(&kernel, 1), Diagnostics_);
+    }
+    return kernel;
+}
 
 NQumir::TLLVMRunnerOptions KernelRunnerOptions() {
     NQumir::TLLVMRunnerOptions opts;
@@ -211,6 +227,67 @@ std::string BuildRadixCompositeNullableWrapperSource(
 
 } // namespace
 
+NQumir::NAst::TExprPtr BuildRadixSortProgramAst(
+    const std::vector<NQumir::NAst::TTypePtr>& types)
+{
+    using namespace NQumir::NAst;
+    if (types.empty()) {
+        throw NQumir::TError("BuildRadixSortProgramAst: empty key list");
+    }
+    std::vector<TExprPtr> programStmts;
+    auto library = NKernel::ParseFunctionLibrary(NKernel::ReadSortKernel("radix.oz"));
+    if (!library) {
+        throw NQumir::TError("BuildRadixSortProgramAst: " + library.error().ToString());
+    }
+    for (auto& stmt : *library) {
+        programStmts.push_back(std::move(stmt));
+    }
+    auto wrapper = NKernel::ParseFunctionLibrary(BuildRadixCompositeWrapperSource(types));
+    if (!wrapper) {
+        throw NQumir::TError("BuildRadixSortProgramAst: " + wrapper.error().ToString());
+    }
+    for (auto& stmt : *wrapper) {
+        programStmts.push_back(std::move(stmt));
+    }
+    return std::make_shared<TBlockExpr>(NQumir::TLocation{}, std::move(programStmts));
+}
+
+NQumir::NAst::TExprPtr BuildRadixSortNullableProgramAst(
+    const std::vector<NQumir::NAst::TTypePtr>& types)
+{
+    using namespace NQumir::NAst;
+    if (types.empty()) {
+        throw NQumir::TError("BuildRadixSortNullableProgramAst: empty key list");
+    }
+    std::vector<TExprPtr> programStmts;
+    auto addLibrary = [&](const std::string& name, bool skipUse) {
+        auto library = NKernel::ParseFunctionLibrary(NKernel::ReadSortKernel(name));
+        if (!library) {
+            throw NQumir::TError(
+                "BuildRadixSortNullableProgramAst: " + library.error().ToString());
+        }
+        for (auto& stmt : *library) {
+            if (skipUse && TMaybeNode<TUseExpr>(stmt)) {
+                continue;
+            }
+            programStmts.push_back(std::move(stmt));
+        }
+    };
+    addLibrary("radix.oz", false);
+    addLibrary("radix_nullable.oz", true);
+
+    auto wrapper = NKernel::ParseFunctionLibrary(
+        BuildRadixCompositeNullableWrapperSource(types));
+    if (!wrapper) {
+        throw NQumir::TError(
+            "BuildRadixSortNullableProgramAst: " + wrapper.error().ToString());
+    }
+    for (auto& stmt : *wrapper) {
+        programStmts.push_back(std::move(stmt));
+    }
+    return std::make_shared<TBlockExpr>(NQumir::TLocation{}, std::move(programStmts));
+}
+
 TKernelCompiler::TFilterDispatch TKernelCompiler::CompileFilter(
     const NKernel::TOperatorKernelSpec& spec)
 {
@@ -245,42 +322,19 @@ TKernelCompiler::TFilterDispatch TKernelCompiler::CompileFilter(
             "CompileFilter: " + kernelAst.error().ToString());
     }
 
-    auto runner = std::make_unique<NQumir::TLLVMRunner>(Opts_);
-
     if (Diagnostics_) {
         NKernel::PrintKernelSpec(*Diagnostics_, spec);
     }
     PrintKernelAst(Diagnostics_, "filter", *kernelAst);
 
-    if (ExportBackend_ && ExportBackend_->SkipJit()) {
-        ExportBackend_->CompileKernel(TGeneratedKernel{
-            .Name = "filter",
-            .Stage = Stage_,
-            .Entrypoints = {"<kernel>"},
-            .Ast = std::move(*kernelAst),
-        });
-        FinishKernelDiagnostics(Diagnostics_);
-        return [](TRowSet&) {};
-    }
-
-    std::string err;
-    void* fnPtr = CompileKernelAst(
-        *runner,
-        std::move(*kernelAst), "<kernel>", &err);
+    auto kernel = EmitKernel(
+        "filter", {"<kernel>"}, std::move(*kernelAst), literalStorage);
     FinishKernelDiagnostics(Diagnostics_);
-    if (!fnPtr) {
-        throw std::runtime_error("filter kernel compilation failed: " + err);
-    }
 
     using TFilterFn = void(*)(void*);
-    auto sharedRunner = std::shared_ptr<NQumir::TLLVMRunner>(std::move(runner));
-
-    TFilterDispatch dispatch =
-        [fnPtr, sharedRunner, literalStorage](TRowSet& rowSet) {
-            reinterpret_cast<TFilterFn>(fnPtr)(&rowSet);
-        };
-
-    return dispatch;
+    return [slot = kernel.Slot, storage = kernel.Storage](TRowSet& rowSet) {
+        reinterpret_cast<TFilterFn>(slot->Fns[0])(&rowSet);
+    };
 }
 
 TKernelCompiler::TProjectDispatch TKernelCompiler::CompileProject(
@@ -327,35 +381,19 @@ TKernelCompiler::TProjectDispatch TKernelCompiler::CompileProject(
         std::move(cloned), computedTypes, *inputType.Cast(), fieldIndices,
         columnType, rowSetType, stringViewType, *literalStorage);
 
-    auto runner = std::make_unique<NQumir::TLLVMRunner>(Opts_);
-
     if (Diagnostics_) {
         NKernel::PrintKernelSpec(*Diagnostics_, spec);
     }
     PrintKernelAst(Diagnostics_, "project", kernelAst);
 
-    if (ExportBackend_ && ExportBackend_->SkipJit()) {
-        ExportBackend_->CompileKernel(TGeneratedKernel{
-            .Name = "project",
-            .Stage = Stage_,
-            .Entrypoints = {"<project>"},
-            .Ast = std::move(kernelAst),
-        });
-        FinishKernelDiagnostics(Diagnostics_);
-        return [](TRowSet*, void**) {};
-    }
-
-    std::string err;
-    void* fnPtr = CompileKernelAst(*runner, std::move(kernelAst), "<project>", &err);
+    auto kernel = EmitKernel(
+        "project", {"<project>"}, std::move(kernelAst), literalStorage);
     FinishKernelDiagnostics(Diagnostics_);
-    if (!fnPtr) {
-        throw std::runtime_error("project kernel compilation failed: " + err);
-    }
 
     using TProjectFn = void(*)(void*, void**);
-    auto sharedRunner = std::shared_ptr<NQumir::TLLVMRunner>(std::move(runner));
-    return [fnPtr, sharedRunner, literalStorage](TRowSet* in, void** outBuffers) {
-        reinterpret_cast<TProjectFn>(fnPtr)(in, outBuffers);
+    return [slot = kernel.Slot, storage = kernel.Storage](
+               TRowSet* in, void** outBuffers) {
+        reinterpret_cast<TProjectFn>(slot->Fns[0])(in, outBuffers);
     };
 }
 
@@ -368,50 +406,19 @@ TKernelCompiler::TSortRadixCompositeDispatch TKernelCompiler::CompileRadixSortCo
         throw NQumir::TError("CompileRadixSortComposite: empty key list");
     }
 
-    std::vector<TExprPtr> programStmts;
-    auto addLibrary = [&](const std::string& name, bool skipUse) {
-        auto library = NKernel::ParseFunctionLibrary(NKernel::ReadSortKernel(name));
-        if (!library) {
-            throw NQumir::TError(
-                "CompileRadixSortComposite: " + library.error().ToString());
-        }
-        for (auto& stmt : *library) {
-            if (skipUse && TMaybeNode<TUseExpr>(stmt)) {
-                continue;
-            }
-            programStmts.push_back(std::move(stmt));
-        }
-    };
-    addLibrary("radix.oz", false);
-
-    auto wrapper = NKernel::ParseFunctionLibrary(BuildRadixCompositeWrapperSource(types));
-    if (!wrapper) {
-        throw NQumir::TError(
-            "CompileRadixSortComposite: " + wrapper.error().ToString());
-    }
-    for (auto& stmt : *wrapper) {
-        programStmts.push_back(std::move(stmt));
-    }
-
-    auto program = std::make_shared<TBlockExpr>(NQumir::TLocation{}, std::move(programStmts));
-    auto runner = std::make_unique<NQumir::TLLVMRunner>(Opts_);
-
+    auto program = BuildRadixSortProgramAst(types);
     PrintKernelAst(Diagnostics_, "sort.radix.fused", program);
 
-    std::string err;
-    void* fnPtr = CompileKernelAst(
-        *runner,
-        std::move(program), "qdb_radix_sort_indices_composite", &err);
+    auto kernel = EmitKernel(
+        "sort.radix.fused",
+        {"qdb_radix_sort_indices_composite"},
+        std::move(program));
     FinishKernelDiagnostics(Diagnostics_);
-    if (!fnPtr) {
-        throw std::runtime_error("sort fused radix kernel compilation failed: " + err);
-    }
 
     using TSortFn = void(*)(void**, uint32_t*, uint32_t*, uint32_t*, int64_t, bool*);
-    auto sharedRunner = std::shared_ptr<NQumir::TLLVMRunner>(std::move(runner));
-    return [fnPtr, sharedRunner](void** values, uint32_t* indices, uint32_t* work,
+    return [slot = kernel.Slot](void** values, uint32_t* indices, uint32_t* work,
         uint32_t* counts, int64_t n, bool* descs) {
-        reinterpret_cast<TSortFn>(fnPtr)(values, indices, work, counts, n, descs);
+        reinterpret_cast<TSortFn>(slot->Fns[0])(values, indices, work, counts, n, descs);
     };
 }
 
@@ -421,57 +428,20 @@ TKernelCompiler::CompileRadixSortCompositeNullable(
 {
     using namespace NQumir::NAst;
 
-    if (types.empty()) {
-        throw NQumir::TError("CompileRadixSortCompositeNullable: empty key list");
-    }
-
-    std::vector<TExprPtr> programStmts;
-    auto addLibrary = [&](const std::string& name, bool skipUse) {
-        auto library = NKernel::ParseFunctionLibrary(NKernel::ReadSortKernel(name));
-        if (!library) {
-            throw NQumir::TError(
-                "CompileRadixSortCompositeNullable: " + library.error().ToString());
-        }
-        for (auto& stmt : *library) {
-            if (skipUse && TMaybeNode<TUseExpr>(stmt)) {
-                continue;
-            }
-            programStmts.push_back(std::move(stmt));
-        }
-    };
-    addLibrary("radix.oz", false);
-    addLibrary("radix_nullable.oz", true);
-
-    auto wrapper = NKernel::ParseFunctionLibrary(
-        BuildRadixCompositeNullableWrapperSource(types));
-    if (!wrapper) {
-        throw NQumir::TError(
-            "CompileRadixSortCompositeNullable: " + wrapper.error().ToString());
-    }
-    for (auto& stmt : *wrapper) {
-        programStmts.push_back(std::move(stmt));
-    }
-
-    auto program = std::make_shared<TBlockExpr>(NQumir::TLocation{}, std::move(programStmts));
-    auto runner = std::make_unique<NQumir::TLLVMRunner>(Opts_);
-
+    auto program = BuildRadixSortNullableProgramAst(types);
     PrintKernelAst(Diagnostics_, "sort.radix.nullable.fused", program);
 
-    std::string err;
-    void* fnPtr = CompileKernelAst(
-        *runner,
-        std::move(program), "qdb_radix_sort_indices_composite_nullable", &err);
+    auto kernel = EmitKernel(
+        "sort.radix.nullable.fused",
+        {"qdb_radix_sort_indices_composite_nullable"},
+        std::move(program));
     FinishKernelDiagnostics(Diagnostics_);
-    if (!fnPtr) {
-        throw std::runtime_error("sort fused nullable radix kernel compilation failed: " + err);
-    }
 
     using TSortFn = void(*)(void**, uint8_t**, uint32_t*, uint32_t*, uint32_t*,
         int64_t, bool*, bool*);
-    auto sharedRunner = std::shared_ptr<NQumir::TLLVMRunner>(std::move(runner));
-    return [fnPtr, sharedRunner](void** values, uint8_t** valids, uint32_t* indices,
+    return [slot = kernel.Slot](void** values, uint8_t** valids, uint32_t* indices,
         uint32_t* work, uint32_t* counts, int64_t n, bool* descs, bool* nullsFirsts) {
-        reinterpret_cast<TSortFn>(fnPtr)(
+        reinterpret_cast<TSortFn>(slot->Fns[0])(
             values, valids, indices, work, counts, n, descs, nullsFirsts);
     };
 }
@@ -598,8 +568,6 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
     auto rowSetType = QumirDbNamedType("TRowSet");
     auto hashTableType = QumirDbNamedType("HashTable");
 
-    auto dispatchRunner = std::make_shared<NQumir::TLLVMRunner>(Opts_);
-
     auto dispatchProgram = NKernel::BuildGenericAggregateProgramAst(
         inputType, keyDescriptor, layout,
         columnType, rowSetType, hashTableType);
@@ -607,53 +575,18 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
         throw NQumir::TError(
             "CompileAggregate: dispatch program: " + dispatchProgram.error().ToString());
     }
-    PrintKernelAst(Diagnostics_, "aggregate.update", *dispatchProgram);
-    std::string error;
-    void* dispatchFn = CompileKernelAst(
-        *dispatchRunner,
-        std::move(*dispatchProgram), "agg_dispatch", &error);
-    FinishKernelDiagnostics(Diagnostics_);
-    if (!dispatchFn) {
-        throw std::runtime_error("CompileAggregate: agg_dispatch compilation failed: " + error);
-    }
-
-    auto measureRunner = std::make_shared<NQumir::TLLVMRunner>(Opts_);
     auto measureProgram = NKernel::BuildGenericAggregateMeasureProgramAst(
         keyDescriptor, hashTableType);
     if (!measureProgram) {
         throw NQumir::TError(
             "CompileAggregate: measure program: " + measureProgram.error().ToString());
     }
-    PrintKernelAst(Diagnostics_, "aggregate.measure", *measureProgram);
-    void* measureFn = CompileKernelAst(
-        *measureRunner,
-        std::move(*measureProgram), "agg_measure_keys", &error);
-    FinishKernelDiagnostics(Diagnostics_);
-    if (!measureFn) {
-        throw std::runtime_error(
-            "CompileAggregate: agg_measure_keys compilation failed: " + error);
-    }
-
-    auto finalizeRunner = std::make_shared<NQumir::TLLVMRunner>(Opts_);
-
     auto finalizeProgram = NKernel::BuildGenericAggregateFinalizeProgramAst(
         keyDescriptor, layout, hashTableType, columnType);
     if (!finalizeProgram) {
         throw NQumir::TError(
             "CompileAggregate: finalize program: " + finalizeProgram.error().ToString());
     }
-    PrintKernelAst(Diagnostics_, "aggregate.finalize", *finalizeProgram);
-    void* finalizeFn = CompileKernelAst(
-        *finalizeRunner,
-        std::move(*finalizeProgram), "agg_finalize", &error);
-    FinishKernelDiagnostics(Diagnostics_);
-    if (!finalizeFn) {
-        throw std::runtime_error("CompileAggregate: agg_finalize compilation failed: " + error);
-    }
-
-    using TDispatchFn = int64_t(*)(void*, TRowSet*, int64_t, int64_t);
-    using TMeasureFn = int64_t(*)(void*, int64_t*, int64_t);
-    using TFinalizeFn = int64_t(*)(void*, void**, int64_t**, uint8_t**, int64_t);
 
     TAggregateKernels kernels;
     kernels.NumAggs = funcs.size();
@@ -673,14 +606,29 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
             .Alignment = field.Alignment,
         });
     }
-    kernels.Dispatch = [dispatchFn, dispatchRunner](void* ht, TRowSet* batch, int64_t arg, int64_t op) {
-        return reinterpret_cast<TDispatchFn>(dispatchFn)(ht, batch, arg, op);
+
+    auto emit = [&](const char* name, const char* entry, NQumir::NAst::TExprPtr ast) {
+        PrintKernelAst(Diagnostics_, name, ast);
+        auto kernel = EmitKernel(name, {entry}, std::move(ast));
+        FinishKernelDiagnostics(Diagnostics_);
+        return kernel.Slot;
     };
-    kernels.Measure = [measureFn, measureRunner](void* ht, int64_t* outputKeyBytes, int64_t outputCapacity) {
-        return reinterpret_cast<TMeasureFn>(measureFn)(ht, outputKeyBytes, outputCapacity);
+    auto dispatchSlot = emit("aggregate.update", "agg_dispatch", std::move(*dispatchProgram));
+    auto measureSlot = emit("aggregate.measure", "agg_measure_keys", std::move(*measureProgram));
+    auto finalizeSlot = emit("aggregate.finalize", "agg_finalize", std::move(*finalizeProgram));
+
+    using TDispatchFn = int64_t(*)(void*, TRowSet*, int64_t, int64_t);
+    using TMeasureFn = int64_t(*)(void*, int64_t*, int64_t);
+    using TFinalizeFn = int64_t(*)(void*, void**, int64_t**, uint8_t**, int64_t);
+
+    kernels.Dispatch = [slot = dispatchSlot](void* ht, TRowSet* batch, int64_t arg, int64_t op) {
+        return reinterpret_cast<TDispatchFn>(slot->Fns[0])(ht, batch, arg, op);
     };
-    kernels.Finalize = [finalizeFn, finalizeRunner](void* ht, void** outputKeyBuffers, int64_t** outputBuffers, uint8_t** outputAggMasks, int64_t outputCapacity) {
-        return reinterpret_cast<TFinalizeFn>(finalizeFn)(ht, outputKeyBuffers, outputBuffers, outputAggMasks, outputCapacity);
+    kernels.Measure = [slot = measureSlot](void* ht, int64_t* outputKeyBytes, int64_t outputCapacity) {
+        return reinterpret_cast<TMeasureFn>(slot->Fns[0])(ht, outputKeyBytes, outputCapacity);
+    };
+    kernels.Finalize = [slot = finalizeSlot](void* ht, void** outputKeyBuffers, int64_t** outputBuffers, uint8_t** outputAggMasks, int64_t outputCapacity) {
+        return reinterpret_cast<TFinalizeFn>(slot->Fns[0])(ht, outputKeyBuffers, outputBuffers, outputAggMasks, outputCapacity);
     };
     return kernels;
 }
@@ -808,32 +756,20 @@ TJoinHashKernels TKernelCompiler::CompileJoinHash(
         return program;
     };
 
-    auto options = Opts_;
-    options.PrintIr = Diagnostics_ != nullptr;
-    options.PrintLlvm = Diagnostics_ != nullptr;
-    auto runner = std::make_shared<NQumir::TLLVMRunner>(options);
     auto program = std::make_shared<TBlockExpr>(NQumir::TLocation{}, buildProgram());
     PrintKernelAst(Diagnostics_, "join_hash", program);
-    std::string error;
-    const std::vector<std::string> entries = {"jt_hash_left", "jt_hash_right"};
-    auto fns = CompileKernelAst(*runner, program, entries, &error);
+
+    auto kernel = EmitKernel(
+        "join_hash", {"jt_hash_left", "jt_hash_right"}, std::move(program));
     FinishKernelDiagnostics(Diagnostics_);
-    for (const auto& entry : entries) {
-        if (!fns.contains(entry)) {
-            throw std::runtime_error(
-                "CompileJoinHash: " + entry + " compilation failed: " + error);
-        }
-    }
-    void* leftFn = fns.at("jt_hash_left");
-    void* rightFn = fns.at("jt_hash_right");
 
     using THashFn = bool(*)(TRowSet*, uint64_t*);
     return {
-        .Left = [leftFn, runner](TRowSet* batch, uint64_t* hashes) {
-            return reinterpret_cast<THashFn>(leftFn)(batch, hashes);
+        .Left = [slot = kernel.Slot](TRowSet* batch, uint64_t* hashes) {
+            return reinterpret_cast<THashFn>(slot->Fns[0])(batch, hashes);
         },
-        .Right = [rightFn, runner](TRowSet* batch, uint64_t* hashes) {
-            return reinterpret_cast<THashFn>(rightFn)(batch, hashes);
+        .Right = [slot = kernel.Slot](TRowSet* batch, uint64_t* hashes) {
+            return reinterpret_cast<THashFn>(slot->Fns[1])(batch, hashes);
         },
     };
 }
@@ -936,28 +872,22 @@ TJoinKernels TKernelCompiler::CompileJoin(
         entries.push_back("jt_finalize_outer");
     }
 
-    auto options = Opts_;
-    options.PrintIr = Diagnostics_ != nullptr;
-    options.PrintLlvm = Diagnostics_ != nullptr;
-    auto runner = std::make_shared<NQumir::TLLVMRunner>(options);
     auto program = std::make_shared<TBlockExpr>(NQumir::TLocation{}, buildProgram());
     PrintKernelAst(Diagnostics_, "join", program);
-    std::string error;
-    auto fns = CompileKernelAst(*runner, program, entries, &error);
-    FinishKernelDiagnostics(Diagnostics_);
-    for (const auto& entry : entries) {
-        if (!fns.contains(entry)) {
-            throw std::runtime_error("CompileJoin: " + entry + " compilation failed: " + error);
-        }
-    }
 
-    void* initFn = fns.at("jt_init");
-    void* leftFn = fns.at("jt_process_left");
-    void* rightFn = fns.at("jt_process_right");
-    void* probeLeftFn = fns.at("jt_probe_left_stream");
-    void* probeRightFn = fns.at("jt_probe_right_stream");
-    void* destroyTableFn = fns.at("jt_destroy");
-    void* destroyPairsFn = fns.at("pb_destroy");
+    auto kernel = EmitKernel("join", entries, std::move(program));
+    FinishKernelDiagnostics(Diagnostics_);
+
+    // Entry indices are fixed by the `entries` order above.
+    auto slot = kernel.Slot;
+    auto entryIndex = [&](std::string_view name) -> size_t {
+        for (size_t i = 0; i < entries.size(); ++i) {
+            if (entries[i] == name) {
+                return i;
+            }
+        }
+        throw std::logic_error("CompileJoin: missing entry " + std::string(name));
+    };
 
     using TInitFn = bool(*)(void*, int64_t, int64_t);
     // jt_process_left/right take the two row-store bases (for jt_residual_filter).
@@ -968,59 +898,61 @@ TJoinKernels TKernelCompiler::CompileJoin(
     using TDestroyFn = void(*)(void*);
 
     TJoinKernels kernels;
-    kernels.Init = [initFn, runner, keySize](void* table, int64_t capacity) {
-        return reinterpret_cast<TInitFn>(initFn)(table, capacity, keySize);
+    kernels.Init = [slot, i = entryIndex("jt_init"), keySize](
+        void* table, int64_t capacity) {
+        return reinterpret_cast<TInitFn>(slot->Fns[i])(table, capacity, keySize);
     };
-    kernels.ProcessLeft = [leftFn, runner](void* own, void* opp, TRowSet* batch,
+    kernels.ProcessLeft = [slot, i = entryIndex("jt_process_left")](
+        void* own, void* opp, TRowSet* batch,
         int64_t batchIdx, void* pairs, TRowSet* leftStore, TRowSet* rightStore) {
-        return reinterpret_cast<TProcessFn>(leftFn)(
+        return reinterpret_cast<TProcessFn>(slot->Fns[i])(
             own, opp, batch, batchIdx, pairs, leftStore, rightStore);
     };
-    kernels.ProcessRight = [rightFn, runner](void* own, void* opp, TRowSet* batch,
+    kernels.ProcessRight = [slot, i = entryIndex("jt_process_right")](
+        void* own, void* opp, TRowSet* batch,
         int64_t batchIdx, void* pairs, TRowSet* leftStore, TRowSet* rightStore) {
-        return reinterpret_cast<TProcessFn>(rightFn)(
+        return reinterpret_cast<TProcessFn>(slot->Fns[i])(
             own, opp, batch, batchIdx, pairs, leftStore, rightStore);
     };
-    kernels.ProbeLeftStream = [probeLeftFn, runner](void* build, TRowSet* batch,
+    kernels.ProbeLeftStream = [slot, i = entryIndex("jt_probe_left_stream")](
+        void* build, TRowSet* batch,
         int64_t batchIdx, void* pairs, TRowSet* leftStore, TRowSet* rightStore) {
-        return reinterpret_cast<TProbeFn>(probeLeftFn)(
+        return reinterpret_cast<TProbeFn>(slot->Fns[i])(
             build, batch, batchIdx, pairs, leftStore, rightStore);
     };
-    kernels.ProbeRightStream = [probeRightFn, runner](void* build, TRowSet* batch,
+    kernels.ProbeRightStream = [slot, i = entryIndex("jt_probe_right_stream")](
+        void* build, TRowSet* batch,
         int64_t batchIdx, void* pairs, TRowSet* leftStore, TRowSet* rightStore) {
-        return reinterpret_cast<TProbeFn>(probeRightFn)(
+        return reinterpret_cast<TProbeFn>(slot->Fns[i])(
             build, batch, batchIdx, pairs, leftStore, rightStore);
     };
-    kernels.DestroyTable = [destroyTableFn, runner](void* table) {
-        reinterpret_cast<TDestroyFn>(destroyTableFn)(table);
+    kernels.DestroyTable = [slot, i = entryIndex("jt_destroy")](void* table) {
+        reinterpret_cast<TDestroyFn>(slot->Fns[i])(table);
     };
-    kernels.DestroyPairs = [destroyPairsFn, runner](void* pairs) {
-        reinterpret_cast<TDestroyFn>(destroyPairsFn)(pairs);
+    kernels.DestroyPairs = [slot, i = entryIndex("pb_destroy")](void* pairs) {
+        reinterpret_cast<TDestroyFn>(slot->Fns[i])(pairs);
     };
 
     using TFinalizeFn = bool(*)(void*, void*, void*);
 
     if (isSemiAnti) {
-        void* insertKeyOnlyFn = fns.at("jt_insert_key_only");
-        void* finalizeFn = fns.at("jt_finalize_semi_anti");
-        kernels.InsertKeyOnly =
-            [insertKeyOnlyFn, runner](void* own, void* opp, TRowSet* batch,
-                int64_t batchIdx, void* pairs) {
-                return reinterpret_cast<TInsertKeyOnlyFn>(insertKeyOnlyFn)(
-                    own, opp, batch, batchIdx, pairs);
-            };
-        kernels.FinalizeAntiSemi =
-            [finalizeFn, runner](void* own, void* opp, void* pairs) {
-                return reinterpret_cast<TFinalizeFn>(finalizeFn)(own, opp, pairs);
-            };
+        kernels.InsertKeyOnly = [slot, i = entryIndex("jt_insert_key_only")](
+            void* own, void* opp, TRowSet* batch,
+            int64_t batchIdx, void* pairs) {
+            return reinterpret_cast<TInsertKeyOnlyFn>(slot->Fns[i])(
+                own, opp, batch, batchIdx, pairs);
+        };
+        kernels.FinalizeAntiSemi = [slot, i = entryIndex("jt_finalize_semi_anti")](
+            void* own, void* opp, void* pairs) {
+            return reinterpret_cast<TFinalizeFn>(slot->Fns[i])(own, opp, pairs);
+        };
     }
 
     if (isOuter) {
-        void* finalizeFn = fns.at("jt_finalize_outer");
-        kernels.FinalizeOuter =
-            [finalizeFn, runner](void* own, void* opp, void* pairs) {
-                return reinterpret_cast<TFinalizeFn>(finalizeFn)(own, opp, pairs);
-            };
+        kernels.FinalizeOuter = [slot, i = entryIndex("jt_finalize_outer")](
+            void* own, void* opp, void* pairs) {
+            return reinterpret_cast<TFinalizeFn>(slot->Fns[i])(own, opp, pairs);
+        };
     }
 
     return kernels;

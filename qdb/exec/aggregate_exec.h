@@ -19,11 +19,13 @@ public:
     bool Finish(TRowSet& rowSet);
 
 private:
+    void EnsureInit();
     void Destroy();
 
 private:
     TAggregateKernels Kernels_;
     std::array<uint8_t, TKernelCompiler::kHashTableSize> HashTable_ = {};
+    bool Initialized_ = false;
     bool Finished_ = false;
     bool Destroyed_ = false;
 };

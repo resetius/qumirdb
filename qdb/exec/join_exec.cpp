@@ -325,8 +325,9 @@ TInnerJoinProcessor::~TInnerJoinProcessor() {
     if (Initialized_) {
         Kernels_.DestroyTable(LeftTable_.data());
         Kernels_.DestroyTable(RightTable_.data());
+        // The pair buffer is only populated by kernels after EnsureInit.
+        Kernels_.DestroyPairs(&PairBuffer_);
     }
-    Kernels_.DestroyPairs(&PairBuffer_);
 }
 
 void TInnerJoinProcessor::EnsureInit() {

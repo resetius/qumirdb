@@ -857,89 +857,6 @@ void AddArrayArtifactRef(
     }
 }
 
-std::vector<TKernelArtifacts> ParseKernelArtifacts(
-    std::string_view diagnostics,
-    TArtifactStore& artifacts)
-{
-    static constexpr std::string_view stageHeader = "========== RUNTIME STAGE: ";
-    static constexpr std::string_view stageHeaderEnd = " ==========";
-    static constexpr std::string_view stageEnd =
-        "========== END RUNTIME STAGE ==========";
-    static constexpr std::string_view header = "========== RUNTIME NODE: ";
-    static constexpr std::string_view headerEnd = " ==========";
-    static constexpr std::string_view blockEnd =
-        "========== END RUNTIME NODE ==========";
-
-    std::vector<TKernelArtifacts> out;
-    size_t pos = 0;
-    std::string currentStage;
-    while (true) {
-        const auto stageBegin = diagnostics.find(stageHeader, pos);
-        const auto stageFinish = diagnostics.find(stageEnd, pos);
-        const auto nodeBegin = diagnostics.find(header, pos);
-        auto next = std::min({stageBegin, stageFinish, nodeBegin});
-        if (next == std::string_view::npos) {
-            break;
-        }
-
-        if (next == stageBegin) {
-            const auto valueBegin = stageBegin + stageHeader.size();
-            const auto valueEnd = diagnostics.find(stageHeaderEnd, valueBegin);
-            if (valueEnd == std::string_view::npos) {
-                break;
-            }
-            currentStage = Trim(
-                diagnostics.substr(valueBegin, valueEnd - valueBegin));
-            pos = valueEnd + stageHeaderEnd.size();
-            continue;
-        }
-        if (next == stageFinish) {
-            currentStage.clear();
-            pos = stageFinish + stageEnd.size();
-            continue;
-        }
-
-        auto nameBegin = nodeBegin + header.size();
-        auto nameEnd = diagnostics.find(headerEnd, nameBegin);
-        if (nameEnd == std::string_view::npos) {
-            break;
-        }
-        auto bodyBegin = diagnostics.find('\n', nameEnd);
-        if (bodyBegin == std::string_view::npos) {
-            break;
-        }
-        ++bodyBegin;
-        auto end = diagnostics.find(blockEnd, bodyBegin);
-        if (end == std::string_view::npos) {
-            break;
-        }
-
-        const auto name = Trim(diagnostics.substr(nameBegin, nameEnd - nameBegin));
-        const auto body = diagnostics.substr(bodyBegin, end - bodyBegin);
-        TKernelArtifacts item{
-            .Stage = currentStage,
-            .Name = name,
-        };
-        auto ast = ArtifactSlice(body, "----- AST -----", "----- IR / LLVM -----");
-        if (!ast.empty()) {
-            item.Ast = artifacts.Add("ast", std::move(ast), name, currentStage);
-        }
-
-        auto ir = ArtifactSlice(body, "=========== IR: ============", "============================");
-        if (!ir.empty()) {
-            item.Ir = artifacts.Add("ir", std::move(ir), name, currentStage);
-        }
-
-        auto llvm = ArtifactSlice(body, "=========== LLVM: ==========", "============================");
-        if (!llvm.empty()) {
-            item.Llvm = artifacts.Add("llvm-ir", std::move(llvm), name, currentStage);
-        }
-
-        out.push_back(std::move(item));
-        pos = end + blockEnd.size();
-    }
-    return out;
-}
 
 std::string ConnectionKindName(NQdb::NScheduler::EConnectionKind kind) {
     using NQdb::NScheduler::EConnectionKind;
@@ -1327,102 +1244,41 @@ std::string AstText(const NQumir::NAst::TExprPtr& ast) {
     return out.str();
 }
 
-class TWasmKernelExportBackend final : public NQdb::IKernelExportBackend {
-public:
-    TWasmKernelExportBackend(
-        TArtifactStore& artifacts,
-        std::vector<TKernelArtifacts>& kernels,
-        llvm::json::Array& diagnostics,
-        bool embedWasm)
-        : Artifacts_(artifacts)
-        , Kernels_(kernels)
-        , Diagnostics_(diagnostics)
-        , EmbedWasm_(embedWasm)
-    {}
-
-    bool SkipJit() const override {
-        return true;
-    }
-
-    void CompileKernel(NQdb::TGeneratedKernel kernel) override {
-        auto astText = AstText(kernel.Ast);
+// Register every lowered kernel's AST as an artifact and (in embed mode)
+// compile it to wasm. Failures land in `diagnostics` per kernel; the bundle
+// still forms.
+std::vector<TKernelArtifacts> WasmFinalizeKernels(
+    std::span<const NQdb::TGeneratedKernel> kernels,
+    TArtifactStore& artifacts,
+    llvm::json::Array& diagnostics,
+    bool embedWasm)
+{
+    std::vector<TKernelArtifacts> out;
+    out.reserve(kernels.size());
+    for (const auto& kernel : kernels) {
         TKernelArtifacts item{
-            .Stage = std::move(kernel.Stage),
-            .Name = std::move(kernel.Name),
+            .Stage = kernel.Stage,
+            .Name = kernel.Name,
         };
-        item.Ast = Artifacts_.Add("ast", astText, item.Name, item.Stage);
-        if (EmbedWasm_) {
-            auto wasm = CompileKernelAstToWasm(std::move(kernel.Ast));
+        item.Ast = artifacts.Add(
+            "ast", AstText(kernel.Ast), item.Name, item.Stage);
+        if (embedWasm) {
+            auto wasm = CompileKernelAstToWasm(kernel.Ast);
             if (wasm) {
-                item.Wasm = Artifacts_.AddBinary(
-                    "wasm",
-                    std::move(*wasm),
-                    item.Name,
-                    item.Stage);
+                item.Wasm = artifacts.AddBinary(
+                    "wasm", std::move(*wasm), item.Name, item.Stage);
             } else {
-                Diagnostics_.push_back(llvm::json::Object{
+                diagnostics.push_back(llvm::json::Object{
                     {"stage", item.Stage},
                     {"message", wasm.error()},
                 });
             }
         }
-        Kernels_.push_back(std::move(item));
+        out.push_back(std::move(item));
     }
+    return out;
+}
 
-private:
-    TArtifactStore& Artifacts_;
-    std::vector<TKernelArtifacts>& Kernels_;
-    llvm::json::Array& Diagnostics_;
-    bool EmbedWasm_ = false;
-};
-
-// Captures a single filter/project kernel compiled to WASM for the exec plan.
-// SkipJit keeps CompileFilter/CompileProject on the export path (no native JIT).
-class TExecKernelBackend final : public NQdb::IKernelExportBackend {
-public:
-    TExecKernelBackend(
-        TArtifactStore& artifacts,
-        llvm::json::Array& diagnostics,
-        bool embedWasm)
-        : Artifacts_(artifacts)
-        , Diagnostics_(diagnostics)
-        , EmbedWasm_(embedWasm)
-    {}
-
-    bool SkipJit() const override {
-        return true;
-    }
-
-    void CompileKernel(NQdb::TGeneratedKernel kernel) override {
-        Compiled_ = true;
-        if (!EmbedWasm_) {
-            return;
-        }
-        auto wasm = CompileKernelAstToWasm(std::move(kernel.Ast));
-        if (wasm) {
-            WasmId_ = Artifacts_.AddBinary(
-                "wasm", std::move(*wasm), kernel.Name, kernel.Stage);
-        } else {
-            Failed_ = true;
-            Diagnostics_.push_back(llvm::json::Object{
-                {"stage", "exec:" + kernel.Name},
-                {"message", wasm.error()},
-            });
-        }
-    }
-
-    const std::string& WasmId() const { return WasmId_; }
-    bool Compiled() const { return Compiled_; }
-    bool Failed() const { return Failed_; }
-
-private:
-    TArtifactStore& Artifacts_;
-    llvm::json::Array& Diagnostics_;
-    bool EmbedWasm_ = false;
-    std::string WasmId_;
-    bool Compiled_ = false;
-    bool Failed_ = false;
-};
 
 std::string BareColumnName(std::string_view qualified) {
     auto dot = qualified.rfind('.');
@@ -1642,10 +1498,100 @@ llvm::json::Object UnsupportedExec(std::string reason) {
     };
 }
 
+// One lowered kernel joined with its exported artifacts, indexed by the
+// logical operator that generated it.
+struct TKernelRef {
+    const NQdb::TGeneratedKernel* Kernel = nullptr;
+    const TKernelArtifacts* Artifacts = nullptr;
+};
+using TKernelIndex =
+    std::unordered_map<const void*, std::vector<TKernelRef>>;
+
+TKernelIndex BuildKernelIndex(
+    std::span<const NQdb::TGeneratedKernel> kernels,
+    std::span<const TKernelArtifacts> artifacts)
+{
+    TKernelIndex index;
+    for (size_t i = 0; i < kernels.size(); ++i) {
+        if (kernels[i].Operator) {
+            index[kernels[i].Operator].push_back({&kernels[i], &artifacts[i]});
+        }
+    }
+    return index;
+}
+
+const TKernelRef* FindKernel(
+    const TKernelIndex& index, const void* op, std::string_view name)
+{
+    auto it = index.find(op);
+    if (it == index.end()) {
+        return nullptr;
+    }
+    for (const auto& ref : it->second) {
+        if (ref.Kernel->Name == name) {
+            return &ref;
+        }
+    }
+    return nullptr;
+}
+
+// Builds a sort stage body from the operator's lowered kernels. When the sort
+// compiled to a radix kernel with wasm and no key is nullable, emits the
+// kernel plus its per-key {index,width,desc} metadata; otherwise emits
+// JS-comparison keys. Returns nullopt if a key references an unknown column.
+std::optional<llvm::json::Object> BuildSortStageJson(
+    const std::vector<NQdb::TSortKey>& sortKeys,
+    const NQumir::NAst::TStructType& inputStruct,
+    const TKernelIndex& kernels,
+    const void* op,
+    bool embedWasm)
+{
+    bool anyNullableKey = false;
+    for (const auto& key : sortKeys) {
+        int32_t index = -1;
+        for (size_t f = 0; f < inputStruct.Fields.size(); ++f) {
+            if (BareColumnName(inputStruct.Fields[f].first) == BareColumnName(key.Column)) {
+                index = static_cast<int32_t>(f);
+                break;
+            }
+        }
+        if (index < 0) {
+            return std::nullopt;
+        }
+        anyNullableKey = anyNullableKey ||
+            NQdb::IsNullableType(inputStruct.Fields[index].second);
+    }
+
+    // The browser runtime's radix driver does not marshal validity bitmaps, so
+    // nullable keys fall back to JS-comparison sort.
+    const auto* radix = FindKernel(kernels, op, "sort.radix.fused");
+    if (embedWasm && !anyNullableKey && radix &&
+        !radix->Artifacts->Wasm.empty())
+    {
+        llvm::json::Array keys;
+        for (const auto& key : radix->Kernel->SortKeys) {
+            keys.push_back(llvm::json::Object{
+                {"index", key.Index},
+                {"width", key.WidthBytes},
+                {"desc", key.Desc},
+            });
+        }
+        return llvm::json::Object{
+            {"wasm", radix->Artifacts->Wasm},
+            {"radixKeys", std::move(keys)},
+        };
+    }
+
+    auto keys = ExecSortKeysJson(sortKeys, inputStruct);
+    if (!keys) {
+        return std::nullopt;
+    }
+    return llvm::json::Object{{"keys", std::move(*keys)}};
+}
+
 llvm::json::Object BuildExecPlan(
     const NQdb::TOperatorPtr& plan,
-    TArtifactStore& artifacts,
-    llvm::json::Array& diagnostics,
+    const TKernelIndex& kernels,
     bool embedWasm)
 {
     using namespace NQdb;
@@ -1668,63 +1614,65 @@ llvm::json::Object BuildExecPlan(
                     {"columns", SourceColumnsJson(curType)},
                 });
             } else if (auto filter = TMaybeOp<TFilterOperator>(op)) {
-                // String predicates compile to qdb_sv_* extern calls that the
-                // browser runtime implements as wasm imports.
-                TExecKernelBackend backend(artifacts, diagnostics, embedWasm);
-                BuildFilterRuntimeProcess(
-                    *filter.Cast(), curType, nullptr, &backend, "exec:filter");
-                if (backend.Failed()) {
+                const auto* ref = FindKernel(kernels, filter.Cast().get(), "filter");
+                if (!ref) {
+                    return UnsupportedExec("filter kernel was not generated");
+                }
+                if (embedWasm && ref->Artifacts->Wasm.empty()) {
                     return UnsupportedExec("filter kernel failed to compile to wasm");
                 }
                 stages.push_back(llvm::json::Object{
                     {"kind", "filter"},
-                    {"wasm", backend.WasmId()},
+                    {"wasm", ref->Artifacts->Wasm},
                 });
             } else if (auto project = TMaybeOp<TProjectOperator>(op)) {
                 auto* inputStruct =
                     static_cast<NQumir::NAst::TStructType*>(curType.get());
-                // Projections reading/producing strings compile to qdb_sv_*
-                // extern calls (and StringView outputs) that the browser runtime
-                // implements as wasm imports.
-                TExecKernelBackend backend(artifacts, diagnostics, embedWasm);
-                auto runtime = BuildProjectRuntimeProcess(
-                    *project.Cast(), curType, nullptr, &backend, "exec:project");
-                if (backend.Failed()) {
-                    return UnsupportedExec(
-                        "project kernel failed to compile to wasm");
+                auto columnPlan =
+                    BuildProjectColumnPlan(*project.Cast(), *inputStruct);
+                std::string wasmId;
+                if (!columnPlan.ComputedExprs.empty()) {
+                    const auto* ref =
+                        FindKernel(kernels, project.Cast().get(), "project");
+                    if (!ref) {
+                        return UnsupportedExec("project kernel was not generated");
+                    }
+                    if (embedWasm && ref->Artifacts->Wasm.empty()) {
+                        return UnsupportedExec(
+                            "project kernel failed to compile to wasm");
+                    }
+                    wasmId = ref->Artifacts->Wasm;
                 }
                 stages.push_back(llvm::json::Object{
                     {"kind", "project"},
-                    {"wasm", backend.WasmId()},
+                    {"wasm", wasmId},
                     {"output", ProjectOutputJson(
-                        *project.Cast(), *inputStruct, runtime.OutputType)},
+                        *project.Cast(), *inputStruct, columnPlan.OutputType)},
                 });
-                curType = runtime.OutputType;
+                curType = columnPlan.OutputType;
             } else if (auto sort = TMaybeOp<TSortOperator>(op)) {
                 auto* inputStruct =
                     static_cast<NQumir::NAst::TStructType*>(curType.get());
-                auto keys = ExecSortKeysJson(sort.Cast()->Keys(), *inputStruct);
-                if (!keys) {
-                    return UnsupportedExec(
-                        "sort key references an unknown column");
+                auto stage = BuildSortStageJson(
+                    sort.Cast()->Keys(), *inputStruct, kernels,
+                    sort.Cast().get(), embedWasm);
+                if (!stage) {
+                    return UnsupportedExec("sort key references an unknown column");
                 }
-                stages.push_back(llvm::json::Object{
-                    {"kind", "sort"},
-                    {"keys", std::move(*keys)},
-                });
+                stage->insert({"kind", "sort"});
+                stages.push_back(std::move(*stage));
             } else if (auto top = TMaybeOp<TTopSortOperator>(op)) {
                 auto* inputStruct =
                     static_cast<NQumir::NAst::TStructType*>(curType.get());
-                auto keys = ExecSortKeysJson(top.Cast()->Keys(), *inputStruct);
-                if (!keys) {
-                    return UnsupportedExec(
-                        "top-sort key references an unknown column");
+                auto stage = BuildSortStageJson(
+                    top.Cast()->Keys(), *inputStruct, kernels,
+                    top.Cast().get(), embedWasm);
+                if (!stage) {
+                    return UnsupportedExec("top-sort key references an unknown column");
                 }
-                stages.push_back(llvm::json::Object{
-                    {"kind", "top-sort"},
-                    {"keys", std::move(*keys)},
-                    {"limit", top.Cast()->Limit()},
-                });
+                stage->insert({"kind", "top-sort"});
+                stage->insert({"limit", top.Cast()->Limit()});
+                stages.push_back(std::move(*stage));
             } else if (auto limit = TMaybeOp<TLimitOperator>(op)) {
                 stages.push_back(llvm::json::Object{
                     {"kind", "limit"},
@@ -1769,28 +1717,22 @@ llvm::json::Object BuildBundle(TExportRequest& request) {
     llvm::json::Array diagnostics;
     std::ostringstream schedulerText;
     std::vector<TKernelArtifacts> kernelArtifacts;
+    std::vector<NQdb::TGeneratedKernel> loweredKernels;
     try {
         std::ostringstream lowerDiagnostics;
-        std::unique_ptr<TWasmKernelExportBackend> wasmBackend;
-        if (request.EmbedWasm) {
-            wasmBackend = std::make_unique<TWasmKernelExportBackend>(
-                artifacts,
-                kernelArtifacts,
-                diagnostics,
-                request.EmbedWasm);
-        }
+        // One lowering; kernels arrive as ASTs on lowered.Kernels.
         auto lowered = NQdb::NScheduler::LowerPlanToGraph(
             *plan,
             request.Scheduler,
-            &lowerDiagnostics,
-            wasmBackend.get());
+            &lowerDiagnostics);
         lowered.Graph->Build();
 
-        auto lowerDiagnosticsText = lowerDiagnostics.str();
-        if (!wasmBackend) {
-            kernelArtifacts = ParseKernelArtifacts(lowerDiagnosticsText, artifacts);
-        }
-        schedulerText << lowerDiagnosticsText;
+        // Wasm finalization: ast artifacts always, wasm in embed mode.
+        kernelArtifacts = WasmFinalizeKernels(
+            lowered.Kernels, artifacts, diagnostics, request.EmbedWasm);
+        loweredKernels = std::move(lowered.Kernels);
+
+        schedulerText << lowerDiagnostics.str();
         schedulerText << "\n========== SCHEDULER GRAPH ==========\n";
         schedulerText << "mode=" << static_cast<int>(request.Scheduler.Scheduler.Mode)
                       << " workers=" << request.Scheduler.Scheduler.WorkerCount
@@ -1810,7 +1752,10 @@ llvm::json::Object BuildBundle(TExportRequest& request) {
         });
     }
 
-    auto execPlan = BuildExecPlan(*plan, artifacts, diagnostics, request.EmbedWasm);
+    // The exec section reads the kernels the lowering already generated —
+    // nothing is compiled twice.
+    auto kernelIndex = BuildKernelIndex(loweredKernels, kernelArtifacts);
+    auto execPlan = BuildExecPlan(*plan, kernelIndex, request.EmbedWasm);
 
     return llvm::json::Object{
             {"ok", true},

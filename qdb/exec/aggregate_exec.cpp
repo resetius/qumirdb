@@ -69,7 +69,6 @@ void DestroyAggregateRowSet(TRowSet* rowSet) {
 TAggregateProcessor::TAggregateProcessor(TAggregateKernels kernels)
     : Kernels_(std::move(kernels))
 {
-    Kernels_.Dispatch(HashTable_.data(), nullptr, kInitialCapacity, kOpInit);
 }
 
 TAggregateProcessor::~TAggregateProcessor()
@@ -77,11 +76,22 @@ TAggregateProcessor::~TAggregateProcessor()
     Destroy();
 }
 
+// Deferred so a processor can be constructed before its kernels are finalized.
+void TAggregateProcessor::EnsureInit()
+{
+    if (Initialized_) {
+        return;
+    }
+    Initialized_ = true;
+    Kernels_.Dispatch(HashTable_.data(), nullptr, kInitialCapacity, kOpInit);
+}
+
 void TAggregateProcessor::Add(TRowSet& rowSet)
 {
     if (Finished_) {
         throw std::runtime_error("aggregate processor is already finished");
     }
+    EnsureInit();
     Kernels_.Dispatch(HashTable_.data(), &rowSet, 0, kOpUpdate);
 }
 
@@ -91,6 +101,7 @@ bool TAggregateProcessor::Finish(TRowSet& rowSet)
         return false;
     }
     Finished_ = true;
+    EnsureInit();
 
     const int64_t size = reinterpret_cast<THashTable*>(HashTable_.data())->Size;
 
@@ -182,7 +193,7 @@ bool TAggregateProcessor::Finish(TRowSet& rowSet)
 
 void TAggregateProcessor::Destroy()
 {
-    if (!Destroyed_) {
+    if (Initialized_ && !Destroyed_) {
         Kernels_.Dispatch(HashTable_.data(), nullptr, 0, kOpDestroy);
         Destroyed_ = true;
     }
