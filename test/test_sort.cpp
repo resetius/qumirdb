@@ -75,6 +75,35 @@ void CountSortIndices(T* dest, uint32_t* indices, uint32_t* work, int n, int dig
     }
 }
 
+struct TStringKey {
+    uint64_t Prefix;
+    uint32_t RowIndex;
+};
+
+uint64_t RadixKey(const TStringKey& key) {
+    return key.Prefix;
+}
+
+void SortStrings(std::vector<std::string_view>& strings, std::vector<uint32_t>& indices)
+{
+    int n = strings.size();
+    std::vector<TStringKey> keys(n);
+    for (int i = 0; i < n; i++) {
+        keys[i].Prefix = 0;
+        memcpy(&keys[i].Prefix, strings[i].data(), std::min(8, static_cast<int>(strings[i].size())));
+        keys[i].Prefix = ntohll(keys[i].Prefix);
+        keys[i].RowIndex = i;
+    }
+    std::vector<uint32_t> work(n);
+    std::iota(indices.begin(), indices.end(), 0);
+    for (int i = 0; i < sizeof(uint64_t) * 8; i += 8) {
+        CountSortIndices(keys.data(), indices.data(), work.data(), n, i);
+    }
+    //for (int i = 0; i < n; i++) {
+    //    indices[i] = keys[i].RowIndex;
+    //}
+}
+
 template<typename T>
 void RadixSortIndices(T* dest, uint32_t* indices, uint32_t* work, int n) {
     for (int i = 0; i < sizeof(T) * 8; i += 8) {
@@ -716,6 +745,25 @@ TEST(SortRadixOz, GenericSortUsesI32RadixKeyOverload) {
 
     sort(values.data(), indices.data(), work.data(), counts.data(), values.size(), false);
     EXPECT_EQ(indices, StableSortedIndices(values));
+}
+
+TEST(SortStrings, Basic) {
+    std::vector<std::string_view> strings = {
+        "banana", "apple", "cherry", "apple", "date", "fig", "grape", "elderberry"
+    };
+    std::vector<uint32_t> indices(strings.size());
+    std::iota(indices.begin(), indices.end(), 0);
+
+    SortStrings(strings, indices);
+
+    std::vector<std::string_view> sortedStrings(strings.size());
+    for (size_t i = 0; i < indices.size(); ++i) {
+        sortedStrings[i] = strings[indices[i]];
+
+        std::cerr << "Index: " << indices[i] << ", String: " << sortedStrings[i] << std::endl;
+    }
+
+    // EXPECT_TRUE(std::is_sorted(sortedStrings.begin(), sortedStrings.end()));
 }
 
 int main(int argc, char** argv) {

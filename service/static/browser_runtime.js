@@ -329,15 +329,12 @@ class WasmRowStore {
   }
 }
 
-// A bump allocator over one kernel module's linear memory. All allocations are
+// A bump allocator over one query-wide shared memory. All allocations are
 // performed before any writes so a mid-write memory.grow() never detaches a view.
 class Arena {
-  constructor(instance) {
-    this.memory = instance.exports.memory;
-    const heapBase = instance.exports.__heap_base
-      ? Number(instance.exports.__heap_base.value)
-      : PAGE;
-    this.offset = alignUp(heapBase, 16);
+  constructor(memory, base) {
+    this.memory = memory;
+    this.offset = alignUp(Number(base), 16);
   }
 
   alloc(bytes, align = 8) {
@@ -365,6 +362,54 @@ class Arena {
   bytes() {
     return new Uint8Array(this.memory.buffer);
   }
+}
+
+function createMemory64(initialPages) {
+  const pages = BigInt(initialPages);
+  const errors = [];
+  for (const key of ['address', 'index']) {
+    try {
+      return new WebAssembly.Memory({ initial: pages, [key]: 'i64' });
+    } catch (error) {
+      errors.push(`${key}: ${error.message || String(error)}`);
+    }
+  }
+  throw new Error(`memory64 is not available (${errors.join('; ')})`);
+}
+
+function createSharedMemory(layout) {
+  const spec = layout.sharedMemory;
+  if (!spec) {
+    throw new Error('exec layout is missing sharedMemory');
+  }
+  const memory = createMemory64(Number(spec.initialPages));
+  return {
+    memory,
+    arena: new Arena(memory, Number(spec.heapBase)),
+  };
+}
+
+// batch.wasm is a pointer into the current query's shared memory. Streaming
+// pointers are valid until the producing RowSetWriter writes again; pinned
+// pointers are fresh arena allocations and can be retained by join state.
+function attachBatchWasm(batch, rowsetPtr, { pinned, selection = null }) {
+  batch.wasm = {
+    rowsetPtr,
+    pinned: pinned === true,
+    hasSelection: selection !== null,
+    selection,
+  };
+}
+
+function wasmRowSetForSelection(batch, selection) {
+  const wasm = batch?.wasm;
+  if (!wasm) {
+    return null;
+  }
+  if (selection == null) {
+    return wasm.hasSelection ? null : wasm;
+  }
+  return wasm.hasSelection && wasm.selection === selection ? wasm : null;
 }
 
 function writePointer(dv, offset, address) {
@@ -555,7 +600,7 @@ function createQdbEnv(getMemory, holder) {
 
   const norm = v => (v < 0n ? 1n : v);
   return {
-    // malloc family over the instance's own linear memory (bump; free no-op).
+    // malloc family over the query's shared linear memory (bump; free no-op).
     qdb_alloc: (size) => BigInt(alloc(size)),
     qdb_realloc: (ptr, size) => {
       const oldPtr = Number(ptr);
@@ -612,20 +657,25 @@ function createQdbEnv(getMemory, holder) {
   };
 }
 
-// Compile + instantiate a kernel module, wiring the `env` string runtime. Any
-// import we don't implement is reported so the caller can fall back to server
-// execution rather than run a partially-linked kernel.
-export async function instantiateKernel(base64, entryName) {
+// Compile + instantiate a kernel module, wiring the `env` runtime. Any import
+// we do not implement is reported immediately instead of running a partial link.
+export async function instantiateKernel(base64, entryName, shared) {
   const module = await WebAssembly.compile(base64ToBytes(base64));
-  const holder = { memory: null, arena: null };
+  const holder = { memory: shared.memory, arena: shared.arena };
   const env = createQdbEnv(() => holder.memory, holder);
+  env.memory = shared.memory;
   for (const imp of WebAssembly.Module.imports(module)) {
-    if (imp.module !== 'env' || typeof env[imp.name] !== 'function') {
+    if (imp.module !== 'env') {
+      throw new Error(`kernel needs unsupported import: ${imp.module}.${imp.name}`);
+    }
+    if (imp.name === 'memory' && imp.kind === 'memory') {
+      continue;
+    }
+    if (typeof env[imp.name] !== 'function') {
       throw new Error(`kernel needs unsupported import: ${imp.module}.${imp.name}`);
     }
   }
   const instance = await WebAssembly.instantiate(module, { env });
-  holder.memory = instance.exports.memory;
   if (instance.exports.__wasm_call_ctors) {
     instance.exports.__wasm_call_ctors();
   }
@@ -636,7 +686,7 @@ export async function instantiateKernel(base64, entryName) {
   return { instance, fn, holder };
 }
 
-// Marshal `columns` (source column order) into a fresh TRowSet inside `arena`.
+// Marshal `columns` (source column order) into a fresh, pinned TRowSet inside `arena`.
 // Numeric columns get a data buffer; string columns get a concatenated UTF-8
 // bytes buffer plus an i32 offsets array (OffsetWidth = 4), matching the layout
 // the kernel reads (Data + Offsets[row]).
@@ -732,40 +782,53 @@ function marshalRowSet(arena, layout, columns, rowCount, wantSelection, selectio
 
 // Run a filter kernel over `batch` (columns in source order). Returns a
 // Uint8Array selection where a nonzero byte marks a kept row.
-export function runFilter(kernel, layout, batch) {
-  const arena = new Arena(kernel.instance);
-  const { rowsetPtr, selectionPtr } =
-    marshalRowSet(arena, layout, batch.columns, batch.rowCount, true);
+export function runFilter(kernel, layout, batch, writer, options = {}) {
+  const pinned = options.pinned === true;
+  const { rowsetPtr, selectionPtr } = pinned
+    ? marshalRowSet(
+        kernel.holder.arena, layout, batch.columns, batch.rowCount, true)
+    : writer.write(batch.columns, batch.rowCount, true);
   // memory64 entry: the rowset pointer is an i64 param.
   kernel.fn(BigInt(rowsetPtr));
   // Copy the selection out before the buffer can be reused.
-  return arena.bytes().slice(selectionPtr, selectionPtr + batch.rowCount);
+  const selection = kernel.holder.arena.bytes()
+    .slice(selectionPtr, selectionPtr + batch.rowCount);
+  attachBatchWasm(batch, rowsetPtr, { pinned, selection });
+  return selection;
 }
 
-// Run a project kernel over `batch`; `output` is exec.stages[project].output.
+// Run a project kernel over `batch`; `output` is the graph project's output plan.
 // Returns the new columns array (source order preserved for the pipeline).
-export function runProject(kernel, layout, batch, output) {
-  const arena = new Arena(kernel.instance);
+export function runProject(kernel, layout, batch, output, writer, state) {
+  const arena = writer.arena;
   const rowCount = batch.rowCount;
 
   const computed = output.filter(col => col.source === 'computed');
-  const computedBufs = computed.map(col =>
-    arena.alloc(Math.max(rowCount, 1) * col.width, 8));
-  const outArrayPtr = computed.length
-    ? arena.alloc(computed.length * 8, 8)
-    : 0;
+  if (!state.outArrayPtr && computed.length) {
+    state.outArrayPtr = arena.alloc(computed.length * 8, 8);
+  }
+  while (state.computedBufs.length < computed.length) {
+    state.computedBufs.push({ ptr: 0, capacity: 0 });
+  }
+  const computedBufs = computed.map((col, i) => {
+    const bytes = Math.max(rowCount, 1) * col.width;
+    if (state.computedBufs[i].capacity < bytes) {
+      state.computedBufs[i] = { ptr: arena.alloc(bytes, 8), capacity: bytes };
+    }
+    return state.computedBufs[i].ptr;
+  });
 
-  const { rowsetPtr } =
-    marshalRowSet(arena, layout, batch.columns, rowCount, false);
+  const rowsetPtr = batch.wasm?.rowsetPtr ||
+    writer.write(batch.columns, rowCount, false).rowsetPtr;
 
   const dv = arena.view();
   for (let k = 0; k < computed.length; ++k) {
-    writePointer(dv, outArrayPtr + k * 8, computedBufs[k]);
+    writePointer(dv, state.outArrayPtr + k * 8, computedBufs[k]);
   }
 
   if (computed.length > 0) {
     // memory64 entry: rowset and out-array pointers are i64 params.
-    kernel.fn(BigInt(rowsetPtr), BigInt(outArrayPtr));
+    kernel.fn(BigInt(rowsetPtr), BigInt(state.outArrayPtr));
   }
 
   // Re-take the view: the kernel may have grown memory internally.
@@ -783,7 +846,7 @@ export function runProject(kernel, layout, batch, output) {
       if (col.isString) {
         const values = new Array(rowCount);
         const sv = layout.stringView;
-        const memBytes = new Uint8Array(kernel.instance.exports.memory.buffer);
+        const memBytes = new Uint8Array(kernel.holder.memory.buffer);
         const decoder = new TextDecoder();
         for (let i = 0; i < rowCount; ++i) {
           const base = bufPtr + i * sv.size;
@@ -794,7 +857,7 @@ export function runProject(kernel, layout, batch, output) {
         columns.push({ name: col.name, type: col.type, values });
       } else {
         const values = copyNumericColumnFromMemory(
-          kernel.instance.exports.memory, bufPtr, col.type, rowCount);
+          kernel.holder.memory, bufPtr, col.type, rowCount);
         columns.push({ name: col.name, type: col.type, values });
       }
     }
@@ -817,7 +880,7 @@ function readValidityBits(memBytes, maskPtr, count) {
 // is also the kernel's qdb_alloc backing, so nothing ever overlaps.
 export function runAggregate(kernel, layout, batch, selection, stage) {
   const state = createAggregateState(kernel, layout, stage);
-  updateAggregateState(state, batch, selection);
+  updateAggregateState(state, { batch, selection });
   return finishAggregateState(state);
 }
 
@@ -829,8 +892,7 @@ function createAggregateState(kernel, layout, stage) {
     throw new Error('aggregate kernel is missing an entry');
   }
 
-  const arena = new Arena(kernel.instance);
-  kernel.holder.arena = arena; // qdb_alloc draws from the same bump pointer
+  const arena = kernel.holder.arena; // qdb_alloc draws from the shared bump pointer
 
   const keyCount = Number(stage.keyCount);
   const output = stage.output;
@@ -858,13 +920,17 @@ function createAggregateState(kernel, layout, stage) {
   };
 }
 
-function updateAggregateState(state, batch, selection) {
+function updateAggregateState(state, rowSet) {
   if (state.finished) {
     throw new Error('aggregate state is already finalized');
   }
+  const { batch, selection } = rowSet;
+  const wasm = wasmRowSetForSelection(batch, selection);
   // update(ht, batch) — the kernel honors rowset.Selection.
-  const { rowsetPtr } = state.inputWriter.write(
-    batch.columns, batch.rowCount, false, selection);
+  const rowsetPtr = wasm
+    ? wasm.rowsetPtr
+    : state.inputWriter.write(
+        batch.columns, batch.rowCount, false, selection).rowsetPtr;
   state.dispatch(BigInt(state.ht), BigInt(rowsetPtr), 0n, 1n);
 }
 
@@ -1034,8 +1100,7 @@ function createJoinState(kernel, layout, stage) {
     throw new Error('join kernel is missing entry jt_finalize_outer');
   }
 
-  const arena = new Arena(kernel.instance);
-  kernel.holder.arena = arena;
+  const arena = kernel.holder.arena;
   const leftTable = arena.alloc(layout.hashTable.size, 8);
   const rightTable = arena.alloc(layout.hashTable.size, 8);
   const pairBuffer = arena.alloc(layout.pairBuffer.size, 8);
@@ -1074,10 +1139,14 @@ function browserRuntimeSupportsJoin(stage) {
   return isLeftSemiAntiJoin(stage);
 }
 
-function updateJoinState(state, side, batch, selection) {
+function updateJoinState(state, side, rowSet) {
   const { arena, layout, kernel } = state;
-  const { rowsetPtr } = marshalRowSet(
-    arena, layout, batch.columns, batch.rowCount, false, selection);
+  const { batch, selection } = rowSet;
+  const wasm = wasmRowSetForSelection(batch, selection);
+  const rowsetPtr = wasm?.pinned
+    ? wasm.rowsetPtr
+    : marshalRowSet(
+        arena, layout, batch.columns, batch.rowCount, false, selection).rowsetPtr;
   const isLeft = side === 0;
   const semiAnti = isLeftSemiAntiJoin(state.stage);
   const store = isLeft ? state.leftStore : state.rightStore;
@@ -1320,7 +1389,7 @@ function finishJoinState(state) {
 // permutation, then gathers all columns by it (top-`limit` if given). No
 // ordering logic lives here — the kernel owns it, exactly as the native path.
 export function runRadixSort(kernel, layout, batch, selection, radixKeys, limit) {
-  const arena = new Arena(kernel.instance);
+  const arena = kernel.holder.arena;
 
   const live = [];
   for (let i = 0; i < batch.rowCount; ++i) {
@@ -1374,84 +1443,6 @@ export function runRadixSort(kernel, layout, batch, selection, radixKeys, limit)
     values: kept.map(idx => col.values[idx]),
   }));
   return { rowCount: kept.length, columns };
-}
-
-// Execute a linear exec pipeline. `readSource(stage)` must return
-// { rowCount, columns: [{ name, type, values }] } in the stage's column order.
-export async function executeBrowserPipeline(exec, readSource) {
-  if (!exec || exec.supported !== true) {
-    throw new Error(exec?.reason || 'pipeline is not supported for browser execution');
-  }
-  if (exec.embedWasm !== true) {
-    throw new Error('exec plan was produced without embedded wasm kernels');
-  }
-
-  const layout = exec.layout;
-  let batch = null;
-  let selection = null;
-  let limit = null;
-  const timings = [];
-
-  for (const stage of exec.stages) {
-    const started = nowMs();
-    if (stage.kind === 'source') {
-      batch = await readSource(stage);
-      selection = null;
-    } else if (stage.kind === 'filter') {
-      const kernel = await instantiateKernel(stage.wasm, '<kernel>');
-      selection = runFilter(kernel, layout, batch);
-    } else if (stage.kind === 'project') {
-      let columns;
-      if (stage.wasm) {
-        const kernel = await instantiateKernel(stage.wasm, '<project>');
-        columns = runProject(kernel, layout, batch, stage.output);
-      } else {
-        // Pure passthrough project: no kernel, remap columns directly.
-        columns = stage.output.map(col => ({
-          name: col.name,
-          type: col.type,
-          values: batch.columns[col.inputIndex].values,
-        }));
-      }
-      batch = { rowCount: batch.rowCount, columns };
-    } else if (stage.kind === 'aggregate') {
-      const kernel = await instantiateKernel(stage.wasm, 'agg_dispatch');
-      batch = runAggregate(kernel, layout, batch, selection, stage);
-      selection = null;
-    } else if (stage.kind === 'sort' || stage.kind === 'top-sort') {
-      const rowLimit = stage.kind === 'top-sort' ? Number(stage.limit) : null;
-      if (stage.wasm) {
-        // Radix sort kernel: JS only marshals key bytes and gathers by the
-        // returned permutation — all ordering happens in the kernel.
-        const kernel =
-          await instantiateKernel(stage.wasm, 'qdb_radix_sort_indices_composite');
-        batch = runRadixSort(kernel, layout, batch, selection, stage.radixKeys, rowLimit);
-      } else {
-        // Non-radix keys (strings): comparison sort in JS.
-        batch = applySort(batch, selection, stage.keys, rowLimit);
-      }
-      selection = null;
-    } else if (stage.kind === 'limit') {
-      limit = { limit: Number(stage.limit), offset: Number(stage.offset || 0) };
-    } else {
-      throw new Error(`unsupported exec stage: ${stage.kind}`);
-    }
-    timings.push({
-      stage: stage.kind,
-      rows: batch ? batch.rowCount : 0,
-      elapsedMs: nowMs() - started,
-    });
-  }
-
-  const started = nowMs();
-  const result = materialize(batch, selection, limit);
-  timings.push({
-    stage: 'materialize',
-    rows: result.rows.length,
-    elapsedMs: nowMs() - started,
-  });
-  result.timings = timings;
-  return result;
 }
 
 const TaskResult = {
@@ -1663,11 +1654,17 @@ class SingleThreadedScheduler {
   }
 }
 
-function connect(src, dst, connection = new OneToOneConnection(1)) {
-  const edge = { src, dst, connection };
+function connect(src, dst, connection = new OneToOneConnection(1), options = {}) {
+  const edge = { src, dst, connection, persistent: options.persistent === true };
   src.outbound.push(edge);
   dst.inbound.push(edge);
   return edge;
+}
+
+function assertStreamingWasmEdge(edge) {
+  if (edge.connection.kind !== ConnectionKind.OneToOne || edge.connection.capacity !== 1) {
+    throw new Error('streaming wasm rowsets require a one-slot one-to-one edge');
+  }
 }
 
 class SourceTask {
@@ -1708,9 +1705,11 @@ class SourceTask {
 }
 
 class FilterTask {
-  constructor(stage, layout) {
+  constructor(stage, layout, shared) {
     this.stage = stage;
     this.layout = layout;
+    this.shared = shared;
+    this.writer = new RowSetWriter(shared.arena, layout);
     this.kernel = null;
     this.done = false;
     this.rows = 0;
@@ -1719,7 +1718,8 @@ class FilterTask {
   async execute() {
     if (this.done) return TaskResult.FINISHED;
     const input = this.node.inbound[0].connection;
-    const output = this.node.outbound[0].connection;
+    const outEdge = this.node.outbound[0];
+    const output = outEdge.connection;
     if (!output.canPush()) return TaskResult.BLOCKED_OUTPUT;
 
     const fetched = input.fetch();
@@ -1730,9 +1730,15 @@ class FilterTask {
       return TaskResult.FINISHED;
     }
     if (!this.kernel) {
-      this.kernel = await instantiateKernel(this.stage.wasm, '<kernel>');
+      this.kernel = await instantiateKernel(this.stage.wasm, '<kernel>', this.shared);
     }
-    const selection = runFilter(this.kernel, this.layout, fetched.rowSet.batch);
+    assertStreamingWasmEdge(outEdge);
+    const selection = runFilter(
+      this.kernel,
+      this.layout,
+      fetched.rowSet.batch,
+      this.writer,
+      { pinned: outEdge.persistent });
     this.rows += fetched.rowSet.batch.rowCount;
     output.push({ batch: fetched.rowSet.batch, selection });
     return TaskResult.OK;
@@ -1740,9 +1746,12 @@ class FilterTask {
 }
 
 class ProjectTask {
-  constructor(stage, layout) {
+  constructor(stage, layout, shared) {
     this.stage = stage;
     this.layout = layout;
+    this.shared = shared;
+    this.writer = new RowSetWriter(shared.arena, layout);
+    this.projectState = { computedBufs: [], outArrayPtr: 0 };
     this.kernel = null;
     this.done = false;
     this.rows = 0;
@@ -1765,9 +1774,18 @@ class ProjectTask {
     let columns;
     if (this.stage.wasm) {
       if (!this.kernel) {
-        this.kernel = await instantiateKernel(this.stage.wasm, '<project>');
+        this.kernel = await instantiateKernel(this.stage.wasm, '<project>', this.shared);
       }
-      columns = runProject(this.kernel, this.layout, fetched.rowSet.batch, this.stage.output);
+      if (fetched.rowSet.batch.wasm && !fetched.rowSet.batch.wasm.pinned) {
+        assertStreamingWasmEdge(this.node.inbound[0]);
+      }
+      columns = runProject(
+        this.kernel,
+        this.layout,
+        fetched.rowSet.batch,
+        this.stage.output,
+        this.writer,
+        this.projectState);
     } else {
       columns = this.stage.output.map(col => ({
         name: col.name,
@@ -1783,9 +1801,10 @@ class ProjectTask {
 }
 
 class AggregateTask {
-  constructor(stage, layout) {
+  constructor(stage, layout, shared) {
     this.stage = stage;
     this.layout = layout;
+    this.shared = shared;
     this.kernel = null;
     this.state = null;
     this.pending = null;
@@ -1812,7 +1831,8 @@ class AggregateTask {
     if (fetched.result === FetchResult.FINISHED) {
       if (!this.state) {
         if (!this.kernel) {
-          this.kernel = await instantiateKernel(this.stage.wasm, 'agg_dispatch');
+          this.kernel = await instantiateKernel(
+            this.stage.wasm, 'agg_dispatch', this.shared);
         }
         this.state = createAggregateState(this.kernel, this.layout, this.stage);
       }
@@ -1821,19 +1841,24 @@ class AggregateTask {
     }
 
     if (!this.kernel) {
-      this.kernel = await instantiateKernel(this.stage.wasm, 'agg_dispatch');
+      this.kernel = await instantiateKernel(
+        this.stage.wasm, 'agg_dispatch', this.shared);
       this.state = createAggregateState(this.kernel, this.layout, this.stage);
     }
-    updateAggregateState(this.state, fetched.rowSet.batch, fetched.rowSet.selection);
+    if (fetched.rowSet.batch.wasm && !fetched.rowSet.batch.wasm.pinned) {
+      assertStreamingWasmEdge(this.node.inbound[0]);
+    }
+    updateAggregateState(this.state, fetched.rowSet);
     this.rows += fetched.rowSet.batch.rowCount;
     return TaskResult.OK;
   }
 }
 
 class JoinTask {
-  constructor(stage, layout) {
+  constructor(stage, layout, shared) {
     this.stage = stage;
     this.layout = layout;
+    this.shared = shared;
     this.kernel = null;
     this.state = null;
     this.ready = [];
@@ -1855,7 +1880,7 @@ class JoinTask {
 
     if (!this.state) {
       if (!this.kernel) {
-        this.kernel = await instantiateKernel(this.stage.wasm, 'jt_init');
+        this.kernel = await instantiateKernel(this.stage.wasm, 'jt_init', this.shared);
       }
       this.state = createJoinState(this.kernel, this.layout, this.stage);
     }
@@ -1907,8 +1932,7 @@ class JoinTask {
     if (!this.leftDone) {
       const fetched = this.node.inbound[0].connection.fetch();
       if (fetched.result === FetchResult.OK) {
-        updateJoinState(
-          this.state, 0, fetched.rowSet.batch, fetched.rowSet.selection);
+        updateJoinState(this.state, 0, fetched.rowSet);
         this.rows += fetched.rowSet.batch.rowCount;
         return true;
       }
@@ -1921,8 +1945,7 @@ class JoinTask {
     if (!this.rightDone) {
       const fetched = this.node.inbound[1].connection.fetch();
       if (fetched.result === FetchResult.OK) {
-        updateJoinState(
-          this.state, 1, fetched.rowSet.batch, fetched.rowSet.selection);
+        updateJoinState(this.state, 1, fetched.rowSet);
         this.rows += fetched.rowSet.batch.rowCount;
         return true;
       }
@@ -1939,8 +1962,7 @@ class JoinTask {
     if (!this.leftDone) {
       const fetched = this.node.inbound[0].connection.fetch();
       if (fetched.result === FetchResult.OK) {
-        updateJoinState(
-          this.state, 0, fetched.rowSet.batch, fetched.rowSet.selection);
+        updateJoinState(this.state, 0, fetched.rowSet);
         this.rows += fetched.rowSet.batch.rowCount;
         return true;
       }
@@ -1954,8 +1976,7 @@ class JoinTask {
     if (!this.rightDone) {
       const fetched = this.node.inbound[1].connection.fetch();
       if (fetched.result === FetchResult.OK) {
-        updateJoinState(
-          this.state, 1, fetched.rowSet.batch, fetched.rowSet.selection);
+        updateJoinState(this.state, 1, fetched.rowSet);
         this.rows += fetched.rowSet.batch.rowCount;
         return true;
       }
@@ -2078,9 +2099,10 @@ function selectedRowIndices(item) {
 }
 
 class SortTask {
-  constructor(stage, layout) {
+  constructor(stage, layout, shared) {
     this.stage = stage;
     this.layout = layout;
+    this.shared = shared;
     this.inputs = [];
     this.pending = null;
     this.done = false;
@@ -2113,7 +2135,7 @@ class SortTask {
     const rowLimit = this.stage.kind === 'top-sort' ? Number(this.stage.limit) : null;
     if (this.stage.wasm) {
       const kernel = await instantiateKernel(
-        this.stage.wasm, 'qdb_radix_sort_indices_composite');
+        this.stage.wasm, 'qdb_radix_sort_indices_composite', this.shared);
       this.pending = runRadixSort(
         kernel, this.layout, batch, null, this.stage.radixKeys, rowLimit);
     } else {
@@ -2156,34 +2178,34 @@ function makeNode(task, label) {
   return node;
 }
 
-function taskNodeForStage(stage, layout, readSourceBatches, onProgress) {
+function taskNodeForStage(stage, layout, readSourceBatches, onProgress, shared) {
   if (stage.kind === 'source') {
     return makeNode(
       new SourceTask(stage, readSourceBatches, onProgress || null),
       stage.kind);
   }
   if (stage.kind === 'filter') {
-    return makeNode(new FilterTask(stage, layout), stage.kind);
+    return makeNode(new FilterTask(stage, layout, shared), stage.kind);
   }
   if (stage.kind === 'project') {
-    return makeNode(new ProjectTask(stage, layout), stage.kind);
+    return makeNode(new ProjectTask(stage, layout, shared), stage.kind);
   }
   if (stage.kind === 'aggregate') {
-    return makeNode(new AggregateTask(stage, layout), stage.kind);
+    return makeNode(new AggregateTask(stage, layout, shared), stage.kind);
   }
   if (stage.kind === 'join') {
-    return makeNode(new JoinTask(stage, layout), stage.kind);
+    return makeNode(new JoinTask(stage, layout, shared), stage.kind);
   }
   if (stage.kind === 'cross-join') {
     return makeNode(new CrossJoinTask(stage), stage.kind);
   }
   if (stage.kind === 'sort' || stage.kind === 'top-sort') {
-    return makeNode(new SortTask(stage, layout), stage.kind);
+    return makeNode(new SortTask(stage, layout, shared), stage.kind);
   }
   throw new Error(`unsupported exec stage: ${stage.kind}`);
 }
 
-function buildScheduledGraph(exec, readSourceBatches, options, layout) {
+function buildScheduledGraph(exec, readSourceBatches, options, layout, shared) {
   const nodesById = new Map();
   const nodes = [];
   for (const spec of exec.nodes || []) {
@@ -2191,7 +2213,7 @@ function buildScheduledGraph(exec, readSourceBatches, options, layout) {
       continue;
     }
     const node = taskNodeForStage(
-      spec, layout, readSourceBatches, options.onProgress);
+      spec, layout, readSourceBatches, options.onProgress, shared);
     nodesById.set(Number(spec.id), node);
     nodes.push(node);
   }
@@ -2201,7 +2223,11 @@ function buildScheduledGraph(exec, readSourceBatches, options, layout) {
     if (!src || !dst) {
       throw new Error('exec graph edge references an unknown node');
     }
-    connect(src, dst, createConnection(edge.kind || ConnectionKind.OneToOne));
+    connect(
+      src,
+      dst,
+      createConnection(edge.kind || ConnectionKind.OneToOne),
+      { persistent: dst.task?.stage?.kind === 'join' });
   }
   const root = nodesById.get(Number(exec.root));
   if (!root) {
@@ -2226,72 +2252,13 @@ export async function executeBrowserPipelineScheduled(exec, readSourceBatches, o
   }
 
   const layout = exec.layout;
-  if (Array.isArray(exec.nodes)) {
-    const { roots, sink, nodes } =
-      buildScheduledGraph(exec, readSourceBatches, options, layout);
-    const scheduler = new SingleThreadedScheduler(roots);
-    await scheduler.run();
-
-    const result = sink.task.result();
-    result.timings = nodes.map(node => ({
-      stage: node.label,
-      rows: node.rows,
-      elapsedMs: node.elapsedMs,
-    }));
-    result.scheduler = scheduler.stats;
-    result.connections = nodes.flatMap(node =>
-      node.outbound.map(edge => ({
-        from: edge.src.label,
-        to: edge.dst.label,
-        kind: edge.connection.kind,
-        ...edge.connection.stats,
-      })));
-    return result;
+  if (!Array.isArray(exec.nodes)) {
+    throw new Error('exec plan is missing graph nodes');
   }
-
-  let root = null;
-  let previous = null;
-  let limit = null;
-  const nodes = [];
-
-  for (const stage of exec.stages) {
-    let node = null;
-    if (stage.kind === 'source') {
-      node = taskNodeForStage(
-        stage, layout, readSourceBatches, options.onProgress);
-      root = node;
-    } else if (
-      stage.kind === 'filter' ||
-      stage.kind === 'project' ||
-      stage.kind === 'aggregate' ||
-      stage.kind === 'join' ||
-      stage.kind === 'sort' ||
-      stage.kind === 'top-sort')
-    {
-      node = taskNodeForStage(stage, layout, readSourceBatches, options.onProgress);
-    } else if (stage.kind === 'limit') {
-      limit = { limit: Number(stage.limit), offset: Number(stage.offset || 0) };
-      continue;
-    } else {
-      throw new Error(`unsupported exec stage: ${stage.kind}`);
-    }
-
-    nodes.push(node);
-    if (previous) {
-      connect(previous, node, createConnection(ConnectionKind.OneToOne));
-    }
-    previous = node;
-  }
-
-  if (!root || !previous) {
-    throw new Error('exec plan has no runnable stages');
-  }
-
-  const sink = makeNode(new SinkTask(limit), 'materialize');
-  nodes.push(sink);
-  connect(previous, sink, createConnection(ConnectionKind.OneToOne));
-
-  const scheduler = new SingleThreadedScheduler(root);
+  const shared = createSharedMemory(layout);
+  const { roots, sink, nodes } =
+    buildScheduledGraph(exec, readSourceBatches, options, layout, shared);
+  const scheduler = new SingleThreadedScheduler(roots);
   await scheduler.run();
 
   const result = sink.task.result();
@@ -2342,7 +2309,7 @@ function compactRowSets(rowSets) {
 // Sort a batch by `keys` (each { index, direction, nulls }), folding any
 // pending selection into a compacted, reordered batch. When `limit` is set
 // (top-sort), only the first `limit` rows are kept. Returns a new batch with no
-// selection; downstream stages see fully materialized ordered rows.
+// selection; downstream nodes see fully materialized ordered rows.
 function applySort(batch, selection, keys, limit) {
   const indices = [];
   for (let i = 0; i < batch.rowCount; ++i) {
@@ -2410,30 +2377,6 @@ function compareKey(a, b, key, compare) {
   }
   const c = compare(a, b);
   return key.direction === 'desc' ? -c : c;
-}
-
-// Apply selection + limit and produce { columns: string[], rows: any[][] }.
-function materialize(batch, selection, limit) {
-  const columns = batch.columns.map(col => col.name);
-  const rows = [];
-  const offset = limit ? limit.offset : 0;
-  const max = limit ? limit.limit : Infinity;
-  let skipped = 0;
-
-  for (let i = 0; i < batch.rowCount; ++i) {
-    if (selection && !selection[i]) {
-      continue;
-    }
-    if (skipped < offset) {
-      ++skipped;
-      continue;
-    }
-    if (rows.length >= max) {
-      break;
-    }
-    rows.push(batch.columns.map(col => formatValue(col.values[i])));
-  }
-  return { columns, rows };
 }
 
 function materializeRowSets(rowSets, limit) {

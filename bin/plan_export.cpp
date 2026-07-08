@@ -66,6 +66,12 @@
 
 namespace {
 
+constexpr int64_t WasmPageSize = 65536;
+constexpr int64_t WasmSlot0 = 1 << 20;
+constexpr int64_t WasmSlotSize = 1 << 20;
+constexpr int64_t WasmStackSize = 262144;
+constexpr int64_t WasmInitialSlackPages = 256;
+
 struct TTableStats {
     int64_t Rows = 0;
     int64_t Bytes = 0;
@@ -310,14 +316,19 @@ std::string ReadBinaryFile(const std::filesystem::path& path) {
 
 std::expected<std::monostate, std::string> RunWasmLd(
     const std::filesystem::path& objPath,
-    const std::filesystem::path& wasmPath)
+    const std::filesystem::path& wasmPath,
+    int64_t globalBase)
 {
     std::vector<std::string> args{
         "wasm-ld",
         "--no-entry",
         "--export-all",
         "--allow-undefined",
+        "--import-memory",
         "-mwasm64",
+        "--global-base=" + std::to_string(globalBase),
+        "-z",
+        "stack-size=" + std::to_string(WasmStackSize),
         "-o",
         wasmPath.string(),
         objPath.string(),
@@ -361,7 +372,8 @@ std::expected<std::monostate, std::string> RunWasmLd(
 // is wasm64 (8-byte pointers): the kernel/runtime layout assumes 8-byte pointers
 // and wasm32 miscompiles it. See docs/issues/browser-wasm64-layout.md.
 std::expected<std::string, std::string> CompileKernelAstToWasm(
-    NQumir::NAst::TExprPtr ast)
+    NQumir::NAst::TExprPtr ast,
+    int64_t globalBase)
 {
     auto opts = NQdb::KernelRunnerOptions();
     opts.NativeCode = false;
@@ -391,7 +403,7 @@ std::expected<std::string, std::string> CompileKernelAstToWasm(
         std::filesystem::remove(objPath, ec);
         std::filesystem::remove(wasmPath, ec);
     };
-    if (auto linked = RunWasmLd(objPath, wasmPath); !linked) {
+    if (auto linked = RunWasmLd(objPath, wasmPath, globalBase); !linked) {
         cleanup();
         return std::unexpected(linked.error());
     }
@@ -1256,7 +1268,8 @@ std::vector<TKernelArtifacts> WasmFinalizeKernels(
 {
     std::vector<TKernelArtifacts> out;
     out.reserve(kernels.size());
-    for (const auto& kernel : kernels) {
+    for (size_t i = 0; i < kernels.size(); ++i) {
+        const auto& kernel = kernels[i];
         TKernelArtifacts item{
             .Stage = kernel.Stage,
             .Name = kernel.Name,
@@ -1264,7 +1277,13 @@ std::vector<TKernelArtifacts> WasmFinalizeKernels(
         item.Ast = artifacts.Add(
             "ast", AstText(kernel.Ast), item.Name, item.Stage);
         if (embedWasm) {
-            auto wasm = CompileKernelAstToWasm(kernel.Ast);
+            // One generated kernel artifact owns one static slot. Reusing the
+            // same artifact from multiple graph nodes is safe in the browser's
+            // single-threaded scheduler: literals are immutable and wasm stack
+            // use is not concurrent.
+            const int64_t globalBase =
+                WasmSlot0 + static_cast<int64_t>(i) * WasmSlotSize;
+            auto wasm = CompileKernelAstToWasm(kernel.Ast, globalBase);
             if (wasm) {
                 item.Wasm = artifacts.AddBinary(
                     "wasm", std::move(*wasm), item.Name, item.Stage);
@@ -1355,8 +1374,12 @@ size_t ExecProjectWidth(const NQumir::NAst::TTypePtr& outType) {
 // kernels): qumir models pointers as 8 bytes on every target, so these offsets
 // also match the native 64-bit layout. See PLAN_BROWSER_EXECUTION.md and
 // docs/issues/qumir_pointer_width_and_pointer_cast.md.
-llvm::json::Object ExecLayoutJson() {
-    return llvm::json::Object{
+llvm::json::Object ExecLayoutJson(size_t kernelCount) {
+    const int64_t heapBase =
+        WasmSlot0 + static_cast<int64_t>(kernelCount) * WasmSlotSize;
+    const int64_t initialPages =
+        (heapBase + WasmPageSize - 1) / WasmPageSize + WasmInitialSlackPages;
+    llvm::json::Object layout{
         {"pointerSize", 8},
         {"column", llvm::json::Object{
             {"size", 48},
@@ -1389,6 +1412,15 @@ llvm::json::Object ExecLayoutJson() {
             {"data", 16},
         }},
     };
+    layout["sharedMemory"] = llvm::json::Object{
+        {"heapBase", heapBase},
+        {"initialPages", initialPages},
+        {"slot0", WasmSlot0},
+        {"slotSize", WasmSlotSize},
+        {"stackSize", WasmStackSize},
+        {"kernelCount", static_cast<int64_t>(kernelCount)},
+    };
+    return layout;
 }
 
 llvm::json::Array ProjectOutputJson(
@@ -1449,40 +1481,6 @@ llvm::json::Array StructColumnsJson(const NQumir::NAst::TStructType& type) {
         out.push_back(std::move(entry));
     }
     return out;
-}
-
-// Collect a root-to-source linear chain of {source, filter, project, limit}.
-// Returns source-first order, or nullopt if the plan is not a supported chain.
-std::optional<std::vector<NQdb::TOperatorPtr>> LinearExecChain(
-    const NQdb::TOperatorPtr& root)
-{
-    using namespace NQdb;
-    std::vector<TOperatorPtr> chain;
-    TOperatorPtr cur = root;
-    while (cur) {
-        if (TMaybeOp<TSourceOperator>(cur)) {
-            chain.push_back(cur);
-            break;
-        }
-        if (TMaybeOp<TFilterOperator>(cur) ||
-            TMaybeOp<TProjectOperator>(cur) ||
-            TMaybeOp<TAggregateOperator>(cur) ||
-            TMaybeOp<TSortOperator>(cur) ||
-            TMaybeOp<TTopSortOperator>(cur) ||
-            TMaybeOp<TLimitOperator>(cur))
-        {
-            chain.push_back(cur);
-            auto children = ChildOps(cur);
-            if (children.size() != 1) {
-                return std::nullopt;
-            }
-            cur = children[0];
-            continue;
-        }
-        return std::nullopt;
-    }
-    std::reverse(chain.begin(), chain.end());
-    return chain;
 }
 
 // Resolve sort keys to indices into the current batch's columns (matching by
@@ -1950,7 +1948,8 @@ struct TExecGraphBuilder {
 llvm::json::Object BuildExecGraphPlan(
     const NQdb::TOperatorPtr& plan,
     const TKernelIndex& kernels,
-    bool embedWasm)
+    bool embedWasm,
+    size_t kernelCount)
 {
     TExecGraphBuilder builder{.Kernels = kernels, .EmbedWasm = embedWasm};
     auto root = builder.Build(plan);
@@ -1960,7 +1959,7 @@ llvm::json::Object BuildExecGraphPlan(
     llvm::json::Object out{
         {"supported", true},
         {"embedWasm", embedWasm},
-        {"layout", ExecLayoutJson()},
+        {"layout", ExecLayoutJson(kernelCount)},
         {"nodes", std::move(builder.Nodes)},
         {"edges", std::move(builder.Edges)},
         {"root", root.NodeId},
@@ -1974,146 +1973,10 @@ llvm::json::Object BuildExecGraphPlan(
 llvm::json::Object BuildExecPlan(
     const NQdb::TOperatorPtr& plan,
     const TKernelIndex& kernels,
-    bool embedWasm)
+    bool embedWasm,
+    size_t kernelCount)
 {
-    auto graph = BuildExecGraphPlan(plan, kernels, embedWasm);
-    if (graph.getBoolean("supported").value_or(false)) {
-        return graph;
-    }
-
-    using namespace NQdb;
-    auto chain = LinearExecChain(plan);
-    if (!chain) {
-        return graph;
-    }
-
-    llvm::json::Array stages;
-    NQumir::NAst::TTypePtr curType;
-    try {
-        for (const auto& op : *chain) {
-            if (auto source = TMaybeOp<TSourceOperator>(op)) {
-                curType = BuildSourceRuntimeType(*source.Cast());
-                stages.push_back(llvm::json::Object{
-                    {"kind", "source"},
-                    {"table", source.Cast()->SourcePath()},
-                    {"columns", SourceColumnsJson(curType)},
-                });
-            } else if (auto filter = TMaybeOp<TFilterOperator>(op)) {
-                const auto* ref = FindKernel(kernels, filter.Cast().get(), "filter");
-                if (!ref) {
-                    return UnsupportedExec("filter kernel was not generated");
-                }
-                if (embedWasm && ref->Artifacts->Wasm.empty()) {
-                    return UnsupportedExec("filter kernel failed to compile to wasm");
-                }
-                stages.push_back(llvm::json::Object{
-                    {"kind", "filter"},
-                    {"wasm", ref->Artifacts->Wasm},
-                });
-            } else if (auto project = TMaybeOp<TProjectOperator>(op)) {
-                auto* inputStruct =
-                    static_cast<NQumir::NAst::TStructType*>(curType.get());
-                auto columnPlan =
-                    BuildProjectColumnPlan(*project.Cast(), *inputStruct);
-                std::string wasmId;
-                if (!columnPlan.ComputedExprs.empty()) {
-                    const auto* ref =
-                        FindKernel(kernels, project.Cast().get(), "project");
-                    if (!ref) {
-                        return UnsupportedExec("project kernel was not generated");
-                    }
-                    if (embedWasm && ref->Artifacts->Wasm.empty()) {
-                        return UnsupportedExec(
-                            "project kernel failed to compile to wasm");
-                    }
-                    wasmId = ref->Artifacts->Wasm;
-                }
-                stages.push_back(llvm::json::Object{
-                    {"kind", "project"},
-                    {"wasm", wasmId},
-                    {"output", ProjectOutputJson(
-                        *project.Cast(), *inputStruct, columnPlan.OutputType)},
-                });
-                curType = columnPlan.OutputType;
-            } else if (auto aggregate = TMaybeOp<TAggregateOperator>(op)) {
-                const auto* ref =
-                    FindKernel(kernels, aggregate.Cast().get(), "aggregate");
-                if (!ref) {
-                    return UnsupportedExec("aggregate kernel was not generated");
-                }
-                if (embedWasm && ref->Artifacts->Wasm.empty()) {
-                    return UnsupportedExec(
-                        "aggregate kernel failed to compile to wasm");
-                }
-                auto outputType = ComputeAggregateOutputType(
-                    curType, aggregate.Cast()->GroupKeys(), aggregate.Cast()->Aggs());
-                auto* outStruct =
-                    static_cast<NQumir::NAst::TStructType*>(outputType.get());
-                const size_t keyCount = ref->Kernel->AggKeys.size();
-                llvm::json::Array output;
-                for (size_t i = 0; i < outStruct->Fields.size(); ++i) {
-                    auto entry = CoreTypeJson(outStruct->Fields[i].second);
-                    entry["name"] = BareColumnName(outStruct->Fields[i].first);
-                    // Nullability is a kernel property the plan schema does not
-                    // carry (e.g. i64 sum over a nullable column).
-                    if (i < keyCount) {
-                        entry["nullable"] = ref->Kernel->AggKeys[i].IsNullable;
-                    } else if (i - keyCount < ref->Kernel->AggValues.size()) {
-                        entry["nullable"] =
-                            ref->Kernel->AggValues[i - keyCount].IsNullable;
-                    }
-                    output.push_back(std::move(entry));
-                }
-                stages.push_back(llvm::json::Object{
-                    {"kind", "aggregate"},
-                    {"wasm", ref->Artifacts->Wasm},
-                    {"keyCount", static_cast<int64_t>(keyCount)},
-                    {"output", std::move(output)},
-                });
-                curType = outputType;
-            } else if (auto sort = TMaybeOp<TSortOperator>(op)) {
-                auto* inputStruct =
-                    static_cast<NQumir::NAst::TStructType*>(curType.get());
-                auto stage = BuildSortStageJson(
-                    sort.Cast()->Keys(), *inputStruct, kernels,
-                    sort.Cast().get(), embedWasm);
-                if (!stage) {
-                    return UnsupportedExec("sort key references an unknown column");
-                }
-                stage->insert({"kind", "sort"});
-                stages.push_back(std::move(*stage));
-            } else if (auto top = TMaybeOp<TTopSortOperator>(op)) {
-                auto* inputStruct =
-                    static_cast<NQumir::NAst::TStructType*>(curType.get());
-                auto stage = BuildSortStageJson(
-                    top.Cast()->Keys(), *inputStruct, kernels,
-                    top.Cast().get(), embedWasm);
-                if (!stage) {
-                    return UnsupportedExec("top-sort key references an unknown column");
-                }
-                stage->insert({"kind", "top-sort"});
-                stage->insert({"limit", top.Cast()->Limit()});
-                stages.push_back(std::move(*stage));
-            } else if (auto limit = TMaybeOp<TLimitOperator>(op)) {
-                stages.push_back(llvm::json::Object{
-                    {"kind", "limit"},
-                    {"limit", limit.Cast()->Limit()},
-                    {"offset", limit.Cast()->Offset()},
-                });
-            }
-        }
-    } catch (const NQumir::TError& e) {
-        return UnsupportedExec(e.ToString());
-    } catch (const std::exception& e) {
-        return UnsupportedExec(e.what());
-    }
-
-    return llvm::json::Object{
-        {"supported", true},
-        {"embedWasm", embedWasm},
-        {"layout", ExecLayoutJson()},
-        {"stages", std::move(stages)},
-    };
+    return BuildExecGraphPlan(plan, kernels, embedWasm, kernelCount);
 }
 
 llvm::json::Object BuildBundle(TExportRequest& request) {
@@ -2176,7 +2039,8 @@ llvm::json::Object BuildBundle(TExportRequest& request) {
     // The exec section reads the kernels the lowering already generated —
     // nothing is compiled twice.
     auto kernelIndex = BuildKernelIndex(loweredKernels, kernelArtifacts);
-    auto execPlan = BuildExecPlan(*plan, kernelIndex, request.EmbedWasm);
+    auto execPlan =
+        BuildExecPlan(*plan, kernelIndex, request.EmbedWasm, kernelArtifacts.size());
 
     return llvm::json::Object{
             {"ok", true},
