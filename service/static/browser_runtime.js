@@ -73,6 +73,18 @@ function copyNumericColumnFromMemory(memory, ptr, type, rowCount) {
   return new Ctor(memory.buffer, ptr, rowCount).slice();
 }
 
+function makeRowId(batchIdx, rowIdx) {
+  return (BigInt(batchIdx) << 32n) | BigInt(rowIdx >>> 0);
+}
+
+function rowIdBatch(id) {
+  return Number(id >> 32n);
+}
+
+function rowIdRow(id) {
+  return Number(id & 0xffffffffn);
+}
+
 function encodeStringColumn(values, rowCount, encoder) {
   const parts = new Array(rowCount);
   const offsets = new Int32Array(rowCount + 1);
@@ -220,6 +232,53 @@ class RowSetWriter {
     }
     this.selectionPtr = this.arena.alloc(bytes, 8);
     this.selectionCap = bytes;
+  }
+}
+
+class WasmRowStore {
+  constructor(arena, layout) {
+    this.arena = arena;
+    this.layout = layout;
+    this.batches = [];
+    this.storePtr = 0;
+    this.capacity = 0;
+  }
+
+  push(batch, rowsetPtr) {
+    this.ensureCapacity(this.batches.length + 1);
+    const idx = this.batches.length;
+    this.batches.push(batch);
+    const size = this.layout.rowset.size;
+    const memBytes = this.arena.bytes();
+    memBytes.copyWithin(
+      this.storePtr + idx * size,
+      rowsetPtr,
+      rowsetPtr + size);
+    return idx;
+  }
+
+  dataPtr() {
+    return this.storePtr;
+  }
+
+  batch(index) {
+    return this.batches[index];
+  }
+
+  ensureCapacity(needed) {
+    if (this.capacity >= needed) {
+      return;
+    }
+    const size = this.layout.rowset.size;
+    const next = Math.max(needed, this.capacity ? this.capacity * 2 : 4);
+    const oldPtr = this.storePtr;
+    const oldBytes = this.batches.length * size;
+    this.storePtr = this.arena.alloc(next * size, 8);
+    this.capacity = next;
+    if (oldPtr && oldBytes > 0) {
+      const memBytes = this.arena.bytes();
+      memBytes.copyWithin(this.storePtr, oldPtr, oldPtr + oldBytes);
+    }
   }
 }
 
@@ -889,6 +948,210 @@ function finishAggregateState(state) {
   return { rowCount: size, columns };
 }
 
+function createJoinState(kernel, layout, stage) {
+  if (!browserRuntimeSupportsJoin(stage)) {
+    throw new Error(`browser join type is not implemented: ${stage.joinType}` +
+      (stage.hasResidual ? ' with residual' : ''));
+  }
+  const exports = kernel.instance.exports;
+  const required = [
+    'jt_init',
+    'jt_process_left',
+    'jt_process_right',
+    'jt_destroy',
+    'pb_destroy',
+  ];
+  for (const name of required) {
+    if (typeof exports[name] !== 'function') {
+      throw new Error(`join kernel is missing entry ${name}`);
+    }
+  }
+  const semiAnti = isLeftSemiAntiJoin(stage);
+  if (semiAnti && !stage.hasResidual) {
+    for (const name of ['jt_insert_key_only', 'jt_finalize_semi_anti']) {
+      if (typeof exports[name] !== 'function') {
+        throw new Error(`join kernel is missing entry ${name}`);
+      }
+    }
+  }
+
+  const arena = new Arena(kernel.instance);
+  kernel.holder.arena = arena;
+  const leftTable = arena.alloc(layout.hashTable.size, 8);
+  const rightTable = arena.alloc(layout.hashTable.size, 8);
+  const pairBuffer = arena.alloc(layout.pairBuffer.size, 8);
+  new Uint8Array(arena.memory.buffer, leftTable, layout.hashTable.size).fill(0);
+  new Uint8Array(arena.memory.buffer, rightTable, layout.hashTable.size).fill(0);
+  new Uint8Array(arena.memory.buffer, pairBuffer, layout.pairBuffer.size).fill(0);
+  const keySize = BigInt(stage.keySize || 0);
+  if (!exports.jt_init(BigInt(leftTable), 256n, keySize) ||
+      !exports.jt_init(BigInt(rightTable), 256n, keySize)) {
+    throw new Error('join hash table initialization failed');
+  }
+
+  return {
+    kernel,
+    layout,
+    stage,
+    arena,
+    leftTable,
+    rightTable,
+    pairBuffer,
+    leftStore: new WasmRowStore(arena, layout),
+    rightStore: new WasmRowStore(arena, layout),
+    semiAntiFinalized: false,
+    finalized: false,
+  };
+}
+
+function browserRuntimeSupportsJoin(stage) {
+  if (stage.joinType === 'inner') return true;
+  return isLeftSemiAntiJoin(stage) && !stage.hasResidual;
+}
+
+function updateJoinState(state, side, batch, selection) {
+  const { arena, layout, kernel } = state;
+  const { rowsetPtr } = marshalRowSet(
+    arena, layout, batch.columns, batch.rowCount, false, selection);
+  const isLeft = side === 0;
+  const semiAnti = isLeftSemiAntiJoin(state.stage);
+  const store = isLeft ? state.leftStore : state.rightStore;
+  const batchIdx = store.push(batch, rowsetPtr);
+  const exports = kernel.instance.exports;
+  const ok = semiAnti && !state.stage.hasResidual && !isLeft
+    ? exports.jt_insert_key_only(
+        BigInt(state.rightTable),
+        0n,
+        BigInt(store.dataPtr() + batchIdx * layout.rowset.size),
+        BigInt(batchIdx),
+        BigInt(state.pairBuffer))
+    : isLeft
+    ? exports.jt_process_left(
+        BigInt(state.leftTable),
+        BigInt(state.rightTable),
+        BigInt(store.dataPtr() + batchIdx * layout.rowset.size),
+        BigInt(batchIdx),
+        BigInt(state.pairBuffer),
+        BigInt(state.leftStore.dataPtr()),
+        BigInt(state.rightStore.dataPtr()))
+    : exports.jt_process_right(
+        BigInt(state.rightTable),
+        BigInt(state.leftTable),
+        BigInt(store.dataPtr() + batchIdx * layout.rowset.size),
+        BigInt(batchIdx),
+        BigInt(state.pairBuffer),
+        BigInt(state.leftStore.dataPtr()),
+        BigInt(state.rightStore.dataPtr()));
+  if (!ok) {
+    throw new Error('join kernel update failed');
+  }
+}
+
+function isLeftSemiAntiJoin(stage) {
+  return stage.joinType === 'left_semi' ||
+    stage.joinType === 'left_anti' ||
+    stage.joinType === 'left-semi' ||
+    stage.joinType === 'left-anti';
+}
+
+function finalizeSemiAntiJoinState(state) {
+  if (state.semiAntiFinalized) {
+    return;
+  }
+  if (state.stage.hasResidual) {
+    throw new Error('browser residual semi/anti join is not implemented yet');
+  }
+  const ok = state.kernel.instance.exports.jt_finalize_semi_anti(
+    BigInt(state.leftTable),
+    BigInt(state.rightTable),
+    BigInt(state.pairBuffer));
+  if (!ok) {
+    throw new Error('join semi/anti finalize failed');
+  }
+  state.semiAntiFinalized = true;
+}
+
+function drainJoinPairs(state, maxRows = 1024) {
+  const layout = state.layout;
+  const pairLayout = layout.pairBuffer;
+  const dv = state.arena.view();
+  const count = Number(dv.getBigInt64(state.pairBuffer + pairLayout.count, true));
+  if (count <= 0) {
+    return [];
+  }
+  const dataPtr = Number(dv.getBigInt64(state.pairBuffer + pairLayout.data, true));
+  const outputs = [];
+  let cursor = 0;
+  while (cursor < count) {
+    const n = Math.min(maxRows, count - cursor);
+    const leftIds = new Array(n);
+    const rightIds = new Array(n);
+    for (let i = 0; i < n; ++i) {
+      const pair = cursor + i;
+      leftIds[i] = dv.getBigInt64(dataPtr + pair * 16, true);
+      rightIds[i] = dv.getBigInt64(dataPtr + pair * 16 + 8, true);
+    }
+    outputs.push(materializeJoinOutput(state, leftIds, rightIds));
+    cursor += n;
+  }
+  dv.setBigInt64(state.pairBuffer + pairLayout.count, 0n, true);
+  return outputs;
+}
+
+function materializeJoinOutput(state, leftIds, rightIds) {
+  const output = state.stage.output || [];
+  const leftCount = (state.stage.leftColumns || []).length;
+  const semiAnti = isLeftSemiAntiJoin(state.stage);
+  const columns = output.map((spec, outIndex) => {
+    const fromLeft = semiAnti || outIndex < leftCount;
+    const srcIndex = fromLeft ? outIndex : outIndex - leftCount;
+    const ids = fromLeft ? leftIds : rightIds;
+    return {
+      name: spec.name,
+      type: spec.type,
+      values: gatherJoinColumn(
+        fromLeft ? state.leftStore : state.rightStore,
+        ids,
+        srcIndex,
+        spec.type),
+    };
+  });
+  return { rowCount: leftIds.length, columns };
+}
+
+function gatherJoinColumn(store, ids, columnIndex, type) {
+  if (type === 'string') {
+    return ids.map(id => {
+      if (id === -1n) return null;
+      const batch = store.batch(rowIdBatch(id));
+      return batch.columns[columnIndex].values[rowIdRow(id)];
+    });
+  }
+  const Ctor = numericArrayConstructor(type);
+  const out = Ctor ? new Ctor(ids.length) : new Array(ids.length);
+  for (let i = 0; i < ids.length; ++i) {
+    const id = ids[i];
+    if (id === -1n) {
+      out[i] = Ctor && (type === 'i64' || type === 'u64') ? 0n : 0;
+      continue;
+    }
+    const batch = store.batch(rowIdBatch(id));
+    out[i] = batch.columns[columnIndex].values[rowIdRow(id)];
+  }
+  return out;
+}
+
+function finishJoinState(state) {
+  if (state.finalized) {
+    return;
+  }
+  state.finalized = true;
+  const exports = state.kernel.instance.exports;
+  exports.jt_destroy(BigInt(state.leftTable));
+  exports.jt_destroy(BigInt(state.rightTable));
+  exports.pb_destroy(BigInt(state.pairBuffer));
+}
+
 // Drive the radix composite sort kernel. Marshals each key column into a
 // contiguous raw buffer, runs qdb_radix_sort_indices_composite to get a sorted
 // permutation, then gathers all columns by it (top-`limit` if given). No
@@ -1041,8 +1304,16 @@ const FetchResult = {
   FINISHED: 'FINISHED',
 };
 
+const ConnectionKind = {
+  OneToOne: 'one-to-one',
+  Gather: 'gather',
+  HashShuffle: 'hash-shuffle',
+  Broadcast: 'broadcast',
+};
+
 class OneToOneConnection {
   constructor(capacity = 1) {
+    this.kind = ConnectionKind.OneToOne;
     this.capacity = capacity;
     this.queue = [];
     this.finished = false;
@@ -1091,6 +1362,62 @@ class OneToOneConnection {
   }
 }
 
+class UnsupportedConnection {
+  constructor(kind) {
+    this.kind = kind;
+    this.stats = {
+      pushed: 0,
+      popped: 0,
+      finished: 0,
+      blockedPush: 0,
+      emptyFetch: 0,
+      finishedFetch: 0,
+    };
+  }
+
+  unsupported() {
+    throw new Error(`browser scheduler connection is not implemented: ${this.kind}`);
+  }
+
+  canPush() { return this.unsupported(); }
+  push() { return this.unsupported(); }
+  finish() { return this.unsupported(); }
+  fetch() { return this.unsupported(); }
+}
+
+class GatherConnection extends UnsupportedConnection {
+  constructor() {
+    super(ConnectionKind.Gather);
+  }
+}
+
+class HashShuffleConnection extends UnsupportedConnection {
+  constructor() {
+    super(ConnectionKind.HashShuffle);
+  }
+}
+
+class BroadcastConnection extends UnsupportedConnection {
+  constructor() {
+    super(ConnectionKind.Broadcast);
+  }
+}
+
+function createConnection(kind = ConnectionKind.OneToOne, options = {}) {
+  switch (kind) {
+    case ConnectionKind.OneToOne:
+      return new OneToOneConnection(options.capacity || 1);
+    case ConnectionKind.Gather:
+      return new GatherConnection();
+    case ConnectionKind.HashShuffle:
+      return new HashShuffleConnection();
+    case ConnectionKind.Broadcast:
+      return new BroadcastConnection();
+    default:
+      throw new Error(`unknown browser scheduler connection kind: ${kind}`);
+  }
+}
+
 class SchedulerNode {
   constructor(task, label) {
     this.task = task;
@@ -1103,8 +1430,8 @@ class SchedulerNode {
 }
 
 class SingleThreadedScheduler {
-  constructor(root) {
-    this.root = root;
+  constructor(roots) {
+    this.roots = Array.isArray(roots) ? roots : [roots];
     this.ready = [];
     this.scheduled = new Set();
     this.stats = {
@@ -1119,7 +1446,9 @@ class SingleThreadedScheduler {
   }
 
   async run() {
-    this.schedule(this.root);
+    for (const root of this.roots) {
+      this.schedule(root);
+    }
     while (this.ready.length > 0) {
       const node = this.ready.shift();
       this.scheduled.delete(node);
@@ -1338,6 +1667,137 @@ class AggregateTask {
   }
 }
 
+class JoinTask {
+  constructor(stage, layout) {
+    this.stage = stage;
+    this.layout = layout;
+    this.kernel = null;
+    this.state = null;
+    this.ready = [];
+    this.done = false;
+    this.leftDone = false;
+    this.rightDone = false;
+    this.rows = 0;
+  }
+
+  async execute() {
+    if (this.done) return TaskResult.FINISHED;
+    const output = this.node.outbound[0].connection;
+
+    if (this.ready.length > 0) {
+      if (!output.canPush()) return TaskResult.BLOCKED_OUTPUT;
+      output.push({ batch: this.ready.shift(), selection: null });
+      return TaskResult.OK;
+    }
+
+    if (!this.state) {
+      if (!this.kernel) {
+        this.kernel = await instantiateKernel(this.stage.wasm, 'jt_init');
+      }
+      this.state = createJoinState(this.kernel, this.layout, this.stage);
+    }
+
+    const progressed = this.pullOneInputBatch();
+    if (progressed) {
+      this.ready.push(...drainJoinPairs(this.state));
+      if (this.ready.length > 0) {
+        return this.execute();
+      }
+      return TaskResult.OK;
+    }
+
+    if (this.leftDone && this.rightDone) {
+      if (isLeftSemiAntiJoin(this.stage) && !this.state.semiAntiFinalized) {
+        finalizeSemiAntiJoinState(this.state);
+        this.ready.push(...drainJoinPairs(this.state));
+        if (this.ready.length > 0) {
+          return this.execute();
+        }
+      }
+      finishJoinState(this.state);
+      output.finish();
+      this.done = true;
+      return TaskResult.FINISHED;
+    }
+    return TaskResult.NEED_DATA;
+  }
+
+  pullOneInputBatch() {
+    if (isLeftSemiAntiJoin(this.stage)) {
+      return this.pullOneSemiAntiInputBatch();
+    }
+    if (!this.leftDone) {
+      const fetched = this.node.inbound[0].connection.fetch();
+      if (fetched.result === FetchResult.OK) {
+        updateJoinState(
+          this.state, 0, fetched.rowSet.batch, fetched.rowSet.selection);
+        this.rows += fetched.rowSet.batch.rowCount;
+        return true;
+      }
+      if (fetched.result === FetchResult.FINISHED) {
+        this.leftDone = true;
+        return true;
+      }
+    }
+
+    if (!this.rightDone) {
+      const fetched = this.node.inbound[1].connection.fetch();
+      if (fetched.result === FetchResult.OK) {
+        updateJoinState(
+          this.state, 1, fetched.rowSet.batch, fetched.rowSet.selection);
+        this.rows += fetched.rowSet.batch.rowCount;
+        return true;
+      }
+      if (fetched.result === FetchResult.FINISHED) {
+        this.rightDone = true;
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  pullOneSemiAntiInputBatch() {
+    if (!this.leftDone) {
+      const fetched = this.node.inbound[0].connection.fetch();
+      if (fetched.result === FetchResult.OK) {
+        updateJoinState(
+          this.state, 0, fetched.rowSet.batch, fetched.rowSet.selection);
+        this.rows += fetched.rowSet.batch.rowCount;
+        return true;
+      }
+      if (fetched.result === FetchResult.FINISHED) {
+        this.leftDone = true;
+        return true;
+      }
+      return false;
+    }
+
+    if (!this.rightDone) {
+      const fetched = this.node.inbound[1].connection.fetch();
+      if (fetched.result === FetchResult.OK) {
+        updateJoinState(
+          this.state, 1, fetched.rowSet.batch, fetched.rowSet.selection);
+        this.rows += fetched.rowSet.batch.rowCount;
+        if (this.stage.hasResidual) {
+          this.collectResidualSemiAntiMatches();
+        }
+        return true;
+      }
+      if (fetched.result === FetchResult.FINISHED) {
+        this.rightDone = true;
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  collectResidualSemiAntiMatches() {
+    throw new Error('browser residual semi/anti join is not implemented yet');
+  }
+}
+
 class SortTask {
   constructor(stage, layout) {
     this.stage = stage;
@@ -1417,6 +1877,64 @@ function makeNode(task, label) {
   return node;
 }
 
+function taskNodeForStage(stage, layout, readSourceBatches, onProgress) {
+  if (stage.kind === 'source') {
+    return makeNode(
+      new SourceTask(stage, readSourceBatches, onProgress || null),
+      stage.kind);
+  }
+  if (stage.kind === 'filter') {
+    return makeNode(new FilterTask(stage, layout), stage.kind);
+  }
+  if (stage.kind === 'project') {
+    return makeNode(new ProjectTask(stage, layout), stage.kind);
+  }
+  if (stage.kind === 'aggregate') {
+    return makeNode(new AggregateTask(stage, layout), stage.kind);
+  }
+  if (stage.kind === 'join') {
+    return makeNode(new JoinTask(stage, layout), stage.kind);
+  }
+  if (stage.kind === 'sort' || stage.kind === 'top-sort') {
+    return makeNode(new SortTask(stage, layout), stage.kind);
+  }
+  throw new Error(`unsupported exec stage: ${stage.kind}`);
+}
+
+function buildScheduledGraph(exec, readSourceBatches, options, layout) {
+  const nodesById = new Map();
+  const nodes = [];
+  for (const spec of exec.nodes || []) {
+    if (spec.kind === 'limit') {
+      continue;
+    }
+    const node = taskNodeForStage(
+      spec, layout, readSourceBatches, options.onProgress);
+    nodesById.set(Number(spec.id), node);
+    nodes.push(node);
+  }
+  for (const edge of exec.edges || []) {
+    const src = nodesById.get(Number(edge.from));
+    const dst = nodesById.get(Number(edge.to));
+    if (!src || !dst) {
+      throw new Error('exec graph edge references an unknown node');
+    }
+    connect(src, dst, createConnection(edge.kind || ConnectionKind.OneToOne));
+  }
+  const root = nodesById.get(Number(exec.root));
+  if (!root) {
+    throw new Error('exec graph root references an unknown node');
+  }
+  const limit = exec.limit
+    ? { limit: Number(exec.limit.limit), offset: Number(exec.limit.offset || 0) }
+    : null;
+  const sink = makeNode(new SinkTask(limit), 'materialize');
+  nodes.push(sink);
+  connect(root, sink, createConnection(ConnectionKind.OneToOne));
+  const roots = nodes.filter(node => node.inbound.length === 0);
+  return { roots, sink, nodes };
+}
+
 export async function executeBrowserPipelineScheduled(exec, readSourceBatches, options = {}) {
   if (!exec || exec.supported !== true) {
     throw new Error(exec?.reason || 'pipeline is not supported for browser execution');
@@ -1426,6 +1944,29 @@ export async function executeBrowserPipelineScheduled(exec, readSourceBatches, o
   }
 
   const layout = exec.layout;
+  if (Array.isArray(exec.nodes)) {
+    const { roots, sink, nodes } =
+      buildScheduledGraph(exec, readSourceBatches, options, layout);
+    const scheduler = new SingleThreadedScheduler(roots);
+    await scheduler.run();
+
+    const result = sink.task.result();
+    result.timings = nodes.map(node => ({
+      stage: node.label,
+      rows: node.rows,
+      elapsedMs: node.elapsedMs,
+    }));
+    result.scheduler = scheduler.stats;
+    result.connections = nodes.flatMap(node =>
+      node.outbound.map(edge => ({
+        from: edge.src.label,
+        to: edge.dst.label,
+        kind: edge.connection.kind,
+        ...edge.connection.stats,
+      })));
+    return result;
+  }
+
   let root = null;
   let previous = null;
   let limit = null;
@@ -1434,18 +1975,18 @@ export async function executeBrowserPipelineScheduled(exec, readSourceBatches, o
   for (const stage of exec.stages) {
     let node = null;
     if (stage.kind === 'source') {
-      node = makeNode(
-        new SourceTask(stage, readSourceBatches, options.onProgress || null),
-        stage.kind);
+      node = taskNodeForStage(
+        stage, layout, readSourceBatches, options.onProgress);
       root = node;
-    } else if (stage.kind === 'filter') {
-      node = makeNode(new FilterTask(stage, layout), stage.kind);
-    } else if (stage.kind === 'project') {
-      node = makeNode(new ProjectTask(stage, layout), stage.kind);
-    } else if (stage.kind === 'aggregate') {
-      node = makeNode(new AggregateTask(stage, layout), stage.kind);
-    } else if (stage.kind === 'sort' || stage.kind === 'top-sort') {
-      node = makeNode(new SortTask(stage, layout), stage.kind);
+    } else if (
+      stage.kind === 'filter' ||
+      stage.kind === 'project' ||
+      stage.kind === 'aggregate' ||
+      stage.kind === 'join' ||
+      stage.kind === 'sort' ||
+      stage.kind === 'top-sort')
+    {
+      node = taskNodeForStage(stage, layout, readSourceBatches, options.onProgress);
     } else if (stage.kind === 'limit') {
       limit = { limit: Number(stage.limit), offset: Number(stage.offset || 0) };
       continue;
@@ -1455,7 +1996,7 @@ export async function executeBrowserPipelineScheduled(exec, readSourceBatches, o
 
     nodes.push(node);
     if (previous) {
-      connect(previous, node, new OneToOneConnection(1));
+      connect(previous, node, createConnection(ConnectionKind.OneToOne));
     }
     previous = node;
   }
@@ -1466,7 +2007,7 @@ export async function executeBrowserPipelineScheduled(exec, readSourceBatches, o
 
   const sink = makeNode(new SinkTask(limit), 'materialize');
   nodes.push(sink);
-  connect(previous, sink, new OneToOneConnection(1));
+  connect(previous, sink, createConnection(ConnectionKind.OneToOne));
 
   const scheduler = new SingleThreadedScheduler(root);
   await scheduler.run();
@@ -1482,6 +2023,7 @@ export async function executeBrowserPipelineScheduled(exec, readSourceBatches, o
     node.outbound.map(edge => ({
       from: edge.src.label,
       to: edge.dst.label,
+      kind: edge.connection.kind,
       ...edge.connection.stats,
     })));
   return result;

@@ -264,9 +264,37 @@ async function readParquetColumnsRange(file, specs, columnNames, range, onProgre
     : maxChunkRowCount(chunks);
   const columns = {};
   for (const spec of specs) {
-    columns[spec.name] = assembleColumn(chunks[spec.name], rowCount);
+    columns[spec.name] = coerceColumnForSpec(
+      assembleColumn(chunks[spec.name], rowCount),
+      spec);
   }
   return { rowCount, columns };
+}
+
+function coerceColumnForSpec(values, spec) {
+  if (spec.type !== 'i32') {
+    return values;
+  }
+
+  let sample = null;
+  for (let i = 0; i < values.length; ++i) {
+    if (values[i] !== null && values[i] !== undefined) {
+      sample = values[i];
+      break;
+    }
+  }
+  if (!(sample instanceof Date)) {
+    return values;
+  }
+
+  const out = new Int32Array(values.length);
+  for (let i = 0; i < values.length; ++i) {
+    const value = values[i];
+    out[i] = value instanceof Date
+      ? Math.floor(value.getTime() / 86400000)
+      : Number(value || 0) | 0;
+  }
+  return out;
 }
 
 function rowGroupRanges(metadata) {
