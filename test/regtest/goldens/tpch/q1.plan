@@ -2,9 +2,7 @@
   (rel project
     (rel aggregate
       (rel project
-        (rel filter
-          (rel source "lineitem")
-          (<= l_shipdate (- (call qdb_sql_date "1998-12-01") (call qdb_sql_interval "81" "day"))))
+        (rel filter (rel source "lineitem") (<= l_shipdate (- (: 10561 i32) (: 81 i32))))
         (l_returnflag l_returnflag)
         (l_linestatus l_linestatus)
         (l_quantity l_quantity)

@@ -21,8 +21,8 @@
     )
     (where
       (&& (&& (&& (&& (== c_mktsegment "FURNITURE") (== c_custkey o_custkey)) (== l_orderkey o_orderkey))
-          (< o_orderdate (call qdb_sql_date "1995-03-20")))
-        (> l_shipdate (call qdb_sql_date "1995-03-20")))
+          (< o_orderdate (: 9209 i32)))
+        (> l_shipdate (: 9209 i32)))
     )
     (group-by
       l_orderkey

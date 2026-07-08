@@ -19,8 +19,8 @@
       (&& (&& (&& (&& (&& (== o_orderkey l_orderkey) (|| (== l_shipmode "TRUCK") (== l_shipmode "AIR")))
               (< l_commitdate l_receiptdate))
             (< l_shipdate l_commitdate))
-          (>= l_receiptdate (call qdb_sql_date "1993-01-01")))
-        (< l_receiptdate (+ (call qdb_sql_date "1993-01-01") (call qdb_sql_interval "1" "year"))))
+          (>= l_receiptdate (: 8401 i32)))
+        (< l_receiptdate (+ (: 8401 i32) (: 365 i32))))
     )
     (group-by
       l_shipmode

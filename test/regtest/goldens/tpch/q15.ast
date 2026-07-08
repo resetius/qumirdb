@@ -15,8 +15,7 @@
             (table lineitem)
           )
           (where
-            (&& (>= l_shipdate (call qdb_sql_date "1995-03-01"))
-              (< l_shipdate (+ (call qdb_sql_date "1995-03-01") (call qdb_sql_interval "3" "month"))))
+            (&& (>= l_shipdate (: 9190 i32)) (< l_shipdate (+ (: 9190 i32) (: 90 i32))))
           )
           (group-by
             l_suppkey

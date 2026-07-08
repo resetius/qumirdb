@@ -40,7 +40,7 @@
                         (== |n1.n_regionkey| r_regionkey))
                       (== r_name "EUROPE"))
                     (== s_nationkey |n2.n_nationkey|))
-                  (&& (<= (call qdb_sql_date "1995-01-01") o_orderdate) (<= o_orderdate (call qdb_sql_date "1996-12-31"))))
+                  (&& (<= (: 9131 i32) o_orderdate) (<= o_orderdate (: 9861 i32))))
                 (== p_type "PROMO POLISHED BRASS"))
             )
           )

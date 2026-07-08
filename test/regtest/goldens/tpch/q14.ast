@@ -11,8 +11,7 @@
       (table part)
     )
     (where
-      (&& (&& (== l_partkey p_partkey) (>= l_shipdate (call qdb_sql_date "1993-03-01")))
-        (< l_shipdate (+ (call qdb_sql_date "1993-03-01") (call qdb_sql_interval "1" "month"))))
+      (&& (&& (== l_partkey p_partkey) (>= l_shipdate (: 8460 i32))) (< l_shipdate (+ (: 8460 i32) (: 30 i32))))
     )
   )
 )

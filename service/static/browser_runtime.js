@@ -8,6 +8,10 @@
 const PAGE = 65536;
 const EMPTY_BYTES = new Uint8Array(0);
 
+function nowMs() {
+  return globalThis.performance ? globalThis.performance.now() : Date.now();
+}
+
 function alignUp(value, align) {
   return (value + (align - 1)) & ~(align - 1);
 }
@@ -35,6 +39,38 @@ export function coreTypeWidth(type) {
 
 function isBigType(type) {
   return type === 'i64' || type === 'u64';
+}
+
+function numericArrayConstructor(type) {
+  switch (type) {
+    case 'i8': return Int8Array;
+    case 'u8': case 'bool': return Uint8Array;
+    case 'i16': return Int16Array;
+    case 'u16': return Uint16Array;
+    case 'i32': return Int32Array;
+    case 'u32': return Uint32Array;
+    case 'i64': return BigInt64Array;
+    case 'u64': return BigUint64Array;
+    case 'f64': return Float64Array;
+    default: return null;
+  }
+}
+
+function typedColumnBytes(values, type, rowCount) {
+  const Ctor = numericArrayConstructor(type);
+  if (!Ctor || !(values instanceof Ctor) || values.length < rowCount) {
+    return null;
+  }
+  const width = coreTypeWidth(type);
+  return new Uint8Array(values.buffer, values.byteOffset, rowCount * width);
+}
+
+function copyNumericColumnFromMemory(memory, ptr, type, rowCount) {
+  const Ctor = numericArrayConstructor(type);
+  if (!Ctor) {
+    throw new Error(`unsupported numeric column type: ${type}`);
+  }
+  return new Ctor(memory.buffer, ptr, rowCount).slice();
 }
 
 // A bump allocator over one kernel module's linear memory. All allocations are
@@ -359,12 +395,19 @@ function marshalRowSet(arena, layout, columns, rowCount, wantSelection, selectio
     if (column.type !== 'string') return null;
     const parts = new Array(rowCount);
     const offsets = new Int32Array(rowCount + 1);
+    const cache = new Map();
     let total = 0;
     for (let i = 0; i < rowCount; ++i) {
       const value = column.values[i];
-      const b = (value === null || value === undefined)
-        ? EMPTY_BYTES
-        : encoder.encode(String(value));
+      let b = EMPTY_BYTES;
+      if (value !== null && value !== undefined) {
+        const text = String(value);
+        b = cache.get(text);
+        if (!b) {
+          b = encoder.encode(text);
+          cache.set(text, b);
+        }
+      }
       parts[i] = b;
       offsets[i] = total;
       total += b.length;
@@ -417,8 +460,13 @@ function marshalRowSet(arena, layout, columns, rowCount, wantSelection, selectio
     } else {
       const width = coreTypeWidth(column.type);
       const values = column.values;
-      for (let i = 0; i < rowCount; ++i) {
-        writeNumericValue(dv, dataPtrs[c] + i * width, column.type, values[i]);
+      const bytes = typedColumnBytes(values, column.type, rowCount);
+      if (bytes) {
+        memBytes.set(bytes, dataPtrs[c]);
+      } else {
+        for (let i = 0; i < rowCount; ++i) {
+          writeNumericValue(dv, dataPtrs[c] + i * width, column.type, values[i]);
+        }
       }
     }
   }
@@ -487,23 +535,23 @@ export function runProject(kernel, layout, batch, output) {
       });
     } else {
       const bufPtr = computedBufs[computed.indexOf(col)];
-      const values = new Array(rowCount);
       if (col.isString) {
+        const values = new Array(rowCount);
         const sv = layout.stringView;
         const memBytes = new Uint8Array(kernel.instance.exports.memory.buffer);
+        const decoder = new TextDecoder();
         for (let i = 0; i < rowCount; ++i) {
           const base = bufPtr + i * sv.size;
           const dataPtr = outDv.getUint32(base + sv.data, true);
           const size = Number(outDv.getBigInt64(base + sv.length, true));
-          values[i] = new TextDecoder().decode(
-            memBytes.subarray(dataPtr, dataPtr + size));
+          values[i] = decoder.decode(memBytes.subarray(dataPtr, dataPtr + size));
         }
+        columns.push({ name: col.name, type: col.type, values });
       } else {
-        for (let i = 0; i < rowCount; ++i) {
-          values[i] = readNumericValue(outDv, bufPtr + i * col.width, col.type);
-        }
+        const values = copyNumericColumnFromMemory(
+          kernel.instance.exports.memory, bufPtr, col.type, rowCount);
+        columns.push({ name: col.name, type: col.type, values });
       }
-      columns.push({ name: col.name, type: col.type, values });
     }
   }
   return columns;
@@ -740,8 +788,10 @@ export async function executeBrowserPipeline(exec, readSource) {
   let batch = null;
   let selection = null;
   let limit = null;
+  const timings = [];
 
   for (const stage of exec.stages) {
+    const started = nowMs();
     if (stage.kind === 'source') {
       batch = await readSource(stage);
       selection = null;
@@ -784,9 +834,22 @@ export async function executeBrowserPipeline(exec, readSource) {
     } else {
       throw new Error(`unsupported exec stage: ${stage.kind}`);
     }
+    timings.push({
+      stage: stage.kind,
+      rows: batch ? batch.rowCount : 0,
+      elapsedMs: nowMs() - started,
+    });
   }
 
-  return materialize(batch, selection, limit);
+  const started = nowMs();
+  const result = materialize(batch, selection, limit);
+  timings.push({
+    stage: 'materialize',
+    rows: result.rows.length,
+    elapsedMs: nowMs() - started,
+  });
+  result.timings = timings;
+  return result;
 }
 
 // Sort a batch by `keys` (each { index, direction, nulls }), folding any

@@ -9,8 +9,7 @@
               (rel project
                 (rel filter
                   (rel source "lineitem")
-                  (&& (>= l_shipdate (call qdb_sql_date "1995-03-01"))
-                    (< l_shipdate (+ (call qdb_sql_date "1995-03-01") (call qdb_sql_interval "3" "month")))))
+                  (&& (>= l_shipdate (: 9190 i32)) (< l_shipdate (+ (: 9190 i32) (: 90 i32)))))
                 (l_suppkey l_suppkey)
                 (arg_0 (* l_extendedprice (- 1 l_discount))))
               (keys l_suppkey)
@@ -27,8 +26,7 @@
                   (rel project
                     (rel filter
                       (rel source "lineitem")
-                      (&& (>= l_shipdate (call qdb_sql_date "1995-03-01"))
-                        (< l_shipdate (+ (call qdb_sql_date "1995-03-01") (call qdb_sql_interval "3" "month")))))
+                      (&& (>= l_shipdate (: 9190 i32)) (< l_shipdate (+ (: 9190 i32) (: 90 i32)))))
                     (l_suppkey l_suppkey)
                     (arg_0 (* l_extendedprice (- 1 l_discount))))
                   (keys l_suppkey)

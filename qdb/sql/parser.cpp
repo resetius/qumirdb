@@ -1,5 +1,7 @@
 #include "parser.h"
 
+#include <qdb/modules/qumirdb_runtime.h>
+
 #include <qumir/optional.h>
 
 #include <map>
@@ -260,6 +262,12 @@ NQumir::NAst::TExprPtr call(TLocation loc, const std::string& name, std::vector<
         std::make_shared<NQumir::NAst::TIdentExpr>(loc, name),
         std::move(args)
     );
+}
+
+NQumir::NAst::TExprPtr i32_literal(TLocation loc, int32_t value) {
+    auto ret = std::make_shared<NQumir::NAst::TNumberExpr>(loc, static_cast<int64_t>(value));
+    ret->Type = std::make_shared<NQumir::NAst::TIntegerType>(NQumir::NAst::TIntegerType::I32);
+    return ret;
 }
 
 NQumir::NAst::TExprPtr cast(TLocation loc, NQumir::NAst::TExprPtr expr, NQumir::NAst::TTypePtr type) {
@@ -1058,8 +1066,9 @@ TAstExprTask primary_expr(TParserContext& ctx) {
         if (value.Type != TToken::String) {
             co_return Error(value, "string literal expected after `DATE'");
         }
-        co_return call(loc, "qdb_sql_date",
-            { std::make_shared<NQumir::NAst::TStringLiteralExpr>(value.Location, value.Name) });
+        // TODO: constant functions should be expanded by Qumir constant folding,
+        // not special-cased in the SQL parser.
+        co_return i32_literal(loc, qdb_sql_date(value.Name.c_str()));
     }
 
     // <interval_literal> ::= "INTERVAL" <string_literal> <unit>
@@ -1072,10 +1081,9 @@ TAstExprTask primary_expr(TParserContext& ctx) {
         if (unit.Type != TToken::Identifier) {
             co_return Error(unit, "interval unit expected (e.g. day, month, year)");
         }
-        co_return call(loc, "qdb_sql_interval", {
-            std::make_shared<NQumir::NAst::TStringLiteralExpr>(value.Location, value.Name),
-            std::make_shared<NQumir::NAst::TStringLiteralExpr>(unit.Location, unit.Name),
-        });
+        // TODO: constant functions should be expanded by Qumir constant folding,
+        // not special-cased in the SQL parser.
+        co_return i32_literal(loc, qdb_sql_interval(value.Name.c_str(), unit.Name.c_str()));
     }
 
     if (token.Type == TToken::Identifier) {
