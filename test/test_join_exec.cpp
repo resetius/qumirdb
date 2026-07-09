@@ -410,7 +410,7 @@ TEST(InnerJoinProcessor, ProcessesInputsWithoutRuntimeNext) {
 
     TKernelCompiler compiler;
     auto kernels = CompileJoin(compiler, leftType, rightType, EJoinType::Inner);
-    TInnerJoinProcessor processor(leftType, rightType, std::move(kernels));
+    TInnerJoinProcessor processor(std::move(kernels));
 
     bool leftTemporarilyEmpty = true;
     bool leftDone = false;

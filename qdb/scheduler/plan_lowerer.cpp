@@ -119,17 +119,10 @@ struct TTopSortBlockingState {
 
 struct TSchedulerInnerJoinState {
     TSchedulerInnerJoinState(
-        NQumir::NAst::TTypePtr leftType,
-        NQumir::NAst::TTypePtr rightType,
         TJoinKernels kernels,
         EJoinType joinType,
         bool hasResidual)
-        : Processor(
-            std::move(leftType),
-            std::move(rightType),
-            std::move(kernels),
-            joinType,
-            hasResidual)
+        : Processor(std::move(kernels), joinType, hasResidual)
     {}
 
     TInnerJoinProcessor Processor;
@@ -1556,7 +1549,7 @@ private:
             auto task = std::make_unique<NScheduler::TBinaryBlockingTask>(
                 joinCode,
                 std::make_shared<TSchedulerInnerJoinState>(
-                    leftType, rightType, *joinKernels, join.JoinType(),
+                    *joinKernels, join.JoinType(),
                     join.Filter() != nullptr),
                 NScheduler::TInputPort{
                     .Connection = &leftPipeRef, .Lane = 0},
@@ -1599,7 +1592,7 @@ private:
             auto task = std::make_unique<NScheduler::TBinaryBlockingTask>(
                 joinCode,
                 std::make_shared<TSchedulerInnerJoinState>(
-                    leftType, rightType, *joinKernels, join.JoinType(),
+                    *joinKernels, join.JoinType(),
                     join.Filter() != nullptr),
                 NScheduler::TInputPort{
                     .Connection = leftShuf.Connection, .Lane = j},

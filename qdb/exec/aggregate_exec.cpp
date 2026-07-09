@@ -1,4 +1,5 @@
 #include <qdb/exec/aggregate_exec.h>
+#include <qdb/exec/kernel_rowset.h>
 #include <qdb/modules/qumirdb_runtime.h>
 
 #include <cstdint>
@@ -31,18 +32,6 @@ constexpr int64_t kInitialCapacity = 4;
 constexpr int64_t kOpInit = 0;
 constexpr int64_t kOpUpdate = 1;
 constexpr int64_t kOpDestroy = 2;
-
-void DestroyAggregateRowSet(TRowSet* rowSet) {
-    auto* owners = static_cast<int64_t*>(rowSet->Private);
-    if (!owners) {
-        return;
-    }
-    const int64_t count = owners[0];
-    for (int64_t i = 0; i < count; ++i) {
-        qdb_free(reinterpret_cast<void*>(owners[i + 1]));
-    }
-    qdb_free(owners);
-}
 
 } // namespace
 
@@ -90,7 +79,7 @@ bool TAggregateProcessor::Finish(TRowSet& rowSet)
         throw std::runtime_error("aggregate finalize returned an unexpected row count");
     }
 
-    rowSet.Destroy = DestroyAggregateRowSet;
+    rowSet.Destroy = DestroyKernelOwnedRowSet;
     return true;
 }
 

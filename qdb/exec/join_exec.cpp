@@ -1,11 +1,14 @@
 #include <qdb/exec/join_exec.h>
 
+#include <qdb/exec/kernel_rowset.h>
+#include <qdb/modules/qumirdb_runtime.h>
 #include <qdb/plan/types/nullable.h>
 
 #include <qumir/error.h>
 
 #include <algorithm>
 #include <cstring>
+#include <new>
 
 namespace NQdb {
 
@@ -19,7 +22,7 @@ constexpr int64_t JoinOp(EJoinKernelOp op) {
     return static_cast<int64_t>(op);
 }
 
-// Owns the gathered buffers behind an output TRowSet (one batch).
+// Owns the gathered buffers behind an output TRowSet (one batch, cross join).
 struct TJoinedRowSetData {
     std::vector<TGatheredColumn> Gathered;
     std::vector<TColumn> Columns;
@@ -184,75 +187,6 @@ void TakeColumn(const TRowStore& store, const std::vector<TRowId>& rowIds,
     }
 }
 
-void TakeColumnFromBatch(const TRowSet& batch, const std::vector<int32_t>& rows,
-    int32_t srcColIdx, const TTypePtr& type, TGatheredColumn& out)
-{
-    const size_t n = rows.size();
-    const size_t width = JoinColumnFixedWidth(type);
-    const TColumn& col = batch.Columns[srcColIdx];
-
-    out.Data.clear();
-    out.Offsets.clear();
-    out.Mask.assign((n + 7) / 8, 0xff);
-    bool anyNull = false;
-
-    auto markNull = [&](size_t j) {
-        ClearBit(out.Mask, j);
-        anyNull = true;
-    };
-
-    if (width == 0) {
-        out.Offsets.resize(n + 1);
-        out.Offsets[0] = 0;
-        for (size_t j = 0; j < n; ++j) {
-            const int32_t row = rows[j];
-            int64_t len = 0;
-            if (!SourceValid(col, row)) {
-                markNull(j);
-            } else {
-                len = OffsetAt(col, row + 1) - OffsetAt(col, row);
-            }
-            out.Offsets[j + 1] = out.Offsets[j] + len;
-        }
-        out.Data.resize(static_cast<size_t>(out.Offsets[n]));
-        for (size_t j = 0; j < n; ++j) {
-            const int32_t row = rows[j];
-            if (!SourceValid(col, row)) {
-                continue;
-            }
-            const int64_t start = OffsetAt(col, row);
-            const int64_t len = OffsetAt(col, row + 1) - start;
-            if (len > 0) {
-                std::memcpy(out.Data.data() + out.Offsets[j], col.Data + start, len);
-            }
-        }
-        out.Column = TColumn{
-            .Data = out.Data.data(),
-            .Mask = anyNull ? out.Mask.data() : nullptr,
-            .Offsets = out.Offsets.data(),
-            .OffsetWidth = 8,
-        };
-    } else {
-        out.Data.assign(n * width, 0);
-        for (size_t j = 0; j < n; ++j) {
-            const int32_t row = rows[j];
-            if (!SourceValid(col, row)) {
-                markNull(j);
-                continue;
-            }
-            std::memcpy(out.Data.data() + j * width, col.Data + row * width, width);
-        }
-        out.Column = TColumn{
-            .Data = out.Data.data(),
-            .Mask = anyNull ? out.Mask.data() : nullptr,
-        };
-    }
-
-    if (!anyNull) {
-        out.Mask.clear();
-    }
-}
-
 bool TJoinOutputBuilder::NextBatch(TRowSet& out) {
     if (Cursor_ >= LeftIds_.size()) {
         return false;
@@ -290,20 +224,13 @@ bool TJoinOutputBuilder::NextBatch(TRowSet& out) {
 }
 
 TInnerJoinProcessor::TInnerJoinProcessor(
-    TTypePtr leftType,
-    TTypePtr rightType,
     TJoinKernels kernels,
     EJoinType joinType,
     bool hasResidual)
-    : LeftType_(std::move(leftType))
-    , RightType_(std::move(rightType))
-    , Kernels_(std::move(kernels))
+    : Kernels_(std::move(kernels))
     , JoinType_(joinType)
     , HasResidual_(hasResidual)
 {
-    // Semi/anti joins emit only the left columns.
-    Builder_.emplace(&LeftRows_, &RightRows_,
-        BuildJoinColumns(LeftType_, RightType_, !IsSemiAnti()));
 }
 
 bool TInnerJoinProcessor::IsOuter() const {
@@ -368,74 +295,59 @@ bool TInnerJoinProcessor::DrainReadyOutput(TRowSet& rowSet) {
     return true;
 }
 
-void TInnerJoinProcessor::DrainKernelPairs() {
-    for (int64_t i = 0; i < PairBuffer_.Count; ++i) {
-        Builder_->AddPair(PairBuffer_.Data[2 * i], PairBuffer_.Data[2 * i + 1]);
+// Materializes at most one output batch of pending pairs through the kernel;
+// resets the buffer once the cursor catches up so later kernel ops (Finalize)
+// always see an empty buffer.
+bool TInnerJoinProcessor::DrainMaterialized(TRowSet& rowSet) {
+    if (MaterializeCursor_ >= PairBuffer_.Count) {
+        return false;
     }
-    PairBuffer_.Count = 0;
+    auto* leftStore = const_cast<TRowSet*>(LeftRows_.Data());
+    auto* rightStore = const_cast<TRowSet*>(RightRows_.Data());
+    TRowSet out{};
+    const int64_t produced = Kernels_.Materialize(
+        &PairBuffer_, leftStore, rightStore, leftStore, rightStore,
+        MaterializeCursor_, kJoinOutputBatchRows, &out);
+    if (produced <= 0) {
+        throw std::runtime_error("join materialize failed");
+    }
+    out.Destroy = DestroyKernelOwnedRowSet;
+    MaterializeCursor_ += produced;
+    if (MaterializeCursor_ >= PairBuffer_.Count) {
+        PairBuffer_.Count = 0;
+        MaterializeCursor_ = 0;
+    }
+    rowSet = out;
+    return true;
 }
 
 void TInnerJoinProcessor::DrainStreamingPairs(
     const TRowSet& streamBatch,
     EJoinSide streamSide)
 {
-    int64_t cursor = 0;
-    while (cursor < PairBuffer_.Count) {
-        const size_t n = std::min<size_t>(
-            static_cast<size_t>(kJoinOutputBatchRows),
-            static_cast<size_t>(PairBuffer_.Count - cursor));
+    auto* stream = const_cast<TRowSet*>(&streamBatch);
+    auto* leftStore = const_cast<TRowSet*>(LeftRows_.Data());
+    auto* rightStore = const_cast<TRowSet*>(RightRows_.Data());
+    TRowSet* streamLeft = streamSide == EJoinSide::Left ? stream : leftStore;
+    TRowSet* streamRight = streamSide == EJoinSide::Right ? stream : rightStore;
 
-        auto* data = new TJoinedRowSetData;
-        auto columns = BuildJoinColumns(LeftType_, RightType_, true);
-        data->Gathered.resize(columns.size());
-        data->Columns.resize(columns.size());
-        for (size_t c = 0; c < columns.size(); ++c) {
-            const auto& ref = columns[c];
-            if (ref.Side == streamSide) {
-                std::vector<int32_t> rows;
-                rows.reserve(n);
-                for (size_t i = 0; i < n; ++i) {
-                    const int64_t pairIdx = cursor + static_cast<int64_t>(i);
-                    const TRowId id = (streamSide == EJoinSide::Left)
-                        ? PairBuffer_.Data[2 * pairIdx]
-                        : PairBuffer_.Data[2 * pairIdx + 1];
-                    rows.push_back(RowIndex(id));
-                }
-                TakeColumnFromBatch(
-                    streamBatch,
-                    rows,
-                    ref.SrcColIdx,
-                    ref.Type,
-                    data->Gathered[c]);
-            } else {
-                std::vector<TRowId> ids;
-                ids.reserve(n);
-                for (size_t i = 0; i < n; ++i) {
-                    const int64_t pairIdx = cursor + static_cast<int64_t>(i);
-                    ids.push_back((ref.Side == EJoinSide::Left)
-                        ? PairBuffer_.Data[2 * pairIdx]
-                        : PairBuffer_.Data[2 * pairIdx + 1]);
-                }
-                const TRowStore& store = (ref.Side == EJoinSide::Left)
-                    ? LeftRows_
-                    : RightRows_;
-                TakeColumn(store, ids, ref.SrcColIdx, ref.Type, data->Gathered[c]);
-            }
-            data->Columns[c] = data->Gathered[c].Column;
+    // The stream batch is released right after this call, so every pair that
+    // references it (packed batch index -1) must be materialized now. Pairs
+    // left over from the stored phase materialize fine with any stream pointer.
+    while (MaterializeCursor_ < PairBuffer_.Count) {
+        TRowSet out{};
+        const int64_t produced = Kernels_.Materialize(
+            &PairBuffer_, leftStore, rightStore, streamLeft, streamRight,
+            MaterializeCursor_, kJoinOutputBatchRows, &out);
+        if (produced <= 0) {
+            throw std::runtime_error("join materialize failed");
         }
-
-        ReadyOutput_.push_back(TRowSet{
-            .Columns = data->Columns.data(),
-            .ColumnCount = static_cast<int64_t>(columns.size()),
-            .RowCount = static_cast<int64_t>(n),
-            .Selection = nullptr,
-            .Destroy = DestroyJoinedRowSet,
-            .Private = data,
-            .RefCount = 1,
-        });
-        cursor += static_cast<int64_t>(n);
+        out.Destroy = DestroyKernelOwnedRowSet;
+        ReadyOutput_.push_back(out);
+        MaterializeCursor_ += produced;
     }
     PairBuffer_.Count = 0;
+    MaterializeCursor_ = 0;
 }
 
 EJoinSide TInnerJoinProcessor::ChooseSymmetricPullSide() const {
@@ -486,7 +398,6 @@ bool TInnerJoinProcessor::PullOneInputBatch(
                 JoinOp(EJoinKernelOp::UpdateLeft))) {
             throw std::runtime_error("join kernel update failed");
         }
-        DrainKernelPairs();
         return true;
     };
 
@@ -516,7 +427,6 @@ bool TInnerJoinProcessor::PullOneInputBatch(
                 JoinOp(EJoinKernelOp::UpdateRight))) {
             throw std::runtime_error("join kernel update failed");
         }
-        DrainKernelPairs();
         return true;
     };
 
@@ -641,7 +551,6 @@ void TInnerJoinProcessor::FinalizeOuterJoin() {
             JoinOp(EJoinKernelOp::Finalize))) {
         throw std::runtime_error("join outer finalize failed");
     }
-    DrainKernelPairs();
     OuterFinalized_ = true;
 }
 
@@ -732,14 +641,29 @@ void TInnerJoinProcessor::FinalizeSemiAntiJoin() {
             JoinOp(EJoinKernelOp::Finalize))) {
         throw std::runtime_error("join semi/anti finalize failed");
     }
-    for (int64_t i = 0; i < PairBuffer_.Count; ++i) {
-        Builder_->AddPair(PairBuffer_.Data[2 * i], PairBuffer_.Data[2 * i + 1]);
-    }
-    PairBuffer_.Count = 0;
     SemiAntiFinalized_ = true;
 }
 
 void TInnerJoinProcessor::FinalizeResidualSemiAntiJoin() {
+    // Host-side pb_push mirror (same allocator, same growth); this whole scan
+    // moves into the kernel together with the matched-id tracking.
+    auto push = [&](TRowId leftId, TRowId rightId) {
+        if (PairBuffer_.Count == PairBuffer_.Capacity) {
+            const int64_t newCap =
+                PairBuffer_.Capacity ? PairBuffer_.Capacity * 2 : 1024;
+            auto* grown = static_cast<int64_t*>(
+                qdb_realloc(PairBuffer_.Data, newCap * 16));
+            if (!grown) {
+                throw std::bad_alloc();
+            }
+            PairBuffer_.Data = grown;
+            PairBuffer_.Capacity = newCap;
+        }
+        PairBuffer_.Data[2 * PairBuffer_.Count] = leftId;
+        PairBuffer_.Data[2 * PairBuffer_.Count + 1] = rightId;
+        ++PairBuffer_.Count;
+    };
+
     // Emit each left row once: SEMI keeps matched, ANTI keeps unmatched.
     for (int32_t b = 0; b < LeftRows_.BatchCount(); ++b) {
         const int32_t cnt = LeftRows_.Batch(b).RowCount;
@@ -748,7 +672,7 @@ void TInnerJoinProcessor::FinalizeResidualSemiAntiJoin() {
             const bool matched = MatchedLeftIds_.count(id) > 0;
             if ((JoinType_ == EJoinType::LeftSemi && matched) ||
                 (JoinType_ == EJoinType::LeftAnti && !matched)) {
-                Builder_->AddPair(id, kNullRowId);
+                push(id, kNullRowId);
             }
         }
     }
@@ -760,7 +684,7 @@ EJoinProcessorResult TInnerJoinProcessor::ProcessSemiAnti(
     const TFetch& right,
     TRowSet& output)
 {
-    if (DrainBuilder(*Builder_, output)) {
+    if (DrainMaterialized(output)) {
         return EJoinProcessorResult::OK;
     }
     if (SemiAntiFinalized_) {
@@ -776,7 +700,7 @@ EJoinProcessorResult TInnerJoinProcessor::ProcessSemiAnti(
     } else {
         FinalizeSemiAntiJoin();
     }
-    if (DrainBuilder(*Builder_, output)) {
+    if (DrainMaterialized(output)) {
         return EJoinProcessorResult::OK;
     }
     return EJoinProcessorResult::FINISHED;
@@ -797,14 +721,14 @@ EJoinProcessorResult TInnerJoinProcessor::Process(
     auto finishedResult = [&]() -> EJoinProcessorResult {
         if (IsOuter() && !OuterFinalized_) {
             FinalizeOuterJoin();
-            if (DrainReadyOutput(output) || DrainBuilder(*Builder_, output)) {
+            if (DrainReadyOutput(output) || DrainMaterialized(output)) {
                 return EJoinProcessorResult::OK;
             }
         }
         return EJoinProcessorResult::FINISHED;
     };
 
-    if (DrainReadyOutput(output) || DrainBuilder(*Builder_, output)) {
+    if (DrainReadyOutput(output) || DrainMaterialized(output)) {
         return EJoinProcessorResult::OK;
     }
     if (BothDone_) {
@@ -813,7 +737,7 @@ EJoinProcessorResult TInnerJoinProcessor::Process(
     if (!PullOneInputBatch(left, right)) {
         return EJoinProcessorResult::NEED_DATA;
     }
-    if (DrainReadyOutput(output) || DrainBuilder(*Builder_, output)) {
+    if (DrainReadyOutput(output) || DrainMaterialized(output)) {
         return EJoinProcessorResult::OK;
     }
     return BothDone_ ? finishedResult() : EJoinProcessorResult::NEED_DATA;

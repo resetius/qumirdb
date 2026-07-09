@@ -25,8 +25,8 @@ NQumir::NAst::TExprPtr GenJoinInsertKeyOnlyAst(
 
 // Generates jt_finalize_semi / jt_finalize_anti: iterates own.GroupKeys,
 // probes opp for each key, and pushes matching (SEMI) or non-matching (ANTI)
-// left RowIds to pairs (right_row_id = -1, ignored by TJoinOutputBuilder when
-// output schema contains only left columns).
+// left RowIds to pairs (right_row_id = -1; jt_materialize ignores it because
+// semi/anti output schema contains only left columns).
 NQumir::NAst::TExprPtr GenJoinFinalizeSemiAntiAst(
     const TJoinKeyDescriptor& key,
     bool isAnti,
