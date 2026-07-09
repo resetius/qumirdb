@@ -313,26 +313,16 @@ class WasmRowStore {
   // Frees the column buffers of every batch this store marshalled itself, plus
   // the store array. Build sides linger for the whole query otherwise — the
   // dominant cross-join accumulation in multi-join plans (TPC-H Q18/Q21).
-  // Pinned batches (ownedPtr 0) are owned upstream and left untouched.
+  // Pinned batches (ownedPtr 0) are either source-owned or kernel-owned; the
+  // latter carries a destroy hook on batch.wasm.
   freeMarshalled() {
-    const dv = this.arena.view();
-    const col = this.layout.column;
-    const rs = this.layout.rowset;
     for (let i = 0; i < this.ownedPtrs.length; ++i) {
       const owned = this.ownedPtrs[i];
-      if (!owned) continue;
-      const colsBase = readPointer(dv, owned + rs.columns);
-      const colCount = Number(dv.getBigInt64(owned + rs.columnCount, true));
-      if (colsBase) {
-        for (let c = 0; c < colCount; ++c) {
-          const colPtr = colsBase + c * col.size;
-          this.arena.free(readPointer(dv, colPtr + col.data));
-          this.arena.free(readPointer(dv, colPtr + col.mask));
-          this.arena.free(readPointer(dv, colPtr + col.offsets));
-        }
-        this.arena.free(colsBase);
+      if (!owned) {
+        releaseWasmRowSet({ batch: this.batches[i] });
+        continue;
       }
-      this.arena.free(owned);
+      freeMarshalledRowSet(this.arena, this.layout, owned);
     }
     if (this.storePtr) this.arena.free(this.storePtr);
     this.storePtr = 0;
@@ -428,12 +418,13 @@ function createSharedMemory(layout) {
 // batch.wasm is a pointer into the current query's shared memory. Streaming
 // pointers are valid until the producing RowSetWriter writes again; pinned
 // pointers are fresh arena allocations and can be retained by join state.
-function attachBatchWasm(batch, rowsetPtr, { pinned, selection = null }) {
+function attachBatchWasm(batch, rowsetPtr, { pinned, selection = null, destroy = null }) {
   batch.wasm = {
     rowsetPtr,
     pinned: pinned === true,
     hasSelection: selection !== null,
     selection,
+    destroy,
   };
 }
 
@@ -446,6 +437,59 @@ function wasmRowSetForSelection(batch, selection) {
     return wasm.hasSelection ? null : wasm;
   }
   return wasm.hasSelection && wasm.selection === selection ? wasm : null;
+}
+
+function shapeColumns(output) {
+  return (output || []).map(column => ({
+    name: column.name,
+    type: column.type,
+  }));
+}
+
+function makeWasmOwnedBatch(state, rowsetPtr, output) {
+  const rowCount = Number(
+    state.arena.view().getBigInt64(rowsetPtr + state.layout.rowset.rowCount, true));
+  const batch = {
+    rowCount,
+    columns: shapeColumns(output),
+  };
+  attachBatchWasm(batch, rowsetPtr, {
+    pinned: true,
+    selection: null,
+    destroy: () => destroyKernelOwnedRowSet(state, rowsetPtr),
+  });
+  return batch;
+}
+
+function releaseWasmRowSet(rowSet) {
+  const wasm = rowSet?.batch?.wasm;
+  if (typeof wasm?.destroy === 'function') {
+    const destroy = wasm.destroy;
+    wasm.destroy = null;
+    destroy();
+  }
+}
+
+function freeMarshalledRowSet(arena, layout, rowsetPtr) {
+  if (!rowsetPtr) {
+    return;
+  }
+  const dv = arena.view();
+  const col = layout.column;
+  const rs = layout.rowset;
+  const colsBase = readPointer(dv, rowsetPtr + rs.columns);
+  const colCount = Number(dv.getBigInt64(rowsetPtr + rs.columnCount, true));
+  if (colsBase) {
+    for (let c = 0; c < colCount; ++c) {
+      const colPtr = colsBase + c * col.size;
+      arena.free(readPointer(dv, colPtr + col.data));
+      arena.free(readPointer(dv, colPtr + col.mask));
+      arena.free(readPointer(dv, colPtr + col.offsets));
+    }
+    arena.free(colsBase);
+  }
+  arena.free(readPointer(dv, rowsetPtr + rs.selection));
+  arena.free(rowsetPtr);
 }
 
 function writePointer(dv, offset, address) {
@@ -969,13 +1013,12 @@ function destroyKernelOwnedRowSet(state, rowsetPtr) {
   free(rowsetPtr);
 }
 
-// Materializes one output batch from a join/cross pair buffer, copies it into
-// JS arrays, then frees every wasm buffer the kernel allocated for it (mirrors
-// native DestroyKernelOwnedRowSet). Without this the per-drain output would
-// accumulate in the shared memory for the whole query — unbounded for joins
-// that emit large intermediates (TPC-H Q18/Q21). The returned batch is pure JS
-// (no pinned wasm pointer), so downstream re-marshals from its columns.
-function drainMaterializedBatch(state, maxRows, streamLeftPtr, streamRightPtr) {
+// Materializes one output batch from a join/cross pair buffer. When downstream
+// can consume wasm rowsets, keep the kernel-owned TRowSet alive and return only
+// a handle. Compatibility callers still get JS arrays and immediately free the
+// wasm buffers.
+function drainMaterializedBatch(
+    state, maxRows, streamLeftPtr, streamRightPtr, asWasm = false) {
   const { layout, arena } = state;
   const rowsetPtr = arena.alloc(layout.rowset.size, 8);
   const leftPtr = BigInt(state.leftStore.dataPtr());
@@ -995,6 +1038,9 @@ function drainMaterializedBatch(state, maxRows, streamLeftPtr, streamRightPtr) {
     throw new Error('join materialize failed');
   }
   state.materializeCursor += produced;
+  if (asWasm) {
+    return makeWasmOwnedBatch(state, rowsetPtr, state.stage.output || []);
+  }
   const batch = materializeWasmRowSet(
     arena, layout, state.stage.output || [], rowsetPtr);
   destroyKernelOwnedRowSet(state, rowsetPtr);
@@ -1055,7 +1101,7 @@ function updateAggregateState(state, rowSet) {
   state.dispatch(BigInt(state.ht), BigInt(rowsetPtr), 0n, 1n);
 }
 
-function finishAggregateState(state) {
+function finishAggregateState(state, asWasm = false) {
   if (state.finished) {
     throw new Error('aggregate state is already finalized');
   }
@@ -1076,7 +1122,13 @@ function finishAggregateState(state) {
   if (finalized !== expectedSize) {
     throw new Error('aggregate finalize returned an unexpected row count');
   }
-  return materializeWasmRowSet(arena, layout, output, rowsetPtr);
+  if (asWasm) {
+    return makeWasmOwnedBatch(state, rowsetPtr, output);
+  }
+  const batch = materializeWasmRowSet(arena, layout, output, rowsetPtr);
+  destroyKernelOwnedRowSet(state, rowsetPtr);
+  delete batch.wasm;
+  return batch;
 }
 
 const JoinOp = Object.freeze({
@@ -1159,36 +1211,43 @@ function isInnerJoin(stage) {
 // no insert) and is never stored. Pairs carry right batch index -1 and are
 // materialized immediately against the live batch, then the pair buffer is
 // reset. Bounds memory to the build (left) side alone. Returns the output batches.
-function streamJoinRightBatch(state, rowSet) {
+function streamJoinRightBatch(state, rowSet, asWasm = false) {
   const { arena, layout } = state;
   const { batch, selection } = rowSet;
-  const { rowsetPtr } = state.streamWriter.write(
-    batch.columns, batch.rowCount, false, selection);
-  const ok = state.dispatch(
-    BigInt(state.leftTable),
-    BigInt(state.rightTable),
-    BigInt(rowsetPtr),
-    -1n,
-    BigInt(state.pairBuffer),
-    BigInt(state.leftStore.dataPtr()),
-    BigInt(state.rightStore.dataPtr()),
-    0n,
-    JoinOp.STREAM_RIGHT);
-  if (!ok) {
-    throw new Error('join stream failed');
+  const wasm = wasmRowSetForSelection(batch, selection);
+  const rowsetPtr = wasm
+    ? wasm.rowsetPtr
+    : state.streamWriter.write(
+        batch.columns, batch.rowCount, false, selection).rowsetPtr;
+  try {
+    const ok = state.dispatch(
+      BigInt(state.leftTable),
+      BigInt(state.rightTable),
+      BigInt(rowsetPtr),
+      -1n,
+      BigInt(state.pairBuffer),
+      BigInt(state.leftStore.dataPtr()),
+      BigInt(state.rightStore.dataPtr()),
+      0n,
+      JoinOp.STREAM_RIGHT);
+    if (!ok) {
+      throw new Error('join stream failed');
+    }
+    const pairLayout = layout.pairBuffer;
+    const count = Number(
+      arena.view().getBigInt64(state.pairBuffer + pairLayout.count, true));
+    const results = [];
+    while (state.materializeCursor < count) {
+      // stream_right = the live right rowset; stream_left unused (left ids are stored).
+      results.push(drainMaterializedBatch(
+        state, 1024, state.leftStore.dataPtr(), rowsetPtr, asWasm));
+    }
+    arena.view().setBigInt64(state.pairBuffer + pairLayout.count, 0n, true);
+    state.materializeCursor = 0;
+    return results;
+  } finally {
+    releaseWasmRowSet(rowSet);
   }
-  const pairLayout = layout.pairBuffer;
-  const count = Number(
-    arena.view().getBigInt64(state.pairBuffer + pairLayout.count, true));
-  const results = [];
-  while (state.materializeCursor < count) {
-    // stream_right = the live right rowset; stream_left unused (left ids are stored).
-    results.push(drainMaterializedBatch(
-      state, 1024, state.leftStore.dataPtr(), rowsetPtr));
-  }
-  arena.view().setBigInt64(state.pairBuffer + pairLayout.count, 0n, true);
-  state.materializeCursor = 0;
-  return results;
 }
 
 function browserRuntimeSupportsJoin(stage) {
@@ -1201,42 +1260,55 @@ function updateJoinState(state, side, rowSet) {
   const { arena, layout } = state;
   const { batch, selection } = rowSet;
   const wasm = wasmRowSetForSelection(batch, selection);
-  const rowsetPtr = wasm?.pinned
-    ? wasm.rowsetPtr
+  const marshalled = wasm?.pinned
+    ? null
     : marshalRowSet(
-        arena, layout, batch.columns, batch.rowCount, false, selection).rowsetPtr;
+        arena, layout, batch.columns, batch.rowCount, false, selection);
+  const rowsetPtr = wasm?.pinned ? wasm.rowsetPtr : marshalled.rowsetPtr;
   const isLeft = side === 0;
   const semiAnti = isLeftSemiAntiJoin(state.stage);
   let batchIdx = -1;
   let batchPtr = rowsetPtr;
+  let stored = false;
   if (isLeft || !semiAnti) {
     const store = isLeft ? state.leftStore : state.rightStore;
     batchIdx = store.push(batch, rowsetPtr, wasm?.pinned ? 0 : rowsetPtr);
     batchPtr = store.dataPtr() + batchIdx * layout.rowset.size;
+    stored = true;
   }
-  const ok = isLeft
-    ? state.dispatch(
-        BigInt(state.leftTable),
-        BigInt(state.rightTable),
-        BigInt(batchPtr),
-        BigInt(batchIdx),
-        BigInt(state.pairBuffer),
-        BigInt(state.leftStore.dataPtr()),
-        BigInt(state.rightStore.dataPtr()),
-        0n,
-        JoinOp.UPDATE_LEFT)
-    : state.dispatch(
-        BigInt(state.leftTable),
-        BigInt(state.rightTable),
-        BigInt(batchPtr),
-        BigInt(batchIdx),
-        BigInt(state.pairBuffer),
-        BigInt(state.leftStore.dataPtr()),
-        BigInt(state.rightStore.dataPtr()),
-        0n,
-        JoinOp.UPDATE_RIGHT);
-  if (!ok) {
-    throw new Error('join kernel update failed');
+  try {
+    const ok = isLeft
+      ? state.dispatch(
+          BigInt(state.leftTable),
+          BigInt(state.rightTable),
+          BigInt(batchPtr),
+          BigInt(batchIdx),
+          BigInt(state.pairBuffer),
+          BigInt(state.leftStore.dataPtr()),
+          BigInt(state.rightStore.dataPtr()),
+          0n,
+          JoinOp.UPDATE_LEFT)
+      : state.dispatch(
+          BigInt(state.leftTable),
+          BigInt(state.rightTable),
+          BigInt(batchPtr),
+          BigInt(batchIdx),
+          BigInt(state.pairBuffer),
+          BigInt(state.leftStore.dataPtr()),
+          BigInt(state.rightStore.dataPtr()),
+          0n,
+          JoinOp.UPDATE_RIGHT);
+    if (!ok) {
+      throw new Error('join kernel update failed');
+    }
+  } finally {
+    if (!stored) {
+      if (marshalled) {
+        freeMarshalledRowSet(arena, layout, marshalled.rowsetPtr);
+      } else {
+        releaseWasmRowSet(rowSet);
+      }
+    }
   }
 }
 
@@ -1294,14 +1366,15 @@ function finalizeOuterJoinState(state) {
   state.outerFinalized = true;
 }
 
-function drainJoinPairs(state, maxRows = 1024) {
+function drainJoinPairs(state, maxRows = 1024, asWasm = false) {
   const pairLayout = state.layout.pairBuffer;
   const dv = state.arena.view();
   const count = Number(dv.getBigInt64(state.pairBuffer + pairLayout.count, true));
   if (state.materializeCursor >= count) {
     return [];
   }
-  const batch = drainMaterializedBatch(state, maxRows);
+  const batch = drainMaterializedBatch(
+    state, maxRows, undefined, undefined, asWasm);
   if (state.materializeCursor >= count) {
     state.arena.view().setBigInt64(
       state.pairBuffer + pairLayout.count, 0n, true);
@@ -1358,28 +1431,31 @@ function createCrossJoinState(kernel, layout, stage) {
   };
 }
 
-function stableRowSetPtr(state, rowSet) {
+function stableRowSetForStore(state, rowSet) {
   const { arena, layout } = state;
   const { batch, selection } = rowSet;
   const wasm = wasmRowSetForSelection(batch, selection);
-  return wasm?.pinned
-    ? wasm.rowsetPtr
-    : marshalRowSet(
-        arena, layout, batch.columns, batch.rowCount, false, selection).rowsetPtr;
+  if (wasm?.pinned) {
+    return { rowsetPtr: wasm.rowsetPtr, ownedPtr: 0 };
+  }
+  const marshalled = marshalRowSet(
+    arena, layout, batch.columns, batch.rowCount, false, selection);
+  return { rowsetPtr: marshalled.rowsetPtr, ownedPtr: marshalled.rowsetPtr };
 }
 
 function updateCrossRightState(state, rowSet) {
-  const rowsetPtr = stableRowSetPtr(state, rowSet);
-  state.rightStore.push(rowSet.batch, rowsetPtr);
+  const { rowsetPtr, ownedPtr } = stableRowSetForStore(state, rowSet);
+  state.rightStore.push(rowSet.batch, rowsetPtr, ownedPtr);
   state.rightRows += rowSet.batch.rowCount;
 }
 
 function updateCrossLeftState(state, rowSet) {
   if (state.rightRows === 0) {
+    releaseWasmRowSet(rowSet);
     return;
   }
-  const rowsetPtr = stableRowSetPtr(state, rowSet);
-  const batchIdx = state.leftStore.push(rowSet.batch, rowsetPtr);
+  const { rowsetPtr, ownedPtr } = stableRowSetForStore(state, rowSet);
+  const batchIdx = state.leftStore.push(rowSet.batch, rowsetPtr, ownedPtr);
   const batchPtr = state.leftStore.dataPtr() + batchIdx * state.layout.rowset.size;
   const ok = state.dispatch(
     BigInt(batchPtr),
@@ -1393,14 +1469,15 @@ function updateCrossLeftState(state, rowSet) {
   }
 }
 
-function drainCrossJoinPairs(state, maxRows = 1024) {
+function drainCrossJoinPairs(state, maxRows = 1024, asWasm = false) {
   const pairLayout = state.layout.pairBuffer;
   const dv = state.arena.view();
   const count = Number(dv.getBigInt64(state.pairBuffer + pairLayout.count, true));
   if (state.materializeCursor >= count) {
     return [];
   }
-  const batch = drainMaterializedBatch(state, maxRows);
+  const batch = drainMaterializedBatch(
+    state, maxRows, undefined, undefined, asWasm);
   if (state.materializeCursor >= count) {
     state.arena.view().setBigInt64(
       state.pairBuffer + pairLayout.count, 0n, true);
@@ -1421,6 +1498,8 @@ function finishCrossJoinState(state) {
     0n,
     BigInt(state.pairBuffer),
     CrossJoinOp.DESTROY);
+  state.leftStore.freeMarshalled();
+  state.rightStore.freeMarshalled();
 }
 
 function outputShapeFromRowSets(rowSets) {
@@ -1799,6 +1878,21 @@ function assertStreamingWasmEdge(edge) {
   }
 }
 
+function canConsumeWasmOutput(task) {
+  if (!task) {
+    return false;
+  }
+  if (task instanceof SinkTask) {
+    return true;
+  }
+  const kind = task.stage?.kind;
+  return kind === 'aggregate' || kind === 'join' || kind === 'cross-join';
+}
+
+function downstreamConsumesWasm(node) {
+  return canConsumeWasmOutput(node?.outbound?.[0]?.dst?.task);
+}
+
 class SourceTask {
   constructor(stage, readSourceBatches, onProgress) {
     this.stage = stage;
@@ -1968,7 +2062,8 @@ class AggregateTask {
         }
         this.state = createAggregateState(this.kernel, this.layout, this.stage);
       }
-      this.pending = finishAggregateState(this.state);
+      this.pending = finishAggregateState(
+        this.state, downstreamConsumesWasm(this.node));
       return this.execute();
     }
 
@@ -1980,8 +2075,12 @@ class AggregateTask {
     if (fetched.rowSet.batch.wasm && !fetched.rowSet.batch.wasm.pinned) {
       assertStreamingWasmEdge(this.node.inbound[0]);
     }
-    updateAggregateState(this.state, fetched.rowSet);
-    this.rows += fetched.rowSet.batch.rowCount;
+    try {
+      updateAggregateState(this.state, fetched.rowSet);
+      this.rows += fetched.rowSet.batch.rowCount;
+    } finally {
+      releaseWasmRowSet(fetched.rowSet);
+    }
     return TaskResult.OK;
   }
 }
@@ -2003,6 +2102,7 @@ class JoinTask {
   async execute() {
     if (this.done) return TaskResult.FINISHED;
     const output = this.node.outbound[0].connection;
+    const asWasm = downstreamConsumesWasm(this.node);
 
     if (this.ready.length > 0) {
       if (!output.canPush()) return TaskResult.BLOCKED_OUTPUT;
@@ -2017,7 +2117,7 @@ class JoinTask {
       this.state = createJoinState(this.kernel, this.layout, this.stage);
     }
 
-    const drained = drainJoinPairs(this.state);
+    const drained = drainJoinPairs(this.state, 1024, asWasm);
     if (drained.length > 0) {
       this.ready.push(...drained);
       return this.execute();
@@ -2025,7 +2125,7 @@ class JoinTask {
 
     const progressed = this.pullOneInputBatch();
     if (progressed) {
-      this.ready.push(...drainJoinPairs(this.state));
+      this.ready.push(...drainJoinPairs(this.state, 1024, asWasm));
       if (this.ready.length > 0) {
         return this.execute();
       }
@@ -2035,14 +2135,14 @@ class JoinTask {
     if (this.leftDone && this.rightDone) {
       if (isLeftSemiAntiJoin(this.stage) && !this.state.semiAntiFinalized) {
         finalizeSemiAntiJoinState(this.state);
-        this.ready.push(...drainJoinPairs(this.state));
+        this.ready.push(...drainJoinPairs(this.state, 1024, asWasm));
         if (this.ready.length > 0) {
           return this.execute();
         }
       }
       if (isOuterJoin(this.stage) && !this.state.outerFinalized) {
         finalizeOuterJoinState(this.state);
-        this.ready.push(...drainJoinPairs(this.state));
+        this.ready.push(...drainJoinPairs(this.state, 1024, asWasm));
         if (this.ready.length > 0) {
           return this.execute();
         }
@@ -2060,7 +2160,8 @@ class JoinTask {
       return this.pullOneSemiAntiInputBatch();
     }
     if (isInnerJoin(this.stage)) {
-      return this.pullOneInnerStreamingBatch();
+      return this.pullOneInnerStreamingBatch(
+        downstreamConsumesWasm(this.node));
     }
     // Outer joins keep both sides buffered: the finalize scan needs the build
     // table plus the stored rows to emit unmatched padding.
@@ -2097,7 +2198,7 @@ class JoinTask {
   // STREAM the right (probe) side — never storing it — so peak memory is bounded
   // by the build side rather than both inputs. The probe emits pairs that are
   // materialized against the live right batch inside streamJoinRightBatch.
-  pullOneInnerStreamingBatch() {
+  pullOneInnerStreamingBatch(asWasm) {
     if (!this.leftDone) {
       const fetched = this.node.inbound[0].connection.fetch();
       if (fetched.result === FetchResult.OK) {
@@ -2115,7 +2216,8 @@ class JoinTask {
     if (!this.rightDone) {
       const fetched = this.node.inbound[1].connection.fetch();
       if (fetched.result === FetchResult.OK) {
-        this.ready.push(...streamJoinRightBatch(this.state, fetched.rowSet));
+        this.ready.push(...streamJoinRightBatch(
+          this.state, fetched.rowSet, asWasm));
         this.rows += fetched.rowSet.batch.rowCount;
         return true;
       }
@@ -2180,6 +2282,7 @@ class CrossJoinTask {
   async execute() {
     if (this.done) return TaskResult.FINISHED;
     const output = this.node.outbound[0].connection;
+    const asWasm = downstreamConsumesWasm(this.node);
 
     if (this.ready.length > 0) {
       if (!output.canPush()) return TaskResult.BLOCKED_OUTPUT;
@@ -2199,7 +2302,7 @@ class CrossJoinTask {
       this.state = createCrossJoinState(this.kernel, this.layout, this.stage);
     }
 
-    const drained = drainCrossJoinPairs(this.state);
+    const drained = drainCrossJoinPairs(this.state, 1024, asWasm);
     if (drained.length > 0) {
       this.ready.push(...drained);
       return this.execute();
@@ -2223,7 +2326,7 @@ class CrossJoinTask {
       if (fetched.result === FetchResult.NO_DATA) return TaskResult.NEED_DATA;
       if (fetched.result === FetchResult.OK) {
         updateCrossLeftState(this.state, fetched.rowSet);
-        this.ready.push(...drainCrossJoinPairs(this.state));
+        this.ready.push(...drainCrossJoinPairs(this.state, 1024, asWasm));
         if (this.ready.length > 0) {
           return this.execute();
         }
@@ -2407,8 +2510,10 @@ class SortTask {
 }
 
 class SinkTask {
-  constructor(limit) {
+  constructor(limit, layout, shared) {
     this.limit = limit;
+    this.layout = layout;
+    this.shared = shared;
     this.rowSets = [];
     this.done = false;
     this.rows = 0;
@@ -2429,7 +2534,8 @@ class SinkTask {
   }
 
   result() {
-    return materializeRowSets(this.rowSets, this.limit);
+    return materializeRowSets(
+      this.rowSets, this.limit, this.layout, this.shared.arena);
   }
 }
 
@@ -2497,7 +2603,7 @@ function buildScheduledGraph(exec, readSourceBatches, options, layout, shared) {
   const limit = exec.limit
     ? { limit: Number(exec.limit.limit), offset: Number(exec.limit.offset || 0) }
     : null;
-  const sink = makeNode(new SinkTask(limit), 'materialize');
+  const sink = makeNode(new SinkTask(limit, layout, shared), 'materialize');
   nodes.push(sink);
   connect(root, sink, createConnection(ConnectionKind.OneToOne));
   const roots = nodes.filter(node => node.inbound.length === 0);
@@ -2539,7 +2645,29 @@ export async function executeBrowserPipelineScheduled(exec, readSourceBatches, o
   return result;
 }
 
-function materializeRowSets(rowSets, limit) {
+function batchHasJsValues(batch) {
+  return batch.columns.every(column =>
+    Object.prototype.hasOwnProperty.call(column, 'values'));
+}
+
+function finalMaterializeBatch(rowSet, layout, arena) {
+  const batch = rowSet.batch;
+  if (batchHasJsValues(batch)) {
+    return batch;
+  }
+  if (!batch.wasm) {
+    throw new Error('rowset has no JS values and no wasm handle');
+  }
+  return materializeWasmRowSet(arena, layout, batch.columns, batch.wasm.rowsetPtr);
+}
+
+function releaseWasmRowSets(rowSets, start) {
+  for (let i = start; i < rowSets.length; ++i) {
+    releaseWasmRowSet(rowSets[i]);
+  }
+}
+
+function materializeRowSets(rowSets, limit, layout, arena) {
   const first = rowSets.find(rowSet => rowSet.batch.columns.length > 0);
   const columns = first ? first.batch.columns.map(col => col.name) : [];
   const rows = [];
@@ -2547,18 +2675,35 @@ function materializeRowSets(rowSets, limit) {
   const max = limit ? limit.limit : Infinity;
   let skipped = 0;
 
-  for (const rowSet of rowSets) {
-    const { batch, selection } = rowSet;
-    for (let i = 0; i < batch.rowCount; ++i) {
-      if (selection && !selection[i]) continue;
-      if (skipped < offset) {
-        ++skipped;
-        continue;
+  if (max <= 0) {
+    releaseWasmRowSets(rowSets, 0);
+    return { columns, rows };
+  }
+
+  for (let setIndex = 0; setIndex < rowSets.length; ++setIndex) {
+    const rowSet = rowSets[setIndex];
+    const { selection } = rowSet;
+    let reachedLimit = false;
+    try {
+      const batch = finalMaterializeBatch(rowSet, layout, arena);
+      for (let i = 0; i < batch.rowCount; ++i) {
+        if (selection && !selection[i]) continue;
+        if (skipped < offset) {
+          ++skipped;
+          continue;
+        }
+        if (rows.length >= max) {
+          reachedLimit = true;
+          break;
+        }
+        rows.push(batch.columns.map(col => formatValue(col.values[i])));
       }
-      if (rows.length >= max) {
-        return { columns, rows };
-      }
-      rows.push(batch.columns.map(col => formatValue(col.values[i])));
+    } finally {
+      releaseWasmRowSet(rowSet);
+    }
+    if (reachedLimit) {
+      releaseWasmRowSets(rowSets, setIndex + 1);
+      return { columns, rows };
     }
   }
   return { columns, rows };
