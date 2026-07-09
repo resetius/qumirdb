@@ -48,50 +48,94 @@ std::string ReadSortKernel(const std::string& name) {
     return source.str();
 }
 
+namespace {
+
+std::optional<NQumir::TError> AddParsedKernel(
+    std::vector<NQumir::NAst::TExprPtr>& library,
+    const std::string& source,
+    const std::unordered_set<std::string>& exclude = {})
+{
+    auto parsed = ParseFunctionLibrary(source, exclude);
+    if (!parsed) {
+        return parsed.error();
+    }
+    for (auto& fn : *parsed) {
+        library.push_back(std::move(fn));
+    }
+    return std::nullopt;
+}
+
+// Shared prefix of both join libraries: generic Robin Hood + HashTable
+// lifecycle and the join table / pair buffer helpers.
+std::expected<std::vector<NQumir::NAst::TExprPtr>, NQumir::TError>
+BuildJoinLibraryBase() {
+    std::vector<NQumir::NAst::TExprPtr> library;
+    if (auto e = AddParsedKernel(library, ReadAggregationKernel("key_ops_i64.oz"))) {
+        return std::unexpected(*e);
+    }
+    if (auto e = AddParsedKernel(library,
+            ReadAggregationKernel("robin_hood_rehash_generic.oz"))) {
+        return std::unexpected(*e);
+    }
+    if (auto e = AddParsedKernel(library,
+            ReadAggregationKernel("aggregation_hashtable_generic.oz"),
+            {"aht_update"})) {
+        return std::unexpected(*e);
+    }
+    if (auto e = AddParsedKernel(library, ReadJoinKernel("join_table.oz"))) {
+        return std::unexpected(*e);
+    }
+    return library;
+}
+
+} // namespace
+
 std::expected<std::vector<NQumir::NAst::TExprPtr>, NQumir::TError>
 BuildJoinKernelLibrary() {
+    auto library = BuildJoinLibraryBase();
+    if (!library) {
+        return library;
+    }
+    // Default always-true residual filter — must precede join_update.oz and
+    // join_semi_anti.oz, whose probe helpers call jt_residual_filter.
+    // CompileJoin replaces this with a generated predicate when the query has
+    // a residual filter.
+    if (auto e = AddParsedKernel(*library, ReadJoinKernel("join_residual_default.oz"))) {
+        return std::unexpected(*e);
+    }
+    if (auto e = AddParsedKernel(*library, ReadJoinKernel("join_update.oz"))) {
+        return std::unexpected(*e);
+    }
+    if (auto e = AddParsedKernel(*library, ReadJoinKernel("join_semi_anti.oz"))) {
+        return std::unexpected(*e);
+    }
+    return library;
+}
+
+std::expected<std::vector<NQumir::NAst::TExprPtr>, NQumir::TError>
+BuildCrossJoinKernelLibrary() {
+    auto library = BuildJoinLibraryBase();
+    if (!library) {
+        return library;
+    }
+    if (auto e = AddParsedKernel(*library, ReadJoinKernel("join_cross.oz"))) {
+        return std::unexpected(*e);
+    }
+    return library;
+}
+
+std::expected<std::vector<NQumir::NAst::TExprPtr>, NQumir::TError>
+BuildJoinDualKeyLibrary() {
     std::vector<NQumir::NAst::TExprPtr> library;
-    auto add = [&](const std::string& source,
-        const std::unordered_set<std::string>& exclude = {})
-        -> std::optional<NQumir::TError>
-    {
-        auto parsed = ParseFunctionLibrary(source, exclude);
+    for (const char* name : {"owned_blocks.oz", "robin_hood_dual_key.oz"}) {
+        auto parsed = ParseFunctionLibrary(ReadAggregationKernel(name));
         if (!parsed) {
-            return parsed.error();
+            return std::unexpected(NQumir::TError(
+                std::string(name) + ": " + parsed.error().ToString()));
         }
         for (auto& fn : *parsed) {
             library.push_back(std::move(fn));
         }
-        return std::nullopt;
-    };
-
-    if (auto e = add(ReadAggregationKernel("key_ops_i64.oz"))) {
-        return std::unexpected(*e);
-    }
-    if (auto e = add(ReadAggregationKernel("robin_hood_rehash_generic.oz"))) {
-        return std::unexpected(*e);
-    }
-    if (auto e = add(ReadAggregationKernel("aggregation_hashtable_generic.oz"),
-            {"aht_update"})) {
-        return std::unexpected(*e);
-    }
-    if (auto e = add(ReadJoinKernel("join_table.oz"))) {
-        return std::unexpected(*e);
-    }
-    // Default always-true residual filter — must precede join_update.oz, whose
-    // jt_emit_and_insert calls jt_residual_filter. CompileJoin replaces this with
-    // a generated predicate when the query has a residual filter.
-    if (auto e = add(ReadJoinKernel("join_residual_default.oz"))) {
-        return std::unexpected(*e);
-    }
-    if (auto e = add(ReadJoinKernel("join_update.oz"))) {
-        return std::unexpected(*e);
-    }
-    if (auto e = add(ReadJoinKernel("join_semi_anti.oz"))) {
-        return std::unexpected(*e);
-    }
-    if (auto e = add(ReadJoinKernel("join_cross.oz"))) {
-        return std::unexpected(*e);
     }
     return library;
 }

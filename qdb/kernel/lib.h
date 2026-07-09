@@ -29,12 +29,30 @@ std::string ReadJoinKernel(const std::string& name);
 // to this source file's location.
 std::string ReadSortKernel(const std::string& name);
 
-// Assembles the join kernel library: generic Robin Hood helpers, the reused
-// aggregation HashTable lifecycle, pair buffers, and join update helpers.
-// Per-query key readers and the external jt_dispatch entry are generated in
-// join_gen.cpp and appended by TKernelCompiler::CompileJoin.
+// Assembles the keyed-join kernel library: generic Robin Hood helpers, the
+// reused aggregation HashTable lifecycle, pair buffers, the dual-key-generic
+// join update/probe helpers (join_update.oz templates over LookupKey /
+// StoredKey), and residual semi/anti helpers. Function-name resolution is
+// eager, so programs using this library must also include the per-key
+// overloads and BuildJoinDualKeyLibrary. Per-query key readers and the
+// external jt_dispatch entry are generated in join_gen.cpp and appended by
+// TKernelCompiler::CompileJoin.
 std::expected<std::vector<NQumir::NAst::TExprPtr>, NQumir::TError>
 BuildJoinKernelLibrary();
+
+// Cross join library: the shared HashTable/pair-buffer base plus
+// join_cross.oz. Deliberately excludes join_update.oz / join_semi_anti.oz —
+// cross join has no keys, and those helpers' bodies name the dual-key and
+// per-key-overload functions that a cross program does not define.
+std::expected<std::vector<NQumir::NAst::TExprPtr>, NQumir::TError>
+BuildCrossJoinKernelLibrary();
+
+// The dual lookup/stored-key HashTable helpers (owned_blocks.oz,
+// robin_hood_dual_key.oz) that join_update.oz calls. Every program that
+// includes BuildJoinKernelLibrary must also include these (after the per-key
+// rh_hash / rh_key_equal / key_owned_bytes / key_clone_owned overloads).
+std::expected<std::vector<NQumir::NAst::TExprPtr>, NQumir::TError>
+BuildJoinDualKeyLibrary();
 
 // Parses `source` as a top-level (block (fun ...) ...) and returns its
 // FunDecl statements, in order, skipping any whose Name is in `exclude`.
