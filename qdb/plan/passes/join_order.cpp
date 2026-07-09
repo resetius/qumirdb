@@ -42,6 +42,25 @@ void CollectEquiEdges(const TExprPtr& predicate, std::vector<TEdge>& out) {
     }
 }
 
+// Does this join input carry a filter (a selective dimension), rather than being
+// a raw fact scan? Used by the reorder seed heuristic (put filtered relations
+// first) and the semi-pushdown guard (keep selective joins in the build). Stops
+// at subquery boundaries (aggregate/project) so an inner correlated filter does
+// not count.
+bool ContainsFilter(const TOperatorPtr& node) {
+    if (!node) {
+        return false;
+    }
+    if (TMaybeOp<TFilterOperator>(node)) {
+        return true;
+    }
+    if (auto join = TMaybeOp<TJoinOperator>(node)) {
+        return ContainsFilter(join.Cast()->Left())
+            || ContainsFilter(join.Cast()->Right());
+    }
+    return false;
+}
+
 // A reorderable join is an inner join we are free to reassociate: no extracted
 // keys yet and no residual of its own (the comma-join shape the builder emits).
 bool IsReorderableJoin(const TOperatorPtr& node) {
@@ -258,6 +277,13 @@ TOperatorPtr SinkSemi(std::shared_ptr<TJoinOperator> semi) {
     const bool toRight = !toLeft && AllIn(needBuild, rightCols);
     if (!toLeft && !toRight) {
         return semi; // build dependencies span both sides — cannot push
+    }
+
+    // Don't push past a selective (filtered) side: keeping that join in the
+    // build shrinks the blocking semi/anti far more than the push would.
+    const auto& other = toLeft ? inner->Right() : inner->Left();
+    if (ContainsFilter(other)) {
+        return semi;
     }
 
     auto& target = toLeft ? inner->MutableLeft() : inner->MutableRight();
