@@ -276,7 +276,10 @@ TSortRuntimeProcess BuildSortRuntimeProcess(
     PrintKernelSpec(options.Diagnostics, spec);
     auto sortInputs = BuildSortKernelInputs(spec);
     TSortRadixKernel radixKernel;
-    if (sortInputs.AllKeysRadixSortable && !sortInputs.RadixKeys.empty()) {
+    if (!sortInputs.AllKeysRadixSortable || sortInputs.RadixKeys.empty()) {
+        throw std::runtime_error("sort kernel is unavailable for requested keys");
+    }
+    {
         auto* sink = options.Sink;
         const size_t sinkBefore = sink ? sink->size() : 0;
         // The nullable variant is only reachable when a key column can carry a
@@ -293,9 +296,11 @@ TSortRuntimeProcess BuildSortRuntimeProcess(
         TKernelCompiler compiler(std::move(radixOptions));
         radixKernel = {
             .Enabled = true,
-            .Dispatch = compiler.CompileRadixSortComposite(sortInputs.RadixKeys),
+            .Dispatch = anyNullableKey
+                ? TKernelCompiler::TSortRadixCompositeDispatch{}
+                : compiler.CompileRadixSortComposite(sortInputs.RadixKeys, &inputType),
             .NullableDispatch = anyNullableKey
-                ? compiler.CompileRadixSortCompositeNullable(sortInputs.RadixKeys)
+                ? compiler.CompileRadixSortCompositeNullable(sortInputs.RadixKeys, &inputType)
                 : TKernelCompiler::TSortRadixCompositeNullableDispatch{},
         };
         if (kernelName == "top-sort") {
@@ -305,7 +310,7 @@ TSortRuntimeProcess BuildSortRuntimeProcess(
                 }
             }
             TKernelCompiler topSortCompiler(std::move(options));
-            (void)topSortCompiler.CompileTopSort(sortInputs.RadixKeys);
+            (void)topSortCompiler.CompileTopSort(sortInputs.RadixKeys, &inputType);
         }
         if (sink) {
             // Resolved key metadata for the exec exporter, on both emitted
