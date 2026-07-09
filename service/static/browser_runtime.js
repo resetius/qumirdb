@@ -289,14 +289,18 @@ class WasmRowStore {
     this.arena = arena;
     this.layout = layout;
     this.batches = [];
+    this.ownedPtrs = []; // per batch: our marshalled rowset ptr to free, or 0 (pinned)
     this.storePtr = 0;
     this.capacity = 0;
   }
 
-  push(batch, rowsetPtr) {
+  // `ownedPtr` is the marshalRowSet rowset this store may free at teardown; pass
+  // 0 when `rowsetPtr` is a pinned buffer owned by an upstream operator.
+  push(batch, rowsetPtr, ownedPtr = 0) {
     this.ensureCapacity(this.batches.length + 1);
     const idx = this.batches.length;
     this.batches.push(batch);
+    this.ownedPtrs.push(ownedPtr);
     const size = this.layout.rowset.size;
     const memBytes = this.arena.bytes();
     memBytes.copyWithin(
@@ -304,6 +308,37 @@ class WasmRowStore {
       rowsetPtr,
       rowsetPtr + size);
     return idx;
+  }
+
+  // Frees the column buffers of every batch this store marshalled itself, plus
+  // the store array. Build sides linger for the whole query otherwise — the
+  // dominant cross-join accumulation in multi-join plans (TPC-H Q18/Q21).
+  // Pinned batches (ownedPtr 0) are owned upstream and left untouched.
+  freeMarshalled() {
+    const dv = this.arena.view();
+    const col = this.layout.column;
+    const rs = this.layout.rowset;
+    for (let i = 0; i < this.ownedPtrs.length; ++i) {
+      const owned = this.ownedPtrs[i];
+      if (!owned) continue;
+      const colsBase = readPointer(dv, owned + rs.columns);
+      const colCount = Number(dv.getBigInt64(owned + rs.columnCount, true));
+      if (colsBase) {
+        for (let c = 0; c < colCount; ++c) {
+          const colPtr = colsBase + c * col.size;
+          this.arena.free(readPointer(dv, colPtr + col.data));
+          this.arena.free(readPointer(dv, colPtr + col.mask));
+          this.arena.free(readPointer(dv, colPtr + col.offsets));
+        }
+        this.arena.free(colsBase);
+      }
+      this.arena.free(owned);
+    }
+    if (this.storePtr) this.arena.free(this.storePtr);
+    this.storePtr = 0;
+    this.capacity = 0;
+    this.batches = [];
+    this.ownedPtrs = [];
   }
 
   dataPtr() {
@@ -940,14 +975,18 @@ function destroyKernelOwnedRowSet(state, rowsetPtr) {
 // accumulate in the shared memory for the whole query — unbounded for joins
 // that emit large intermediates (TPC-H Q18/Q21). The returned batch is pure JS
 // (no pinned wasm pointer), so downstream re-marshals from its columns.
-function drainMaterializedBatch(state, maxRows) {
+function drainMaterializedBatch(state, maxRows, streamLeftPtr, streamRightPtr) {
   const { layout, arena } = state;
   const rowsetPtr = arena.alloc(layout.rowset.size, 8);
   const leftPtr = BigInt(state.leftStore.dataPtr());
   const rightPtr = BigInt(state.rightStore.dataPtr());
+  // For streamed pairs (batch index -1 on a side) jt_materialize reads that side
+  // from the stream_* rowset rather than the store; buffered pairs ignore them.
+  const streamLeft = streamLeftPtr !== undefined ? BigInt(streamLeftPtr) : leftPtr;
+  const streamRight = streamRightPtr !== undefined ? BigInt(streamRightPtr) : rightPtr;
   const produced = Number(state.materialize(
     BigInt(state.pairBuffer),
-    leftPtr, rightPtr, leftPtr, rightPtr,
+    leftPtr, rightPtr, streamLeft, streamRight,
     BigInt(state.materializeCursor),
     BigInt(maxRows),
     BigInt(rowsetPtr)));
@@ -1099,11 +1138,57 @@ function createJoinState(kernel, layout, stage) {
     pairBuffer,
     leftStore: new WasmRowStore(arena, layout),
     rightStore: new WasmRowStore(arena, layout),
+    // Reused marshalling buffer for the streamed (probe) side of an inner join:
+    // the right side is probed batch-by-batch and never stored, so a grow-only
+    // writer keeps its memory bounded (mirrors the filter/project/aggregate
+    // input path).
+    streamWriter: new RowSetWriter(arena, layout),
     materializeCursor: 0,
     semiAntiFinalized: false,
     outerFinalized: false,
     finalized: false,
   };
+}
+
+function isInnerJoin(stage) {
+  return stage.joinType === 'inner';
+}
+
+// Streams one probe-side (right) batch of an INNER join: builds the left table
+// beforehand, so the right side only probes (STREAM_RIGHT = jt_probe_right_stream,
+// no insert) and is never stored. Pairs carry right batch index -1 and are
+// materialized immediately against the live batch, then the pair buffer is
+// reset. Bounds memory to the build (left) side alone. Returns the output batches.
+function streamJoinRightBatch(state, rowSet) {
+  const { arena, layout } = state;
+  const { batch, selection } = rowSet;
+  const { rowsetPtr } = state.streamWriter.write(
+    batch.columns, batch.rowCount, false, selection);
+  const ok = state.dispatch(
+    BigInt(state.leftTable),
+    BigInt(state.rightTable),
+    BigInt(rowsetPtr),
+    -1n,
+    BigInt(state.pairBuffer),
+    BigInt(state.leftStore.dataPtr()),
+    BigInt(state.rightStore.dataPtr()),
+    0n,
+    JoinOp.STREAM_RIGHT);
+  if (!ok) {
+    throw new Error('join stream failed');
+  }
+  const pairLayout = layout.pairBuffer;
+  const count = Number(
+    arena.view().getBigInt64(state.pairBuffer + pairLayout.count, true));
+  const results = [];
+  while (state.materializeCursor < count) {
+    // stream_right = the live right rowset; stream_left unused (left ids are stored).
+    results.push(drainMaterializedBatch(
+      state, 1024, state.leftStore.dataPtr(), rowsetPtr));
+  }
+  arena.view().setBigInt64(state.pairBuffer + pairLayout.count, 0n, true);
+  state.materializeCursor = 0;
+  return results;
 }
 
 function browserRuntimeSupportsJoin(stage) {
@@ -1126,7 +1211,7 @@ function updateJoinState(state, side, rowSet) {
   let batchPtr = rowsetPtr;
   if (isLeft || !semiAnti) {
     const store = isLeft ? state.leftStore : state.rightStore;
-    batchIdx = store.push(batch, rowsetPtr);
+    batchIdx = store.push(batch, rowsetPtr, wasm?.pinned ? 0 : rowsetPtr);
     batchPtr = store.dataPtr() + batchIdx * layout.rowset.size;
   }
   const ok = isLeft
@@ -1240,6 +1325,10 @@ function finishJoinState(state) {
     0n,
     0n,
     JoinOp.DESTROY);
+  // Reclaim the build-side row store so it doesn't linger for the rest of the
+  // query (upstream joins finish before the final one peaks).
+  state.leftStore.freeMarshalled();
+  state.rightStore.freeMarshalled();
 }
 
 function createCrossJoinState(kernel, layout, stage) {
@@ -1970,6 +2059,11 @@ class JoinTask {
     if (isLeftSemiAntiJoin(this.stage)) {
       return this.pullOneSemiAntiInputBatch();
     }
+    if (isInnerJoin(this.stage)) {
+      return this.pullOneInnerStreamingBatch();
+    }
+    // Outer joins keep both sides buffered: the finalize scan needs the build
+    // table plus the stored rows to emit unmatched padding.
     if (!this.leftDone) {
       const fetched = this.node.inbound[0].connection.fetch();
       if (fetched.result === FetchResult.OK) {
@@ -1987,6 +2081,41 @@ class JoinTask {
       const fetched = this.node.inbound[1].connection.fetch();
       if (fetched.result === FetchResult.OK) {
         updateJoinState(this.state, 1, fetched.rowSet);
+        this.rows += fetched.rowSet.batch.rowCount;
+        return true;
+      }
+      if (fetched.result === FetchResult.FINISHED) {
+        this.rightDone = true;
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  // Inner join: build the left side to completion (stored + hash table), then
+  // STREAM the right (probe) side — never storing it — so peak memory is bounded
+  // by the build side rather than both inputs. The probe emits pairs that are
+  // materialized against the live right batch inside streamJoinRightBatch.
+  pullOneInnerStreamingBatch() {
+    if (!this.leftDone) {
+      const fetched = this.node.inbound[0].connection.fetch();
+      if (fetched.result === FetchResult.OK) {
+        updateJoinState(this.state, 0, fetched.rowSet);
+        this.rows += fetched.rowSet.batch.rowCount;
+        return true;
+      }
+      if (fetched.result === FetchResult.FINISHED) {
+        this.leftDone = true;
+        return true;
+      }
+      return false;
+    }
+
+    if (!this.rightDone) {
+      const fetched = this.node.inbound[1].connection.fetch();
+      if (fetched.result === FetchResult.OK) {
+        this.ready.push(...streamJoinRightBatch(this.state, fetched.rowSet));
         this.rows += fetched.rowSet.batch.rowCount;
         return true;
       }
