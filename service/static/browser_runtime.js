@@ -96,14 +96,6 @@ function columnValidityMask(values, rowCount) {
   return mask;
 }
 
-function copyNumericColumnFromMemory(memory, ptr, type, rowCount) {
-  const Ctor = numericArrayConstructor(type);
-  if (!Ctor) {
-    throw new Error(`unsupported numeric column type: ${type}`);
-  }
-  return new Ctor(memory.buffer, ptr, rowCount).slice();
-}
-
 function makeRowId(batchIdx, rowIdx) {
   return (BigInt(batchIdx) << 32n) | BigInt(rowIdx >>> 0);
 }
@@ -517,10 +509,6 @@ function pinSourceBatch(batch, arena, layout) {
     destroy: () => freeMarshalledRowSet(arena, layout, marshalled.rowsetPtr),
   });
   return batch;
-}
-
-function transferRowSetRelease(source, target) {
-  target.destroy = takeRowSetRelease(source);
 }
 
 function takeRowSetRelease(rowSet) {
@@ -983,72 +971,195 @@ export function runFilter(kernel, layout, rowSet, writer, options = {}) {
   return makeWasmSelection(arena, batch.rowCount, selectionPtr);
 }
 
-// Run a project kernel over `batch`; `output` is the graph project's output plan.
-// Returns the new columns array (source order preserved for the pipeline).
-export function runProject(kernel, layout, batch, output, writer, state) {
-  const arena = writer.arena;
-  const rowCount = batch.rowCount;
+function stableProjectInput(rowSet, arena, layout) {
+  const wasm = wasmRowSetForSelection(rowSet.batch, rowSet.selection);
+  if (wasm?.pinned) {
+    return {
+      rowsetPtr: wasm.rowsetPtr,
+      release: takeRowSetRelease(rowSet),
+    };
+  }
+  const marshalled = marshalRowSet(
+    arena,
+    layout,
+    rowSet.batch.columns,
+    rowSet.batch.rowCount,
+    false,
+    rowSet.selection);
+  const releaseInput = takeRowSetRelease(rowSet);
+  return {
+    rowsetPtr: marshalled.rowsetPtr,
+    release: () => {
+      freeMarshalledRowSet(arena, layout, marshalled.rowsetPtr);
+      if (releaseInput) {
+        releaseInput();
+      }
+    },
+  };
+}
 
-  const computed = output.filter(col => col.source === 'computed');
-  if (!state.outArrayPtr && computed.length) {
-    state.outArrayPtr = arena.alloc(computed.length * 8, 8);
+function writeEmptyColumn(dv, colPtr, layout) {
+  new Uint8Array(dv.buffer, colPtr, layout.column.size).fill(0);
+}
+
+function buildProjectStringColumn(arena, layout, stringViewPtr, rowCount) {
+  const sv = layout.stringView;
+  let dv = arena.view();
+  const views = new Array(rowCount);
+  let total = 0;
+  for (let r = 0; r < rowCount; ++r) {
+    const base = stringViewPtr + r * sv.size;
+    const dataPtr = readPointer(dv, base + sv.data);
+    const size = Number(dv.getBigInt64(base + sv.length, true));
+    views[r] = { dataPtr, size, offset: total };
+    total += size;
   }
-  while (state.computedBufs.length < computed.length) {
-    state.computedBufs.push({ ptr: 0, capacity: 0 });
-  }
-  const computedBufs = computed.map((col, i) => {
-    const bytes = Math.max(rowCount, 1) * col.width;
-    if (state.computedBufs[i].capacity < bytes) {
-      state.computedBufs[i] = { ptr: arena.alloc(bytes, 8), capacity: bytes };
+
+  const dataPtr = arena.alloc(Math.max(total, 1), 1);
+  const offsetsPtr = arena.alloc((rowCount + 1) * 8, 8);
+  dv = arena.view();
+  const memBytes = arena.bytes();
+  let writeAt = dataPtr;
+  for (let r = 0; r < rowCount; ++r) {
+    const view = views[r];
+    dv.setBigInt64(offsetsPtr + r * 8, BigInt(view.offset), true);
+    if (view.size > 0 && view.dataPtr) {
+      memBytes.set(
+        memBytes.subarray(view.dataPtr, view.dataPtr + view.size),
+        writeAt);
+      writeAt += view.size;
     }
-    return state.computedBufs[i].ptr;
-  });
+  }
+  dv.setBigInt64(offsetsPtr + rowCount * 8, BigInt(total), true);
+  return { dataPtr, offsetsPtr, offsetWidth: 8 };
+}
 
-  const rowsetPtr = batch.wasm?.rowsetPtr ||
-    writer.write(batch.columns, rowCount, false).rowsetPtr;
-
-  const dv = arena.view();
-  for (let k = 0; k < computed.length; ++k) {
-    writePointer(dv, state.outArrayPtr + k * 8, computedBufs[k]);
+// Run a project kernel over `rowSet` and build an output TRowSet in wasm memory.
+// Passthrough columns copy only TColumn descriptors; computed columns own their
+// result buffers. The output destroy hook releases the retained input rowset.
+export function runProject(kernel, layout, rowSet, output, arena) {
+  arena = arena || kernel?.holder?.arena || rowSet.selection?.arena;
+  if (!arena) {
+    throw new Error('project needs shared wasm memory');
+  }
+  const rowCount = rowSet.batch.rowCount;
+  const computed = output.filter(col => col.source === 'computed');
+  if (computed.length > 0 && !kernel) {
+    throw new Error('project stage is missing wasm kernel');
   }
 
-  if (computed.length > 0) {
-    // memory64 entry: rowset and out-array pointers are i64 params.
-    kernel.fn(BigInt(rowsetPtr), BigInt(state.outArrayPtr));
-  }
+  const input = stableProjectInput(rowSet, arena, layout);
+  const ownedPtrs = [];
+  let inputRelease = input.release;
+  let rowsetPtr = 0;
+  let columnsBase = 0;
+  let outArrayPtr = 0;
+  const computedBuffers = [];
 
-  // Re-take the view: the kernel may have grown memory internally.
-  const outDv = arena.view();
-  const columns = [];
-  for (const col of output) {
-    if (col.source === 'passthrough') {
-      columns.push({
-        name: col.name,
-        type: col.type,
-        values: batch.columns[col.inputIndex].values,
-      });
-    } else {
-      const bufPtr = computedBufs[computed.indexOf(col)];
-      if (col.isString) {
-        const values = new Array(rowCount);
-        const sv = layout.stringView;
-        const memBytes = new Uint8Array(kernel.holder.memory.buffer);
-        const decoder = new TextDecoder();
-        for (let i = 0; i < rowCount; ++i) {
-          const base = bufPtr + i * sv.size;
-          const dataPtr = outDv.getUint32(base + sv.data, true);
-          const size = Number(outDv.getBigInt64(base + sv.length, true));
-          values[i] = decoder.decode(memBytes.subarray(dataPtr, dataPtr + size));
+  try {
+    if (computed.length > 0) {
+      outArrayPtr = arena.alloc(computed.length * 8, 8);
+      for (let k = 0; k < computed.length; ++k) {
+        const width = Number(computed[k].width || 0);
+        if (width <= 0) {
+          throw new Error(`unsupported project column width: ${computed[k].name}`);
         }
-        columns.push({ name: col.name, type: col.type, values });
-      } else {
-        const values = copyNumericColumnFromMemory(
-          kernel.holder.memory, bufPtr, col.type, rowCount);
-        columns.push({ name: col.name, type: col.type, values });
+        const ptr = arena.alloc(Math.max(rowCount, 1) * width, 8);
+        computedBuffers.push(ptr);
+      }
+      let dv = arena.view();
+      for (let k = 0; k < computedBuffers.length; ++k) {
+        writePointer(dv, outArrayPtr + k * 8, computedBuffers[k]);
+      }
+      kernel.fn(BigInt(input.rowsetPtr), BigInt(outArrayPtr));
+      arena.free(outArrayPtr);
+      outArrayPtr = 0;
+    }
+
+    const computedColumns = computedBuffers.map((ptr, k) => {
+      const spec = computed[k];
+      if (!spec.isString) {
+        ownedPtrs.push(ptr);
+        return { dataPtr: ptr, offsetsPtr: 0, offsetWidth: 0 };
+      }
+      const stringColumn = buildProjectStringColumn(arena, layout, ptr, rowCount);
+      arena.free(ptr);
+      ownedPtrs.push(stringColumn.dataPtr, stringColumn.offsetsPtr);
+      return stringColumn;
+    });
+
+    rowsetPtr = arena.alloc(layout.rowset.size, 8);
+    columnsBase = arena.alloc(output.length * layout.column.size, 8);
+    ownedPtrs.push(columnsBase, rowsetPtr);
+
+    let dv = arena.view();
+    const memBytes = arena.bytes();
+    const inputColumns = readPointer(dv, input.rowsetPtr + layout.rowset.columns);
+    const selectionPtr = readPointer(dv, input.rowsetPtr + layout.rowset.selection);
+    let computedCursor = 0;
+    for (let i = 0; i < output.length; ++i) {
+      const spec = output[i];
+      const outCol = columnsBase + i * layout.column.size;
+      if (spec.source === 'passthrough') {
+        const inCol = inputColumns + Number(spec.inputIndex) * layout.column.size;
+        memBytes.copyWithin(outCol, inCol, inCol + layout.column.size);
+        continue;
+      }
+      writeEmptyColumn(dv, outCol, layout);
+      const computedColumn = computedColumns[computedCursor++];
+      writePointer(dv, outCol + layout.column.data, computedColumn.dataPtr);
+      if (computedColumn.offsetsPtr) {
+        writePointer(dv, outCol + layout.column.offsets, computedColumn.offsetsPtr);
+        dv.setUint8(outCol + layout.column.offsetWidth, computedColumn.offsetWidth);
       }
     }
+
+    new Uint8Array(arena.memory.buffer, rowsetPtr, layout.rowset.size).fill(0);
+    dv = arena.view();
+    writePointer(dv, rowsetPtr + layout.rowset.columns, columnsBase);
+    dv.setBigInt64(rowsetPtr + layout.rowset.columnCount, BigInt(output.length), true);
+    dv.setBigInt64(rowsetPtr + layout.rowset.rowCount, BigInt(rowCount), true);
+    if (selectionPtr) {
+      writePointer(dv, rowsetPtr + layout.rowset.selection, selectionPtr);
+    }
+
+    const batch = {
+      rowCount,
+      columns: shapeColumns(output),
+    };
+    const destroy = () => {
+      for (const ptr of ownedPtrs) {
+        arena.free(ptr);
+      }
+      if (inputRelease) {
+        inputRelease();
+        inputRelease = null;
+      }
+    };
+    attachBatchWasm(batch, rowsetPtr, {
+      pinned: true,
+      selectionPtr,
+      destroy,
+    });
+    return {
+      batch,
+      selection: makeWasmSelection(arena, rowCount, selectionPtr),
+    };
+  } catch (error) {
+    if (outArrayPtr) {
+      arena.free(outArrayPtr);
+    }
+    for (const ptr of computedBuffers) {
+      arena.free(ptr);
+    }
+    for (const ptr of ownedPtrs) {
+      arena.free(ptr);
+    }
+    if (inputRelease) {
+      inputRelease();
+    }
+    throw error;
   }
-  return columns;
 }
 
 // Read `count` validity bits (LSB-first per byte, qdb_bitmap_set_valid order).
@@ -1680,15 +1791,28 @@ function stableSortRowSetForStore(arena, layout, rowSet) {
   };
 }
 
-function gatherRowIds(rowSets, sortedIds, keep) {
+function jsValueBatchForRowSet(rowSet, layout, arena) {
+  if (batchHasJsValues(rowSet.batch)) {
+    return rowSet.batch;
+  }
+  if (!rowSet.batch.wasm) {
+    throw new Error('rowset has no JS values and no wasm handle');
+  }
+  return materializeWasmRowSet(
+    arena, layout, rowSet.batch.columns, rowSet.batch.wasm.rowsetPtr);
+}
+
+function gatherRowIds(rowSets, sortedIds, keep, layout, arena) {
   const columns = outputShapeFromRowSets(rowSets).map(col => ({
     name: col.name,
     type: col.type,
     values: new Array(keep),
   }));
+  const batches = rowSets.map(rowSet =>
+    jsValueBatchForRowSet(rowSet, layout, arena));
   for (let i = 0; i < keep; ++i) {
     const id = sortedIds[i];
-    const batch = rowSets[rowIdBatch(id)].batch;
+    const batch = batches[rowIdBatch(id)];
     const row = rowIdRow(id);
     for (let c = 0; c < columns.length; ++c) {
       columns[c].values[i] = batch.columns[c].values[row];
@@ -1784,16 +1908,22 @@ function readSortedRowIds(arena, rowIdsPtr, count) {
 }
 
 function runRadixSortRowSets(kernel, layout, rowSets, radixKeys, limit) {
-  const sorted = radixSortRowIds(kernel, layout, rowSets, radixKeys);
-  const keep = (limit != null && limit < sorted.n)
-    ? Math.max(Number(limit), 0)
-    : sorted.n;
-  if (sorted.n === 0 || keep === 0) {
-    return emptyBatchForRowSets(rowSets);
-  }
+  try {
+    const sorted = radixSortRowIds(kernel, layout, rowSets, radixKeys);
+    const keep = (limit != null && limit < sorted.n)
+      ? Math.max(Number(limit), 0)
+      : sorted.n;
+    if (sorted.n === 0 || keep === 0) {
+      return emptyBatchForRowSets(rowSets);
+    }
 
-  const sortedIds = readSortedRowIds(kernel.holder.arena, sorted.rowIdsPtr, keep);
-  return gatherRowIds(rowSets, sortedIds, keep);
+    const sortedIds = readSortedRowIds(kernel.holder.arena, sorted.rowIdsPtr, keep);
+    return gatherRowIds(rowSets, sortedIds, keep, layout, kernel.holder.arena);
+  } finally {
+    for (const rowSet of rowSets) {
+      releaseWasmRowSet(rowSet);
+    }
+  }
 }
 
 // Drive the radix composite sort kernel. The kernel sorts a row-id permutation
@@ -2138,8 +2268,6 @@ class ProjectTask {
     this.stage = stage;
     this.layout = layout;
     this.shared = shared;
-    this.writer = new RowSetWriter(shared.arena, layout);
-    this.projectState = { computedBufs: [], outArrayPtr: 0 };
     this.kernel = null;
     this.done = false;
     this.rows = 0;
@@ -2159,36 +2287,25 @@ class ProjectTask {
       return TaskResult.FINISHED;
     }
 
-    let columns;
-    if (this.stage.wasm) {
+    const hasComputed = this.stage.output.some(col => col.source === 'computed');
+    if (hasComputed) {
+      if (!this.stage.wasm) {
+        throw new Error('project stage is missing wasm kernel');
+      }
       if (!this.kernel) {
         this.kernel = await instantiateKernel(this.stage.wasm, '<project>', this.shared);
       }
-      if (fetched.rowSet.batch.wasm && !fetched.rowSet.batch.wasm.pinned) {
-        assertStreamingWasmEdge(this.node.inbound[0]);
-      }
-      columns = runProject(
-        this.kernel,
-        this.layout,
-        fetched.rowSet.batch,
-        this.stage.output,
-        this.writer,
-        this.projectState);
-    } else {
-      columns = this.stage.output.map(col => ({
-        name: col.name,
-        type: col.type,
-        values: fetched.rowSet.batch.columns[col.inputIndex].values,
-      }));
     }
-    const batch = { rowCount: fetched.rowSet.batch.rowCount, columns };
-    this.rows += batch.rowCount;
-    const outRowSet = { batch, selection: fetched.rowSet.selection };
-    if (fetched.rowSet.selection?.kind === 'wasm-selection') {
-      transferRowSetRelease(fetched.rowSet, outRowSet);
-    } else {
-      releaseWasmRowSet(fetched.rowSet);
+    if (fetched.rowSet.batch.wasm && !fetched.rowSet.batch.wasm.pinned) {
+      assertStreamingWasmEdge(this.node.inbound[0]);
     }
+    const outRowSet = runProject(
+      this.kernel,
+      this.layout,
+      fetched.rowSet,
+      this.stage.output,
+      this.shared.arena);
+    this.rows += outRowSet.batch.rowCount;
     output.push(outRowSet);
     return TaskResult.OK;
   }
@@ -2609,8 +2726,9 @@ class TopSortWasmState {
         BigInt(pickSrcPtr),
         BigInt(pickIdxPtr),
         BigInt(this.limit)));
+      const tempBatch = jsValueBatchForRowSet(rowSet, this.layout, arena);
       this.stateBatch = gatherTopSortPicks(
-        this.stateBatch, rowSet.batch, arena, pickSrcPtr, pickIdxPtr, out);
+        this.stateBatch, tempBatch, arena, pickSrcPtr, pickIdxPtr, out);
     } finally {
       freeMarshalledRowSet(arena, this.layout, stateRowSet.rowsetPtr);
       if (batchRowSet.ownedPtr) {
