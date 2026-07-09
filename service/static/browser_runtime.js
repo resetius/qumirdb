@@ -5,6 +5,8 @@
 // TColumn[]/TRowSet per the verified 8-byte-pointer layout, runs the kernel, and
 // reads results back. See PLAN_BROWSER_EXECUTION.md for the ABI/layout facts.
 
+import { BucketAllocator } from './wasm_allocator.js';
+
 const PAGE = 65536;
 const EMPTY_BYTES = new Uint8Array(0);
 
@@ -329,30 +331,29 @@ class WasmRowStore {
   }
 }
 
-// A bump allocator over one query-wide shared memory. All allocations are
-// performed before any writes so a mid-write memory.grow() never detaches a view.
+// One query-wide allocator over the shared linear memory. Backed by a
+// segregated free-list (BucketAllocator) so qdb_free / qdb_realloc actually
+// reclaim — bounding memory for join-heavy queries whose per-drain output and
+// per-batch input buffers would otherwise accumulate forever in a bump arena.
+// Blocks are >= 16-byte aligned, satisfying every caller's alignment request.
+// As before, callers must finish all alloc() calls before taking a view()/
+// bytes() (a grow inside malloc detaches the underlying ArrayBuffer).
 class Arena {
   constructor(memory, base) {
     this.memory = memory;
-    this.offset = alignUp(Number(base), 16);
+    this.allocator = new BucketAllocator(memory, Number(base));
   }
 
-  alloc(bytes, align = 8) {
-    this.offset = alignUp(this.offset, align);
-    const ptr = this.offset;
-    this.offset += bytes;
-    const need = this.offset;
-    const have = this.memory.buffer.byteLength;
-    if (need > have) {
-      const pages = Math.ceil((need - have) / PAGE);
-      // memory64 engines may require a BigInt page delta.
-      try {
-        this.memory.grow(pages);
-      } catch {
-        this.memory.grow(BigInt(pages));
-      }
-    }
-    return ptr;
+  alloc(bytes, _align = 8) {
+    return this.allocator.malloc(bytes);
+  }
+
+  realloc(ptr, bytes) {
+    return this.allocator.realloc(ptr, bytes);
+  }
+
+  free(ptr) {
+    this.allocator.free(ptr);
   }
 
   view() {
@@ -509,15 +510,11 @@ function dateYear(days) {
 // time; `holder.arena` is bound by drivers whose kernels allocate
 // (qdb_alloc/realloc/free — e.g. the aggregate hash table).
 function createQdbEnv(getMemory, holder) {
-  const allocSizes = new Map();
   const alloc = (size) => {
     if (!holder.arena) {
       throw new Error('kernel called qdb_alloc but no allocator is bound');
     }
-    const n = Number(size);
-    const ptr = holder.arena.alloc(Math.max(n, 1), 8);
-    allocSizes.set(ptr, n);
-    return ptr;
+    return holder.arena.alloc(Math.max(Number(size), 1), 8);
   };
   const bytesAt = (ptr, size) => {
     const mem = new Uint8Array(getMemory().buffer);
@@ -604,19 +601,12 @@ function createQdbEnv(getMemory, holder) {
 
   const norm = v => (v < 0n ? 1n : v);
   return {
-    // malloc family over the query's shared linear memory (bump; free no-op).
+    // malloc family over the query's shared linear memory (segregated
+    // free-list; realloc/free reclaim).
     qdb_alloc: (size) => BigInt(alloc(size)),
-    qdb_realloc: (ptr, size) => {
-      const oldPtr = Number(ptr);
-      const newPtr = alloc(size);
-      if (oldPtr) {
-        const oldSize = allocSizes.get(oldPtr) || 0;
-        const mem = new Uint8Array(getMemory().buffer);
-        mem.copyWithin(newPtr, oldPtr, oldPtr + Math.min(oldSize, Number(size)));
-      }
-      return BigInt(newPtr);
-    },
-    qdb_free: () => {},
+    qdb_realloc: (ptr, size) =>
+      BigInt(holder.arena.realloc(Number(ptr), Math.max(Number(size), 1))),
+    qdb_free: (ptr) => holder.arena.free(Number(ptr)),
 
     qdb_filter_string_compare: (ld, ls, rd, rs) =>
       BigInt(compareBytes(bytesAt(ld, ls), bytesAt(rd, rs))),
@@ -926,6 +916,53 @@ function materializeWasmRowSet(arena, layout, output, rowsetPtr) {
   return batch;
 }
 
+// Frees a kernel-materialized rowset: walks the owners list stored in Private
+// (owners[0] = count, then one qdb_alloc'd pointer per buffer), frees each
+// buffer, then the owners array and the rowset shell. Values must already be
+// copied to JS (materializeWasmRowSet) — the wasm memory is dead afterward.
+function destroyKernelOwnedRowSet(state, rowsetPtr) {
+  const free = (p) => state.arena.free(p);
+  const dv = state.arena.view();
+  const ownersPtr = readPointer(dv, rowsetPtr + state.layout.rowset.private);
+  if (ownersPtr) {
+    const count = Number(dv.getBigInt64(ownersPtr, true));
+    for (let i = 0; i < count; ++i) {
+      free(readPointer(dv, ownersPtr + (i + 1) * 8));
+    }
+    free(ownersPtr);
+  }
+  free(rowsetPtr);
+}
+
+// Materializes one output batch from a join/cross pair buffer, copies it into
+// JS arrays, then frees every wasm buffer the kernel allocated for it (mirrors
+// native DestroyKernelOwnedRowSet). Without this the per-drain output would
+// accumulate in the shared memory for the whole query — unbounded for joins
+// that emit large intermediates (TPC-H Q18/Q21). The returned batch is pure JS
+// (no pinned wasm pointer), so downstream re-marshals from its columns.
+function drainMaterializedBatch(state, maxRows) {
+  const { layout, arena } = state;
+  const rowsetPtr = arena.alloc(layout.rowset.size, 8);
+  const leftPtr = BigInt(state.leftStore.dataPtr());
+  const rightPtr = BigInt(state.rightStore.dataPtr());
+  const produced = Number(state.materialize(
+    BigInt(state.pairBuffer),
+    leftPtr, rightPtr, leftPtr, rightPtr,
+    BigInt(state.materializeCursor),
+    BigInt(maxRows),
+    BigInt(rowsetPtr)));
+  if (produced <= 0) {
+    arena.free(rowsetPtr);
+    throw new Error('join materialize failed');
+  }
+  state.materializeCursor += produced;
+  const batch = materializeWasmRowSet(
+    arena, layout, state.stage.output || [], rowsetPtr);
+  destroyKernelOwnedRowSet(state, rowsetPtr);
+  delete batch.wasm; // buffers are freed; force a re-marshal downstream
+  return batch;
+}
+
 // Drive the fused aggregate kernel. agg_dispatch updates the hash table;
 // agg_finish_rowset owns measure/finalize/output buffer allocation and writes a
 // complete TRowSet in linear memory.
@@ -1173,37 +1210,19 @@ function finalizeOuterJoinState(state) {
 }
 
 function drainJoinPairs(state, maxRows = 1024) {
-  const layout = state.layout;
-  const pairLayout = layout.pairBuffer;
+  const pairLayout = state.layout.pairBuffer;
   const dv = state.arena.view();
   const count = Number(dv.getBigInt64(state.pairBuffer + pairLayout.count, true));
   if (state.materializeCursor >= count) {
     return [];
   }
-  const rowsetPtr = state.arena.alloc(layout.rowset.size, 8);
-  new Uint8Array(state.arena.memory.buffer, rowsetPtr, layout.rowset.size).fill(0);
-  const produced = Number(state.materialize(
-    BigInt(state.pairBuffer),
-    BigInt(state.leftStore.dataPtr()),
-    BigInt(state.rightStore.dataPtr()),
-    BigInt(state.leftStore.dataPtr()),
-    BigInt(state.rightStore.dataPtr()),
-    BigInt(state.materializeCursor),
-    BigInt(maxRows),
-    BigInt(rowsetPtr)));
-  if (produced <= 0) {
-    throw new Error('join materialize failed');
-  }
-  state.materializeCursor += produced;
+  const batch = drainMaterializedBatch(state, maxRows);
   if (state.materializeCursor >= count) {
     state.arena.view().setBigInt64(
       state.pairBuffer + pairLayout.count, 0n, true);
     state.materializeCursor = 0;
   }
-  return [
-    materializeWasmRowSet(
-      state.arena, layout, state.stage.output || [], rowsetPtr),
-  ];
+  return [batch];
 }
 
 function finishJoinState(state) {
@@ -1286,37 +1305,19 @@ function updateCrossLeftState(state, rowSet) {
 }
 
 function drainCrossJoinPairs(state, maxRows = 1024) {
-  const layout = state.layout;
-  const pairLayout = layout.pairBuffer;
+  const pairLayout = state.layout.pairBuffer;
   const dv = state.arena.view();
   const count = Number(dv.getBigInt64(state.pairBuffer + pairLayout.count, true));
   if (state.materializeCursor >= count) {
     return [];
   }
-  const rowsetPtr = state.arena.alloc(layout.rowset.size, 8);
-  new Uint8Array(state.arena.memory.buffer, rowsetPtr, layout.rowset.size).fill(0);
-  const produced = Number(state.materialize(
-    BigInt(state.pairBuffer),
-    BigInt(state.leftStore.dataPtr()),
-    BigInt(state.rightStore.dataPtr()),
-    BigInt(state.leftStore.dataPtr()),
-    BigInt(state.rightStore.dataPtr()),
-    BigInt(state.materializeCursor),
-    BigInt(maxRows),
-    BigInt(rowsetPtr)));
-  if (produced <= 0) {
-    throw new Error('cross join materialize failed');
-  }
-  state.materializeCursor += produced;
+  const batch = drainMaterializedBatch(state, maxRows);
   if (state.materializeCursor >= count) {
     state.arena.view().setBigInt64(
       state.pairBuffer + pairLayout.count, 0n, true);
     state.materializeCursor = 0;
   }
-  return [
-    materializeWasmRowSet(
-      state.arena, layout, state.stage.output || [], rowsetPtr),
-  ];
+  return [batch];
 }
 
 function finishCrossJoinState(state) {

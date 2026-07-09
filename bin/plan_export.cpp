@@ -1374,6 +1374,10 @@ llvm::json::Object ExecLayoutJson(size_t kernelCount) {
             {"columnCount", 8},
             {"rowCount", 16},
             {"selection", 24},
+            // Private holds the owners list for kernel-materialized rowsets
+            // (owners[0] = count, then one qdb_alloc'd pointer per buffer); the
+            // runtime walks it to free join output. See destroyKernelOwnedRowSet.
+            {"private", 40},
         }},
         {"stringView", llvm::json::Object{
             {"size", 16},
