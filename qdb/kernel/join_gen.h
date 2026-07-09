@@ -1,6 +1,7 @@
 #pragma once
 
 #include <qdb/kernel/join_key.h>
+#include <qdb/plan/ops/join.h>
 
 #include <qumir/parser/ast.h>
 #include <qumir/parser/type.h>
@@ -83,5 +84,18 @@ std::vector<NQumir::NAst::TExprPtr> GenJoinKeyOpsFunDecls(const TJoinKeyDescript
 // Emits the (type ...) declarations that make the named Key type(s) known to
 // the compiler. Must be prepended to the program before any use of the Key.
 std::vector<NQumir::NAst::TExprPtr> GenJoinKeyTypeDecls(const TJoinKeyDescriptor& key);
+
+// Generates the single external join entrypoint:
+//   jt_dispatch(left, right, batch, batch_idx, pairs, left_store, right_store,
+//               arg, op) -> bool
+// It dispatches init/update/stream/finalize/destroy to the internal generated
+// and library helpers. Join type and key size are compile-time constants.
+NQumir::NAst::TExprPtr GenJoinDispatchAst(
+    int64_t keySize,
+    EJoinType type,
+    bool hasResidual,
+    NQumir::NAst::TTypePtr rowSetType,
+    NQumir::NAst::TTypePtr hashTableType,
+    NQumir::NAst::TTypePtr pairBufferType);
 
 } // namespace NQdb::NKernel

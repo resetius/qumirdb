@@ -29,11 +29,10 @@ std::string ReadJoinKernel(const std::string& name);
 // to this source file's location.
 std::string ReadSortKernel(const std::string& name);
 
-// Assembles the Stage-1 join kernel library (i64 key ops + generic Robin Hood
-// rehash + the aggregation HashTable lifecycle minus aht_update + the join
-// sources). Wrap in a (block ...) and compile with AllowOverloads=true,
-// selecting an entry (jt_init / jt_destroy / pb_destroy; the per-query
-// jt_process_left / jt_process_right are generated separately, see join_gen.h).
+// Assembles the join kernel library: generic Robin Hood helpers, the reused
+// aggregation HashTable lifecycle, pair buffers, and join update helpers.
+// Per-query key readers and the external jt_dispatch entry are generated in
+// join_gen.cpp and appended by TKernelCompiler::CompileJoin.
 std::expected<std::vector<NQumir::NAst::TExprPtr>, NQumir::TError>
 BuildJoinKernelLibrary();
 

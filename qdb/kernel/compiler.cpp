@@ -1124,13 +1124,6 @@ TJoinKernels TKernelCompiler::CompileJoin(
         leftFieldCount = leftType.Cast()->Fields.size();
     }
 
-    const EJoinType kernelType =
-        (residualPredicate &&
-         (spec.JoinType == EJoinType::LeftSemi ||
-          spec.JoinType == EJoinType::LeftAnti))
-        ? EJoinType::Inner
-        : spec.JoinType;
-
     if (Diagnostics_) {
         *Diagnostics_ << "\n========== KERNEL SPEC ==========\n";
         NKernel::PrintKernelSpec(*Diagnostics_, spec);
@@ -1138,7 +1131,7 @@ TJoinKernels TKernelCompiler::CompileJoin(
     }
 
     return CompileJoin(
-        *leftType.Cast(), *rightType.Cast(), keys, kernelType,
+        *leftType.Cast(), *rightType.Cast(), keys, spec.JoinType,
         residualPredicate, innerType, leftFieldCount);
 }
 
@@ -1227,6 +1220,7 @@ TJoinKernels TKernelCompiler::CompileJoin(
     using namespace NQumir::NAst;
 
     const bool isSemiAnti = (type == EJoinType::LeftSemi || type == EJoinType::LeftAnti);
+    const bool isResidualSemiAnti = isSemiAnti && static_cast<bool>(residualPredicate);
     const bool isOuter = (type == EJoinType::Left || type == EJoinType::Right);
     if (!isSemiAnti && !isOuter && type != EJoinType::Inner) {
         throw NQumir::TError(
@@ -1279,7 +1273,7 @@ TJoinKernels TKernelCompiler::CompileJoin(
             "jt_probe_left_stream", columnType, rowSetType, hashTableType, pairBufferType));
         program.push_back(NKernel::GenJoinProbeAst(keyDesc, /*isLeft=*/false,
             "jt_probe_right_stream", columnType, rowSetType, hashTableType, pairBufferType));
-        if (isSemiAnti) {
+        if (isSemiAnti && !isResidualSemiAnti) {
             program.push_back(NKernel::GenJoinInsertKeyOnlyAst(
                 keyDesc, "jt_insert_key_only",
                 columnType, rowSetType, hashTableType, pairBufferType));
@@ -1293,25 +1287,13 @@ TJoinKernels TKernelCompiler::CompileJoin(
                 keyDesc, /*isAnti=*/true,
                 "jt_finalize_outer", hashTableType, pairBufferType));
         }
+        program.push_back(NKernel::GenJoinDispatchAst(
+            keySize, type, isResidualSemiAnti,
+            rowSetType, hashTableType, pairBufferType));
         return program;
     };
 
-    std::vector<std::string> entries = {
-        "jt_init",
-        "jt_process_left",
-        "jt_process_right",
-        "jt_probe_left_stream",
-        "jt_probe_right_stream",
-        "jt_destroy",
-        "pb_destroy",
-    };
-    if (isSemiAnti) {
-        entries.push_back("jt_insert_key_only");
-        entries.push_back("jt_finalize_semi_anti");
-    }
-    if (isOuter) {
-        entries.push_back("jt_finalize_outer");
-    }
+    std::vector<std::string> entries = {"jt_dispatch"};
 
     auto program = std::make_shared<TBlockExpr>(NQumir::TLocation{}, buildProgram());
     PrintKernelAst(Diagnostics_, "join", program);
@@ -1319,83 +1301,24 @@ TJoinKernels TKernelCompiler::CompileJoin(
     auto kernel = EmitKernel("join", entries, std::move(program));
     FinishKernelDiagnostics(Diagnostics_);
 
-    // Entry indices are fixed by the `entries` order above.
     auto slot = kernel.Slot;
-    auto entryIndex = [&](std::string_view name) -> size_t {
-        for (size_t i = 0; i < entries.size(); ++i) {
-            if (entries[i] == name) {
-                return i;
-            }
-        }
-        throw std::logic_error("CompileJoin: missing entry " + std::string(name));
-    };
-
-    using TInitFn = bool(*)(void*, int64_t, int64_t);
-    // jt_process_left/right take the two row-store bases (for jt_residual_filter).
-    using TProcessFn = bool(*)(void*, void*, TRowSet*, int64_t, void*, TRowSet*, TRowSet*);
-    using TProbeFn = bool(*)(void*, TRowSet*, int64_t, void*, TRowSet*, TRowSet*);
-    // jt_insert_key_only keeps the original 5-arg ABI (no residual filter).
-    using TInsertKeyOnlyFn = bool(*)(void*, void*, TRowSet*, int64_t, void*);
-    using TDestroyFn = void(*)(void*);
+    using TDispatchFn = bool(*)(
+        void*, void*, TRowSet*, int64_t, void*, TRowSet*, TRowSet*, int64_t, int64_t);
 
     TJoinKernels kernels;
-    kernels.Init = [slot, i = entryIndex("jt_init"), keySize](
-        void* table, int64_t capacity) {
-        return reinterpret_cast<TInitFn>(slot->Fns[i])(table, capacity, keySize);
+    kernels.Dispatch = [slot](
+        void* left,
+        void* right,
+        TRowSet* batch,
+        int64_t batchIdx,
+        void* pairs,
+        TRowSet* leftStore,
+        TRowSet* rightStore,
+        int64_t arg,
+        int64_t op) {
+        return reinterpret_cast<TDispatchFn>(slot->Fns[0])(
+            left, right, batch, batchIdx, pairs, leftStore, rightStore, arg, op);
     };
-    kernels.ProcessLeft = [slot, i = entryIndex("jt_process_left")](
-        void* own, void* opp, TRowSet* batch,
-        int64_t batchIdx, void* pairs, TRowSet* leftStore, TRowSet* rightStore) {
-        return reinterpret_cast<TProcessFn>(slot->Fns[i])(
-            own, opp, batch, batchIdx, pairs, leftStore, rightStore);
-    };
-    kernels.ProcessRight = [slot, i = entryIndex("jt_process_right")](
-        void* own, void* opp, TRowSet* batch,
-        int64_t batchIdx, void* pairs, TRowSet* leftStore, TRowSet* rightStore) {
-        return reinterpret_cast<TProcessFn>(slot->Fns[i])(
-            own, opp, batch, batchIdx, pairs, leftStore, rightStore);
-    };
-    kernels.ProbeLeftStream = [slot, i = entryIndex("jt_probe_left_stream")](
-        void* build, TRowSet* batch,
-        int64_t batchIdx, void* pairs, TRowSet* leftStore, TRowSet* rightStore) {
-        return reinterpret_cast<TProbeFn>(slot->Fns[i])(
-            build, batch, batchIdx, pairs, leftStore, rightStore);
-    };
-    kernels.ProbeRightStream = [slot, i = entryIndex("jt_probe_right_stream")](
-        void* build, TRowSet* batch,
-        int64_t batchIdx, void* pairs, TRowSet* leftStore, TRowSet* rightStore) {
-        return reinterpret_cast<TProbeFn>(slot->Fns[i])(
-            build, batch, batchIdx, pairs, leftStore, rightStore);
-    };
-    kernels.DestroyTable = [slot, i = entryIndex("jt_destroy")](void* table) {
-        reinterpret_cast<TDestroyFn>(slot->Fns[i])(table);
-    };
-    kernels.DestroyPairs = [slot, i = entryIndex("pb_destroy")](void* pairs) {
-        reinterpret_cast<TDestroyFn>(slot->Fns[i])(pairs);
-    };
-
-    using TFinalizeFn = bool(*)(void*, void*, void*);
-
-    if (isSemiAnti) {
-        kernels.InsertKeyOnly = [slot, i = entryIndex("jt_insert_key_only")](
-            void* own, void* opp, TRowSet* batch,
-            int64_t batchIdx, void* pairs) {
-            return reinterpret_cast<TInsertKeyOnlyFn>(slot->Fns[i])(
-                own, opp, batch, batchIdx, pairs);
-        };
-        kernels.FinalizeAntiSemi = [slot, i = entryIndex("jt_finalize_semi_anti")](
-            void* own, void* opp, void* pairs) {
-            return reinterpret_cast<TFinalizeFn>(slot->Fns[i])(own, opp, pairs);
-        };
-    }
-
-    if (isOuter) {
-        kernels.FinalizeOuter = [slot, i = entryIndex("jt_finalize_outer")](
-            void* own, void* opp, void* pairs) {
-            return reinterpret_cast<TFinalizeFn>(slot->Fns[i])(own, opp, pairs);
-        };
-    }
-
     return kernels;
 }
 

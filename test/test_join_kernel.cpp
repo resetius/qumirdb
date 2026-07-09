@@ -51,6 +51,10 @@ struct TPairBuffer {
 };
 static_assert(sizeof(TPairBuffer) == TKernelCompiler::kPairBufferSize);
 
+constexpr int64_t JoinOpCode(EJoinKernelOp op) {
+    return static_cast<int64_t>(op);
+}
+
 std::unique_ptr<NQumir::TLLVMRunner> CompileJoinEntry(
     const std::string& entryName, void*& entry)
 {
@@ -200,12 +204,14 @@ TEST(CompileJoin, ProducesWorkingInnerJoinKernels) {
 
     THashTable left{}, right{};
     TPairBuffer pairs{};
-    ASSERT_TRUE(kernels.Init(&left, 8));
-    ASSERT_TRUE(kernels.Init(&right, 8));
+    ASSERT_TRUE(kernels.Dispatch(&left, &right, nullptr, 0, &pairs, nullptr, nullptr,
+        8, JoinOpCode(EJoinKernelOp::Init)));
     // left_store / right_store are single-batch arrays (batch_idx 0). The default
     // (always-true) jt_residual_filter ignores them.
-    ASSERT_TRUE(kernels.ProcessLeft(&left, &right, &lbatch, 0, &pairs, &lbatch, &rbatch));
-    ASSERT_TRUE(kernels.ProcessRight(&right, &left, &rbatch, 0, &pairs, &lbatch, &rbatch));
+    ASSERT_TRUE(kernels.Dispatch(&left, &right, &lbatch, 0, &pairs, &lbatch, &rbatch,
+        0, JoinOpCode(EJoinKernelOp::UpdateLeft)));
+    ASSERT_TRUE(kernels.Dispatch(&left, &right, &rbatch, 0, &pairs, &lbatch, &rbatch,
+        0, JoinOpCode(EJoinKernelOp::UpdateRight)));
 
     std::vector<std::tuple<int64_t, int64_t>> got;
     for (int64_t i = 0; i < pairs.Count; ++i) {
@@ -215,9 +221,8 @@ TEST(CompileJoin, ProducesWorkingInnerJoinKernels) {
     std::sort(got.begin(), got.end());
     EXPECT_EQ(got, expected);
 
-    kernels.DestroyPairs(&pairs);
-    kernels.DestroyTable(&left);
-    kernels.DestroyTable(&right);
+    kernels.Dispatch(&left, &right, nullptr, 0, &pairs, nullptr, nullptr,
+        0, JoinOpCode(EJoinKernelOp::Destroy));
 }
 
 TEST(CompileJoinHash, ProducesMatchingSideHashes) {
@@ -293,11 +298,13 @@ TEST(CompileJoin, ProbeOnlyStreamsWithoutInserting) {
 
     THashTable left{}, right{};
     TPairBuffer pairs{};
-    ASSERT_TRUE(kernels.Init(&left, 8));
-    ASSERT_TRUE(kernels.Init(&right, 8));
-    ASSERT_TRUE(kernels.ProcessLeft(&left, &right, &lbatch, 0, &pairs, &lbatch, &rbatch));
+    ASSERT_TRUE(kernels.Dispatch(&left, &right, nullptr, 0, &pairs, nullptr, nullptr,
+        8, JoinOpCode(EJoinKernelOp::Init)));
+    ASSERT_TRUE(kernels.Dispatch(&left, &right, &lbatch, 0, &pairs, &lbatch, &rbatch,
+        0, JoinOpCode(EJoinKernelOp::UpdateLeft)));
     ASSERT_EQ(pairs.Count, 0);
-    ASSERT_TRUE(kernels.ProbeRightStream(&left, &rbatch, 7, &pairs, &lbatch, &rbatch));
+    ASSERT_TRUE(kernels.Dispatch(&left, &right, &rbatch, 7, &pairs, &lbatch, &rbatch,
+        0, JoinOpCode(EJoinKernelOp::StreamRight)));
     EXPECT_EQ(right.Size, 0);
 
     std::vector<std::tuple<int64_t, int64_t>> got;
@@ -309,14 +316,16 @@ TEST(CompileJoin, ProbeOnlyStreamsWithoutInserting) {
     EXPECT_EQ(got, expected);
 
     pairs.Count = 0;
-    kernels.DestroyTable(&left);
-    kernels.DestroyTable(&right);
+    kernels.Dispatch(&left, &right, nullptr, 0, &pairs, nullptr, nullptr,
+        0, JoinOpCode(EJoinKernelOp::Destroy));
     THashTable left2{}, right2{};
-    ASSERT_TRUE(kernels.Init(&left2, 8));
-    ASSERT_TRUE(kernels.Init(&right2, 8));
-    ASSERT_TRUE(kernels.ProcessRight(&right2, &left2, &rbatch, 0, &pairs, &lbatch, &rbatch));
+    ASSERT_TRUE(kernels.Dispatch(&left2, &right2, nullptr, 0, &pairs, nullptr, nullptr,
+        8, JoinOpCode(EJoinKernelOp::Init)));
+    ASSERT_TRUE(kernels.Dispatch(&left2, &right2, &rbatch, 0, &pairs, &lbatch, &rbatch,
+        0, JoinOpCode(EJoinKernelOp::UpdateRight)));
     ASSERT_EQ(pairs.Count, 0);
-    ASSERT_TRUE(kernels.ProbeLeftStream(&right2, &lbatch, 9, &pairs, &lbatch, &rbatch));
+    ASSERT_TRUE(kernels.Dispatch(&left2, &right2, &lbatch, 9, &pairs, &lbatch, &rbatch,
+        0, JoinOpCode(EJoinKernelOp::StreamLeft)));
     EXPECT_EQ(left2.Size, 0);
 
     got.clear();
@@ -326,9 +335,8 @@ TEST(CompileJoin, ProbeOnlyStreamsWithoutInserting) {
     std::sort(got.begin(), got.end());
     EXPECT_EQ(got, expected);
 
-    kernels.DestroyPairs(&pairs);
-    kernels.DestroyTable(&left2);
-    kernels.DestroyTable(&right2);
+    kernels.Dispatch(&left2, &right2, nullptr, 0, &pairs, nullptr, nullptr,
+        0, JoinOpCode(EJoinKernelOp::Destroy));
 }
 
 TEST(CompileJoin, RejectsStringKeyNonInnerAndIncompatible) {
