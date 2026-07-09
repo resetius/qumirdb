@@ -667,6 +667,8 @@ void ApplyPlanPasses(NQdb::TOperatorPtr& plan) {
     NQdb::AnnotateTypes(plan);
     plan = NQdb::ExtractEquiJoins(plan);
     NQdb::AnnotateTypes(plan);
+    plan = NQdb::PushDownSemiJoins(plan);
+    NQdb::AnnotateTypes(plan); // re-annotate: semi pushdown restructured joins
     plan = NQdb::ApplyTopSort(plan);
     NQdb::AnnotateTypes(plan);
     NQdb::ApplyColumnPruning(plan);

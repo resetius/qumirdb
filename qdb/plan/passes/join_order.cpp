@@ -8,7 +8,9 @@
 #include <qdb/plan/ops/sort.h>
 
 #include "factor_conjuncts.h"
+#include "unbound_vars.h"
 
+#include <memory>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -201,8 +203,114 @@ TOperatorPtr Reorder(TOperatorPtr node, std::vector<TEdge> edges) {
 
 } // namespace
 
+namespace {
+
+std::unordered_set<std::string> ColumnNames(const TOperatorPtr& node) {
+    std::unordered_set<std::string> names;
+    if (auto st = TMaybeType<TStructType>(node->OutputColumns())) {
+        for (const auto& [name, _] : st.Cast()->Fields) {
+            names.insert(name);
+        }
+    }
+    return names;
+}
+
+bool AllIn(const std::unordered_set<std::string>& cols,
+    const std::unordered_set<std::string>& set)
+{
+    for (const auto& c : cols) {
+        if (!set.count(c)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Sinks a LeftSemi/LeftAnti join through the inner joins beneath its build side,
+// as deep as its build-side dependencies allow. Reads output schemas of the
+// current (typed) tree before mutating, so a caller must re-annotate afterwards.
+TOperatorPtr SinkSemi(std::shared_ptr<TJoinOperator> semi) {
+    auto childJoin = TMaybeOp<TJoinOperator>(semi->Left());
+    if (!childJoin || childJoin.Cast()->JoinType() != EJoinType::Inner) {
+        return semi;
+    }
+    auto inner = childJoin.Cast();
+
+    // Everything the semi needs from its build side: its left key columns plus
+    // any build-side columns its residual predicate reads. (Probe-side columns
+    // travel with the probe input C and are unaffected by the push.)
+    std::unordered_set<std::string> needBuild;
+    for (const auto& key : semi->Keys()) {
+        needBuild.insert(key.Left);
+    }
+    if (semi->Filter()) {
+        const auto childCols = ColumnNames(semi->Left());
+        for (const auto& v : FindUnboundVars(semi->Filter())) {
+            if (childCols.count(v)) {
+                needBuild.insert(v);
+            }
+        }
+    }
+
+    const auto leftCols = ColumnNames(inner->Left());
+    const auto rightCols = ColumnNames(inner->Right());
+    const bool toLeft = AllIn(needBuild, leftCols);
+    const bool toRight = !toLeft && AllIn(needBuild, rightCols);
+    if (!toLeft && !toRight) {
+        return semi; // build dependencies span both sides — cannot push
+    }
+
+    auto& target = toLeft ? inner->MutableLeft() : inner->MutableRight();
+    auto pushed = std::make_shared<TJoinOperator>(
+        target, semi->Right(), semi->Keys(), semi->JoinType(), semi->Filter());
+    target = SinkSemi(std::move(pushed));
+    return inner;
+}
+
+TOperatorPtr PushDown(TOperatorPtr node) {
+    if (!node) {
+        return node;
+    }
+    if (auto join = TMaybeOp<TJoinOperator>(node)) {
+        auto j = join.Cast();
+        const auto type = j->JoinType();
+        // Sink first (top-down), while this subtree's types are still current;
+        // SinkSemi preserves output column names, so recursing into the
+        // restructured result stays valid before the pipeline re-annotates.
+        if (type == EJoinType::LeftSemi || type == EJoinType::LeftAnti) {
+            auto sunk = SinkSemi(j);
+            if (sunk.get() != j.get()) {
+                return PushDown(std::move(sunk));
+            }
+        }
+        j->MutableLeft() = PushDown(j->Left());
+        j->MutableRight() = PushDown(j->Right());
+        return j;
+    }
+    if (auto f = TMaybeOp<TFilterOperator>(node)) {
+        f.Cast()->MutableInput() = PushDown(f.Cast()->Input());
+    } else if (auto p = TMaybeOp<TProjectOperator>(node)) {
+        p.Cast()->MutableInput() = PushDown(p.Cast()->Input());
+    } else if (auto a = TMaybeOp<TAggregateOperator>(node)) {
+        a.Cast()->MutableInput() = PushDown(a.Cast()->Input());
+    } else if (auto l = TMaybeOp<TLimitOperator>(node)) {
+        l.Cast()->MutableInput() = PushDown(l.Cast()->Input());
+    } else if (auto s = TMaybeOp<TSortOperator>(node)) {
+        s.Cast()->MutableInput() = PushDown(s.Cast()->Input());
+    } else if (auto t = TMaybeOp<TTopSortOperator>(node)) {
+        t.Cast()->MutableInput() = PushDown(t.Cast()->Input());
+    }
+    return node;
+}
+
+} // namespace
+
 TOperatorPtr ReorderJoins(TOperatorPtr root) {
     return Reorder(std::move(root), {});
+}
+
+TOperatorPtr PushDownSemiJoins(TOperatorPtr root) {
+    return PushDown(std::move(root));
 }
 
 } // namespace NQdb

@@ -376,6 +376,8 @@ int RunQuery(ESyntax syntax, std::istream& in, const TConfig& config) {
     NQdb::AnnotateTypes(*plan); // re-annotate: reordering rebuilt the join tree
     *plan = NQdb::ExtractEquiJoins(*plan);
     NQdb::AnnotateTypes(*plan); // re-annotate: equi-join extraction adds/removes nodes
+    *plan = NQdb::PushDownSemiJoins(*plan);
+    NQdb::AnnotateTypes(*plan); // re-annotate: semi pushdown restructured joins
     *plan = NQdb::ApplyTopSort(*plan);
     NQdb::AnnotateTypes(*plan); // re-annotate: top-sort replaces limit(sort(...))
     NQdb::ApplyColumnPruning(*plan);
