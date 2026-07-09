@@ -1274,6 +1274,10 @@ std::vector<TKernelArtifacts> WasmFinalizeKernels(
             .Stage = kernel.Stage,
             .Name = kernel.Name,
         };
+        if (!kernel.ExportArtifacts) {
+            out.push_back(std::move(item));
+            continue;
+        }
         item.Ast = artifacts.Add(
             "ast", AstText(kernel.Ast), item.Name, item.Stage);
         if (embedWasm) {
@@ -1581,7 +1585,8 @@ std::optional<llvm::json::Object> BuildSortStageJson(
     const NQumir::NAst::TStructType& inputStruct,
     const TKernelIndex& kernels,
     const void* op,
-    bool embedWasm)
+    bool embedWasm,
+    bool topSort = false)
 {
     bool anyNullableKey = false;
     for (const auto& key : sortKeys) {
@@ -1599,15 +1604,17 @@ std::optional<llvm::json::Object> BuildSortStageJson(
             NQdb::IsNullableType(inputStruct.Fields[index].second);
     }
 
-    const auto* radix = FindKernel(
-        kernels, op,
-        anyNullableKey ? "sort.radix.nullable.fused" : "sort.radix.fused");
-    if (embedWasm && radix &&
-        !radix->Artifacts->Wasm.empty())
+    const auto* wasmKernel = topSort
+        ? FindKernel(kernels, op, "top-sort.fused")
+        : FindKernel(
+            kernels, op,
+            anyNullableKey ? "sort.radix.nullable.fused" : "sort.radix.fused");
+    if (embedWasm && wasmKernel &&
+        !wasmKernel->Artifacts->Wasm.empty())
     {
         llvm::json::Array keys;
-        for (size_t i = 0; i < radix->Kernel->SortKeys.size(); ++i) {
-            const auto& key = radix->Kernel->SortKeys[i];
+        for (size_t i = 0; i < wasmKernel->Kernel->SortKeys.size(); ++i) {
+            const auto& key = wasmKernel->Kernel->SortKeys[i];
             const auto& sortKey = sortKeys[i];
             const bool nullsFirst = sortKey.Nulls == NQdb::ESortNulls::First ||
                 (sortKey.Nulls == NQdb::ESortNulls::Default &&
@@ -1620,11 +1627,12 @@ std::optional<llvm::json::Object> BuildSortStageJson(
                 {"nullsFirst", nullsFirst},
             });
         }
-        return llvm::json::Object{
-            {"wasm", radix->Artifacts->Wasm},
+        llvm::json::Object stage{
+            {"wasm", wasmKernel->Artifacts->Wasm},
             {"radixKeys", std::move(keys)},
             {"radixNullable", anyNullableKey},
         };
+        return stage;
     }
 
     auto keys = ExecSortKeysJson(sortKeys, inputStruct);
@@ -1919,9 +1927,13 @@ struct TExecGraphBuilder {
                     static_cast<NQumir::NAst::TStructType*>(input.OutputType.get());
                 auto stage = BuildSortStageJson(
                     top.Cast()->Keys(), *inputStruct, Kernels,
-                    top.Cast().get(), EmbedWasm);
+                    top.Cast().get(), EmbedWasm, true);
                 if (!stage) {
                     Unsupported = UnsupportedExec("top-sort key references an unknown column");
+                    return {};
+                }
+                if (EmbedWasm && !stage->getString("wasm")) {
+                    Unsupported = UnsupportedExec("top-sort kernel failed to compile to wasm");
                     return {};
                 }
                 stage->insert({"kind", "top-sort"});

@@ -64,6 +64,13 @@ bool IsRadixSortableType(const NQumir::NAst::TTypePtr& type) {
         static_cast<bool>(TMaybeType<TStringType>(inner));
 }
 
+bool SortNullsFirst(const NKernel::TKernelSortKeySpec& key) {
+    if (key.Nulls != ESortNulls::Default) {
+        return key.Nulls == ESortNulls::First;
+    }
+    return key.Direction == ESortDirection::Desc;
+}
+
 struct TSortKernelInputs {
     std::vector<TSortColumnRef> KeyColumns;
     std::vector<TSortRadixKeyInput> RadixKeys;
@@ -80,6 +87,8 @@ TSortKernelInputs BuildSortKernelInputs(const NKernel::TOperatorKernelSpec& spec
         inputs.RadixKeys.push_back({
             .ColumnIndex = key.Column.Index,
             .Type = key.Column.Type,
+            .Desc = key.Direction == ESortDirection::Desc,
+            .NullsFirst = SortNullsFirst(key),
         });
         inputs.KeyColumns.push_back({
             .Index = key.Column.Index,
@@ -277,7 +286,11 @@ TSortRuntimeProcess BuildSortRuntimeProcess(
         for (const auto& key : sortInputs.RadixKeys) {
             anyNullableKey = anyNullableKey || IsNullableType(key.Type);
         }
-        TKernelCompiler compiler(std::move(options));
+        auto radixOptions = options;
+        if (kernelName == "top-sort") {
+            radixOptions.Diagnostics = nullptr;
+        }
+        TKernelCompiler compiler(std::move(radixOptions));
         radixKernel = {
             .Enabled = true,
             .Dispatch = compiler.CompileRadixSortComposite(sortInputs.RadixKeys),
@@ -285,6 +298,15 @@ TSortRuntimeProcess BuildSortRuntimeProcess(
                 ? compiler.CompileRadixSortCompositeNullable(sortInputs.RadixKeys)
                 : TKernelCompiler::TSortRadixCompositeNullableDispatch{},
         };
+        if (kernelName == "top-sort") {
+            if (sink) {
+                for (size_t i = sinkBefore; i < sink->size(); ++i) {
+                    (*sink)[i].ExportArtifacts = false;
+                }
+            }
+            TKernelCompiler topSortCompiler(std::move(options));
+            (void)topSortCompiler.CompileTopSort(sortInputs.RadixKeys);
+        }
         if (sink) {
             // Resolved key metadata for the exec exporter, on both emitted
             // sort kernels.
