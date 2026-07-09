@@ -184,8 +184,6 @@ public:
     using TFetch = std::function<EJoinFetchResult(TRowSet&)>;
 
     TInnerJoinProcessor(
-        NQumir::NAst::TTypePtr leftType,
-        NQumir::NAst::TTypePtr rightType,
         TJoinKernels kernels,
         EJoinType joinType = EJoinType::Inner,
         bool hasResidual = false);
@@ -211,7 +209,7 @@ private:
     bool IsSemiAnti() const;
     void EnsureInit();
     bool DrainReadyOutput(TRowSet& rowSet);
-    void DrainKernelPairs();
+    bool DrainMaterialized(TRowSet& rowSet);
     void DrainStreamingPairs(const TRowSet& streamBatch, EJoinSide streamSide);
     void CollectMatchedLeftIds();
     bool PullOneInputBatch(const TFetch& left, const TFetch& right);
@@ -224,8 +222,6 @@ private:
     EJoinSide ChooseSymmetricPullSide() const;
 
 private:
-    NQumir::NAst::TTypePtr LeftType_;
-    NQumir::NAst::TTypePtr RightType_;
     TJoinKernels Kernels_;
     EJoinType JoinType_ = EJoinType::Inner;
     bool HasResidual_ = false;
@@ -237,7 +233,10 @@ private:
     std::array<uint8_t, TKernelCompiler::kHashTableSize> LeftTable_{};
     std::array<uint8_t, TKernelCompiler::kHashTableSize> RightTable_{};
     TPairBufferState PairBuffer_;
-    std::optional<TJoinOutputBuilder> Builder_;
+    // Next undrained pair in PairBuffer_ (kernel jt_materialize cursor). The
+    // buffer is reset once the cursor catches up, so Finalize ops (whose RIGHT
+    // variant swaps every pair in the buffer) always start from an empty one.
+    int64_t MaterializeCursor_ = 0;
     std::deque<TRowSet> ReadyOutput_;
     bool Initialized_ = false;
     bool LeftDone_ = false;

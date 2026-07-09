@@ -1020,8 +1020,9 @@ function createJoinState(kernel, layout, stage) {
   }
   const exports = kernel.instance.exports;
   const dispatch = exports.jt_dispatch;
-  if (typeof dispatch !== 'function') {
-    throw new Error('join kernel is missing entry jt_dispatch');
+  const materialize = exports.jt_materialize;
+  if (typeof dispatch !== 'function' || typeof materialize !== 'function') {
+    throw new Error('join kernel is missing an entry');
   }
 
   const arena = kernel.holder.arena;
@@ -1049,6 +1050,7 @@ function createJoinState(kernel, layout, stage) {
     layout,
     stage,
     dispatch,
+    materialize,
     arena,
     leftTable,
     rightTable,
@@ -1059,6 +1061,7 @@ function createJoinState(kernel, layout, stage) {
     // residual semi/anti finalize scan must skip unselected rows.
     leftSelections: [],
     matchedLeftIds: isResidualSemiAntiJoin(stage) ? new Set() : null,
+    materializeCursor: 0,
     semiAntiFinalized: false,
     outerFinalized: false,
     finalized: false,
@@ -1160,9 +1163,8 @@ function finalizeSemiAntiJoinState(state) {
 }
 
 // Outer join: after both sides are consumed, emit own-side rows that never
-// matched, with kNullRowId on the opposite side. For RIGHT the kernel runs
-// with the sides flipped, so the drained pairs are swapped back to keep left
-// ids in slot 0 (mirrors the native FinalizeOuterJoin).
+// matched, with kNullRowId on the opposite side. jt_dispatch leaves every pair
+// in canonical (left_id, right_id) order, including RIGHT joins.
 function finalizeOuterJoinState(state) {
   if (state.outerFinalized) {
     return;
@@ -1181,7 +1183,6 @@ function finalizeOuterJoinState(state) {
     throw new Error('join outer finalize failed');
   }
   state.outerFinalized = true;
-  return drainJoinPairs(state, 1024, false);
 }
 
 // Residual semi/anti: consume the inner kernel's raw pairs into the
@@ -1198,21 +1199,13 @@ function collectJoinPairIds(state) {
     state.matchedLeftIds.add(dv.getBigInt64(dataPtr + i * 16, true));
   }
   dv.setBigInt64(state.pairBuffer + pairLayout.count, 0n, true);
+  state.materializeCursor = 0;
 }
 
 // Residual semi/anti finalize: emit each selected stored left row once —
 // SEMI keeps matched, ANTI keeps unmatched (native FinalizeResidualSemiAntiJoin).
-function finalizeResidualSemiAntiJoinState(state, maxRows = 1024) {
+function finalizeResidualSemiAntiJoinState(state) {
   const anti = isLeftAntiJoin(state.stage);
-  const outputs = [];
-  let ids = [];
-  const flush = () => {
-    if (ids.length > 0) {
-      outputs.push(materializeJoinOutput(
-        state, ids, new Array(ids.length).fill(-1n)));
-      ids = [];
-    }
-  };
   for (let b = 0; b < state.leftStore.batches.length; ++b) {
     const batch = state.leftStore.batches[b];
     const selection = state.leftSelections[b];
@@ -1222,99 +1215,78 @@ function finalizeResidualSemiAntiJoinState(state, maxRows = 1024) {
       }
       const matched = state.matchedLeftIds.has(makeRowId(b, r));
       if (matched !== anti) {
-        ids.push(makeRowId(b, r));
-        if (ids.length >= maxRows) {
-          flush();
-        }
+        pushJoinPair(state, makeRowId(b, r), -1n);
       }
     }
   }
-  flush();
   state.semiAntiFinalized = true;
-  return outputs;
 }
 
-function drainJoinPairs(state, maxRows = 1024, swapPairs = false) {
+function ensureJoinPairCapacity(state, needed) {
+  const pairLayout = state.layout.pairBuffer;
+  const dv = state.arena.view();
+  const capacity = Number(
+    dv.getBigInt64(state.pairBuffer + pairLayout.capacity, true));
+  if (capacity >= needed) {
+    return;
+  }
+  const count = Number(dv.getBigInt64(state.pairBuffer + pairLayout.count, true));
+  const oldData = readPointer(dv, state.pairBuffer + pairLayout.data);
+  const newCapacity = Math.max(needed, capacity ? capacity * 2 : 1024);
+  const newData = state.arena.alloc(newCapacity * 16, 8);
+  if (oldData && count > 0) {
+    state.arena.bytes().copyWithin(newData, oldData, oldData + count * 16);
+  }
+  const outDv = state.arena.view();
+  outDv.setBigInt64(
+    state.pairBuffer + pairLayout.capacity, BigInt(newCapacity), true);
+  writePointer(outDv, state.pairBuffer + pairLayout.data, newData);
+}
+
+function pushJoinPair(state, leftId, rightId) {
+  const pairLayout = state.layout.pairBuffer;
+  let dv = state.arena.view();
+  const count = Number(dv.getBigInt64(state.pairBuffer + pairLayout.count, true));
+  ensureJoinPairCapacity(state, count + 1);
+  dv = state.arena.view();
+  const dataPtr = readPointer(dv, state.pairBuffer + pairLayout.data);
+  dv.setBigInt64(dataPtr + count * 16, leftId, true);
+  dv.setBigInt64(dataPtr + count * 16 + 8, rightId, true);
+  dv.setBigInt64(state.pairBuffer + pairLayout.count, BigInt(count + 1), true);
+}
+
+function drainJoinPairs(state, maxRows = 1024) {
   const layout = state.layout;
   const pairLayout = layout.pairBuffer;
   const dv = state.arena.view();
   const count = Number(dv.getBigInt64(state.pairBuffer + pairLayout.count, true));
-  if (count <= 0) {
+  if (state.materializeCursor >= count) {
     return [];
   }
-  const dataPtr = Number(dv.getBigInt64(state.pairBuffer + pairLayout.data, true));
-  const outputs = [];
-  let cursor = 0;
-  while (cursor < count) {
-    const n = Math.min(maxRows, count - cursor);
-    const leftIds = new Array(n);
-    const rightIds = new Array(n);
-    for (let i = 0; i < n; ++i) {
-      const pair = cursor + i;
-      const a = dv.getBigInt64(dataPtr + pair * 16, true);
-      const b = dv.getBigInt64(dataPtr + pair * 16 + 8, true);
-      leftIds[i] = swapPairs ? b : a;
-      rightIds[i] = swapPairs ? a : b;
-    }
-    outputs.push(materializeJoinOutput(state, leftIds, rightIds));
-    cursor += n;
+  const rowsetPtr = state.arena.alloc(layout.rowset.size, 8);
+  new Uint8Array(state.arena.memory.buffer, rowsetPtr, layout.rowset.size).fill(0);
+  const produced = Number(state.materialize(
+    BigInt(state.pairBuffer),
+    BigInt(state.leftStore.dataPtr()),
+    BigInt(state.rightStore.dataPtr()),
+    BigInt(state.leftStore.dataPtr()),
+    BigInt(state.rightStore.dataPtr()),
+    BigInt(state.materializeCursor),
+    BigInt(maxRows),
+    BigInt(rowsetPtr)));
+  if (produced <= 0) {
+    throw new Error('join materialize failed');
   }
-  dv.setBigInt64(state.pairBuffer + pairLayout.count, 0n, true);
-  return outputs;
-}
-
-function materializeJoinOutput(state, leftIds, rightIds) {
-  const output = state.stage.output || [];
-  const leftCount = (state.stage.leftColumns || []).length;
-  const semiAnti = isLeftSemiAntiJoin(state.stage);
-  const columns = output.map((spec, outIndex) => {
-    const fromLeft = semiAnti || outIndex < leftCount;
-    const srcIndex = fromLeft ? outIndex : outIndex - leftCount;
-    const ids = fromLeft ? leftIds : rightIds;
-    return {
-      name: spec.name,
-      type: spec.type,
-      values: gatherJoinColumn(
-        fromLeft ? state.leftStore : state.rightStore,
-        ids,
-        srcIndex,
-        spec.type),
-    };
-  });
-  return { rowCount: leftIds.length, columns };
-}
-
-function gatherJoinColumn(store, ids, columnIndex, type) {
-  if (type === 'string') {
-    return ids.map(id => {
-      if (id === -1n) return null;
-      const batch = store.batch(rowIdBatch(id));
-      const value = batch.columns[columnIndex].values[rowIdRow(id)];
-      return value === undefined ? null : value;
-    });
+  state.materializeCursor += produced;
+  if (state.materializeCursor >= count) {
+    state.arena.view().setBigInt64(
+      state.pairBuffer + pairLayout.count, 0n, true);
+    state.materializeCursor = 0;
   }
-  // Unmatched rows (outer join) become real nulls, so the output must be a
-  // plain array; the typed fast path is only for all-matched gathers.
-  let hasNullIds = false;
-  for (let i = 0; i < ids.length; ++i) {
-    if (ids[i] === -1n) {
-      hasNullIds = true;
-      break;
-    }
-  }
-  const Ctor = hasNullIds ? null : numericArrayConstructor(type);
-  const out = Ctor ? new Ctor(ids.length) : new Array(ids.length);
-  for (let i = 0; i < ids.length; ++i) {
-    const id = ids[i];
-    if (id === -1n) {
-      out[i] = null;
-      continue;
-    }
-    const batch = store.batch(rowIdBatch(id));
-    const value = batch.columns[columnIndex].values[rowIdRow(id)];
-    out[i] = value === undefined ? null : value;
-  }
-  return out;
+  return [
+    materializeWasmRowSet(
+      state.arena, layout, state.stage.output || [], rowsetPtr),
+  ];
 }
 
 function finishJoinState(state) {
@@ -1928,6 +1900,12 @@ class JoinTask {
       this.state = createJoinState(this.kernel, this.layout, this.stage);
     }
 
+    const drained = drainJoinPairs(this.state);
+    if (drained.length > 0) {
+      this.ready.push(...drained);
+      return this.execute();
+    }
+
     const progressed = this.pullOneInputBatch();
     if (progressed) {
       if (isResidualSemiAntiJoin(this.stage)) {
@@ -1945,17 +1923,18 @@ class JoinTask {
     if (this.leftDone && this.rightDone) {
       if (isLeftSemiAntiJoin(this.stage) && !this.state.semiAntiFinalized) {
         if (isResidualSemiAntiJoin(this.stage)) {
-          this.ready.push(...finalizeResidualSemiAntiJoinState(this.state));
+          finalizeResidualSemiAntiJoinState(this.state);
         } else {
           finalizeSemiAntiJoinState(this.state);
-          this.ready.push(...drainJoinPairs(this.state));
         }
+        this.ready.push(...drainJoinPairs(this.state));
         if (this.ready.length > 0) {
           return this.execute();
         }
       }
       if (isOuterJoin(this.stage) && !this.state.outerFinalized) {
-        this.ready.push(...finalizeOuterJoinState(this.state));
+        finalizeOuterJoinState(this.state);
+        this.ready.push(...drainJoinPairs(this.state));
         if (this.ready.length > 0) {
           return this.execute();
         }
