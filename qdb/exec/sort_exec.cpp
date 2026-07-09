@@ -1,5 +1,6 @@
 #include <qdb/exec/sort_exec.h>
 
+#include <qdb/exec/kernel_rowset.h>
 #include <qdb/plan/types/nullable.h>
 
 #include <qumir/parser/type.h>
@@ -550,22 +551,17 @@ bool TSortProcessor::TryRadixSort()
     if (Rows_.size() > std::numeric_limits<uint32_t>::max()) {
         return false;
     }
-    if (!RadixKernel_.Enabled || !RadixKernel_.Dispatch) {
+    const bool useNullable = static_cast<bool>(RadixKernel_.NullableDispatch);
+    auto dispatch = useNullable ? RadixKernel_.NullableDispatch : RadixKernel_.Dispatch;
+    if (!RadixKernel_.Enabled || !dispatch) {
         return false;
     }
     if (KeyColumns_.size() != Keys_.size()) {
         return false;
     }
-    bool hasAnyNulls = false;
-    for (size_t i = 0; i < Keys_.size(); ++i) {
-        hasAnyNulls = hasAnyNulls || HasAnyNullMask(Store_, Rows_, KeyColumns_[i].Index);
-    }
-    if (hasAnyNulls && !RadixKernel_.NullableDispatch) {
-        return false;
-    }
 
     std::vector<TRowId> work(Rows_.size() * RadixWorkStride(KeyColumns_));
-    std::vector<uint32_t> counts(hasAnyNulls ? 257 : 256);
+    std::vector<uint32_t> counts(useNullable ? 257 : 256);
     auto descs = std::make_unique<bool[]>(Keys_.size());
     auto nullsFirsts = std::make_unique<bool[]>(Keys_.size());
     for (size_t k = 0; k < Keys_.size(); ++k) {
@@ -574,13 +570,10 @@ bool TSortProcessor::TryRadixSort()
     }
 
     auto* store = const_cast<TRowSet*>(Store_.Data());
-    if (hasAnyNulls) {
-        RadixKernel_.NullableDispatch(store, Rows_.data(), work.data(), counts.data(),
-            static_cast<int64_t>(Rows_.size()), descs.get(), nullsFirsts.get());
-    } else {
-        RadixKernel_.Dispatch(store, Rows_.data(), work.data(), counts.data(),
-            static_cast<int64_t>(Rows_.size()), descs.get());
-    }
+    TRowSet unused{};
+    dispatch(store, Rows_.data(), work.data(), counts.data(),
+        static_cast<int64_t>(Rows_.size()), descs.get(), nullsFirsts.get(),
+        true, 0, 0, &unused);
     return true;
 }
 
@@ -605,10 +598,7 @@ void TSortProcessor::Finish()
         return;
     }
     if (!TryRadixSort()) {
-        std::stable_sort(Rows_.begin(), Rows_.end(),
-            [&](TRowId leftId, TRowId rightId) {
-                return SortRowsLess(Store_, Keys_, KeyColumns_, leftId, rightId);
-            });
+        throw std::runtime_error("sort kernel is unavailable");
     }
 
     Materialized_ = true;
@@ -623,31 +613,34 @@ bool TSortProcessor::Next(TRowSet& rowSet)
 
     const size_t n = std::min<size_t>(
         static_cast<size_t>(BatchRows_), Rows_.size() - Cursor_);
-    const std::vector<TRowId> slice(Rows_.begin() + Cursor_, Rows_.begin() + Cursor_ + n);
 
-    auto* outputType = static_cast<TStructType*>(OutputType_.get());
-    if (!outputType) {
-        throw std::runtime_error("sort output must have TStructType");
-    }
-    auto* data = new TSortedRowSetData;
-    data->Gathered.resize(outputType->Fields.size());
-    data->Columns.resize(outputType->Fields.size());
-    for (size_t c = 0; c < outputType->Fields.size(); ++c) {
-        GatherColumn(Store_, slice, static_cast<int32_t>(c), outputType->Fields[c].second, data->Gathered[c]);
-        data->Columns[c] = data->Gathered[c].Column;
+    {
+        auto dispatch = RadixKernel_.NullableDispatch
+            ? RadixKernel_.NullableDispatch
+            : RadixKernel_.Dispatch;
+        if (RadixKernel_.Enabled && dispatch) {
+            const int64_t out = dispatch(
+                const_cast<TRowSet*>(Store_.Data()),
+                Rows_.data(),
+                nullptr,
+                nullptr,
+                static_cast<int64_t>(Rows_.size()),
+                nullptr,
+                nullptr,
+                false,
+                static_cast<int64_t>(Cursor_),
+                static_cast<int64_t>(n),
+                &rowSet);
+            if (out <= 0) {
+                return false;
+            }
+            rowSet.Destroy = DestroyKernelOwnedRowSet;
+            Cursor_ += static_cast<size_t>(out);
+            return true;
+        }
     }
 
-    rowSet = TRowSet{
-        .Columns = data->Columns.data(),
-        .ColumnCount = static_cast<int64_t>(data->Columns.size()),
-        .RowCount = static_cast<int64_t>(n),
-        .Selection = nullptr,
-        .Destroy = DestroySortedRowSet,
-        .Private = data,
-        .RefCount = 1,
-    };
-    Cursor_ += n;
-    return true;
+    throw std::runtime_error("sort materialize kernel is unavailable");
 }
 
 TMergeProcessor::TMergeProcessor(
@@ -786,18 +779,12 @@ bool TTopSortProcessor::TryRadixSortBatch(
     if (rows.size() > std::numeric_limits<uint32_t>::max()) {
         return false;
     }
-    if (!RadixKernel_.Enabled || !RadixKernel_.Dispatch) {
+    const bool useNullable = static_cast<bool>(RadixKernel_.NullableDispatch);
+    auto dispatch = useNullable ? RadixKernel_.NullableDispatch : RadixKernel_.Dispatch;
+    if (!RadixKernel_.Enabled || !dispatch) {
         return false;
     }
     if (KeyColumns_.size() != Keys_.size()) {
-        return false;
-    }
-
-    bool hasAnyNulls = false;
-    for (size_t i = 0; i < Keys_.size(); ++i) {
-        hasAnyNulls = hasAnyNulls || HasAnyNullMask(batch, rows, KeyColumns_[i].Index);
-    }
-    if (hasAnyNulls && !RadixKernel_.NullableDispatch) {
         return false;
     }
 
@@ -805,7 +792,7 @@ bool TTopSortProcessor::TryRadixSortBatch(
     scratch.EnsureKeyCapacity(Keys_.size());
     scratch.TempRowIds.resize(rows.size());
     scratch.Work.resize(rows.size() * RadixWorkStride(KeyColumns_));
-    scratch.Counts.assign(hasAnyNulls ? 257 : 256, 0);
+    scratch.Counts.assign(useNullable ? 257 : 256, 0);
     for (size_t i = 0; i < rows.size(); ++i) {
         scratch.TempRowIds[i] = MakeRowId(0, static_cast<int32_t>(rows[i]));
     }
@@ -816,16 +803,12 @@ bool TTopSortProcessor::TryRadixSortBatch(
     }
 
     auto* store = const_cast<TRowSet*>(&batch);
-    if (hasAnyNulls) {
-        RadixKernel_.NullableDispatch(store, scratch.TempRowIds.data(),
-            scratch.Work.data(), scratch.Counts.data(),
-            static_cast<int64_t>(scratch.TempRowIds.size()),
-            scratch.Descs.get(), scratch.NullsFirsts.get());
-    } else {
-        RadixKernel_.Dispatch(store, scratch.TempRowIds.data(),
-            scratch.Work.data(), scratch.Counts.data(),
-            static_cast<int64_t>(scratch.TempRowIds.size()), scratch.Descs.get());
-    }
+    TRowSet unused{};
+    dispatch(store, scratch.TempRowIds.data(),
+        scratch.Work.data(), scratch.Counts.data(),
+        static_cast<int64_t>(scratch.TempRowIds.size()),
+        scratch.Descs.get(), scratch.NullsFirsts.get(),
+        true, 0, 0, &unused);
 
     for (size_t i = 0; i < rows.size(); ++i) {
         rows[i] = static_cast<uint32_t>(RowIndex(scratch.TempRowIds[i]));

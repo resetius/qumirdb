@@ -1469,35 +1469,6 @@ llvm::json::Array StructColumnsJson(const NQumir::NAst::TStructType& type) {
     return out;
 }
 
-// Resolve sort keys to indices into the current batch's columns (matching by
-// bare column name). Returns nullopt if any key column is not present.
-std::optional<llvm::json::Array> ExecSortKeysJson(
-    const std::vector<NQdb::TSortKey>& keys,
-    const NQumir::NAst::TStructType& inputStruct)
-{
-    llvm::json::Array out;
-    for (const auto& key : keys) {
-        int32_t index = -1;
-        for (size_t f = 0; f < inputStruct.Fields.size(); ++f) {
-            if (BareColumnName(inputStruct.Fields[f].first) ==
-                BareColumnName(key.Column))
-            {
-                index = static_cast<int32_t>(f);
-                break;
-            }
-        }
-        if (index < 0) {
-            return std::nullopt;
-        }
-        out.push_back(llvm::json::Object{
-            {"index", index},
-            {"direction", std::string(NQdb::SortDirectionName(key.Direction))},
-            {"nulls", std::string(NQdb::SortNullsName(key.Nulls))},
-        });
-    }
-    return out;
-}
-
 llvm::json::Object UnsupportedExec(std::string reason) {
     return llvm::json::Object{
         {"supported", false},
@@ -1556,18 +1527,24 @@ const TKernelRef* FindKernel(
     return nullptr;
 }
 
-// Builds a sort stage body from the operator's lowered kernels. When the sort
-// compiled to a radix kernel with wasm, emits the kernel plus its per-key
-// metadata; otherwise emits JS-comparison keys. Returns nullopt if a key
-// references an unknown column.
+// Builds a sort stage body from the operator's lowered wasm kernel. Browser
+// sort/top-sort stages do not have a JS comparison fallback; an unavailable
+// kernel is a plan/export error.
 std::optional<llvm::json::Object> BuildSortStageJson(
     const std::vector<NQdb::TSortKey>& sortKeys,
     const NQumir::NAst::TStructType& inputStruct,
     const TKernelIndex& kernels,
     const void* op,
     bool embedWasm,
-    bool topSort = false)
+    bool topSort,
+    std::string& error)
 {
+    const char* stageName = topSort ? "top-sort" : "sort";
+    if (!embedWasm) {
+        error = std::string(stageName) + " stage requires embedded wasm kernel";
+        return std::nullopt;
+    }
+
     bool anyNullableKey = false;
     for (const auto& key : sortKeys) {
         int32_t index = -1;
@@ -1578,6 +1555,8 @@ std::optional<llvm::json::Object> BuildSortStageJson(
             }
         }
         if (index < 0) {
+            error = std::string(stageName) +
+                " key references an unknown column: " + key.Column;
             return std::nullopt;
         }
         anyNullableKey = anyNullableKey ||
@@ -1588,38 +1567,37 @@ std::optional<llvm::json::Object> BuildSortStageJson(
         ? FindKernel(kernels, op, "top-sort.fused")
         : FindKernel(
             kernels, op,
-            anyNullableKey ? "sort.radix.nullable.fused" : "sort.radix.fused");
-    if (embedWasm && wasmKernel &&
-        !wasmKernel->Artifacts->Wasm.empty())
-    {
-        llvm::json::Array keys;
-        for (size_t i = 0; i < wasmKernel->Kernel->SortKeys.size(); ++i) {
-            const auto& key = wasmKernel->Kernel->SortKeys[i];
-            const auto& sortKey = sortKeys[i];
-            const bool nullsFirst = sortKey.Nulls == NQdb::ESortNulls::First ||
-                (sortKey.Nulls == NQdb::ESortNulls::Default &&
-                    sortKey.Direction == NQdb::ESortDirection::Desc);
-            keys.push_back(llvm::json::Object{
-                {"index", key.Index},
-                {"width", key.WidthBytes},
-                {"isString", key.IsString},
-                {"desc", key.Desc},
-                {"nullsFirst", nullsFirst},
-            });
-        }
-        llvm::json::Object stage{
-            {"wasm", wasmKernel->Artifacts->Wasm},
-            {"radixKeys", std::move(keys)},
-            {"radixNullable", anyNullableKey},
-        };
-        return stage;
-    }
-
-    auto keys = ExecSortKeysJson(sortKeys, inputStruct);
-    if (!keys) {
+            anyNullableKey ? "sort.run.nullable.fused" : "sort.run.fused");
+    if (!wasmKernel) {
+        error = std::string(stageName) + " kernel was not generated";
         return std::nullopt;
     }
-    return llvm::json::Object{{"keys", std::move(*keys)}};
+    if (wasmKernel->Artifacts->Wasm.empty()) {
+        error = std::string(stageName) + " kernel failed to compile to wasm";
+        return std::nullopt;
+    }
+
+    llvm::json::Array keys;
+    for (size_t i = 0; i < wasmKernel->Kernel->SortKeys.size(); ++i) {
+        const auto& key = wasmKernel->Kernel->SortKeys[i];
+        const auto& sortKey = sortKeys[i];
+        const bool nullsFirst = sortKey.Nulls == NQdb::ESortNulls::First ||
+            (sortKey.Nulls == NQdb::ESortNulls::Default &&
+                sortKey.Direction == NQdb::ESortDirection::Desc);
+        keys.push_back(llvm::json::Object{
+            {"index", key.Index},
+            {"width", key.WidthBytes},
+            {"isString", key.IsString},
+            {"desc", key.Desc},
+            {"nullsFirst", nullsFirst},
+        });
+    }
+    llvm::json::Object stage{
+        {"wasm", wasmKernel->Artifacts->Wasm},
+        {"radixKeys", std::move(keys)},
+        {"radixNullable", anyNullableKey},
+    };
+    return stage;
 }
 
 struct TExecGraphBuildResult {
@@ -1897,11 +1875,12 @@ struct TExecGraphBuilder {
                 if (Unsupported) return {};
                 auto* inputStruct =
                     static_cast<NQumir::NAst::TStructType*>(input.OutputType.get());
+                std::string error;
                 auto stage = BuildSortStageJson(
                     sort.Cast()->Keys(), *inputStruct, Kernels,
-                    sort.Cast().get(), EmbedWasm);
+                    sort.Cast().get(), EmbedWasm, false, error);
                 if (!stage) {
-                    Unsupported = UnsupportedExec("sort key references an unknown column");
+                    Unsupported = UnsupportedExec(std::move(error));
                     return {};
                 }
                 stage->insert({"kind", "sort"});
@@ -1915,15 +1894,12 @@ struct TExecGraphBuilder {
                 if (Unsupported) return {};
                 auto* inputStruct =
                     static_cast<NQumir::NAst::TStructType*>(input.OutputType.get());
+                std::string error;
                 auto stage = BuildSortStageJson(
                     top.Cast()->Keys(), *inputStruct, Kernels,
-                    top.Cast().get(), EmbedWasm, true);
+                    top.Cast().get(), EmbedWasm, true, error);
                 if (!stage) {
-                    Unsupported = UnsupportedExec("top-sort key references an unknown column");
-                    return {};
-                }
-                if (EmbedWasm && !stage->getString("wasm")) {
-                    Unsupported = UnsupportedExec("top-sort kernel failed to compile to wasm");
+                    Unsupported = UnsupportedExec(std::move(error));
                     return {};
                 }
                 stage->insert({"kind", "top-sort"});
