@@ -100,14 +100,6 @@ function makeRowId(batchIdx, rowIdx) {
   return (BigInt(batchIdx) << 32n) | BigInt(rowIdx >>> 0);
 }
 
-function rowIdBatch(id) {
-  return Number(id >> 32n);
-}
-
-function rowIdRow(id) {
-  return Number(id & 0xffffffffn);
-}
-
 function encodeStringColumn(values, rowCount, encoder) {
   const parts = new Array(rowCount);
   const offsets = new Int32Array(rowCount + 1);
@@ -1802,26 +1794,7 @@ function jsValueBatchForRowSet(rowSet, layout, arena) {
     arena, layout, rowSet.batch.columns, rowSet.batch.wasm.rowsetPtr);
 }
 
-function gatherRowIds(rowSets, sortedIds, keep, layout, arena) {
-  const columns = outputShapeFromRowSets(rowSets).map(col => ({
-    name: col.name,
-    type: col.type,
-    values: new Array(keep),
-  }));
-  const batches = rowSets.map(rowSet =>
-    jsValueBatchForRowSet(rowSet, layout, arena));
-  for (let i = 0; i < keep; ++i) {
-    const id = sortedIds[i];
-    const batch = batches[rowIdBatch(id)];
-    const row = rowIdRow(id);
-    for (let c = 0; c < columns.length; ++c) {
-      columns[c].values[i] = batch.columns[c].values[row];
-    }
-  }
-  return { rowCount: keep, columns };
-}
-
-function radixSortRowIds(kernel, layout, rowSets, radixKeys) {
+function runSortKernelRowSets(kernel, layout, rowSets, radixKeys, limit) {
   const arena = kernel.holder.arena;
 
   const n = selectedRowCount(rowSets);
@@ -1847,7 +1820,17 @@ function radixSortRowIds(kernel, layout, rowSets, radixKeys) {
       releaseWasmRowSet(rowSet);
     }
     store.freeMarshalled();
-    return { n, rowIdsPtr: 0 };
+    return emptyBatchForRowSets(rowSets);
+  }
+  const keep = (limit != null && limit < n)
+    ? Math.max(Number(limit), 0)
+    : n;
+  if (keep === 0) {
+    for (const rowSet of releaseInputs) {
+      releaseWasmRowSet(rowSet);
+    }
+    store.freeMarshalled();
+    return emptyBatchForRowSets(rowSets);
   }
 
   // Allocate everything up front (a mid-write grow would detach views).
@@ -1855,15 +1838,15 @@ function radixSortRowIds(kernel, layout, rowSets, radixKeys) {
   const workPtr = arena.alloc(Math.max(n, 1) * workStride * 8, 8);
   const countsPtr = arena.alloc((nullable ? 257 : 256) * 4, 4);
   const descsPtr = arena.alloc(Math.max(keyCount, 1), 1);
-  const nullsFirstsPtr = nullable ? arena.alloc(Math.max(keyCount, 1), 1) : 0;
+  const nullsFirstsPtr = arena.alloc(Math.max(keyCount, 1), 1);
+  const outRowSetPtr = arena.alloc(layout.rowset.size, 8);
+  let outRowSetTransferred = false;
 
   const dv = arena.view();
   for (let k = 0; k < keyCount; ++k) {
     const key = radixKeys[k];
     dv.setUint8(descsPtr + k, key.desc ? 1 : 0);
-    if (nullable) {
-      dv.setUint8(nullsFirstsPtr + k, key.nullsFirst ? 1 : 0);
-    }
+    dv.setUint8(nullsFirstsPtr + k, key.nullsFirst ? 1 : 0);
   }
 
   let out = 0;
@@ -1879,46 +1862,45 @@ function radixSortRowIds(kernel, layout, rowSets, radixKeys) {
 
   try {
     // memory64: every pointer/count is an i64 param.
-    if (nullable) {
-      kernel.fn(
-        BigInt(store.dataPtr()), BigInt(rowIdsPtr), BigInt(workPtr),
-        BigInt(countsPtr), BigInt(n), BigInt(descsPtr), BigInt(nullsFirstsPtr));
-    } else {
-      kernel.fn(
-        BigInt(store.dataPtr()), BigInt(rowIdsPtr), BigInt(workPtr),
-        BigInt(countsPtr), BigInt(n), BigInt(descsPtr));
+    const out = Number(kernel.fn(
+      BigInt(store.dataPtr()),
+      BigInt(rowIdsPtr),
+      BigInt(workPtr),
+      BigInt(countsPtr),
+      BigInt(n),
+      BigInt(descsPtr),
+      BigInt(nullsFirstsPtr),
+      1,
+      0n,
+      BigInt(keep),
+      BigInt(outRowSetPtr)));
+    if (out <= 0) {
+      return emptyBatchForRowSets(rowSets);
     }
+    outRowSetTransferred = true;
+    return makeWasmOwnedBatch(
+      { arena, layout },
+      outRowSetPtr,
+      outputShapeFromRowSets(rowSets));
   } finally {
+    arena.free(rowIdsPtr);
+    arena.free(workPtr);
+    arena.free(countsPtr);
+    arena.free(descsPtr);
+    arena.free(nullsFirstsPtr);
+    if (!outRowSetTransferred) {
+      arena.free(outRowSetPtr);
+    }
     for (const rowSet of releaseInputs) {
       releaseWasmRowSet(rowSet);
     }
     store.freeMarshalled();
   }
-
-  return { n, rowIdsPtr };
-}
-
-function readSortedRowIds(arena, rowIdsPtr, count) {
-  const outDv = arena.view();
-  const sortedIds = new Array(count);
-  for (let i = 0; i < count; ++i) {
-    sortedIds[i] = outDv.getBigInt64(rowIdsPtr + i * 8, true);
-  }
-  return sortedIds;
 }
 
 function runRadixSortRowSets(kernel, layout, rowSets, radixKeys, limit) {
   try {
-    const sorted = radixSortRowIds(kernel, layout, rowSets, radixKeys);
-    const keep = (limit != null && limit < sorted.n)
-      ? Math.max(Number(limit), 0)
-      : sorted.n;
-    if (sorted.n === 0 || keep === 0) {
-      return emptyBatchForRowSets(rowSets);
-    }
-
-    const sortedIds = readSortedRowIds(kernel.holder.arena, sorted.rowIdsPtr, keep);
-    return gatherRowIds(rowSets, sortedIds, keep, layout, kernel.holder.arena);
+    return runSortKernelRowSets(kernel, layout, rowSets, radixKeys, limit);
   } finally {
     for (const rowSet of rowSets) {
       releaseWasmRowSet(rowSet);
@@ -2799,9 +2781,7 @@ class SortTask {
     const radixNullable = !!this.stage.radixNullable;
     const kernel = await instantiateKernel(
       this.stage.wasm,
-      radixNullable
-        ? 'qdb_radix_sort_indices_composite_nullable'
-        : 'qdb_radix_sort_indices_composite',
+      'qdb_sort_run',
       this.shared);
     kernel.nullable = radixNullable;
     this.pending = runRadixSortRowSets(

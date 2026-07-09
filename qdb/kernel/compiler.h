@@ -60,22 +60,26 @@ struct TSortRadixKeyInput {
     bool NullsFirst = false;
 };
 
-// Radix composite sort program (entry qdb_radix_sort_indices_composite): sorts
-// packed TRowId values in-place and reads key columns directly from TRowSet
-// storage. Throws on an unsupported key type.
+// Radix composite sort program. With a materialize schema it exports one
+// stage-level entry qdb_sort_run: optionally sorts packed TRowId values
+// in-place, then materializes a requested slice into a kernel-owned TRowSet.
+// Throws on an unsupported key/output type.
 NQumir::NAst::TExprPtr BuildRadixSortProgramAst(
-    const std::vector<TSortRadixKeyInput>& keys);
+    const std::vector<TSortRadixKeyInput>& keys,
+    const NQumir::NAst::TStructType* materializeType = nullptr);
 
-// Nullable variant (entry qdb_radix_sort_indices_composite_nullable).
+// Nullable-key variant of qdb_sort_run.
 NQumir::NAst::TExprPtr BuildRadixSortNullableProgramAst(
-    const std::vector<TSortRadixKeyInput>& keys);
+    const std::vector<TSortRadixKeyInput>& keys,
+    const NQumir::NAst::TStructType* materializeType = nullptr);
 
 // Top-sort program (entry qdb_top_sort_update): sorts incoming batch row ids
 // with the same radix cascade as full sort, then merges the current top-K state
 // with that sorted batch. It writes pick_src/pick_idx pairs:
 // src=0 -> old state row, src=1 -> incoming batch row.
 NQumir::NAst::TExprPtr BuildTopSortMergeProgramAst(
-    const std::vector<TSortRadixKeyInput>& keys);
+    const std::vector<TSortRadixKeyInput>& keys,
+    const NQumir::NAst::TStructType* materializeType = nullptr);
 
 // agg_dispatch(ref HashTable ht, ref TRowSet batch, i64 arg, i64 op) -> i64
 //   op == 0: init(ht, capacity = arg)
@@ -236,13 +240,15 @@ public:
     // type). Only computed (non-ident) columns go through this kernel.
     using TProjectDispatch = std::function<void(TRowSet* in, void** outBuffers)>;
 
-    using TSortRadixCompositeDispatch = std::function<void(
+    using TSortRadixCompositeDispatch = std::function<int64_t(
         TRowSet* store, int64_t* rowIds, int64_t* work, uint32_t* counts,
-        int64_t n, bool* descs)>;
+        int64_t n, bool* descs, bool* nullsFirsts, bool doSort,
+        int64_t start, int64_t limit, TRowSet* output)>;
 
-    using TSortRadixCompositeNullableDispatch = std::function<void(
+    using TSortRadixCompositeNullableDispatch = std::function<int64_t(
         TRowSet* store, int64_t* rowIds, int64_t* work, uint32_t* counts,
-        int64_t n, bool* descs, bool* nullsFirsts)>;
+        int64_t n, bool* descs, bool* nullsFirsts, bool doSort,
+        int64_t start, int64_t limit, TRowSet* output)>;
 
     using TTopSortDispatch = std::function<int64_t(
         TRowSet* state,
@@ -277,11 +283,14 @@ public:
     TProjectDispatch CompileProject(const NKernel::TOperatorKernelSpec& spec);
 
     TSortRadixCompositeDispatch CompileRadixSortComposite(
-        const std::vector<TSortRadixKeyInput>& keys);
+        const std::vector<TSortRadixKeyInput>& keys,
+        const NQumir::NAst::TStructType* materializeType);
     TSortRadixCompositeNullableDispatch CompileRadixSortCompositeNullable(
-        const std::vector<TSortRadixKeyInput>& keys);
+        const std::vector<TSortRadixKeyInput>& keys,
+        const NQumir::NAst::TStructType* materializeType);
     TTopSortDispatch CompileTopSort(
-        const std::vector<TSortRadixKeyInput>& keys);
+        const std::vector<TSortRadixKeyInput>& keys,
+        const NQumir::NAst::TStructType* materializeType = nullptr);
 
     // Compiles the per-query generic update and finalize programs for `aggs`
     // grouped by `groupKeys`, over rows of `inputType`.

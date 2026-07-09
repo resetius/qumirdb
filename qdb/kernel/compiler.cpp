@@ -609,10 +609,218 @@ NQumir::NAst::TExprPtr BuildTopSortUpdateAst(
     return std::move(builder).Build();
 }
 
+int64_t MaterializeFixedWidth(const NQumir::NAst::TTypePtr& type) {
+    using namespace NQumir::NAst;
+    auto valueType = UnwrapNamedType(UnwrapNullableType(type));
+    if (auto integer = TMaybeType<TIntegerType>(valueType)) {
+        return integer.Cast()->BitWidth() / 8;
+    }
+    if (TMaybeType<TFloatType>(valueType)) {
+        return 8;
+    }
+    return 0;
+}
+
+NQumir::NAst::TExprPtr BuildSortMaterializeWrapperAst(
+    const NQumir::NAst::TStructType& inputType)
+{
+    using namespace NQumir::NAst;
+    namespace Oz = NKernel::NOz;
+
+    auto i64Type = std::make_shared<TIntegerType>();
+    auto rowSetType = QumirDbNamedType("TRowSet");
+    auto columnType = QumirDbNamedType("TColumn");
+    auto rowSetPtrType = Ptr(rowSetType);
+    auto rowSetRefType = std::make_shared<TReferenceType>(rowSetType);
+    auto columnPtrType = Ptr(columnType);
+    auto ptrI64Type = Ptr(i64Type);
+
+    const int64_t columnCount = static_cast<int64_t>(inputType.Fields.size());
+    int64_t ownedPtrCount = 1; // columns array, stored by sort_materialize_begin.
+    for (const auto& field : inputType.Fields) {
+        ownedPtrCount += SortKeyIsString(field.second) ? 3 : 2;
+    }
+
+    auto column = [&](size_t idx) -> TExprPtr {
+        return Oz::Index("columns", Int64Literal(static_cast<int64_t>(idx)));
+    };
+
+    Oz::TFunBuilder builder("sort_materialize_row_ids");
+    builder
+        .Param("store", rowSetPtrType)
+        .Param("row_ids", ptrI64Type)
+        .Param("start", i64Type)
+        .Param("limit", i64Type)
+        .Param("out_rowset", rowSetRefType)
+        .Return(i64Type)
+        .Var("n", i64Type)
+        .Assign("n", Oz::Ident("limit"))
+        .Stmt(Oz::If(
+            Oz::Bin(TOperator("<="), Oz::Ident("n"), Int64Literal(0)),
+            Oz::Block({Oz::Return(Int64Literal(0))})))
+        .Var("columns", columnPtrType)
+        .Assign("columns", Oz::Call("sort_materialize_begin", {
+            Int64Literal(columnCount),
+            Int64Literal(ownedPtrCount),
+            Oz::Ident("n"),
+            Oz::Ident("out_rowset"),
+        }));
+
+    int64_t ownerIdx = 2;
+    for (size_t c = 0; c < inputType.Fields.size(); ++c) {
+        const auto& type = inputType.Fields[c].second;
+        const auto srcCol = Int64Literal(static_cast<int64_t>(c));
+        if (SortKeyIsString(type)) {
+            const int64_t offsetsOwner = ownerIdx++;
+            const int64_t dataOwner = ownerIdx++;
+            const int64_t maskOwner = ownerIdx++;
+            builder.Stmt(Oz::Call("sort_materialize_string_column", {
+                Oz::Ident("store"),
+                Oz::Ident("row_ids"),
+                Oz::Ident("start"),
+                Oz::Ident("n"),
+                srcCol,
+                column(c),
+                Oz::Ident("out_rowset"),
+                Int64Literal(offsetsOwner),
+                Int64Literal(dataOwner),
+                Int64Literal(maskOwner),
+            }));
+            continue;
+        }
+        const int64_t dataOwner = ownerIdx++;
+        const int64_t maskOwner = ownerIdx++;
+        if (SortKeyIsBool(type)) {
+            builder.Stmt(Oz::Call("sort_materialize_bool_column", {
+                Oz::Ident("store"),
+                Oz::Ident("row_ids"),
+                Oz::Ident("start"),
+                Oz::Ident("n"),
+                srcCol,
+                column(c),
+                Oz::Ident("out_rowset"),
+                Int64Literal(dataOwner),
+                Int64Literal(maskOwner),
+            }));
+            continue;
+        }
+        auto coreType = SortCoreType(type);
+        const int64_t width = MaterializeFixedWidth(type);
+        if (!coreType || width == 0) {
+            throw NQumir::TError(
+                "BuildSortMaterializeWrapperAst: unsupported column type " +
+                (type ? type->ToString() : std::string("<null>")));
+        }
+        builder.Stmt(Oz::Call("sort_materialize_fixed_column", {
+            Oz::Ident("store"),
+            Oz::Ident("row_ids"),
+            Oz::Ident("start"),
+            Oz::Ident("n"),
+            srcCol,
+            column(c),
+            Oz::Ident("out_rowset"),
+            Int64Literal(dataOwner),
+            Int64Literal(maskOwner),
+            Int64Literal(width),
+            Cast(Int64Literal(0), Ptr(std::move(coreType))),
+        }));
+    }
+    builder.Stmt(Oz::Return(Oz::Ident("n")));
+    return std::move(builder).Build();
+}
+
+NQumir::NAst::TExprPtr BuildSortRunWrapperAst(
+    const std::vector<TSortRadixKeyInput>& keys,
+    bool nullable)
+{
+    using namespace NQumir::NAst;
+    namespace Oz = NKernel::NOz;
+
+    auto i64Type = std::make_shared<TIntegerType>();
+    auto u32Type = std::make_shared<TIntegerType>(TIntegerType::U32);
+    auto boolType = std::make_shared<TBoolType>();
+    auto rowSetPtrType = Ptr(QumirDbNamedType("TRowSet"));
+    auto rowSetRefType = std::make_shared<TReferenceType>(QumirDbNamedType("TRowSet"));
+    auto ptrI64Type = Ptr(i64Type);
+    auto ptrU32Type = Ptr(u32Type);
+    auto ptrBoolType = Ptr(boolType);
+
+    Oz::TFunBuilder builder("qdb_sort_run");
+    builder
+        .Param("store", rowSetPtrType)
+        .Param("row_ids", ptrI64Type)
+        .Param("work", ptrI64Type)
+        .Param("counts", ptrU32Type)
+        .Param("n", i64Type)
+        .Param("descs", ptrBoolType)
+        .Param("nulls_firsts", ptrBoolType)
+        .Param("do_sort", boolType)
+        .Param("start", i64Type)
+        .Param("limit", i64Type)
+        .Param("out_rowset", rowSetRefType)
+        .Return(i64Type);
+
+    std::vector<TExprPtr> sortStmts;
+    for (size_t k = keys.size(); k > 0; --k) {
+        const size_t keyIdx = k - 1;
+        auto desc = Oz::Index("descs", Int64Literal(static_cast<int64_t>(keyIdx)));
+        auto nullsFirst = Oz::Index(
+            "nulls_firsts", Int64Literal(static_cast<int64_t>(keyIdx)));
+        sortStmts.push_back(BuildRowIdSortCall(
+            keys[keyIdx], nullable, std::move(desc), std::move(nullsFirst), "store"));
+    }
+    builder.Stmt(Oz::If(Oz::Ident("do_sort"), Oz::Block(std::move(sortStmts))));
+    builder.Stmt(Oz::If(
+        Oz::Bin(TOperator("<="), Oz::Ident("limit"), Int64Literal(0)),
+        Oz::Block({Oz::Return(Int64Literal(0))})));
+    builder.Stmt(Oz::Return(Oz::Call("sort_materialize_row_ids", {
+        Oz::Ident("store"),
+        Oz::Ident("row_ids"),
+        Oz::Ident("start"),
+        Oz::Ident("limit"),
+        Oz::Ident("out_rowset"),
+    })));
+    return std::move(builder).Build();
+}
+
+void AddSortMaterializeLibrary(
+    std::vector<NQumir::NAst::TExprPtr>& programStmts,
+    const char* errorPrefix)
+{
+    using namespace NQumir::NAst;
+    for (const auto& name : {"materialize.oz"}) {
+        auto library = NKernel::ParseFunctionLibrary(NKernel::ReadSortKernel(name));
+        if (!library) {
+            throw NQumir::TError(
+                std::string(errorPrefix) + ": " + library.error().ToString());
+        }
+        for (auto& stmt : *library) {
+            if (TMaybeNode<TUseExpr>(stmt)) {
+                continue;
+            }
+            programStmts.push_back(std::move(stmt));
+        }
+    }
+    auto stringOps = NKernel::ParseFunctionLibrary(
+        NKernel::ReadAggregationKernel("string_ops.oz"));
+    if (!stringOps) {
+        throw NQumir::TError(
+            std::string(errorPrefix) + ": string_ops.oz: " +
+            stringOps.error().ToString());
+    }
+    for (auto& stmt : *stringOps) {
+        if (TMaybeNode<TUseExpr>(stmt)) {
+            continue;
+        }
+        programStmts.push_back(std::move(stmt));
+    }
+}
+
 } // namespace
 
 NQumir::NAst::TExprPtr BuildRadixSortProgramAst(
-    const std::vector<TSortRadixKeyInput>& keys)
+    const std::vector<TSortRadixKeyInput>& keys,
+    const NQumir::NAst::TStructType* materializeType)
 {
     using namespace NQumir::NAst;
     if (keys.empty()) {
@@ -635,11 +843,17 @@ NQumir::NAst::TExprPtr BuildRadixSortProgramAst(
     addLibrary("radix.oz", false);
     addLibrary("sort_rowids.oz", true);
     programStmts.push_back(BuildRadixCompositeWrapperAst(keys, false));
+    if (materializeType) {
+        AddSortMaterializeLibrary(programStmts, "BuildRadixSortProgramAst");
+        programStmts.push_back(BuildSortMaterializeWrapperAst(*materializeType));
+        programStmts.push_back(BuildSortRunWrapperAst(keys, false));
+    }
     return std::make_shared<TBlockExpr>(NQumir::TLocation{}, std::move(programStmts));
 }
 
 NQumir::NAst::TExprPtr BuildRadixSortNullableProgramAst(
-    const std::vector<TSortRadixKeyInput>& keys)
+    const std::vector<TSortRadixKeyInput>& keys,
+    const NQumir::NAst::TStructType* materializeType)
 {
     using namespace NQumir::NAst;
     if (keys.empty()) {
@@ -662,11 +876,17 @@ NQumir::NAst::TExprPtr BuildRadixSortNullableProgramAst(
     addLibrary("radix.oz", false);
     addLibrary("sort_rowids.oz", true);
     programStmts.push_back(BuildRadixCompositeWrapperAst(keys, true));
+    if (materializeType) {
+        AddSortMaterializeLibrary(programStmts, "BuildRadixSortNullableProgramAst");
+        programStmts.push_back(BuildSortMaterializeWrapperAst(*materializeType));
+        programStmts.push_back(BuildSortRunWrapperAst(keys, true));
+    }
     return std::make_shared<TBlockExpr>(NQumir::TLocation{}, std::move(programStmts));
 }
 
 NQumir::NAst::TExprPtr BuildTopSortMergeProgramAst(
-    const std::vector<TSortRadixKeyInput>& keys)
+    const std::vector<TSortRadixKeyInput>& keys,
+    const NQumir::NAst::TStructType* materializeType)
 {
     using namespace NQumir::NAst;
     if (keys.empty()) {
@@ -691,6 +911,10 @@ NQumir::NAst::TExprPtr BuildTopSortMergeProgramAst(
     programStmts.push_back(BuildTopSortTempBeforeStateAst(keys));
     programStmts.push_back(BuildTopSortMergePicksAst());
     programStmts.push_back(BuildTopSortUpdateAst(keys));
+    if (materializeType) {
+        AddSortMaterializeLibrary(programStmts, "BuildTopSortMergeProgramAst");
+        programStmts.push_back(BuildSortMaterializeWrapperAst(*materializeType));
+    }
     return std::make_shared<TBlockExpr>(NQumir::TLocation{}, std::move(programStmts));
 }
 
@@ -804,60 +1028,77 @@ TKernelCompiler::TProjectDispatch TKernelCompiler::CompileProject(
 }
 
 TKernelCompiler::TSortRadixCompositeDispatch TKernelCompiler::CompileRadixSortComposite(
-    const std::vector<TSortRadixKeyInput>& keys)
+    const std::vector<TSortRadixKeyInput>& keys,
+    const NQumir::NAst::TStructType* materializeType)
 {
     using namespace NQumir::NAst;
 
     if (keys.empty()) {
         throw NQumir::TError("CompileRadixSortComposite: empty key list");
     }
+    if (!materializeType) {
+        throw NQumir::TError("CompileRadixSortComposite: materialize schema is required");
+    }
 
-    auto program = BuildRadixSortProgramAst(keys);
-    PrintKernelAst(Diagnostics_, "sort.radix.fused", program);
+    auto program = BuildRadixSortProgramAst(keys, materializeType);
+    PrintKernelAst(Diagnostics_, "sort.run.fused", program);
 
     auto kernel = EmitKernel(
-        "sort.radix.fused",
-        {"qdb_radix_sort_indices_composite"},
+        "sort.run.fused",
+        {"qdb_sort_run"},
         std::move(program));
     FinishKernelDiagnostics(Diagnostics_);
 
-    using TSortFn = void(*)(TRowSet*, int64_t*, int64_t*, uint32_t*, int64_t, bool*);
+    using TSortFn = int64_t(*)(
+        TRowSet*, int64_t*, int64_t*, uint32_t*, int64_t, bool*, bool*,
+        bool, int64_t, int64_t, TRowSet*);
     return [slot = kernel.Slot](TRowSet* store, int64_t* rowIds, int64_t* work,
-        uint32_t* counts, int64_t n, bool* descs) {
-        reinterpret_cast<TSortFn>(slot->Fns[0])(store, rowIds, work, counts, n, descs);
+        uint32_t* counts, int64_t n, bool* descs, bool* nullsFirsts,
+        bool doSort, int64_t start, int64_t limit, TRowSet* output) {
+        return reinterpret_cast<TSortFn>(slot->Fns[0])(
+            store, rowIds, work, counts, n, descs, nullsFirsts,
+            doSort, start, limit, output);
     };
 }
 
 TKernelCompiler::TSortRadixCompositeNullableDispatch
 TKernelCompiler::CompileRadixSortCompositeNullable(
-    const std::vector<TSortRadixKeyInput>& keys)
+    const std::vector<TSortRadixKeyInput>& keys,
+    const NQumir::NAst::TStructType* materializeType)
 {
     using namespace NQumir::NAst;
+    if (!materializeType) {
+        throw NQumir::TError("CompileRadixSortCompositeNullable: materialize schema is required");
+    }
 
-    auto program = BuildRadixSortNullableProgramAst(keys);
-    PrintKernelAst(Diagnostics_, "sort.radix.nullable.fused", program);
+    auto program = BuildRadixSortNullableProgramAst(keys, materializeType);
+    PrintKernelAst(Diagnostics_, "sort.run.nullable.fused", program);
 
     auto kernel = EmitKernel(
-        "sort.radix.nullable.fused",
-        {"qdb_radix_sort_indices_composite_nullable"},
+        "sort.run.nullable.fused",
+        {"qdb_sort_run"},
         std::move(program));
     FinishKernelDiagnostics(Diagnostics_);
 
-    using TSortFn = void(*)(TRowSet*, int64_t*, int64_t*, uint32_t*,
-        int64_t, bool*, bool*);
+    using TSortFn = int64_t(*)(
+        TRowSet*, int64_t*, int64_t*, uint32_t*, int64_t, bool*, bool*,
+        bool, int64_t, int64_t, TRowSet*);
     return [slot = kernel.Slot](TRowSet* store, int64_t* rowIds,
-        int64_t* work, uint32_t* counts, int64_t n, bool* descs, bool* nullsFirsts) {
-        reinterpret_cast<TSortFn>(slot->Fns[0])(
-            store, rowIds, work, counts, n, descs, nullsFirsts);
+        int64_t* work, uint32_t* counts, int64_t n, bool* descs, bool* nullsFirsts,
+        bool doSort, int64_t start, int64_t limit, TRowSet* output) {
+        return reinterpret_cast<TSortFn>(slot->Fns[0])(
+            store, rowIds, work, counts, n, descs, nullsFirsts,
+            doSort, start, limit, output);
     };
 }
 
 TKernelCompiler::TTopSortDispatch TKernelCompiler::CompileTopSort(
-    const std::vector<TSortRadixKeyInput>& keys)
+    const std::vector<TSortRadixKeyInput>& keys,
+    const NQumir::NAst::TStructType* materializeType)
 {
     using namespace NQumir::NAst;
 
-    auto program = BuildTopSortMergeProgramAst(keys);
+    auto program = BuildTopSortMergeProgramAst(keys, materializeType);
     PrintKernelAst(Diagnostics_, "top-sort.fused", program);
 
     auto kernel = EmitKernel(
