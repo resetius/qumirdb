@@ -15,6 +15,10 @@ namespace {
 
 constexpr int64_t kJoinInitialCapacity = 256;
 
+constexpr int64_t JoinOp(EJoinKernelOp op) {
+    return static_cast<int64_t>(op);
+}
+
 // Owns the gathered buffers behind an output TRowSet (one batch).
 struct TJoinedRowSetData {
     std::vector<TGatheredColumn> Gathered;
@@ -323,10 +327,16 @@ TInnerJoinProcessor::~TInnerJoinProcessor() {
         ReadyOutput_.pop_front();
     }
     if (Initialized_) {
-        Kernels_.DestroyTable(LeftTable_.data());
-        Kernels_.DestroyTable(RightTable_.data());
-        // The pair buffer is only populated by kernels after EnsureInit.
-        Kernels_.DestroyPairs(&PairBuffer_);
+        Kernels_.Dispatch(
+            LeftTable_.data(),
+            RightTable_.data(),
+            nullptr,
+            0,
+            &PairBuffer_,
+            nullptr,
+            nullptr,
+            0,
+            JoinOp(EJoinKernelOp::Destroy));
     }
 }
 
@@ -335,8 +345,18 @@ void TInnerJoinProcessor::EnsureInit() {
         return;
     }
     Initialized_ = true;
-    Kernels_.Init(LeftTable_.data(), kJoinInitialCapacity);
-    Kernels_.Init(RightTable_.data(), kJoinInitialCapacity);
+    if (!Kernels_.Dispatch(
+            LeftTable_.data(),
+            RightTable_.data(),
+            nullptr,
+            0,
+            &PairBuffer_,
+            nullptr,
+            nullptr,
+            kJoinInitialCapacity,
+            JoinOp(EJoinKernelOp::Init))) {
+        throw std::runtime_error("join hash table initialization failed");
+    }
 }
 
 bool TInnerJoinProcessor::DrainReadyOutput(TRowSet& rowSet) {
@@ -454,14 +474,18 @@ bool TInnerJoinProcessor::PullOneInputBatch(
         StoredLeftRows_ += batch.RowCount;
         LastLeftBatchRows_ = batch.RowCount;
         const int32_t batchIdx = LeftRows_.PushBatch(batch);
-        Kernels_.ProcessLeft(
-            LeftTable_.data(),
-            RightTable_.data(),
-            const_cast<TRowSet*>(&LeftRows_.Batch(batchIdx)),
-            batchIdx,
-            &PairBuffer_,
-            const_cast<TRowSet*>(LeftRows_.Data()),
-            const_cast<TRowSet*>(RightRows_.Data()));
+        if (!Kernels_.Dispatch(
+                LeftTable_.data(),
+                RightTable_.data(),
+                const_cast<TRowSet*>(&LeftRows_.Batch(batchIdx)),
+                batchIdx,
+                &PairBuffer_,
+                const_cast<TRowSet*>(LeftRows_.Data()),
+                const_cast<TRowSet*>(RightRows_.Data()),
+                0,
+                JoinOp(EJoinKernelOp::UpdateLeft))) {
+            throw std::runtime_error("join kernel update failed");
+        }
         DrainKernelPairs();
         return true;
     };
@@ -480,14 +504,18 @@ bool TInnerJoinProcessor::PullOneInputBatch(
         StoredRightRows_ += batch.RowCount;
         LastRightBatchRows_ = batch.RowCount;
         const int32_t batchIdx = RightRows_.PushBatch(batch);
-        Kernels_.ProcessRight(
-            RightTable_.data(),
-            LeftTable_.data(),
-            const_cast<TRowSet*>(&RightRows_.Batch(batchIdx)),
-            batchIdx,
-            &PairBuffer_,
-            const_cast<TRowSet*>(LeftRows_.Data()),
-            const_cast<TRowSet*>(RightRows_.Data()));
+        if (!Kernels_.Dispatch(
+                LeftTable_.data(),
+                RightTable_.data(),
+                const_cast<TRowSet*>(&RightRows_.Batch(batchIdx)),
+                batchIdx,
+                &PairBuffer_,
+                const_cast<TRowSet*>(LeftRows_.Data()),
+                const_cast<TRowSet*>(RightRows_.Data()),
+                0,
+                JoinOp(EJoinKernelOp::UpdateRight))) {
+            throw std::runtime_error("join kernel update failed");
+        }
         DrainKernelPairs();
         return true;
     };
@@ -504,13 +532,19 @@ bool TInnerJoinProcessor::PullOneInputBatch(
             return true;
         }
 
-        Kernels_.ProbeLeftStream(
-            RightTable_.data(),
-            &batch,
-            -1,
-            &PairBuffer_,
-            const_cast<TRowSet*>(LeftRows_.Data()),
-            const_cast<TRowSet*>(RightRows_.Data()));
+        if (!Kernels_.Dispatch(
+                LeftTable_.data(),
+                RightTable_.data(),
+                &batch,
+                -1,
+                &PairBuffer_,
+                const_cast<TRowSet*>(LeftRows_.Data()),
+                const_cast<TRowSet*>(RightRows_.Data()),
+                0,
+                JoinOp(EJoinKernelOp::StreamLeft))) {
+            Release(&batch);
+            throw std::runtime_error("join kernel update failed");
+        }
         DrainStreamingPairs(batch, EJoinSide::Left);
         Release(&batch);
         return true;
@@ -528,13 +562,19 @@ bool TInnerJoinProcessor::PullOneInputBatch(
             return true;
         }
 
-        Kernels_.ProbeRightStream(
-            LeftTable_.data(),
-            &batch,
-            -1,
-            &PairBuffer_,
-            const_cast<TRowSet*>(LeftRows_.Data()),
-            const_cast<TRowSet*>(RightRows_.Data()));
+        if (!Kernels_.Dispatch(
+                LeftTable_.data(),
+                RightTable_.data(),
+                &batch,
+                -1,
+                &PairBuffer_,
+                const_cast<TRowSet*>(LeftRows_.Data()),
+                const_cast<TRowSet*>(RightRows_.Data()),
+                0,
+                JoinOp(EJoinKernelOp::StreamRight))) {
+            Release(&batch);
+            throw std::runtime_error("join kernel update failed");
+        }
         DrainStreamingPairs(batch, EJoinSide::Right);
         Release(&batch);
         return true;
@@ -589,15 +629,17 @@ bool TInnerJoinProcessor::PullOneInputBatch(
 }
 
 void TInnerJoinProcessor::FinalizeOuterJoin() {
-    // LEFT: emit left rows unmatched against the right table (right = null).
-    // RIGHT: symmetric; swap pair columns so left stays the left side.
-    if (JoinType_ == EJoinType::Left) {
-        Kernels_.FinalizeOuter(LeftTable_.data(), RightTable_.data(), &PairBuffer_);
-    } else {
-        Kernels_.FinalizeOuter(RightTable_.data(), LeftTable_.data(), &PairBuffer_);
-        for (int64_t i = 0; i < PairBuffer_.Count; ++i) {
-            std::swap(PairBuffer_.Data[2 * i], PairBuffer_.Data[2 * i + 1]);
-        }
+    if (!Kernels_.Dispatch(
+            LeftTable_.data(),
+            RightTable_.data(),
+            nullptr,
+            0,
+            &PairBuffer_,
+            const_cast<TRowSet*>(LeftRows_.Data()),
+            const_cast<TRowSet*>(RightRows_.Data()),
+            0,
+            JoinOp(EJoinKernelOp::Finalize))) {
+        throw std::runtime_error("join outer finalize failed");
     }
     DrainKernelPairs();
     OuterFinalized_ = true;
@@ -622,14 +664,18 @@ bool TInnerJoinProcessor::PullSemiAntiBatch(
             return true;
         }
         const int32_t batchIdx = LeftRows_.PushBatch(batch);
-        Kernels_.ProcessLeft(
-            LeftTable_.data(),
-            RightTable_.data(),
-            const_cast<TRowSet*>(&LeftRows_.Batch(batchIdx)),
-            batchIdx,
-            &PairBuffer_,
-            const_cast<TRowSet*>(LeftRows_.Data()),
-            const_cast<TRowSet*>(RightRows_.Data()));
+        if (!Kernels_.Dispatch(
+                LeftTable_.data(),
+                RightTable_.data(),
+                const_cast<TRowSet*>(&LeftRows_.Batch(batchIdx)),
+                batchIdx,
+                &PairBuffer_,
+                const_cast<TRowSet*>(LeftRows_.Data()),
+                const_cast<TRowSet*>(RightRows_.Data()),
+                0,
+                JoinOp(EJoinKernelOp::UpdateLeft))) {
+            throw std::runtime_error("join kernel update failed");
+        }
         if (HasResidual_) {
             CollectMatchedLeftIds();
         } else {
@@ -648,18 +694,22 @@ bool TInnerJoinProcessor::PullSemiAntiBatch(
             BothDone_ = true;
             return true;
         }
-        if (HasResidual_) {
-            Kernels_.ProbeRightStream(
+        if (!Kernels_.Dispatch(
                 LeftTable_.data(),
+                RightTable_.data(),
                 &batch,
                 -1,
                 &PairBuffer_,
                 const_cast<TRowSet*>(LeftRows_.Data()),
-                const_cast<TRowSet*>(RightRows_.Data()));
+                const_cast<TRowSet*>(RightRows_.Data()),
+                0,
+                JoinOp(EJoinKernelOp::UpdateRight))) {
+            Release(&batch);
+            throw std::runtime_error("join kernel update failed");
+        }
+        if (HasResidual_) {
             CollectMatchedLeftIds();
         } else {
-            Kernels_.InsertKeyOnly(RightTable_.data(), nullptr, &batch, 0,
-                &PairBuffer_);
             PairBuffer_.Count = 0;
         }
         Release(&batch);
@@ -670,7 +720,18 @@ bool TInnerJoinProcessor::PullSemiAntiBatch(
 }
 
 void TInnerJoinProcessor::FinalizeSemiAntiJoin() {
-    Kernels_.FinalizeAntiSemi(LeftTable_.data(), RightTable_.data(), &PairBuffer_);
+    if (!Kernels_.Dispatch(
+            LeftTable_.data(),
+            RightTable_.data(),
+            nullptr,
+            0,
+            &PairBuffer_,
+            const_cast<TRowSet*>(LeftRows_.Data()),
+            const_cast<TRowSet*>(RightRows_.Data()),
+            0,
+            JoinOp(EJoinKernelOp::Finalize))) {
+        throw std::runtime_error("join semi/anti finalize failed");
+    }
     for (int64_t i = 0; i < PairBuffer_.Count; ++i) {
         Builder_->AddPair(PairBuffer_.Data[2 * i], PairBuffer_.Data[2 * i + 1]);
     }

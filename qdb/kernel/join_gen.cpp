@@ -1,6 +1,7 @@
 #include <qdb/kernel/join_gen.h>
 
 #include <qdb/kernel/aggregate_key.h>
+#include <qdb/kernel/builder.h>
 #include <qdb/kernel/column_value.h>
 #include <qdb/kernel/gen.h>
 #include <qdb/plan/types/nullable.h>
@@ -598,6 +599,195 @@ NQumir::NAst::TExprPtr GenJoinProbeAst(
     return GenJoinBatchAst(key, isLeft, funcName, std::move(columnType),
         std::move(rowSetType), std::move(hashTableType), std::move(pairBufferType),
         /*insertRows=*/false);
+}
+
+NQumir::NAst::TExprPtr GenJoinDispatchAst(
+    int64_t keySize,
+    EJoinType type,
+    bool hasResidual,
+    NQumir::NAst::TTypePtr rowSetType,
+    NQumir::NAst::TTypePtr hashTableType,
+    NQumir::NAst::TTypePtr pairBufferType)
+{
+    namespace Oz = NKernel::NOz;
+
+    auto i64Type = std::make_shared<TIntegerType>(TIntegerType::I64);
+    auto boolType = std::make_shared<TBoolType>();
+    auto ptrI64Type = std::make_shared<TPointerType>(i64Type);
+    auto hashTableRefType = std::make_shared<TReferenceType>(
+        AsNamed("HashTable", hashTableType));
+    auto rowSetRefType = std::make_shared<TReferenceType>(
+        AsNamed("TRowSet", rowSetType));
+    auto rowSetPtrType = std::make_shared<TPointerType>(
+        AsNamed("TRowSet", rowSetType));
+    auto pairBufferRefType = std::make_shared<TReferenceType>(
+        AsNamed("PairBuffer", pairBufferType));
+
+    auto number = [&](int64_t value) -> TExprPtr {
+        return Oz::TypedInt(value, i64Type);
+    };
+    auto opIs = [&](int64_t op) -> TExprPtr {
+        return Oz::Bin(TOperator("=="), Oz::Ident("op"), number(op));
+    };
+    auto boolReturn = [&](bool value) -> TExprPtr {
+        return Oz::Return(Oz::Bool(value));
+    };
+
+    auto processLeft = [&]() {
+        return Oz::Call("jt_process_left", {
+            Oz::Ident("left"),
+            Oz::Ident("right"),
+            Oz::Ident("batch"),
+            Oz::Ident("batch_idx"),
+            Oz::Ident("pairs"),
+            Oz::Ident("left_store"),
+            Oz::Ident("right_store"),
+        });
+    };
+    auto processRight = [&]() {
+        return Oz::Call("jt_process_right", {
+            Oz::Ident("right"),
+            Oz::Ident("left"),
+            Oz::Ident("batch"),
+            Oz::Ident("batch_idx"),
+            Oz::Ident("pairs"),
+            Oz::Ident("left_store"),
+            Oz::Ident("right_store"),
+        });
+    };
+    auto streamLeft = [&]() {
+        return Oz::Call("jt_probe_left_stream", {
+            Oz::Ident("right"),
+            Oz::Ident("batch"),
+            Oz::Ident("batch_idx"),
+            Oz::Ident("pairs"),
+            Oz::Ident("left_store"),
+            Oz::Ident("right_store"),
+        });
+    };
+    auto streamRight = [&]() {
+        return Oz::Call("jt_probe_right_stream", {
+            Oz::Ident("left"),
+            Oz::Ident("batch"),
+            Oz::Ident("batch_idx"),
+            Oz::Ident("pairs"),
+            Oz::Ident("left_store"),
+            Oz::Ident("right_store"),
+        });
+    };
+    auto insertRightKeyOnly = [&]() {
+        return Oz::Call("jt_insert_key_only", {
+            Oz::Ident("right"),
+            Oz::Ident("left"),
+            Oz::Ident("batch"),
+            Oz::Ident("batch_idx"),
+            Oz::Ident("pairs"),
+        });
+    };
+
+    auto updateRight = [&]() -> TExprPtr {
+        if ((type == EJoinType::LeftSemi || type == EJoinType::LeftAnti) &&
+            !hasResidual) {
+            return insertRightKeyOnly();
+        }
+        if ((type == EJoinType::LeftSemi || type == EJoinType::LeftAnti) &&
+            hasResidual) {
+            return streamRight();
+        }
+        return processRight();
+    };
+
+    auto rightOuterFinalize = [&]() -> TExprPtr {
+        return Oz::Block({
+            Oz::Var("ok", boolType),
+            Oz::Assign("ok", Oz::Call("jt_finalize_outer", {
+                Oz::Ident("right"),
+                Oz::Ident("left"),
+                Oz::Ident("pairs"),
+            })),
+            Oz::If(
+                Oz::Unary(TOperator("!"), Oz::Ident("ok")),
+                Oz::Block({boolReturn(false)})),
+            Oz::Var("data", ptrI64Type),
+            Oz::Assign("data", Oz::Field("pairs", "Data")),
+            Oz::Var("i", i64Type),
+            Oz::Assign("i", number(0)),
+            Oz::Var("tmp", i64Type),
+            Oz::While(
+                Oz::Bin(TOperator("<"), Oz::Ident("i"), Oz::Field("pairs", "Count")),
+                Oz::Block({
+                    Oz::Assign("tmp",
+                        Oz::Index("data", Oz::Mul(Oz::Ident("i"), number(2)))),
+                    Oz::ArrayAssign("data",
+                        Oz::Mul(Oz::Ident("i"), number(2)),
+                        Oz::Index("data", Oz::Add(
+                            Oz::Mul(Oz::Ident("i"), number(2)), number(1)))),
+                    Oz::ArrayAssign("data",
+                        Oz::Add(Oz::Mul(Oz::Ident("i"), number(2)), number(1)),
+                        Oz::Ident("tmp")),
+                    Oz::Assign("i", Oz::Add(Oz::Ident("i"), number(1))),
+                })),
+            boolReturn(true),
+        });
+    };
+
+    auto finalize = [&]() -> TExprPtr {
+        if ((type == EJoinType::LeftSemi || type == EJoinType::LeftAnti) &&
+            !hasResidual) {
+            return Oz::Return(Oz::Call("jt_finalize_semi_anti", {
+                Oz::Ident("left"),
+                Oz::Ident("right"),
+                Oz::Ident("pairs"),
+            }));
+        }
+        if (type == EJoinType::Left) {
+            return Oz::Return(Oz::Call("jt_finalize_outer", {
+                Oz::Ident("left"),
+                Oz::Ident("right"),
+                Oz::Ident("pairs"),
+            }));
+        }
+        if (type == EJoinType::Right) {
+            return rightOuterFinalize();
+        }
+        return boolReturn(true);
+    };
+
+    Oz::TFunBuilder builder("jt_dispatch");
+    builder
+        .Param("left", hashTableRefType)
+        .Param("right", hashTableRefType)
+        .Param("batch", rowSetRefType)
+        .Param("batch_idx", i64Type)
+        .Param("pairs", pairBufferRefType)
+        .Param("left_store", rowSetPtrType)
+        .Param("right_store", rowSetPtrType)
+        .Param("arg", i64Type)
+        .Param("op", i64Type)
+        .Return(boolType)
+        .Stmt(Oz::If(opIs(0),
+            Oz::Block({
+                Oz::Return(Oz::Bin(TOperator("&&"),
+                    Oz::Call("jt_init", {
+                        Oz::Ident("left"), Oz::Ident("arg"), number(keySize)}),
+                    Oz::Call("jt_init", {
+                        Oz::Ident("right"), Oz::Ident("arg"), number(keySize)}))),
+            })))
+        .Stmt(Oz::If(opIs(1), Oz::Block({Oz::Return(processLeft())})))
+        .Stmt(Oz::If(opIs(2), Oz::Block({Oz::Return(updateRight())})))
+        .Stmt(Oz::If(opIs(3), Oz::Block({Oz::Return(streamLeft())})))
+        .Stmt(Oz::If(opIs(4), Oz::Block({Oz::Return(streamRight())})))
+        .Stmt(Oz::If(opIs(5), finalize()))
+        .Stmt(Oz::If(opIs(6),
+            Oz::Block({
+                Oz::Call("jt_destroy", {Oz::Ident("left")}),
+                Oz::Call("jt_destroy", {Oz::Ident("right")}),
+                Oz::Call("pb_destroy", {Oz::Ident("pairs")}),
+                boolReturn(true),
+            })))
+        .Stmt(boolReturn(false));
+
+    return std::move(builder).Build();
 }
 
 NQumir::NAst::TExprPtr GenJoinHashBatchAst(

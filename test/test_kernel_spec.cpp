@@ -174,8 +174,9 @@ TEST(KernelSpec, BuildsAggregateSpecFromGroupKeysAndAggregates) {
     EXPECT_EQ(spec.Aggregates[0].Func, "sum");
     EXPECT_TRUE(spec.Aggregates[0].HasArg);
     EXPECT_EQ(spec.Aggregates[0].Arg.Name, "v");
-    ASSERT_EQ(spec.Entrypoints.size(), 3u);
+    ASSERT_EQ(spec.Entrypoints.size(), 2u);
     EXPECT_EQ(spec.Entrypoints[0].Name, "agg_dispatch");
+    EXPECT_EQ(spec.Entrypoints[1].Name, "agg_finish_rowset");
     ASSERT_EQ(spec.SourceModules.size(), 1u);
     EXPECT_EQ(spec.SourceModules[0], "qumirdb");
 }
@@ -235,8 +236,8 @@ TEST(KernelSpec, BuildsJoinSpecFromEquiKeys) {
     EXPECT_EQ(spec.JoinKeys[0].Left.Index, 0);
     EXPECT_EQ(spec.JoinKeys[0].Right.Name, "rk");
     EXPECT_EQ(spec.JoinKeys[0].Right.Index, 0);
-    ASSERT_EQ(spec.Entrypoints.size(), 4u);
-    EXPECT_EQ(spec.Entrypoints[0].Name, "jt_process_left");
+    ASSERT_EQ(spec.Entrypoints.size(), 1u);
+    EXPECT_EQ(spec.Entrypoints[0].Name, "jt_dispatch");
     ASSERT_EQ(spec.SourceModules.size(), 1u);
     EXPECT_EQ(spec.SourceModules[0], "qumirdb");
 }

@@ -116,54 +116,39 @@ struct TAggregateKernels {
     std::vector<TAggregateOutputAgg> OutputAggs;
 };
 
+enum class EJoinKernelOp : int64_t {
+    Init = 0,
+    UpdateLeft = 1,
+    UpdateRight = 2,
+    StreamLeft = 3,
+    StreamRight = 4,
+    Finalize = 5,
+    Destroy = 6,
+};
+
+using TJoinDispatch = std::function<bool(
+    void* left,
+    void* right,
+    TRowSet* batch,
+    int64_t batchIdx,
+    void* pairs,
+    TRowSet* leftStore,
+    TRowSet* rightStore,
+    int64_t arg,
+    int64_t op)>;
+
 // The compiled kernels for one symmetric hash join. Each side's hash map is a
 // caller-owned, zero-initialized HashTable buffer (kHashTableSize); the output
 // pair buffer is a zero-initialized buffer of kPairBufferSize. The key columns
-// are baked into the generated ProcessLeft / ProcessRight functions.
+// and join-kind dispatch are baked into the generated jt_dispatch function.
 struct TJoinKernels {
-    // jt_init(table, capacity) — initializes one side's HashTable (key size is
-    // captured). Returns false on allocation failure.
-    std::function<bool(void* table, int64_t capacity)> Init;
-    // ProcessLeft(own=left, opp=right, batch, batchIdx, pairs, leftStore,
-    // rightStore): reads the left key columns, probes the right table, appends
-    // matching pairs (each gated by the injected jt_residual_filter, which reads
-    // columns from leftStore/rightStore — contiguous TRowSet arrays — by decoding
-    // the packed row IDs), then inserts the batch's rows into the left table.
-    // ProcessRight is the mirror. leftStore/rightStore are only dereferenced by a
-    // non-trivial residual filter; for the default always-true filter they are
-    // optimized away.
-    std::function<bool(void* own, void* opp, TRowSet* batch, int64_t batchIdx,
-        void* pairs, TRowSet* leftStore, TRowSet* rightStore)> ProcessLeft;
-    std::function<bool(void* own, void* opp, TRowSet* batch, int64_t batchIdx,
-        void* pairs, TRowSet* leftStore, TRowSet* rightStore)> ProcessRight;
-    // Probe-only streaming variants used after one input side reaches EOF.
-    // ProbeLeftStream(build=right, batch=left) and ProbeRightStream(build=left,
-    // batch=right) emit pairs but never insert stream rows into a hash table.
-    std::function<bool(void* build, TRowSet* batch, int64_t batchIdx,
-        void* pairs, TRowSet* leftStore, TRowSet* rightStore)> ProbeLeftStream;
-    std::function<bool(void* build, TRowSet* batch, int64_t batchIdx,
-        void* pairs, TRowSet* leftStore, TRowSet* rightStore)> ProbeRightStream;
-    std::function<void(void* table)> DestroyTable;
-    std::function<void(void* pairs)> DestroyPairs;
-
-    // Filled only for LeftSemi / LeftAnti joins (null otherwise).
-    // InsertKeyOnly(own, /*opp=*/nullptr, batch, /*batchIdx=*/0, /*pairs=*/nullptr):
-    //   inserts only the key for each selected row, with no row-ID storage.
-    //   Used to build the right-side table for SEMI/ANTI without jb_append.
-    // FinalizeAntiSemi(own=left, opp=right, pairs):
-    //   iterates own.GroupKeys, probes opp, and pushes matching (SEMI) or
-    //   non-matching (ANTI) left RowIds into pairs (right_id = -1).
-    std::function<bool(void* own, void* opp, TRowSet* batch, int64_t batchIdx, void* pairs)> InsertKeyOnly;
-    std::function<bool(void* own, void* opp, void* pairs)> FinalizeAntiSemi;
-
-    // Filled only for Left / Right outer joins (null otherwise).
-    // FinalizeOuter(own, opp, pairs):
-    //   iterates own.GroupKeys; for each slot where rh_lookup_slot(opp, key)==-1
-    //   (unmatched), drains own RowBucket and pushes (ownRowId, -1) into pairs.
-    //   For Left outer: call with own=LeftTable_, opp=RightTable_.
-    //   For Right outer: call with own=RightTable_, opp=LeftTable_,
-    //   then swap pair halves before draining.
-    std::function<bool(void* own, void* opp, void* pairs)> FinalizeOuter;
+    // jt_dispatch(left, right, batch, batchIdx, pairs, leftStore, rightStore,
+    //             arg, op) -> bool.
+    // Init uses arg as initial capacity and initializes both hash tables with
+    // the generated key size. UpdateRight/Finalize are specialized by the
+    // compiled join type, so host code does not select jt_insert_key_only vs
+    // jt_process_right or left/right outer finalization itself.
+    TJoinDispatch Dispatch;
 };
 
 struct TJoinHashKernels {

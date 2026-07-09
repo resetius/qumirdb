@@ -284,10 +284,7 @@ TOperatorKernelSpec BuildJoinKernelSpec(
         .JoinKeys = std::move(joinKeys),
         .JoinType = type,
         .Entrypoints = {
-            {.Name = "jt_process_left", .Abi = "bool(ptr HashTable, ptr TRowSet, ptr PairBuffer)"},
-            {.Name = "jt_process_right", .Abi = "bool(ptr HashTable, ptr TRowSet, ptr PairBuffer)"},
-            {.Name = "jt_probe_left_stream", .Abi = "bool(ptr HashTable, ptr TRowSet, ptr PairBuffer)"},
-            {.Name = "jt_probe_right_stream", .Abi = "bool(ptr HashTable, ptr TRowSet, ptr PairBuffer)"},
+            {.Name = "jt_dispatch", .Abi = "bool(ptr HashTable, ptr HashTable, ptr TRowSet, i64, ptr PairBuffer, ptr TRowSet, ptr TRowSet, i64, i64)"},
         },
         .SourceModules = {"qumirdb"},
     };

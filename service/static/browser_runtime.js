@@ -418,6 +418,10 @@ function writePointer(dv, offset, address) {
   dv.setUint32(offset + 4, 0, true);
 }
 
+function readPointer(dv, offset) {
+  return Number(dv.getBigUint64(offset, true));
+}
+
 function writeNumericValue(dv, address, type, value) {
   switch (type) {
     case 'i8': dv.setInt8(address, Number(value) | 0); break;
@@ -874,10 +878,57 @@ function readValidityBits(memBytes, maskPtr, count) {
   return valid;
 }
 
-// Drive the fused aggregate kernel (agg_dispatch / agg_measure_keys /
-// agg_finalize in one module — they share the hash table through the module's
-// linear memory). Mirrors the native TAggregateProcessor protocol; the arena
-// is also the kernel's qdb_alloc backing, so nothing ever overlaps.
+function materializeWasmRowSet(arena, layout, output, rowsetPtr) {
+  const dv = arena.view();
+  const memBytes = arena.bytes();
+  const rowCount = Number(dv.getBigInt64(rowsetPtr + layout.rowset.rowCount, true));
+  const columnsPtr = readPointer(dv, rowsetPtr + layout.rowset.columns);
+  const decoder = new TextDecoder();
+  const columns = [];
+
+  for (let i = 0; i < output.length; ++i) {
+    const spec = output[i];
+    const colPtr = columnsPtr + i * layout.column.size;
+    const dataPtr = readPointer(dv, colPtr + layout.column.data);
+    const maskPtr = readPointer(dv, colPtr + layout.column.mask);
+    const offsetsPtr = readPointer(dv, colPtr + layout.column.offsets);
+    const offsetWidth = dv.getUint8(colPtr + layout.column.offsetWidth);
+    const valid = maskPtr ? readValidityBits(memBytes, maskPtr, rowCount) : null;
+    const values = new Array(rowCount);
+
+    if (spec.type === 'string') {
+      for (let r = 0; r < rowCount; ++r) {
+        if (valid && !valid[r]) {
+          values[r] = null;
+          continue;
+        }
+        const begin = offsetWidth === 4
+          ? dv.getInt32(offsetsPtr + r * 4, true)
+          : Number(dv.getBigInt64(offsetsPtr + r * 8, true));
+        const end = offsetWidth === 4
+          ? dv.getInt32(offsetsPtr + (r + 1) * 4, true)
+          : Number(dv.getBigInt64(offsetsPtr + (r + 1) * 8, true));
+        values[r] = decoder.decode(memBytes.subarray(dataPtr + begin, dataPtr + end));
+      }
+    } else {
+      const width = coreTypeWidth(spec.type);
+      for (let r = 0; r < rowCount; ++r) {
+        values[r] = (valid && !valid[r])
+          ? null
+          : readNumericValue(dv, dataPtr + r * width, spec.type);
+      }
+    }
+    columns.push({ name: spec.name, type: spec.type, values });
+  }
+
+  const batch = { rowCount, columns };
+  attachBatchWasm(batch, rowsetPtr, { pinned: true, selection: null });
+  return batch;
+}
+
+// Drive the fused aggregate kernel. agg_dispatch updates the hash table;
+// agg_finish_rowset owns measure/finalize/output buffer allocation and writes a
+// complete TRowSet in linear memory.
 export function runAggregate(kernel, layout, batch, selection, stage) {
   const state = createAggregateState(kernel, layout, stage);
   updateAggregateState(state, { batch, selection });
@@ -886,17 +937,14 @@ export function runAggregate(kernel, layout, batch, selection, stage) {
 
 function createAggregateState(kernel, layout, stage) {
   const dispatch = kernel.instance.exports['agg_dispatch'];
-  const measure = kernel.instance.exports['agg_measure_keys'];
-  const finalize = kernel.instance.exports['agg_finalize'];
-  if (!dispatch || !measure || !finalize) {
+  const finishRowSet = kernel.instance.exports['agg_finish_rowset'];
+  if (!dispatch || !finishRowSet) {
     throw new Error('aggregate kernel is missing an entry');
   }
 
   const arena = kernel.holder.arena; // qdb_alloc draws from the shared bump pointer
 
-  const keyCount = Number(stage.keyCount);
   const output = stage.output;
-  const aggCount = output.length - keyCount;
 
   // init(ht, capacity)
   const ht = arena.alloc(layout.hashTable.size, 8);
@@ -908,13 +956,10 @@ function createAggregateState(kernel, layout, stage) {
     layout,
     stage,
     dispatch,
-    measure,
-    finalize,
+    finishRowSet,
     arena,
     ht,
-    keyCount,
     output,
-    aggCount,
     inputWriter: new RowSetWriter(arena, layout),
     finished: false,
   };
@@ -940,135 +985,33 @@ function finishAggregateState(state) {
   }
   state.finished = true;
   const {
-    kernel,
     layout,
-    dispatch,
-    measure,
-    finalize,
+    finishRowSet,
     arena,
     ht,
-    keyCount,
     output,
-    aggCount,
   } = state;
 
-  const size = Number(
+  const expectedSize = Number(
     arena.view().getBigInt64(ht + layout.hashTable.sizeOffset, true));
-
-  // measure(ht, outputKeyBytes, size) → per-key Data byte counts.
-  const keyBytesPtr = arena.alloc(Math.max(keyCount, 1) * 8, 8);
-  new Uint8Array(arena.memory.buffer, keyBytesPtr, Math.max(keyCount, 1) * 8).fill(0);
-  if (Number(measure(BigInt(ht), BigInt(keyBytesPtr), BigInt(size))) !== size) {
-    throw new Error('aggregate measure returned an unexpected row count');
-  }
-
-  // Output buffers. Key columns are TColumn structs the kernel fills; agg
-  // values land in i64 buffers with optional validity bitmaps.
-  const colLayout = layout.column;
-  const dv0 = arena.view();
-  const keyBytes = [];
-  for (let i = 0; i < keyCount; ++i) {
-    keyBytes.push(Number(dv0.getBigInt64(keyBytesPtr + i * 8, true)));
-  }
-
-  const maskBytes = (size + 7) >> 3;
-  const keyCols = [];
-  for (let i = 0; i < keyCount; ++i) {
-    const isString = output[i].type === 'string';
-    keyCols.push({
-      colPtr: arena.alloc(colLayout.size, 8),
-      dataPtr: arena.alloc(Math.max(keyBytes[i], 1), 8),
-      offsetsPtr: isString ? arena.alloc((size + 1) * 8, 8) : 0,
-      maskPtr: output[i].nullable ? arena.alloc(Math.max(maskBytes, 1), 8) : 0,
-      isString,
-    });
-  }
-  const keyColArrPtr = arena.alloc(Math.max(keyCount, 1) * 8, 8);
-  const aggBufPtrs = [];
-  const aggMaskPtrs = [];
-  for (let i = 0; i < aggCount; ++i) {
-    aggBufPtrs.push(arena.alloc(Math.max(size, 1) * 8, 8));
-    aggMaskPtrs.push(output[keyCount + i].nullable
-      ? arena.alloc(Math.max(maskBytes, 1), 8)
-      : 0);
-  }
-  const aggBufArrPtr = arena.alloc(Math.max(aggCount, 1) * 8, 8);
-  const aggMaskArrPtr = arena.alloc(Math.max(aggCount, 1) * 8, 8);
-
-  // All allocations done; take views and wire the pointer tables.
-  const dv = arena.view();
-  for (let i = 0; i < keyCount; ++i) {
-    const col = keyCols[i];
-    new Uint8Array(arena.memory.buffer, col.colPtr, colLayout.size).fill(0);
-    writePointer(dv, col.colPtr + colLayout.data, col.dataPtr);
-    if (col.maskPtr) {
-      writePointer(dv, col.colPtr + colLayout.mask, col.maskPtr);
-    }
-    if (col.isString) {
-      writePointer(dv, col.colPtr + colLayout.offsets, col.offsetsPtr);
-      dv.setUint8(col.colPtr + colLayout.offsetWidth, 8);
-    }
-    writePointer(dv, keyColArrPtr + i * 8, col.colPtr);
-  }
-  for (let i = 0; i < aggCount; ++i) {
-    writePointer(dv, aggBufArrPtr + i * 8, aggBufPtrs[i]);
-    writePointer(dv, aggMaskArrPtr + i * 8, aggMaskPtrs[i]);
-  }
-
-  if (Number(finalize(
-      BigInt(ht), BigInt(keyColArrPtr), BigInt(aggBufArrPtr),
-      BigInt(aggMaskArrPtr), BigInt(size))) !== size) {
+  const rowsetPtr = arena.alloc(layout.rowset.size, 8);
+  new Uint8Array(arena.memory.buffer, rowsetPtr, layout.rowset.size).fill(0);
+  const finalized = Number(finishRowSet(BigInt(ht), BigInt(rowsetPtr)));
+  if (finalized !== expectedSize) {
     throw new Error('aggregate finalize returned an unexpected row count');
   }
-  dispatch(BigInt(ht), 0n, 0n, 2n); // destroy
-
-  // Materialize output columns into JS values.
-  const outDv = arena.view();
-  const memBytes = arena.bytes();
-  const decoder = new TextDecoder();
-  const columns = [];
-  for (let i = 0; i < output.length; ++i) {
-    const spec = output[i];
-    const values = new Array(size);
-    const isKey = i < keyCount;
-    const valid = (isKey ? keyCols[i].maskPtr : aggMaskPtrs[i - keyCount])
-      ? readValidityBits(
-          memBytes,
-          isKey ? keyCols[i].maskPtr : aggMaskPtrs[i - keyCount],
-          size)
-      : null;
-    if (isKey && keyCols[i].isString) {
-      const { dataPtr, offsetsPtr } = keyCols[i];
-      for (let r = 0; r < size; ++r) {
-        if (valid && !valid[r]) { values[r] = null; continue; }
-        const begin = Number(outDv.getBigInt64(offsetsPtr + r * 8, true));
-        const end = Number(outDv.getBigInt64(offsetsPtr + (r + 1) * 8, true));
-        values[r] = decoder.decode(
-          memBytes.subarray(dataPtr + begin, dataPtr + end));
-      }
-    } else if (isKey) {
-      const width = coreTypeWidth(spec.type);
-      const { dataPtr } = keyCols[i];
-      for (let r = 0; r < size; ++r) {
-        values[r] = (valid && !valid[r])
-          ? null
-          : readNumericValue(outDv, dataPtr + r * width, spec.type);
-      }
-    } else {
-      // Agg buffers are i64 slots; f64 results are stored as raw f64 bits.
-      const bufPtr = aggBufPtrs[i - keyCount];
-      for (let r = 0; r < size; ++r) {
-        values[r] = (valid && !valid[r])
-          ? null
-          : (spec.type === 'f64'
-              ? outDv.getFloat64(bufPtr + r * 8, true)
-              : outDv.getBigInt64(bufPtr + r * 8, true));
-      }
-    }
-    columns.push({ name: spec.name, type: spec.type, values });
-  }
-  return { rowCount: size, columns };
+  return materializeWasmRowSet(arena, layout, output, rowsetPtr);
 }
+
+const JoinOp = Object.freeze({
+  INIT: 0n,
+  UPDATE_LEFT: 1n,
+  UPDATE_RIGHT: 2n,
+  STREAM_LEFT: 3n,
+  STREAM_RIGHT: 4n,
+  FINALIZE: 5n,
+  DESTROY: 6n,
+});
 
 function createJoinState(kernel, layout, stage) {
   if (!browserRuntimeSupportsJoin(stage)) {
@@ -1076,32 +1019,9 @@ function createJoinState(kernel, layout, stage) {
       (stage.hasResidual ? ' with residual' : ''));
   }
   const exports = kernel.instance.exports;
-  const required = [
-    'jt_init',
-    'jt_process_left',
-    'jt_process_right',
-    'jt_destroy',
-    'pb_destroy',
-  ];
-  for (const name of required) {
-    if (typeof exports[name] !== 'function') {
-      throw new Error(`join kernel is missing entry ${name}`);
-    }
-  }
-  const semiAnti = isLeftSemiAntiJoin(stage);
-  if (semiAnti && !stage.hasResidual) {
-    for (const name of ['jt_insert_key_only', 'jt_finalize_semi_anti']) {
-      if (typeof exports[name] !== 'function') {
-        throw new Error(`join kernel is missing entry ${name}`);
-      }
-    }
-  }
-  if (isResidualSemiAntiJoin(stage) &&
-      typeof exports.jt_probe_right_stream !== 'function') {
-    throw new Error('join kernel is missing entry jt_probe_right_stream');
-  }
-  if (isOuterJoin(stage) && typeof exports.jt_finalize_outer !== 'function') {
-    throw new Error('join kernel is missing entry jt_finalize_outer');
+  const dispatch = exports.jt_dispatch;
+  if (typeof dispatch !== 'function') {
+    throw new Error('join kernel is missing entry jt_dispatch');
   }
 
   const arena = kernel.holder.arena;
@@ -1111,9 +1031,16 @@ function createJoinState(kernel, layout, stage) {
   new Uint8Array(arena.memory.buffer, leftTable, layout.hashTable.size).fill(0);
   new Uint8Array(arena.memory.buffer, rightTable, layout.hashTable.size).fill(0);
   new Uint8Array(arena.memory.buffer, pairBuffer, layout.pairBuffer.size).fill(0);
-  const keySize = BigInt(stage.keySize || 0);
-  if (!exports.jt_init(BigInt(leftTable), 256n, keySize) ||
-      !exports.jt_init(BigInt(rightTable), 256n, keySize)) {
+  if (!dispatch(
+      BigInt(leftTable),
+      BigInt(rightTable),
+      0n,
+      0n,
+      BigInt(pairBuffer),
+      0n,
+      0n,
+      256n,
+      JoinOp.INIT)) {
     throw new Error('join hash table initialization failed');
   }
 
@@ -1121,6 +1048,7 @@ function createJoinState(kernel, layout, stage) {
     kernel,
     layout,
     stage,
+    dispatch,
     arena,
     leftTable,
     rightTable,
@@ -1144,7 +1072,7 @@ function browserRuntimeSupportsJoin(stage) {
 }
 
 function updateJoinState(state, side, rowSet) {
-  const { arena, layout, kernel } = state;
+  const { arena, layout } = state;
   const { batch, selection } = rowSet;
   const wasm = wasmRowSetForSelection(batch, selection);
   const rowsetPtr = wasm?.pinned
@@ -1153,62 +1081,40 @@ function updateJoinState(state, side, rowSet) {
         arena, layout, batch.columns, batch.rowCount, false, selection).rowsetPtr;
   const isLeft = side === 0;
   const semiAnti = isLeftSemiAntiJoin(state.stage);
-  const exports = kernel.instance.exports;
-
-  if (semiAnti && !isLeft) {
-    const ok = state.stage.hasResidual
-      ? exports.jt_probe_right_stream(
-          BigInt(state.leftTable),
-          BigInt(rowsetPtr),
-          -1n,
-          BigInt(state.pairBuffer),
-          BigInt(state.leftStore.dataPtr()),
-          BigInt(state.rightStore.dataPtr()))
-      : exports.jt_insert_key_only(
-          BigInt(state.rightTable),
-          0n,
-          BigInt(rowsetPtr),
-          0n,
-          BigInt(state.pairBuffer));
-    if (!ok) {
-      throw new Error('join kernel update failed');
+  let batchIdx = -1;
+  let batchPtr = rowsetPtr;
+  if (isLeft || !semiAnti) {
+    const store = isLeft ? state.leftStore : state.rightStore;
+    batchIdx = store.push(batch, rowsetPtr);
+    batchPtr = store.dataPtr() + batchIdx * layout.rowset.size;
+    if (isLeft) {
+      state.leftSelections[batchIdx] = selection || null;
     }
-    if (!state.stage.hasResidual) {
-      clearJoinPairBuffer(state);
-    }
-    return;
-  }
-
-  const store = isLeft ? state.leftStore : state.rightStore;
-  const batchIdx = store.push(batch, rowsetPtr);
-  if (isLeft) {
-    state.leftSelections[batchIdx] = selection || null;
   }
   const ok = isLeft
-    ? exports.jt_process_left(
+    ? state.dispatch(
         BigInt(state.leftTable),
         BigInt(state.rightTable),
-        BigInt(store.dataPtr() + batchIdx * layout.rowset.size),
+        BigInt(batchPtr),
         BigInt(batchIdx),
         BigInt(state.pairBuffer),
         BigInt(state.leftStore.dataPtr()),
-        BigInt(state.rightStore.dataPtr()))
-    : exports.jt_process_right(
-        BigInt(state.rightTable),
+        BigInt(state.rightStore.dataPtr()),
+        0n,
+        JoinOp.UPDATE_LEFT)
+    : state.dispatch(
         BigInt(state.leftTable),
-        BigInt(store.dataPtr() + batchIdx * layout.rowset.size),
+        BigInt(state.rightTable),
+        BigInt(batchPtr),
         BigInt(batchIdx),
         BigInt(state.pairBuffer),
         BigInt(state.leftStore.dataPtr()),
-        BigInt(state.rightStore.dataPtr()));
+        BigInt(state.rightStore.dataPtr()),
+        0n,
+        JoinOp.UPDATE_RIGHT);
   if (!ok) {
     throw new Error('join kernel update failed');
   }
-}
-
-function clearJoinPairBuffer(state) {
-  state.arena.view().setBigInt64(
-    state.pairBuffer + state.layout.pairBuffer.count, 0n, true);
 }
 
 function isLeftSemiAntiJoin(stage) {
@@ -1237,10 +1143,16 @@ function finalizeSemiAntiJoinState(state) {
   if (state.semiAntiFinalized) {
     return;
   }
-  const ok = state.kernel.instance.exports.jt_finalize_semi_anti(
+  const ok = state.dispatch(
     BigInt(state.leftTable),
     BigInt(state.rightTable),
-    BigInt(state.pairBuffer));
+    0n,
+    0n,
+    BigInt(state.pairBuffer),
+    BigInt(state.leftStore.dataPtr()),
+    BigInt(state.rightStore.dataPtr()),
+    0n,
+    JoinOp.FINALIZE);
   if (!ok) {
     throw new Error('join semi/anti finalize failed');
   }
@@ -1255,16 +1167,21 @@ function finalizeOuterJoinState(state) {
   if (state.outerFinalized) {
     return;
   }
-  const right = state.stage.joinType === 'right';
-  const own = right ? state.rightTable : state.leftTable;
-  const opp = right ? state.leftTable : state.rightTable;
-  const ok = state.kernel.instance.exports.jt_finalize_outer(
-    BigInt(own), BigInt(opp), BigInt(state.pairBuffer));
+  const ok = state.dispatch(
+    BigInt(state.leftTable),
+    BigInt(state.rightTable),
+    0n,
+    0n,
+    BigInt(state.pairBuffer),
+    BigInt(state.leftStore.dataPtr()),
+    BigInt(state.rightStore.dataPtr()),
+    0n,
+    JoinOp.FINALIZE);
   if (!ok) {
     throw new Error('join outer finalize failed');
   }
   state.outerFinalized = true;
-  return drainJoinPairs(state, 1024, right);
+  return drainJoinPairs(state, 1024, false);
 }
 
 // Residual semi/anti: consume the inner kernel's raw pairs into the
@@ -1405,10 +1322,16 @@ function finishJoinState(state) {
     return;
   }
   state.finalized = true;
-  const exports = state.kernel.instance.exports;
-  exports.jt_destroy(BigInt(state.leftTable));
-  exports.jt_destroy(BigInt(state.rightTable));
-  exports.pb_destroy(BigInt(state.pairBuffer));
+  state.dispatch(
+    BigInt(state.leftTable),
+    BigInt(state.rightTable),
+    0n,
+    0n,
+    BigInt(state.pairBuffer),
+    0n,
+    0n,
+    0n,
+    JoinOp.DESTROY);
 }
 
 function outputShapeFromRowSets(rowSets) {
@@ -2000,7 +1923,7 @@ class JoinTask {
 
     if (!this.state) {
       if (!this.kernel) {
-        this.kernel = await instantiateKernel(this.stage.wasm, 'jt_init', this.shared);
+        this.kernel = await instantiateKernel(this.stage.wasm, 'jt_dispatch', this.shared);
       }
       this.state = createJoinState(this.kernel, this.layout, this.stage);
     }
