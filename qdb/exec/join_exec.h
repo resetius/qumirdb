@@ -14,11 +14,10 @@
 
 namespace NQdb {
 
-// Packed row identifier: (batchIdx << 32) | rowIdx. kNullRowId marks an absent
-// row (NULL padding for OUTER joins, Stage 3).
+// Packed row identifier: (batchIdx << 32) | rowIdx. A packed id of -1 marks an
+// absent row (NULL padding on the opposite side of an OUTER join); the join
+// kernel emits and decodes that sentinel itself during materialization.
 using TRowId = int64_t;
-
-inline constexpr TRowId kNullRowId = -1;
 
 inline TRowId MakeRowId(int32_t batchIdx, int32_t rowIdx) {
     return (static_cast<int64_t>(batchIdx) << 32)

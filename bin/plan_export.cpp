@@ -1332,30 +1332,6 @@ llvm::json::Object CoreTypeJson(const NQumir::NAst::TTypePtr& type) {
     };
 }
 
-bool IsStringCoreType(const NQumir::NAst::TTypePtr& type) {
-    using namespace NQumir::NAst;
-    return static_cast<bool>(TMaybeType<TStringType>(
-        UnwrapNamedType(NQdb::UnwrapNullableType(type))));
-}
-
-// True if `expr` reads a string-typed column of `input`. Filter/project kernels
-// that read a string column currently miscompile on the wasm -O3 backend (the
-// StringView build is treated as UB and the whole kernel body is deleted), so
-// such pipelines are reported unsupported rather than silently returning wrong
-// rows. See PLAN_BROWSER_EXECUTION.md and the qumir string-codegen issue.
-bool ReferencesStringColumn(
-    const NQumir::NAst::TExprPtr& expr,
-    const NQumir::NAst::TStructType& input)
-{
-    auto refs = NQdb::FindUnboundVars(expr);
-    for (const auto& [name, type] : input.Fields) {
-        if (refs.contains(name) && IsStringCoreType(type)) {
-            return true;
-        }
-    }
-    return false;
-}
-
 size_t ExecProjectWidth(const NQumir::NAst::TTypePtr& outType) {
     using namespace NQumir::NAst;
     auto inner = UnwrapNamedType(NQdb::UnwrapNullableType(outType));
