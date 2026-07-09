@@ -76,6 +76,12 @@ TExprPtr Int(int64_t v) {
     return std::make_shared<TNumberExpr>(Loc(), v);
 }
 
+TExprPtr TypedInt(int64_t v, TTypePtr type) {
+    auto e = std::make_shared<TNumberExpr>(Loc(), v);
+    e->Type = std::move(type);
+    return e;
+}
+
 TExprPtr Float(double v) {
     return std::make_shared<TNumberExpr>(Loc(), v);
 }
@@ -107,6 +113,19 @@ TExprPtr Call(std::string name, std::vector<TExprPtr> args) {
         std::move(args));
 }
 
+TExprPtr Cast(TExprPtr expr, TTypePtr type) {
+    return std::make_shared<TCastExpr>(Loc(), std::move(expr), std::move(type));
+}
+
+TExprPtr NullPtr(TTypePtr type) {
+    return Cast(Int(0), std::move(type));
+}
+
+TExprPtr Unary(TOperator op, TExprPtr value) {
+    return std::make_shared<TUnaryExpr>(
+        Loc(), std::move(op), std::move(value));
+}
+
 TExprPtr If(TExprPtr cond, TExprPtr thenBody, TExprPtr elseBody) {
     return std::make_shared<TIfExpr>(
         Loc(),
@@ -131,7 +150,31 @@ TExprPtr Index(std::string collection, TExprPtr index) {
     return Index(Ident(std::move(collection)), std::move(index));
 }
 
+TExprPtr ArrayAssign(std::string collection, TExprPtr index, TExprPtr value) {
+    std::vector<TExprPtr> indices;
+    indices.push_back(std::move(index));
+    return ArrayAssign(std::move(collection), std::move(indices), std::move(value));
+}
+
+TExprPtr ArrayAssign(std::string collection, std::vector<TExprPtr> indices, TExprPtr value) {
+    return std::make_shared<TArrayAssignExpr>(
+        Loc(), std::move(collection), std::move(indices), std::move(value));
+}
+
+TExprPtr Field(TExprPtr object, std::string field) {
+    return std::make_shared<TFieldAccessExpr>(
+        Loc(), std::move(object), std::move(field));
+}
+
+TExprPtr Field(std::string object, std::string field) {
+    return Field(Ident(std::move(object)), std::move(field));
+}
+
+TExprPtr FieldAssign(TExprPtr object, std::string field, TExprPtr value) {
+    return std::make_shared<TFieldAssignExpr>(
+        Loc(), std::move(object), std::move(field), std::move(value));
+}
+
 } // namespace NOz
 } // namespace NKernel
 } // namespace NQdb
-

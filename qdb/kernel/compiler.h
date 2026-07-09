@@ -86,21 +86,8 @@ NQumir::NAst::TExprPtr BuildTopSortMergeProgramAst(
 // modules/qumirdb.cpp).
 using TAggregateDispatch = std::function<int64_t(void* ht, TRowSet* batch, int64_t arg, int64_t op)>;
 
-// Reports required Data bytes for each output key column. Returns ht.Size or
-// -1 if outputCapacity is smaller than the number of groups.
-using TAggregateMeasure = std::function<int64_t(
-    void* ht, int64_t* outputKeyBytes, int64_t outputCapacity)>;
-
-// agg_finalize(ref HashTable ht, <ptr <ptr u8>> outputKeyBuffers, <ptr <ptr i64>>
-// outputBuffers, i64 outputCapacity) -> i64. outputBuffers must have NumAggs
-// entries, each pointing to an int64_t[outputCapacity] buffer, in the same
-// order as the `aggs` passed to CompileAggregate. Returns ht.Size (number of
-// groups), or -1 if outputCapacity < ht.Size. outputKeyBuffers has one
-// TColumn* destination per group key; generated code fills Data and Mask.
-// outputAggMasks has one u8* per aggregate (NumAggs entries, same order as
-// `aggs`): a non-null entry points to a bitmap the generated code fills for a
-// nullable aggregate output; entries for non-nullable aggregates are ignored.
-using TAggregateFinalize = std::function<int64_t(void* ht, void** outputKeyBuffers, int64_t** outputBuffers, uint8_t** outputAggMasks, int64_t outputCapacity)>;
+// Finalizes ht into a complete TRowSet and destroys ht.
+using TAggregateFinishRowSet = std::function<int64_t(void* ht, TRowSet* output)>;
 
 enum class EAggregateOutputKeyKind {
     Fixed,
@@ -123,8 +110,7 @@ struct TAggregateOutputAgg {
 // Finalize copies the dense group keys/aggregate buffers to output arrays.
 struct TAggregateKernels {
     TAggregateDispatch Dispatch;
-    TAggregateMeasure Measure;
-    TAggregateFinalize Finalize;
+    TAggregateFinishRowSet FinishRowSet;
     size_t NumAggs = 0;
     std::vector<TAggregateOutputKey> OutputKeys;
     std::vector<TAggregateOutputAgg> OutputAggs;

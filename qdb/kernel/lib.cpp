@@ -372,6 +372,12 @@ BuildGenericAggregateFusedProgramAst(
             "generic aggregate finalize")) {
         return std::unexpected(*err);
     }
+    if (auto err = appendEntry(
+            GenGenericAggregateFinishRowSetAst(
+                key, layout, hashTableType, columnType, rowSetType),
+            "generic aggregate finish rowset")) {
+        return std::unexpected(*err);
+    }
 
     return std::make_shared<TBlockExpr>(NQumir::TLocation{}, std::move(stmts));
 }

@@ -1885,6 +1885,256 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
     return std::make_shared<TBlockExpr>(loc, std::vector<TExprPtr>{function});
 }
 
+NQumir::NAst::TExprPtr GenGenericAggregateFinishRowSetAst(
+    const TAggregateKeyDescriptor& key,
+    const TAggReducerLayout& layout,
+    NQumir::NAst::TTypePtr hashTableType,
+    NQumir::NAst::TTypePtr columnType,
+    NQumir::NAst::TTypePtr rowSetType)
+{
+    using namespace NQumir::NAst;
+    namespace Oz = NKernel::NOz;
+
+    constexpr int64_t kColumnSize = 48;
+    constexpr int64_t kPtrSize = 8;
+
+    auto i64Type = std::make_shared<TIntegerType>(TIntegerType::I64);
+    auto i32Type = std::make_shared<TIntegerType>(TIntegerType::I32);
+    auto i8Type = std::make_shared<TIntegerType>(TIntegerType::I8);
+    auto u8Type = std::make_shared<TIntegerType>(TIntegerType::U8);
+    auto ptrI8Type = std::make_shared<TPointerType>(i8Type);
+    auto ptrU8Type = std::make_shared<TPointerType>(u8Type);
+    auto ptrI64Type = std::make_shared<TPointerType>(i64Type);
+    auto ptrPtrU8Type = std::make_shared<TPointerType>(ptrU8Type);
+    auto ptrPtrI64Type = std::make_shared<TPointerType>(ptrI64Type);
+    auto ptrColumnType = std::make_shared<TPointerType>(
+        AsNamed("TColumn", columnType));
+    auto rowSetRefType = std::make_shared<TReferenceType>(
+        AsNamed("TRowSet", rowSetType));
+    auto hashTableRefType = std::make_shared<TReferenceType>(
+        AsNamed("HashTable", hashTableType));
+
+    auto number = [&](int64_t value) -> TExprPtr {
+        return Oz::TypedInt(value, i64Type);
+    };
+    auto numI32 = [&](int64_t value) -> TExprPtr {
+        return Oz::TypedInt(value, i32Type);
+    };
+    auto numU8 = [&](int64_t value) -> TExprPtr {
+        return Oz::TypedInt(value, u8Type);
+    };
+    auto allocAs = [&](TTypePtr type, TExprPtr byteSize) -> TExprPtr {
+        return Oz::Cast(
+            Oz::Call("qdb_alloc", {std::move(byteSize)}),
+            std::move(type));
+    };
+    auto column = [&](size_t idx) -> TExprPtr {
+        return Oz::Index("columns", number(static_cast<int64_t>(idx)));
+    };
+    auto columnPtr = [&](size_t idx) -> TExprPtr {
+        return Oz::Cast(Oz::Add(
+            Oz::Cast(Oz::Ident("columns"), i64Type),
+            number(static_cast<int64_t>(idx) * kColumnSize)),
+            ptrColumnType);
+    };
+
+    const int64_t keyCount = static_cast<int64_t>(key.Fields.size());
+    const int64_t aggCount = static_cast<int64_t>(layout.Reducers.size());
+    const int64_t columnCount = keyCount + aggCount;
+    int64_t ownedPtrCount = 5; // columns + key bytes + pointer tables.
+    for (const auto& field : key.Fields) {
+        ++ownedPtrCount; // Data
+        if (field.IsNullable) {
+            ++ownedPtrCount; // Mask
+        }
+        if (TMaybeType<TStringType>(UnwrapNamedType(field.Type))) {
+            ++ownedPtrCount; // Offsets
+        }
+    }
+    for (const auto& reducer : layout.Reducers) {
+        ++ownedPtrCount; // Data
+        if (reducer.IsNullableOutput) {
+            ++ownedPtrCount; // Mask
+        }
+    }
+
+    Oz::TFunBuilder builder("agg_finish_rowset");
+    builder
+        .Param("ht", hashTableRefType)
+        .Param("out_rowset", rowSetRefType)
+        .Return(i64Type)
+        .Var("size", i64Type)
+        .Assign("size", Oz::Field("ht", "Size"))
+        .Var("mask_bytes", i64Type)
+        .Assign("mask_bytes",
+            Oz::Bin(TOperator(">>"),
+                Oz::Add(Oz::Ident("size"), number(7)),
+                number(3)))
+        .Var("owners", ptrI64Type)
+        .Assign("owners", allocAs(ptrI64Type,
+            number((ownedPtrCount + 1) * kPtrSize)))
+        .Stmt(Oz::ArrayAssign("owners", number(0), number(ownedPtrCount)))
+        .Var("owner_idx", i64Type)
+        .Assign("owner_idx", number(1));
+
+    auto remember = [&](const std::string& ptrName) {
+        builder
+            .Stmt(Oz::ArrayAssign("owners", Oz::Ident("owner_idx"),
+                Oz::Cast(Oz::Ident(ptrName), i64Type)))
+            .Assign("owner_idx",
+                Oz::Add(Oz::Ident("owner_idx"), number(1)));
+    };
+
+    builder
+        .Var("columns", ptrColumnType)
+        .Assign("columns", allocAs(ptrColumnType,
+            number(std::max<int64_t>(columnCount, 1) * kColumnSize)));
+    remember("columns");
+
+    builder
+        .Var("key_bytes", ptrI64Type)
+        .Assign("key_bytes", allocAs(ptrI64Type,
+            number(std::max<int64_t>(keyCount, 1) * kPtrSize)));
+    remember("key_bytes");
+
+    builder
+        .Var("key_column_ptrs", ptrPtrU8Type)
+        .Assign("key_column_ptrs", allocAs(ptrPtrU8Type,
+            number(std::max<int64_t>(keyCount, 1) * kPtrSize)));
+    remember("key_column_ptrs");
+
+    builder
+        .Var("agg_buffers", ptrPtrI64Type)
+        .Assign("agg_buffers", allocAs(ptrPtrI64Type,
+            number(std::max<int64_t>(aggCount, 1) * kPtrSize)));
+    remember("agg_buffers");
+
+    builder
+        .Var("agg_masks", ptrPtrU8Type)
+        .Assign("agg_masks", allocAs(ptrPtrU8Type,
+            number(std::max<int64_t>(aggCount, 1) * kPtrSize)));
+    remember("agg_masks");
+
+    builder
+        .Var("measured", i64Type)
+        .Assign("measured", Oz::Call("agg_measure_keys", {
+            Oz::Ident("ht"), Oz::Ident("key_bytes"), Oz::Ident("size")}))
+        .Stmt(Oz::If(
+            Oz::Bin(TOperator("!="), Oz::Ident("measured"), Oz::Ident("size")),
+            Oz::Block({
+                Oz::Call("aht_destroy", {Oz::Ident("ht")}),
+                Oz::Return(number(-1)),
+            })));
+
+    for (size_t i = 0; i < key.Fields.size(); ++i) {
+        const auto& fieldInfo = key.Fields[i];
+        const bool isString = TMaybeType<TStringType>(
+            UnwrapNamedType(fieldInfo.Type));
+        const auto idx = number(static_cast<int64_t>(i));
+        const std::string dataName = "key_data_" + std::to_string(i);
+        const std::string maskName = "key_mask_" + std::to_string(i);
+        const std::string offsetsName = "key_offsets_" + std::to_string(i);
+
+        builder
+            .Var(dataName, ptrU8Type)
+            .Assign(dataName, allocAs(ptrU8Type, Oz::Index("key_bytes", idx)));
+        remember(dataName);
+        builder
+            .Stmt(Oz::FieldAssign(
+                column(i), "Data", Oz::Cast(Oz::Ident(dataName), ptrI8Type)))
+            .Stmt(Oz::FieldAssign(column(i), "DataBitOffset", numI32(0)));
+
+        if (fieldInfo.IsNullable) {
+            builder
+                .Var(maskName, ptrU8Type)
+                .Assign(maskName, allocAs(ptrU8Type, Oz::Ident("mask_bytes")));
+            remember(maskName);
+            builder.Stmt(Oz::FieldAssign(column(i), "Mask", Oz::Ident(maskName)));
+        } else {
+            builder.Stmt(Oz::FieldAssign(column(i), "Mask", Oz::NullPtr(ptrU8Type)));
+        }
+        builder.Stmt(Oz::FieldAssign(column(i), "MaskBitOffset", numI32(0)));
+
+        if (isString) {
+            builder
+                .Var(offsetsName, ptrI64Type)
+                .Assign(offsetsName, allocAs(ptrI64Type,
+                    Oz::Mul(Oz::Add(Oz::Ident("size"), number(1)), number(8))));
+            remember(offsetsName);
+            builder
+                .Stmt(Oz::FieldAssign(column(i), "Offsets", Oz::Ident(offsetsName)))
+                .Stmt(Oz::FieldAssign(column(i), "OffsetWidth", numU8(8)));
+        } else {
+            builder
+                .Stmt(Oz::FieldAssign(column(i), "Offsets", Oz::NullPtr(ptrI64Type)))
+                .Stmt(Oz::FieldAssign(column(i), "OffsetWidth", numU8(0)));
+        }
+        builder.Stmt(Oz::ArrayAssign("key_column_ptrs", idx,
+            Oz::Cast(columnPtr(i), ptrU8Type)));
+    }
+
+    for (size_t i = 0; i < layout.Reducers.size(); ++i) {
+        const auto& reducer = layout.Reducers[i];
+        const size_t columnIdx = key.Fields.size() + i;
+        const auto idx = number(static_cast<int64_t>(i));
+        const std::string dataName = "agg_data_" + std::to_string(i);
+        const std::string maskName = "agg_mask_" + std::to_string(i);
+
+        builder
+            .Var(dataName, ptrI64Type)
+            .Assign(dataName, allocAs(ptrI64Type,
+                Oz::Mul(Oz::Ident("size"), number(8))));
+        remember(dataName);
+        builder
+            .Stmt(Oz::ArrayAssign("agg_buffers", idx, Oz::Ident(dataName)))
+            .Stmt(Oz::FieldAssign(
+                column(columnIdx), "Data", Oz::Cast(Oz::Ident(dataName), ptrI8Type)))
+            .Stmt(Oz::FieldAssign(column(columnIdx), "DataBitOffset", numI32(0)));
+
+        if (reducer.IsNullableOutput) {
+            builder
+                .Var(maskName, ptrU8Type)
+                .Assign(maskName, allocAs(ptrU8Type, Oz::Ident("mask_bytes")));
+            remember(maskName);
+            builder
+                .Stmt(Oz::ArrayAssign("agg_masks", idx, Oz::Ident(maskName)))
+                .Stmt(Oz::FieldAssign(column(columnIdx), "Mask", Oz::Ident(maskName)));
+        } else {
+            builder
+                .Stmt(Oz::ArrayAssign("agg_masks", idx, Oz::NullPtr(ptrU8Type)))
+                .Stmt(Oz::FieldAssign(column(columnIdx), "Mask", Oz::NullPtr(ptrU8Type)));
+        }
+        builder
+            .Stmt(Oz::FieldAssign(column(columnIdx), "MaskBitOffset", numI32(0)))
+            .Stmt(Oz::FieldAssign(column(columnIdx), "Offsets", Oz::NullPtr(ptrI64Type)))
+            .Stmt(Oz::FieldAssign(column(columnIdx), "OffsetWidth", numU8(0)));
+    }
+
+    builder
+        .Var("finalized", i64Type)
+        .Assign("finalized", Oz::Call("agg_finalize", {
+            Oz::Ident("ht"),
+            Oz::Ident("key_column_ptrs"),
+            Oz::Ident("agg_buffers"),
+            Oz::Ident("agg_masks"),
+            Oz::Ident("size"),
+        }))
+        .Stmt(Oz::Call("aht_destroy", {Oz::Ident("ht")}))
+        .Stmt(Oz::If(
+            Oz::Bin(TOperator("!="), Oz::Ident("finalized"), Oz::Ident("size")),
+            Oz::Block({Oz::Return(number(-1))})))
+        .Stmt(Oz::FieldAssign(Oz::Ident("out_rowset"), "Columns", Oz::Ident("columns")))
+        .Stmt(Oz::FieldAssign(Oz::Ident("out_rowset"), "ColumnCount", number(columnCount)))
+        .Stmt(Oz::FieldAssign(Oz::Ident("out_rowset"), "RowCount", Oz::Ident("size")))
+        .Stmt(Oz::FieldAssign(Oz::Ident("out_rowset"), "Selection", Oz::NullPtr(ptrU8Type)))
+        .Stmt(Oz::FieldAssign(Oz::Ident("out_rowset"), "Destroy", Oz::NullPtr(ptrI64Type)))
+        .Stmt(Oz::FieldAssign(Oz::Ident("out_rowset"), "Private", Oz::Ident("owners")))
+        .Stmt(Oz::FieldAssign(Oz::Ident("out_rowset"), "RefCount", number(1)))
+        .Stmt(Oz::Return(Oz::Ident("size")));
+
+    return Oz::Block({std::move(builder).Build()});
+}
+
 NQumir::NAst::TExprPtr GenGenericAggregateMeasureAst(
     const TAggregateKeyDescriptor& key,
     NQumir::NAst::TTypePtr hashTableType)
