@@ -226,7 +226,7 @@ class RowSetWriter {
     dv.setBigInt64(this.rowsetPtr + rsLayout.columnCount, BigInt(columns.length), true);
     dv.setBigInt64(this.rowsetPtr + rsLayout.rowCount, BigInt(rowCount), true);
     if (selection) {
-      memBytes.set(selection.subarray(0, rowCount), this.selectionPtr);
+      copySelectionToMemory(this.arena, this.selectionPtr, selection, rowCount);
       writePointer(dv, this.rowsetPtr + rsLayout.selection, this.selectionPtr);
     } else if (wantSelection) {
       writePointer(dv, this.rowsetPtr + rsLayout.selection, this.selectionPtr);
@@ -418,12 +418,17 @@ function createSharedMemory(layout) {
 // batch.wasm is a pointer into the current query's shared memory. Streaming
 // pointers are valid until the producing RowSetWriter writes again; pinned
 // pointers are fresh arena allocations and can be retained by join state.
-function attachBatchWasm(batch, rowsetPtr, { pinned, selection = null, destroy = null }) {
+function selectionPtrOf(selection) {
+  return selection?.kind === 'wasm-selection' ? selection.ptr : 0;
+}
+
+function attachBatchWasm(
+    batch, rowsetPtr, { pinned, selectionPtr = 0, destroy = null }) {
   batch.wasm = {
     rowsetPtr,
     pinned: pinned === true,
-    hasSelection: selection !== null,
-    selection,
+    hasSelection: selectionPtr !== 0,
+    selectionPtr,
     destroy,
   };
 }
@@ -436,7 +441,48 @@ function wasmRowSetForSelection(batch, selection) {
   if (selection == null) {
     return wasm.hasSelection ? null : wasm;
   }
-  return wasm.hasSelection && wasm.selection === selection ? wasm : null;
+  const selectionPtr = selectionPtrOf(selection);
+  return selectionPtr !== 0 && wasm.hasSelection && wasm.selectionPtr === selectionPtr
+    ? wasm
+    : null;
+}
+
+function makeWasmSelection(arena, rowCount, ptr) {
+  return ptr
+    ? { kind: 'wasm-selection', arena, rowCount, ptr }
+    : null;
+}
+
+function rowSelected(selection, row) {
+  if (!selection) {
+    return true;
+  }
+  if (selection.kind === 'wasm-selection') {
+    return selection.arena.bytes()[selection.ptr + row] !== 0;
+  }
+  return selection[row] !== 0;
+}
+
+function copySelectionToMemory(arena, destPtr, selection, rowCount) {
+  const out = arena.bytes();
+  if (selection?.kind === 'wasm-selection') {
+    out.set(
+      selection.arena.bytes().subarray(selection.ptr, selection.ptr + rowCount),
+      destPtr);
+  } else {
+    out.set(selection.subarray(0, rowCount), destPtr);
+  }
+}
+
+function ensureRowSetSelection(arena, layout, rowsetPtr, rowCount) {
+  const dv = arena.view();
+  const selectionOffset = rowsetPtr + layout.rowset.selection;
+  let selectionPtr = readPointer(dv, selectionOffset);
+  if (!selectionPtr) {
+    selectionPtr = arena.alloc(Math.max(rowCount, 1), 8);
+    writePointer(arena.view(), selectionOffset, selectionPtr);
+  }
+  return selectionPtr;
 }
 
 function shapeColumns(output) {
@@ -455,13 +501,55 @@ function makeWasmOwnedBatch(state, rowsetPtr, output) {
   };
   attachBatchWasm(batch, rowsetPtr, {
     pinned: true,
-    selection: null,
     destroy: () => destroyKernelOwnedRowSet(state, rowsetPtr),
   });
   return batch;
 }
 
+function pinSourceBatch(batch, arena, layout) {
+  if (batch.wasm) {
+    return batch;
+  }
+  const marshalled = marshalRowSet(
+    arena, layout, batch.columns, batch.rowCount, false, null);
+  attachBatchWasm(batch, marshalled.rowsetPtr, {
+    pinned: true,
+    destroy: () => freeMarshalledRowSet(arena, layout, marshalled.rowsetPtr),
+  });
+  return batch;
+}
+
+function transferRowSetRelease(source, target) {
+  target.destroy = takeRowSetRelease(source);
+}
+
+function takeRowSetRelease(rowSet) {
+  const releases = [];
+  if (typeof rowSet?.destroy === 'function') {
+    releases.push(rowSet.destroy);
+    rowSet.destroy = null;
+  }
+  const wasm = rowSet?.batch?.wasm;
+  if (typeof wasm?.destroy === 'function') {
+    releases.push(wasm.destroy);
+    wasm.destroy = null;
+  }
+  if (releases.length === 0) {
+    return null;
+  }
+  return () => {
+    for (const release of releases) {
+      release();
+    }
+  };
+}
+
 function releaseWasmRowSet(rowSet) {
+  if (typeof rowSet?.destroy === 'function') {
+    const destroy = rowSet.destroy;
+    rowSet.destroy = null;
+    destroy();
+  }
   const wasm = rowSet?.batch?.wasm;
   if (typeof wasm?.destroy === 'function') {
     const destroy = wasm.destroy;
@@ -844,7 +932,7 @@ function marshalRowSet(arena, layout, columns, rowCount, wantSelection, selectio
   dv.setBigInt64(rowsetPtr + rsLayout.columnCount, BigInt(columns.length), true);
   dv.setBigInt64(rowsetPtr + rsLayout.rowCount, BigInt(rowCount), true);
   if (selection) {
-    memBytes.set(selection.subarray(0, rowCount), selectionPtr);
+    copySelectionToMemory(arena, selectionPtr, selection, rowCount);
     writePointer(dv, rowsetPtr + rsLayout.selection, selectionPtr);
   } else if (wantSelection) {
     writePointer(dv, rowsetPtr + rsLayout.selection, selectionPtr);
@@ -853,21 +941,46 @@ function marshalRowSet(arena, layout, columns, rowCount, wantSelection, selectio
   return { rowsetPtr, selectionPtr, columnsBase };
 }
 
-// Run a filter kernel over `batch` (columns in source order). Returns a
-// Uint8Array selection where a nonzero byte marks a kept row.
-export function runFilter(kernel, layout, batch, writer, options = {}) {
+function reusableFilterWasm(rowSet, pinned) {
+  const wasm = wasmRowSetForSelection(rowSet.batch, rowSet.selection);
+  return wasm && (wasm.pinned || !pinned) ? wasm : null;
+}
+
+// Run a filter kernel over `rowSet` (columns in source order). The kernel writes
+// the result selection into the rowset's Selection buffer; JS carries only the
+// pointer descriptor.
+export function runFilter(kernel, layout, rowSet, writer, options = {}) {
   const pinned = options.pinned === true;
-  const { rowsetPtr, selectionPtr } = pinned
-    ? marshalRowSet(
-        kernel.holder.arena, layout, batch.columns, batch.rowCount, true)
-    : writer.write(batch.columns, batch.rowCount, true);
+  const { batch, selection } = rowSet;
+  const arena = kernel.holder.arena;
+  const wasm = reusableFilterWasm(rowSet, pinned);
+  let rowsetPtr;
+  let selectionPtr;
+  let destroy = null;
+  if (wasm) {
+    rowsetPtr = wasm.rowsetPtr;
+    selectionPtr = ensureRowSetSelection(arena, layout, rowsetPtr, batch.rowCount);
+    destroy = wasm.destroy || null;
+  } else if (pinned) {
+    const marshalled = marshalRowSet(
+      arena, layout, batch.columns, batch.rowCount, true, selection);
+    rowsetPtr = marshalled.rowsetPtr;
+    selectionPtr = marshalled.selectionPtr;
+    destroy = () => freeMarshalledRowSet(arena, layout, rowsetPtr);
+  } else {
+    const written = writer.write(
+      batch.columns, batch.rowCount, true, selection);
+    rowsetPtr = written.rowsetPtr;
+    selectionPtr = written.selectionPtr;
+  }
   // memory64 entry: the rowset pointer is an i64 param.
   kernel.fn(BigInt(rowsetPtr));
-  // Copy the selection out before the buffer can be reused.
-  const selection = kernel.holder.arena.bytes()
-    .slice(selectionPtr, selectionPtr + batch.rowCount);
-  attachBatchWasm(batch, rowsetPtr, { pinned, selection });
-  return selection;
+  attachBatchWasm(batch, rowsetPtr, {
+    pinned: wasm ? wasm.pinned : pinned,
+    selectionPtr,
+    destroy,
+  });
+  return makeWasmSelection(arena, batch.rowCount, selectionPtr);
 }
 
 // Run a project kernel over `batch`; `output` is the graph project's output plan.
@@ -991,7 +1104,7 @@ function materializeWasmRowSet(arena, layout, output, rowsetPtr) {
   }
 
   const batch = { rowCount, columns };
-  attachBatchWasm(batch, rowsetPtr, { pinned: true, selection: null });
+  attachBatchWasm(batch, rowsetPtr, { pinned: true });
   return batch;
 }
 
@@ -1302,6 +1415,9 @@ function updateJoinState(state, side, rowSet) {
       throw new Error('join kernel update failed');
     }
   } finally {
+    if (marshalled) {
+      releaseWasmRowSet(rowSet);
+    }
     if (!stored) {
       if (marshalled) {
         freeMarshalledRowSet(arena, layout, marshalled.rowsetPtr);
@@ -1436,16 +1552,23 @@ function stableRowSetForStore(state, rowSet) {
   const { batch, selection } = rowSet;
   const wasm = wasmRowSetForSelection(batch, selection);
   if (wasm?.pinned) {
-    return { rowsetPtr: wasm.rowsetPtr, ownedPtr: 0 };
+    return { rowsetPtr: wasm.rowsetPtr, ownedPtr: 0, releaseInput: false };
   }
   const marshalled = marshalRowSet(
     arena, layout, batch.columns, batch.rowCount, false, selection);
-  return { rowsetPtr: marshalled.rowsetPtr, ownedPtr: marshalled.rowsetPtr };
+  return {
+    rowsetPtr: marshalled.rowsetPtr,
+    ownedPtr: marshalled.rowsetPtr,
+    releaseInput: true,
+  };
 }
 
 function updateCrossRightState(state, rowSet) {
-  const { rowsetPtr, ownedPtr } = stableRowSetForStore(state, rowSet);
+  const { rowsetPtr, ownedPtr, releaseInput } = stableRowSetForStore(state, rowSet);
   state.rightStore.push(rowSet.batch, rowsetPtr, ownedPtr);
+  if (releaseInput) {
+    releaseWasmRowSet(rowSet);
+  }
   state.rightRows += rowSet.batch.rowCount;
 }
 
@@ -1454,18 +1577,24 @@ function updateCrossLeftState(state, rowSet) {
     releaseWasmRowSet(rowSet);
     return;
   }
-  const { rowsetPtr, ownedPtr } = stableRowSetForStore(state, rowSet);
+  const { rowsetPtr, ownedPtr, releaseInput } = stableRowSetForStore(state, rowSet);
   const batchIdx = state.leftStore.push(rowSet.batch, rowsetPtr, ownedPtr);
   const batchPtr = state.leftStore.dataPtr() + batchIdx * state.layout.rowset.size;
-  const ok = state.dispatch(
-    BigInt(batchPtr),
-    BigInt(batchIdx),
-    BigInt(state.rightStore.dataPtr()),
-    BigInt(state.rightStore.batches.length),
-    BigInt(state.pairBuffer),
-    CrossJoinOp.EMIT);
-  if (!ok) {
-    throw new Error('cross join kernel update failed');
+  try {
+    const ok = state.dispatch(
+      BigInt(batchPtr),
+      BigInt(batchIdx),
+      BigInt(state.rightStore.dataPtr()),
+      BigInt(state.rightStore.batches.length),
+      BigInt(state.pairBuffer),
+      CrossJoinOp.EMIT);
+    if (!ok) {
+      throw new Error('cross join kernel update failed');
+    }
+  } finally {
+    if (releaseInput) {
+      releaseWasmRowSet(rowSet);
+    }
   }
 }
 
@@ -1530,20 +1659,25 @@ function selectedRowCount(rowSets) {
       continue;
     }
     for (let row = 0; row < batch.rowCount; ++row) {
-      if (selection[row]) ++count;
+      if (rowSelected(selection, row)) ++count;
     }
   }
   return count;
 }
 
-function pinnedSortRowSetPtr(arena, layout, rowSet) {
-  const { batch } = rowSet;
-  const wasm = batch.wasm?.pinned ? batch.wasm : null;
-  if (wasm) {
-    return wasm.rowsetPtr;
+function stableSortRowSetForStore(arena, layout, rowSet) {
+  const { batch, selection } = rowSet;
+  const wasm = wasmRowSetForSelection(batch, selection);
+  if (wasm?.pinned) {
+    return { rowsetPtr: wasm.rowsetPtr, ownedPtr: 0, releaseInput: false };
   }
-  return marshalRowSet(
-    arena, layout, batch.columns, batch.rowCount, false, null).rowsetPtr;
+  const marshalled = marshalRowSet(
+    arena, layout, batch.columns, batch.rowCount, false, selection);
+  return {
+    rowsetPtr: marshalled.rowsetPtr,
+    ownedPtr: marshalled.rowsetPtr,
+    releaseInput: true,
+  };
 }
 
 function gatherRowIds(rowSets, sortedIds, keep) {
@@ -1572,17 +1706,24 @@ function radixSortRowIds(kernel, layout, rowSets, radixKeys) {
   const workStride = radixKeys.some(key => key.isString) ? 4 : 1;
   const store = new WasmRowStore(arena, layout);
   const storeBatchIndexes = new Array(rowSets.length);
-  const rowsetPtrs = new Array(rowSets.length);
+  const releaseInputs = [];
 
   for (let b = 0; b < rowSets.length; ++b) {
     const rowSet = rowSets[b];
-    const rowsetPtr = pinnedSortRowSetPtr(arena, layout, rowSet);
-    rowsetPtrs[b] = rowsetPtr;
-    storeBatchIndexes[b] = store.push(rowSet.batch, rowsetPtr);
+    const stable = stableSortRowSetForStore(arena, layout, rowSet);
+    if (stable.releaseInput) {
+      releaseInputs.push(rowSet);
+    }
+    storeBatchIndexes[b] = store.push(
+      rowSet.batch, stable.rowsetPtr, stable.ownedPtr);
   }
 
   if (n === 0) {
-    return { n, rowIdsPtr: 0, rowsetPtrs };
+    for (const rowSet of releaseInputs) {
+      releaseWasmRowSet(rowSet);
+    }
+    store.freeMarshalled();
+    return { n, rowIdsPtr: 0 };
   }
 
   // Allocate everything up front (a mid-write grow would detach views).
@@ -1606,24 +1747,31 @@ function radixSortRowIds(kernel, layout, rowSets, radixKeys) {
     const rowSet = rowSets[b];
     const { batch, selection } = rowSet;
     for (let row = 0; row < batch.rowCount; ++row) {
-      if (selection && !selection[row]) continue;
+      if (!rowSelected(selection, row)) continue;
       dv.setBigInt64(rowIdsPtr + out * 8, makeRowId(storeBatchIndexes[b], row), true);
       ++out;
     }
   }
 
-  // memory64: every pointer/count is an i64 param.
-  if (nullable) {
-    kernel.fn(
-      BigInt(store.dataPtr()), BigInt(rowIdsPtr), BigInt(workPtr),
-      BigInt(countsPtr), BigInt(n), BigInt(descsPtr), BigInt(nullsFirstsPtr));
-  } else {
-    kernel.fn(
-      BigInt(store.dataPtr()), BigInt(rowIdsPtr), BigInt(workPtr),
-      BigInt(countsPtr), BigInt(n), BigInt(descsPtr));
+  try {
+    // memory64: every pointer/count is an i64 param.
+    if (nullable) {
+      kernel.fn(
+        BigInt(store.dataPtr()), BigInt(rowIdsPtr), BigInt(workPtr),
+        BigInt(countsPtr), BigInt(n), BigInt(descsPtr), BigInt(nullsFirstsPtr));
+    } else {
+      kernel.fn(
+        BigInt(store.dataPtr()), BigInt(rowIdsPtr), BigInt(workPtr),
+        BigInt(countsPtr), BigInt(n), BigInt(descsPtr));
+    }
+  } finally {
+    for (const rowSet of releaseInputs) {
+      releaseWasmRowSet(rowSet);
+    }
+    store.freeMarshalled();
   }
 
-  return { n, rowIdsPtr, rowsetPtrs };
+  return { n, rowIdsPtr };
 }
 
 function readSortedRowIds(arena, rowIdsPtr, count) {
@@ -1894,8 +2042,10 @@ function downstreamConsumesWasm(node) {
 }
 
 class SourceTask {
-  constructor(stage, readSourceBatches, onProgress) {
+  constructor(stage, layout, shared, readSourceBatches, onProgress) {
     this.stage = stage;
+    this.layout = layout;
+    this.shared = shared;
     this.readSourceBatches = readSourceBatches;
     this.onProgress = onProgress;
     this.iterator = null;
@@ -1920,8 +2070,10 @@ class SourceTask {
       this.done = true;
       return TaskResult.FINISHED;
     }
-    this.rows += next.value.rowCount;
-    out.push({ batch: next.value, selection: null });
+    const batch = pinSourceBatch(
+      next.value, this.shared.arena, this.layout);
+    this.rows += batch.rowCount;
+    out.push({ batch, selection: null });
     return TaskResult.OK;
   }
 
@@ -1959,12 +2111,22 @@ class FilterTask {
       this.kernel = await instantiateKernel(this.stage.wasm, '<kernel>', this.shared);
     }
     assertStreamingWasmEdge(outEdge);
-    const selection = runFilter(
-      this.kernel,
-      this.layout,
-      fetched.rowSet.batch,
-      this.writer,
-      { pinned: outEdge.persistent });
+    const reusesInput = reusableFilterWasm(
+      fetched.rowSet, outEdge.persistent) !== null;
+    const releaseInput = reusesInput ? null : takeRowSetRelease(fetched.rowSet);
+    let selection = null;
+    try {
+      selection = runFilter(
+        this.kernel,
+        this.layout,
+        fetched.rowSet,
+        this.writer,
+        { pinned: outEdge.persistent });
+    } finally {
+      if (releaseInput) {
+        releaseInput();
+      }
+    }
     this.rows += fetched.rowSet.batch.rowCount;
     output.push({ batch: fetched.rowSet.batch, selection });
     return TaskResult.OK;
@@ -2021,7 +2183,13 @@ class ProjectTask {
     }
     const batch = { rowCount: fetched.rowSet.batch.rowCount, columns };
     this.rows += batch.rowCount;
-    output.push({ batch, selection: fetched.rowSet.selection });
+    const outRowSet = { batch, selection: fetched.rowSet.selection };
+    if (fetched.rowSet.selection?.kind === 'wasm-selection') {
+      transferRowSetRelease(fetched.rowSet, outRowSet);
+    } else {
+      releaseWasmRowSet(fetched.rowSet);
+    }
+    output.push(outRowSet);
     return TaskResult.OK;
   }
 }
@@ -2393,11 +2561,13 @@ class TopSortWasmState {
       this.stateBatch = emptyBatchForRowSets([rowSet]);
     }
     if (this.limit <= 0) {
+      releaseWasmRowSet(rowSet);
       return;
     }
 
     const n = selectedRowCount([rowSet]);
     if (n === 0) {
+      releaseWasmRowSet(rowSet);
       return;
     }
 
@@ -2409,7 +2579,7 @@ class TopSortWasmState {
       this.stateBatch.rowCount,
       false,
       null);
-    const batchRowSetPtr = pinnedSortRowSetPtr(arena, this.layout, rowSet);
+    const batchRowSet = stableSortRowSetForStore(arena, this.layout, rowSet);
     const pickCapacity = Math.min(
       this.limit, this.stateBatch.rowCount + n);
     const workStride = this.stage.radixKeys.some(key => key.isString) ? 4 : 1;
@@ -2423,23 +2593,36 @@ class TopSortWasmState {
     let outRow = 0;
     const { batch, selection } = rowSet;
     for (let row = 0; row < batch.rowCount; ++row) {
-      if (selection && !selection[row]) continue;
+      if (!rowSelected(selection, row)) continue;
       dv.setBigInt64(rowIdsPtr + outRow * 8, makeRowId(0, row), true);
       ++outRow;
     }
 
-    const out = Number(this.kernel.fn(
-      BigInt(stateRowSet.rowsetPtr),
-      BigInt(batchRowSetPtr),
-      BigInt(rowIdsPtr),
-      BigInt(workPtr),
-      BigInt(countsPtr),
-      BigInt(n),
-      BigInt(pickSrcPtr),
-      BigInt(pickIdxPtr),
-      BigInt(this.limit)));
-    this.stateBatch = gatherTopSortPicks(
-      this.stateBatch, rowSet.batch, arena, pickSrcPtr, pickIdxPtr, out);
+    try {
+      const out = Number(this.kernel.fn(
+        BigInt(stateRowSet.rowsetPtr),
+        BigInt(batchRowSet.rowsetPtr),
+        BigInt(rowIdsPtr),
+        BigInt(workPtr),
+        BigInt(countsPtr),
+        BigInt(n),
+        BigInt(pickSrcPtr),
+        BigInt(pickIdxPtr),
+        BigInt(this.limit)));
+      this.stateBatch = gatherTopSortPicks(
+        this.stateBatch, rowSet.batch, arena, pickSrcPtr, pickIdxPtr, out);
+    } finally {
+      freeMarshalledRowSet(arena, this.layout, stateRowSet.rowsetPtr);
+      if (batchRowSet.ownedPtr) {
+        freeMarshalledRowSet(arena, this.layout, batchRowSet.ownedPtr);
+      }
+      releaseWasmRowSet(rowSet);
+      arena.free(rowIdsPtr);
+      arena.free(workPtr);
+      arena.free(countsPtr);
+      arena.free(pickSrcPtr);
+      arena.free(pickIdxPtr);
+    }
   }
 
   finish() {
@@ -2548,7 +2731,7 @@ function makeNode(task, label) {
 function taskNodeForStage(stage, layout, readSourceBatches, onProgress, shared) {
   if (stage.kind === 'source') {
     return makeNode(
-      new SourceTask(stage, readSourceBatches, onProgress || null),
+      new SourceTask(stage, layout, shared, readSourceBatches, onProgress || null),
       stage.kind);
   }
   if (stage.kind === 'filter') {
@@ -2687,7 +2870,7 @@ function materializeRowSets(rowSets, limit, layout, arena) {
     try {
       const batch = finalMaterializeBatch(rowSet, layout, arena);
       for (let i = 0; i < batch.rowCount; ++i) {
-        if (selection && !selection[i]) continue;
+        if (!rowSelected(selection, i)) continue;
         if (skipped < offset) {
           ++skipped;
           continue;
