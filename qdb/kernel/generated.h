@@ -34,6 +34,7 @@ struct TGeneratedKernel {
     // Logical-operator identity; joins exec-plan stages to their kernels.
     const void* Operator = nullptr;
     std::shared_ptr<TKernelSlot> Slot;
+    bool ExportArtifacts = true;
 
     // Sort kernels only: resolved key metadata for the exec exporter.
     struct TSortKeyMeta {

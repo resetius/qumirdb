@@ -1411,23 +1411,88 @@ function finishJoinState(state) {
   exports.pb_destroy(BigInt(state.pairBuffer));
 }
 
-// Drive the radix composite sort kernel. The kernel sorts a row-id permutation
-// in place and reads key values directly from the marshaled TRowSet, matching
-// the native sort path.
-export function runRadixSort(kernel, layout, batch, selection, radixKeys, limit) {
+function outputShapeFromRowSets(rowSets) {
+  const first = rowSets.find(rowSet => rowSet.batch.columns.length > 0);
+  return first ? first.batch.columns.map(col => ({
+    name: col.name,
+    type: col.type,
+  })) : [];
+}
+
+function emptyBatchForRowSets(rowSets) {
+  return {
+    rowCount: 0,
+    columns: outputShapeFromRowSets(rowSets).map(col => ({
+      name: col.name,
+      type: col.type,
+      values: [],
+    })),
+  };
+}
+
+function selectedRowCount(rowSets) {
+  let count = 0;
+  for (const rowSet of rowSets) {
+    const { batch, selection } = rowSet;
+    if (!selection) {
+      count += batch.rowCount;
+      continue;
+    }
+    for (let row = 0; row < batch.rowCount; ++row) {
+      if (selection[row]) ++count;
+    }
+  }
+  return count;
+}
+
+function pinnedSortRowSetPtr(arena, layout, rowSet) {
+  const { batch } = rowSet;
+  const wasm = batch.wasm?.pinned ? batch.wasm : null;
+  if (wasm) {
+    return wasm.rowsetPtr;
+  }
+  return marshalRowSet(
+    arena, layout, batch.columns, batch.rowCount, false, null).rowsetPtr;
+}
+
+function gatherRowIds(rowSets, sortedIds, keep) {
+  const columns = outputShapeFromRowSets(rowSets).map(col => ({
+    name: col.name,
+    type: col.type,
+    values: new Array(keep),
+  }));
+  for (let i = 0; i < keep; ++i) {
+    const id = sortedIds[i];
+    const batch = rowSets[rowIdBatch(id)].batch;
+    const row = rowIdRow(id);
+    for (let c = 0; c < columns.length; ++c) {
+      columns[c].values[i] = batch.columns[c].values[row];
+    }
+  }
+  return { rowCount: keep, columns };
+}
+
+function radixSortRowIds(kernel, layout, rowSets, radixKeys) {
   const arena = kernel.holder.arena;
 
-  const live = [];
-  for (let i = 0; i < batch.rowCount; ++i) {
-    if (selection && !selection[i]) continue;
-    live.push(i);
-  }
-  const n = live.length;
+  const n = selectedRowCount(rowSets);
   const keyCount = radixKeys.length;
-  const rowset = marshalRowSet(
-    arena, layout, batch.columns, batch.rowCount, false, null);
   const nullable = !!kernel.nullable;
   const workStride = radixKeys.some(key => key.isString) ? 4 : 1;
+  const store = new WasmRowStore(arena, layout);
+  const storeBatchIndexes = new Array(rowSets.length);
+  const rowsetPtrs = new Array(rowSets.length);
+
+  for (let b = 0; b < rowSets.length; ++b) {
+    const rowSet = rowSets[b];
+    const rowsetPtr = pinnedSortRowSetPtr(arena, layout, rowSet);
+    rowsetPtrs[b] = rowsetPtr;
+    storeBatchIndexes[b] = store.push(rowSet.batch, rowsetPtr);
+  }
+
+  if (n === 0) {
+    return { n, rowIdsPtr: 0, rowsetPtrs };
+  }
 
   // Allocate everything up front (a mid-write grow would detach views).
   const rowIdsPtr = arena.alloc(Math.max(n, 1) * 8, 8);
@@ -1445,35 +1510,59 @@ export function runRadixSort(kernel, layout, batch, selection, radixKeys, limit)
     }
   }
 
-  for (let i = 0; i < n; ++i) {
-    dv.setBigInt64(rowIdsPtr + i * 8, makeRowId(0, live[i]), true);
+  let out = 0;
+  for (let b = 0; b < rowSets.length; ++b) {
+    const rowSet = rowSets[b];
+    const { batch, selection } = rowSet;
+    for (let row = 0; row < batch.rowCount; ++row) {
+      if (selection && !selection[row]) continue;
+      dv.setBigInt64(rowIdsPtr + out * 8, makeRowId(storeBatchIndexes[b], row), true);
+      ++out;
+    }
   }
 
   // memory64: every pointer/count is an i64 param.
   if (nullable) {
     kernel.fn(
-      BigInt(rowset.rowsetPtr), BigInt(rowIdsPtr), BigInt(workPtr),
+      BigInt(store.dataPtr()), BigInt(rowIdsPtr), BigInt(workPtr),
       BigInt(countsPtr), BigInt(n), BigInt(descsPtr), BigInt(nullsFirstsPtr));
   } else {
     kernel.fn(
-      BigInt(rowset.rowsetPtr), BigInt(rowIdsPtr), BigInt(workPtr),
+      BigInt(store.dataPtr()), BigInt(rowIdsPtr), BigInt(workPtr),
       BigInt(countsPtr), BigInt(n), BigInt(descsPtr));
   }
 
+  return { n, rowIdsPtr, rowsetPtrs };
+}
+
+function readSortedRowIds(arena, rowIdsPtr, count) {
   const outDv = arena.view();
-  const order = new Array(n);
-  for (let i = 0; i < n; ++i) {
-    order[i] = rowIdRow(outDv.getBigInt64(rowIdsPtr + i * 8, true));
+  const sortedIds = new Array(count);
+  for (let i = 0; i < count; ++i) {
+    sortedIds[i] = outDv.getBigInt64(rowIdsPtr + i * 8, true);
+  }
+  return sortedIds;
+}
+
+function runRadixSortRowSets(kernel, layout, rowSets, radixKeys, limit) {
+  const sorted = radixSortRowIds(kernel, layout, rowSets, radixKeys);
+  const keep = (limit != null && limit < sorted.n)
+    ? Math.max(Number(limit), 0)
+    : sorted.n;
+  if (sorted.n === 0 || keep === 0) {
+    return emptyBatchForRowSets(rowSets);
   }
 
-  const keep = (limit != null && limit < n) ? Math.max(limit, 0) : n;
-  const kept = order.slice(0, keep);
-  const columns = batch.columns.map(col => ({
-    name: col.name,
-    type: col.type,
-    values: kept.map(idx => col.values[idx]),
-  }));
-  return { rowCount: kept.length, columns };
+  const sortedIds = readSortedRowIds(kernel.holder.arena, sorted.rowIdsPtr, keep);
+  return gatherRowIds(rowSets, sortedIds, keep);
+}
+
+// Drive the radix composite sort kernel. The kernel sorts a row-id permutation
+// in place and reads key values directly from marshaled TRowSet storage,
+// matching the native sort path.
+export function runRadixSort(kernel, layout, batch, selection, radixKeys, limit) {
+  return runRadixSortRowSets(
+    kernel, layout, [{ batch, selection: selection || null }], radixKeys, limit);
 }
 
 const TaskResult = {
@@ -2129,141 +2218,107 @@ function selectedRowIndices(item) {
   return rows;
 }
 
-class TopSortState {
-  constructor(stage) {
+function gatherTopSortPicks(stateBatch, tempBatch, arena, pickSrcPtr, pickIdxPtr, count) {
+  const shape = stateBatch.columns.length > 0
+    ? stateBatch.columns
+    : tempBatch.columns;
+  const columns = shape.map(col => ({
+    name: col.name,
+    type: col.type,
+    values: new Array(count),
+  }));
+  const dv = arena.view();
+  for (let i = 0; i < count; ++i) {
+    const src = dv.getUint8(pickSrcPtr + i);
+    const idx = dv.getUint32(pickIdxPtr + i * 4, true);
+    const batch = src === 0 ? stateBatch : tempBatch;
+    for (let c = 0; c < columns.length; ++c) {
+      columns[c].values[i] = batch.columns[c].values[idx];
+    }
+  }
+  return { rowCount: count, columns };
+}
+
+class TopSortWasmState {
+  constructor(stage, layout, shared) {
+    this.stage = stage;
+    this.layout = layout;
+    this.shared = shared;
     this.limit = Math.max(Number(stage.limit || 0), 0);
-    this.keys = sortKeysForStage(stage);
-    this.heap = [];
-    this.specs = null;
-    this.nextSeq = 0;
-    this.encoder = new TextEncoder();
+    this.kernel = null;
+    this.stateBatch = null;
   }
 
-  add(rowSet) {
-    const { batch, selection } = rowSet;
-    if (!this.specs) {
-      this.specs = batch.columns.map(col => ({ name: col.name, type: col.type }));
+  async ensureKernels() {
+    if (!this.stage.wasm || !Array.isArray(this.stage.radixKeys)) {
+      throw new Error('top-sort stage is missing wasm kernel');
+    }
+    if (!this.kernel) {
+      this.kernel = await instantiateKernel(
+        this.stage.wasm,
+        'qdb_top_sort_update',
+        this.shared);
+    }
+  }
+
+  async add(rowSet) {
+    await this.ensureKernels();
+    if (!this.stateBatch) {
+      this.stateBatch = emptyBatchForRowSets([rowSet]);
     }
     if (this.limit <= 0) {
       return;
     }
-    for (let row = 0; row < batch.rowCount; ++row) {
-      if (selection && !selection[row]) {
-        continue;
-      }
-      this.offer(makeTopSortCandidate(
-        batch, row, this.keys, this.nextSeq++, this.encoder), batch, row);
-    }
-  }
 
-  offer(candidate, batch, row) {
-    if (this.heap.length < this.limit) {
-      this.heap.push(materializeTopSortRecord(candidate, batch, row));
-      this.siftUp(this.heap.length - 1);
+    const n = selectedRowCount([rowSet]);
+    if (n === 0) {
       return;
     }
-    if (compareTopSortRecords(candidate, this.heap[0]) >= 0) {
-      return;
+
+    const arena = this.shared.arena;
+    const stateRowSet = marshalRowSet(
+      arena,
+      this.layout,
+      this.stateBatch.columns,
+      this.stateBatch.rowCount,
+      false,
+      null);
+    const batchRowSetPtr = pinnedSortRowSetPtr(arena, this.layout, rowSet);
+    const pickCapacity = Math.min(
+      this.limit, this.stateBatch.rowCount + n);
+    const workStride = this.stage.radixKeys.some(key => key.isString) ? 4 : 1;
+    const rowIdsPtr = arena.alloc(Math.max(n, 1) * 8, 8);
+    const workPtr = arena.alloc(Math.max(n, 1) * workStride * 8, 8);
+    const countsPtr = arena.alloc((this.stage.radixNullable ? 257 : 256) * 4, 4);
+    const pickSrcPtr = arena.alloc(Math.max(pickCapacity, 1), 1);
+    const pickIdxPtr = arena.alloc(Math.max(pickCapacity, 1) * 4, 4);
+
+    const dv = arena.view();
+    let outRow = 0;
+    const { batch, selection } = rowSet;
+    for (let row = 0; row < batch.rowCount; ++row) {
+      if (selection && !selection[row]) continue;
+      dv.setBigInt64(rowIdsPtr + outRow * 8, makeRowId(0, row), true);
+      ++outRow;
     }
-    this.heap[0] = materializeTopSortRecord(candidate, batch, row);
-    this.siftDown(0);
+
+    const out = Number(this.kernel.fn(
+      BigInt(stateRowSet.rowsetPtr),
+      BigInt(batchRowSetPtr),
+      BigInt(rowIdsPtr),
+      BigInt(workPtr),
+      BigInt(countsPtr),
+      BigInt(n),
+      BigInt(pickSrcPtr),
+      BigInt(pickIdxPtr),
+      BigInt(this.limit)));
+    this.stateBatch = gatherTopSortPicks(
+      this.stateBatch, rowSet.batch, arena, pickSrcPtr, pickIdxPtr, out);
   }
 
   finish() {
-    const records = [...this.heap].sort(compareTopSortRecords);
-    const specs = this.specs || [];
-    const columns = specs.map((spec, c) => ({
-      name: spec.name,
-      type: spec.type,
-      values: records.map(record => record.values[c]),
-    }));
-    return { rowCount: records.length, columns };
+    return this.stateBatch || { rowCount: 0, columns: [] };
   }
-
-  siftUp(index) {
-    while (index > 0) {
-      const parent = (index - 1) >> 1;
-      if (!topSortRecordWorse(this.heap[index], this.heap[parent])) {
-        break;
-      }
-      [this.heap[index], this.heap[parent]] = [this.heap[parent], this.heap[index]];
-      index = parent;
-    }
-  }
-
-  siftDown(index) {
-    for (;;) {
-      const left = index * 2 + 1;
-      const right = left + 1;
-      let worst = index;
-      if (left < this.heap.length &&
-          topSortRecordWorse(this.heap[left], this.heap[worst])) {
-        worst = left;
-      }
-      if (right < this.heap.length &&
-          topSortRecordWorse(this.heap[right], this.heap[worst])) {
-        worst = right;
-      }
-      if (worst === index) {
-        break;
-      }
-      [this.heap[index], this.heap[worst]] = [this.heap[worst], this.heap[index]];
-      index = worst;
-    }
-  }
-}
-
-function sortKeysForStage(stage) {
-  if (Array.isArray(stage.keys)) {
-    return stage.keys;
-  }
-  if (Array.isArray(stage.radixKeys)) {
-    return stage.radixKeys.map(key => ({
-      index: key.index,
-      direction: key.desc ? 'desc' : 'asc',
-      nulls: key.nullsFirst ? 'nulls-first' : 'nulls-last',
-    }));
-  }
-  throw new Error('top-sort stage is missing sort keys');
-}
-
-function makeTopSortCandidate(batch, row, keys, seq, encoder) {
-  const keyValues = keys.map(key => {
-    const column = batch.columns[key.index];
-    const value = column.values[row];
-    if (column.type === 'string') {
-      return (value === null || value === undefined)
-        ? null
-        : encoder.encode(String(value));
-    }
-    return value;
-  });
-  return { seq, keyValues, keys };
-}
-
-function materializeTopSortRecord(candidate, batch, row) {
-  return {
-    ...candidate,
-    values: batch.columns.map(col => col.values[row]),
-  };
-}
-
-function compareTopSortRecords(left, right) {
-  for (let i = 0; i < left.keys.length; ++i) {
-    const key = left.keys[i];
-    const columnCompare = left.keyValues[i] instanceof Uint8Array
-      ? compareBytes
-      : compareScalar;
-    const c = compareKey(left.keyValues[i], right.keyValues[i], key, columnCompare);
-    if (c !== 0) {
-      return c;
-    }
-  }
-  return left.seq - right.seq;
-}
-
-function topSortRecordWorse(left, right) {
-  return compareTopSortRecords(left, right) > 0;
 }
 
 class SortTask {
@@ -2271,7 +2326,9 @@ class SortTask {
     this.stage = stage;
     this.layout = layout;
     this.shared = shared;
-    this.topSort = stage.kind === 'top-sort' ? new TopSortState(stage) : null;
+    this.topSort = stage.kind === 'top-sort'
+      ? new TopSortWasmState(stage, layout, shared)
+      : null;
     this.inputs = [];
     this.pending = null;
     this.done = false;
@@ -2296,7 +2353,7 @@ class SortTask {
     if (fetched.result === FetchResult.NO_DATA) return TaskResult.NEED_DATA;
     if (fetched.result === FetchResult.OK) {
       if (this.topSort) {
-        this.topSort.add(fetched.rowSet);
+        await this.topSort.add(fetched.rowSet);
       } else {
         this.inputs.push(fetched.rowSet);
       }
@@ -2306,23 +2363,22 @@ class SortTask {
 
     if (this.topSort) {
       this.pending = this.topSort.finish();
-    } else {
-      const batch = compactRowSets(this.inputs);
-      if (this.stage.wasm) {
-        const radixNullable = !!this.stage.radixNullable;
-        const kernel = await instantiateKernel(
-          this.stage.wasm,
-          radixNullable
-            ? 'qdb_radix_sort_indices_composite_nullable'
-            : 'qdb_radix_sort_indices_composite',
-          this.shared);
-        kernel.nullable = radixNullable;
-        this.pending = runRadixSort(
-          kernel, this.layout, batch, null, this.stage.radixKeys, null);
-      } else {
-        this.pending = applySort(batch, null, this.stage.keys, null);
-      }
+      return this.execute();
     }
+
+    if (!this.stage.wasm || !Array.isArray(this.stage.radixKeys)) {
+      throw new Error(`${this.stage.kind} stage is missing wasm radix sort kernel`);
+    }
+    const radixNullable = !!this.stage.radixNullable;
+    const kernel = await instantiateKernel(
+      this.stage.wasm,
+      radixNullable
+        ? 'qdb_radix_sort_indices_composite_nullable'
+        : 'qdb_radix_sort_indices_composite',
+      this.shared);
+    kernel.nullable = radixNullable;
+    this.pending = runRadixSortRowSets(
+      kernel, this.layout, this.inputs, this.stage.radixKeys, null);
     return this.execute();
   }
 }
@@ -2458,107 +2514,6 @@ export async function executeBrowserPipelineScheduled(exec, readSourceBatches, o
       ...edge.connection.stats,
     })));
   return result;
-}
-
-function compactRowSets(rowSets) {
-  if (rowSets.length === 0) {
-    return { rowCount: 0, columns: [] };
-  }
-  if (rowSets.length === 1 && !rowSets[0].selection) {
-    return rowSets[0].batch;
-  }
-
-  const specs = rowSets[0].batch.columns.map(col => ({
-    name: col.name,
-    type: col.type,
-  }));
-  const rows = [];
-  for (const rowSet of rowSets) {
-    const { batch, selection } = rowSet;
-    for (let r = 0; r < batch.rowCount; ++r) {
-      if (selection && !selection[r]) continue;
-      rows.push(batch.columns.map(col => col.values[r]));
-    }
-  }
-
-  const columns = specs.map((spec, c) => ({
-    ...spec,
-    values: rows.map(row => row[c]),
-  }));
-  return { rowCount: rows.length, columns };
-}
-
-// Sort a batch by `keys` (each { index, direction, nulls }), folding any
-// pending selection into a compacted, reordered batch. When `limit` is set
-// (top-sort), only the first `limit` rows are kept. Returns a new batch with no
-// selection; downstream nodes see fully materialized ordered rows.
-function applySort(batch, selection, keys, limit) {
-  const indices = [];
-  for (let i = 0; i < batch.rowCount; ++i) {
-    if (selection && !selection[i]) {
-      continue;
-    }
-    indices.push(i);
-  }
-
-  // Per-key comparison context. String keys are pre-encoded to UTF-8 once so
-  // ordering matches the native host compare (byte order, not JS UTF-16).
-  const encoder = new TextEncoder();
-  const keyCtx = keys.map(key => {
-    const column = batch.columns[key.index];
-    if (column.type === 'string') {
-      const bytes = column.values.map(v =>
-        (v === null || v === undefined) ? null : encoder.encode(String(v)));
-      return { key, isString: true, bytes };
-    }
-    return { key, isString: false, values: column.values };
-  });
-
-  indices.sort((a, b) => {
-    for (const ctx of keyCtx) {
-      const c = ctx.isString
-        ? compareKey(ctx.bytes[a], ctx.bytes[b], ctx.key, compareBytes)
-        : compareKey(ctx.values[a], ctx.values[b], ctx.key, compareScalar);
-      if (c !== 0) {
-        return c;
-      }
-    }
-    return 0;
-  });
-
-  const keep = (limit != null && limit < indices.length) ? limit : indices.length;
-  const kept = indices.slice(0, Math.max(keep, 0));
-  const columns = batch.columns.map(col => ({
-    name: col.name,
-    type: col.type,
-    values: kept.map(idx => col.values[idx]),
-  }));
-  return { rowCount: kept.length, columns };
-}
-
-function compareScalar(a, b) {
-  if (a < b) return -1;
-  if (a > b) return 1;
-  return 0;
-}
-
-// One sort key, mirroring native LessByKey: nulls are placed by EffectiveNulls
-// (default = Postgres: NULLS LAST for asc, NULLS FIRST for desc) independent of
-// the value direction, which only flips the present-value comparison.
-function compareKey(a, b, key, compare) {
-  const aNull = a === null || a === undefined;
-  const bNull = b === null || b === undefined;
-  if (aNull || bNull) {
-    if (aNull && bNull) {
-      return 0;
-    }
-    const nullsFirst = key.nulls === 'nulls-first' ? true
-      : key.nulls === 'nulls-last' ? false
-      : key.direction === 'desc';
-    return aNull === nullsFirst ? -1 : 1;
-  }
-  const c = compare(a, b);
-  return key.direction === 'desc' ? -c : c;
 }
 
 function materializeRowSets(rowSets, limit) {

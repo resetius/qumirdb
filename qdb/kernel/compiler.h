@@ -56,6 +56,8 @@ std::optional<std::string> CompileKernelAstToObject(
 struct TSortRadixKeyInput {
     int32_t ColumnIndex = 0;
     NQumir::NAst::TTypePtr Type;
+    bool Desc = false;
+    bool NullsFirst = false;
 };
 
 // Radix composite sort program (entry qdb_radix_sort_indices_composite): sorts
@@ -66,6 +68,13 @@ NQumir::NAst::TExprPtr BuildRadixSortProgramAst(
 
 // Nullable variant (entry qdb_radix_sort_indices_composite_nullable).
 NQumir::NAst::TExprPtr BuildRadixSortNullableProgramAst(
+    const std::vector<TSortRadixKeyInput>& keys);
+
+// Top-sort program (entry qdb_top_sort_update): sorts incoming batch row ids
+// with the same radix cascade as full sort, then merges the current top-K state
+// with that sorted batch. It writes pick_src/pick_idx pairs:
+// src=0 -> old state row, src=1 -> incoming batch row.
+NQumir::NAst::TExprPtr BuildTopSortMergeProgramAst(
     const std::vector<TSortRadixKeyInput>& keys);
 
 // agg_dispatch(ref HashTable ht, ref TRowSet batch, i64 arg, i64 op) -> i64
@@ -216,6 +225,17 @@ public:
         TRowSet* store, int64_t* rowIds, int64_t* work, uint32_t* counts,
         int64_t n, bool* descs, bool* nullsFirsts)>;
 
+    using TTopSortDispatch = std::function<int64_t(
+        TRowSet* state,
+        TRowSet* batch,
+        int64_t* rowIds,
+        int64_t* work,
+        uint32_t* counts,
+        int64_t n,
+        uint8_t* pickSrc,
+        uint32_t* pickIdx,
+        int64_t limit)>;
+
     // sizeof(HashTable) per modules/qumirdb.cpp's layout — callers of
     // CompileAggregate must allocate a zero-initialized buffer this large
     // for `ht`.
@@ -240,6 +260,8 @@ public:
     TSortRadixCompositeDispatch CompileRadixSortComposite(
         const std::vector<TSortRadixKeyInput>& keys);
     TSortRadixCompositeNullableDispatch CompileRadixSortCompositeNullable(
+        const std::vector<TSortRadixKeyInput>& keys);
+    TTopSortDispatch CompileTopSort(
         const std::vector<TSortRadixKeyInput>& keys);
 
     // Compiles the per-query generic update and finalize programs for `aggs`

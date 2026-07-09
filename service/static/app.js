@@ -667,8 +667,17 @@ async function runBrowser(sql, dataset) {
 }
 
 function resolveExecArtifacts(exec, artifacts) {
-  const resolveWasm = item =>
-    item.wasm ? { ...item, wasm: artifacts?.[item.wasm]?.data || '' } : item;
+  const resolveWasm = item => {
+    const artifactId = item.wasm;
+    if (!artifactId) {
+      return item;
+    }
+    const data = artifacts?.[artifactId]?.data;
+    if (!data) {
+      throw new Error(`exec artifact is missing: ${artifactId}`);
+    }
+    return { ...item, wasm: data };
+  };
   if (Array.isArray(exec.nodes)) {
     return {
       ...exec,
