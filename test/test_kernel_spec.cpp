@@ -236,8 +236,9 @@ TEST(KernelSpec, BuildsJoinSpecFromEquiKeys) {
     EXPECT_EQ(spec.JoinKeys[0].Left.Index, 0);
     EXPECT_EQ(spec.JoinKeys[0].Right.Name, "rk");
     EXPECT_EQ(spec.JoinKeys[0].Right.Index, 0);
-    ASSERT_EQ(spec.Entrypoints.size(), 1u);
+    ASSERT_EQ(spec.Entrypoints.size(), 2u);
     EXPECT_EQ(spec.Entrypoints[0].Name, "jt_dispatch");
+    EXPECT_EQ(spec.Entrypoints[1].Name, "jt_materialize");
     ASSERT_EQ(spec.SourceModules.size(), 1u);
     EXPECT_EQ(spec.SourceModules[0], "qumirdb");
 }

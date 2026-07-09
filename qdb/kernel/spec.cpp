@@ -285,6 +285,7 @@ TOperatorKernelSpec BuildJoinKernelSpec(
         .JoinType = type,
         .Entrypoints = {
             {.Name = "jt_dispatch", .Abi = "bool(ptr HashTable, ptr HashTable, ptr TRowSet, i64, ptr PairBuffer, ptr TRowSet, ptr TRowSet, i64, i64)"},
+            {.Name = "jt_materialize", .Abi = "i64(ptr PairBuffer, ptr TRowSet, ptr TRowSet, ptr TRowSet, ptr TRowSet, i64, i64, ptr TRowSet)"},
         },
         .SourceModules = {"qumirdb"},
     };

@@ -137,6 +137,24 @@ using TJoinDispatch = std::function<bool(
     int64_t arg,
     int64_t op)>;
 
+// jt_materialize(pairs, leftStore, rightStore, streamLeft, streamRight,
+//                start, limit, out) -> i64.
+// Materializes up to `limit` pairs starting at `start` into a complete output
+// TRowSet allocated inside the kernel (out->Private holds the owners list; the
+// caller assigns out->Destroy). streamLeft/streamRight back pairs whose packed
+// batch index is -1 (rows probed from a live stream batch); pass any valid
+// pointer when no such pairs exist. Returns the number of rows written, 0 when
+// the buffer is exhausted (out is left untouched).
+using TJoinMaterialize = std::function<int64_t(
+    void* pairs,
+    TRowSet* leftStore,
+    TRowSet* rightStore,
+    TRowSet* streamLeft,
+    TRowSet* streamRight,
+    int64_t start,
+    int64_t limit,
+    TRowSet* out)>;
+
 // The compiled kernels for one symmetric hash join. Each side's hash map is a
 // caller-owned, zero-initialized HashTable buffer (kHashTableSize); the output
 // pair buffer is a zero-initialized buffer of kPairBufferSize. The key columns
@@ -149,6 +167,11 @@ struct TJoinKernels {
     // compiled join type, so host code does not select jt_insert_key_only vs
     // jt_process_right or left/right outer finalization itself.
     TJoinDispatch Dispatch;
+
+    // Output materialization: the per-column gather (types, null masks, string
+    // payloads, outer-join null padding) is baked into the generated
+    // jt_materialize, so host code only cursors over the pair buffer.
+    TJoinMaterialize Materialize;
 };
 
 struct TJoinHashKernels {
