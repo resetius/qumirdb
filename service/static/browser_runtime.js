@@ -1013,6 +1013,11 @@ const JoinOp = Object.freeze({
   DESTROY: 6n,
 });
 
+const CrossJoinOp = Object.freeze({
+  EMIT: 0n,
+  DESTROY: 1n,
+});
+
 function createJoinState(kernel, layout, stage) {
   if (!browserRuntimeSupportsJoin(stage)) {
     throw new Error(`browser join type is not implemented: ${stage.joinType}` +
@@ -1057,10 +1062,6 @@ function createJoinState(kernel, layout, stage) {
     pairBuffer,
     leftStore: new WasmRowStore(arena, layout),
     rightStore: new WasmRowStore(arena, layout),
-    // Selections of stored left batches (parallel to leftStore.batches); the
-    // residual semi/anti finalize scan must skip unselected rows.
-    leftSelections: [],
-    matchedLeftIds: isResidualSemiAntiJoin(stage) ? new Set() : null,
     materializeCursor: 0,
     semiAntiFinalized: false,
     outerFinalized: false,
@@ -1090,9 +1091,6 @@ function updateJoinState(state, side, rowSet) {
     const store = isLeft ? state.leftStore : state.rightStore;
     batchIdx = store.push(batch, rowsetPtr);
     batchPtr = store.dataPtr() + batchIdx * layout.rowset.size;
-    if (isLeft) {
-      state.leftSelections[batchIdx] = selection || null;
-    }
   }
   const ok = isLeft
     ? state.dispatch(
@@ -1127,19 +1125,8 @@ function isLeftSemiAntiJoin(stage) {
     stage.joinType === 'left-anti';
 }
 
-function isLeftAntiJoin(stage) {
-  return stage.joinType === 'left_anti' || stage.joinType === 'left-anti';
-}
-
 function isOuterJoin(stage) {
   return stage.joinType === 'left' || stage.joinType === 'right';
-}
-
-// Semi/anti with a residual predicate: the kernel is compiled as INNER (it
-// emits raw pairs); the runtime collects matched left ids and finalizes with
-// a JS scan over the stored left rows, mirroring the native executor.
-function isResidualSemiAntiJoin(stage) {
-  return isLeftSemiAntiJoin(stage) && !!stage.hasResidual;
 }
 
 function finalizeSemiAntiJoinState(state) {
@@ -1154,7 +1141,7 @@ function finalizeSemiAntiJoinState(state) {
     BigInt(state.pairBuffer),
     BigInt(state.leftStore.dataPtr()),
     BigInt(state.rightStore.dataPtr()),
-    0n,
+    BigInt(state.leftStore.batches.length),
     JoinOp.FINALIZE);
   if (!ok) {
     throw new Error('join semi/anti finalize failed');
@@ -1183,76 +1170,6 @@ function finalizeOuterJoinState(state) {
     throw new Error('join outer finalize failed');
   }
   state.outerFinalized = true;
-}
-
-// Residual semi/anti: consume the inner kernel's raw pairs into the
-// matched-left-id set (dedup) instead of emitting output.
-function collectJoinPairIds(state) {
-  const pairLayout = state.layout.pairBuffer;
-  const dv = state.arena.view();
-  const count = Number(dv.getBigInt64(state.pairBuffer + pairLayout.count, true));
-  if (count <= 0) {
-    return;
-  }
-  const dataPtr = Number(dv.getBigInt64(state.pairBuffer + pairLayout.data, true));
-  for (let i = 0; i < count; ++i) {
-    state.matchedLeftIds.add(dv.getBigInt64(dataPtr + i * 16, true));
-  }
-  dv.setBigInt64(state.pairBuffer + pairLayout.count, 0n, true);
-  state.materializeCursor = 0;
-}
-
-// Residual semi/anti finalize: emit each selected stored left row once —
-// SEMI keeps matched, ANTI keeps unmatched (native FinalizeResidualSemiAntiJoin).
-function finalizeResidualSemiAntiJoinState(state) {
-  const anti = isLeftAntiJoin(state.stage);
-  for (let b = 0; b < state.leftStore.batches.length; ++b) {
-    const batch = state.leftStore.batches[b];
-    const selection = state.leftSelections[b];
-    for (let r = 0; r < batch.rowCount; ++r) {
-      if (selection && !selection[r]) {
-        continue;
-      }
-      const matched = state.matchedLeftIds.has(makeRowId(b, r));
-      if (matched !== anti) {
-        pushJoinPair(state, makeRowId(b, r), -1n);
-      }
-    }
-  }
-  state.semiAntiFinalized = true;
-}
-
-function ensureJoinPairCapacity(state, needed) {
-  const pairLayout = state.layout.pairBuffer;
-  const dv = state.arena.view();
-  const capacity = Number(
-    dv.getBigInt64(state.pairBuffer + pairLayout.capacity, true));
-  if (capacity >= needed) {
-    return;
-  }
-  const count = Number(dv.getBigInt64(state.pairBuffer + pairLayout.count, true));
-  const oldData = readPointer(dv, state.pairBuffer + pairLayout.data);
-  const newCapacity = Math.max(needed, capacity ? capacity * 2 : 1024);
-  const newData = state.arena.alloc(newCapacity * 16, 8);
-  if (oldData && count > 0) {
-    state.arena.bytes().copyWithin(newData, oldData, oldData + count * 16);
-  }
-  const outDv = state.arena.view();
-  outDv.setBigInt64(
-    state.pairBuffer + pairLayout.capacity, BigInt(newCapacity), true);
-  writePointer(outDv, state.pairBuffer + pairLayout.data, newData);
-}
-
-function pushJoinPair(state, leftId, rightId) {
-  const pairLayout = state.layout.pairBuffer;
-  let dv = state.arena.view();
-  const count = Number(dv.getBigInt64(state.pairBuffer + pairLayout.count, true));
-  ensureJoinPairCapacity(state, count + 1);
-  dv = state.arena.view();
-  const dataPtr = readPointer(dv, state.pairBuffer + pairLayout.data);
-  dv.setBigInt64(dataPtr + count * 16, leftId, true);
-  dv.setBigInt64(dataPtr + count * 16 + 8, rightId, true);
-  dv.setBigInt64(state.pairBuffer + pairLayout.count, BigInt(count + 1), true);
 }
 
 function drainJoinPairs(state, maxRows = 1024) {
@@ -1304,6 +1221,116 @@ function finishJoinState(state) {
     0n,
     0n,
     JoinOp.DESTROY);
+}
+
+function createCrossJoinState(kernel, layout, stage) {
+  const exports = kernel.instance.exports;
+  const dispatch = exports.xj_dispatch;
+  const materialize = exports.jt_materialize;
+  if (typeof dispatch !== 'function' || typeof materialize !== 'function') {
+    throw new Error('cross join kernel is missing an entry');
+  }
+
+  const arena = kernel.holder.arena;
+  const pairBuffer = arena.alloc(layout.pairBuffer.size, 8);
+  new Uint8Array(arena.memory.buffer, pairBuffer, layout.pairBuffer.size).fill(0);
+  return {
+    kernel,
+    layout,
+    stage,
+    dispatch,
+    materialize,
+    arena,
+    pairBuffer,
+    leftStore: new WasmRowStore(arena, layout),
+    rightStore: new WasmRowStore(arena, layout),
+    materializeCursor: 0,
+    rightRows: 0,
+    finalized: false,
+  };
+}
+
+function stableRowSetPtr(state, rowSet) {
+  const { arena, layout } = state;
+  const { batch, selection } = rowSet;
+  const wasm = wasmRowSetForSelection(batch, selection);
+  return wasm?.pinned
+    ? wasm.rowsetPtr
+    : marshalRowSet(
+        arena, layout, batch.columns, batch.rowCount, false, selection).rowsetPtr;
+}
+
+function updateCrossRightState(state, rowSet) {
+  const rowsetPtr = stableRowSetPtr(state, rowSet);
+  state.rightStore.push(rowSet.batch, rowsetPtr);
+  state.rightRows += rowSet.batch.rowCount;
+}
+
+function updateCrossLeftState(state, rowSet) {
+  if (state.rightRows === 0) {
+    return;
+  }
+  const rowsetPtr = stableRowSetPtr(state, rowSet);
+  const batchIdx = state.leftStore.push(rowSet.batch, rowsetPtr);
+  const batchPtr = state.leftStore.dataPtr() + batchIdx * state.layout.rowset.size;
+  const ok = state.dispatch(
+    BigInt(batchPtr),
+    BigInt(batchIdx),
+    BigInt(state.rightStore.dataPtr()),
+    BigInt(state.rightStore.batches.length),
+    BigInt(state.pairBuffer),
+    CrossJoinOp.EMIT);
+  if (!ok) {
+    throw new Error('cross join kernel update failed');
+  }
+}
+
+function drainCrossJoinPairs(state, maxRows = 1024) {
+  const layout = state.layout;
+  const pairLayout = layout.pairBuffer;
+  const dv = state.arena.view();
+  const count = Number(dv.getBigInt64(state.pairBuffer + pairLayout.count, true));
+  if (state.materializeCursor >= count) {
+    return [];
+  }
+  const rowsetPtr = state.arena.alloc(layout.rowset.size, 8);
+  new Uint8Array(state.arena.memory.buffer, rowsetPtr, layout.rowset.size).fill(0);
+  const produced = Number(state.materialize(
+    BigInt(state.pairBuffer),
+    BigInt(state.leftStore.dataPtr()),
+    BigInt(state.rightStore.dataPtr()),
+    BigInt(state.leftStore.dataPtr()),
+    BigInt(state.rightStore.dataPtr()),
+    BigInt(state.materializeCursor),
+    BigInt(maxRows),
+    BigInt(rowsetPtr)));
+  if (produced <= 0) {
+    throw new Error('cross join materialize failed');
+  }
+  state.materializeCursor += produced;
+  if (state.materializeCursor >= count) {
+    state.arena.view().setBigInt64(
+      state.pairBuffer + pairLayout.count, 0n, true);
+    state.materializeCursor = 0;
+  }
+  return [
+    materializeWasmRowSet(
+      state.arena, layout, state.stage.output || [], rowsetPtr),
+  ];
+}
+
+function finishCrossJoinState(state) {
+  if (state.finalized) {
+    return;
+  }
+  state.finalized = true;
+  state.dispatch(
+    0n,
+    0n,
+    0n,
+    0n,
+    BigInt(state.pairBuffer),
+    CrossJoinOp.DESTROY);
 }
 
 function outputShapeFromRowSets(rowSets) {
@@ -1908,12 +1935,7 @@ class JoinTask {
 
     const progressed = this.pullOneInputBatch();
     if (progressed) {
-      if (isResidualSemiAntiJoin(this.stage)) {
-        // Inner-typed kernel: pairs feed the matched-id set, not the output.
-        collectJoinPairIds(this.state);
-      } else {
-        this.ready.push(...drainJoinPairs(this.state));
-      }
+      this.ready.push(...drainJoinPairs(this.state));
       if (this.ready.length > 0) {
         return this.execute();
       }
@@ -1922,11 +1944,7 @@ class JoinTask {
 
     if (this.leftDone && this.rightDone) {
       if (isLeftSemiAntiJoin(this.stage) && !this.state.semiAntiFinalized) {
-        if (isResidualSemiAntiJoin(this.stage)) {
-          finalizeResidualSemiAntiJoinState(this.state);
-        } else {
-          finalizeSemiAntiJoinState(this.state);
-        }
+        finalizeSemiAntiJoinState(this.state);
         this.ready.push(...drainJoinPairs(this.state));
         if (this.ready.length > 0) {
           return this.execute();
@@ -2013,17 +2031,18 @@ class JoinTask {
 }
 
 // Cross product of two inputs (in practice: a scalar-subquery broadcast, the
-// right side is one row). Buffers both sides, then emits left-batch × right-row
-// chunks; any residual predicate runs as the downstream filter node.
+// right side is one row). The kernel emits row-id pairs; jt_materialize gathers
+// the left ++ right output columns.
 class CrossJoinTask {
-  constructor(stage) {
+  constructor(stage, layout, shared) {
     this.stage = stage;
-    this.leftBatches = [];
-    this.rightBatches = [];
+    this.layout = layout;
+    this.shared = shared;
+    this.kernel = null;
+    this.state = null;
+    this.ready = [];
     this.leftDone = false;
     this.rightDone = false;
-    this.emitLeft = 0;
-    this.emitRight = 0;
     this.done = false;
     this.rows = 0;
   }
@@ -2032,92 +2051,64 @@ class CrossJoinTask {
     if (this.done) return TaskResult.FINISHED;
     const output = this.node.outbound[0].connection;
 
-    if (!this.leftDone || !this.rightDone) {
-      const progressed = this.pullOneInputBatch();
-      if (progressed) return TaskResult.OK;
-      if (!this.leftDone || !this.rightDone) return TaskResult.NEED_DATA;
-    }
-
-    const rightRows = this.rightBatches.reduce((n, item) => n + item.batch.rowCount, 0);
-    while (this.emitLeft < this.leftBatches.length) {
-      if (rightRows === 0) break; // empty right side: empty cross product
+    if (this.ready.length > 0) {
       if (!output.canPush()) return TaskResult.BLOCKED_OUTPUT;
-      const glued = this.glue(
-        this.leftBatches[this.emitLeft], this.rightBatches[this.emitRight]);
-      if (glued) {
-        output.push({ batch: glued, selection: null });
-        this.rows += glued.rowCount;
-      }
-      this.emitRight += 1;
-      if (this.emitRight >= this.rightBatches.length) {
-        this.emitRight = 0;
-        this.emitLeft += 1;
-      }
-      if (glued) return TaskResult.OK;
+      const batch = this.ready.shift();
+      output.push({ batch, selection: null });
+      this.rows += batch.rowCount;
+      return TaskResult.OK;
     }
 
+    if (!this.state) {
+      if (!this.stage.wasm) {
+        throw new Error('cross join stage is missing wasm kernel');
+      }
+      if (!this.kernel) {
+        this.kernel = await instantiateKernel(this.stage.wasm, 'xj_dispatch', this.shared);
+      }
+      this.state = createCrossJoinState(this.kernel, this.layout, this.stage);
+    }
+
+    const drained = drainCrossJoinPairs(this.state);
+    if (drained.length > 0) {
+      this.ready.push(...drained);
+      return this.execute();
+    }
+
+    if (!this.rightDone) {
+      const fetched = this.node.inbound[1].connection.fetch();
+      if (fetched.result === FetchResult.NO_DATA) return TaskResult.NEED_DATA;
+      if (fetched.result === FetchResult.OK) {
+        updateCrossRightState(this.state, fetched.rowSet);
+        return TaskResult.OK;
+      }
+      if (fetched.result === FetchResult.FINISHED) {
+        this.rightDone = true;
+        return TaskResult.OK;
+      }
+    }
+
+    if (!this.leftDone) {
+      const fetched = this.node.inbound[0].connection.fetch();
+      if (fetched.result === FetchResult.NO_DATA) return TaskResult.NEED_DATA;
+      if (fetched.result === FetchResult.OK) {
+        updateCrossLeftState(this.state, fetched.rowSet);
+        this.ready.push(...drainCrossJoinPairs(this.state));
+        if (this.ready.length > 0) {
+          return this.execute();
+        }
+        return TaskResult.OK;
+      }
+      if (fetched.result === FetchResult.FINISHED) {
+        this.leftDone = true;
+      }
+    }
+
+    finishCrossJoinState(this.state);
     output.finish();
     this.done = true;
     return TaskResult.FINISHED;
   }
-
-  pullOneInputBatch() {
-    for (const [idx, list, doneKey] of [
-      [0, this.leftBatches, 'leftDone'],
-      [1, this.rightBatches, 'rightDone'],
-    ]) {
-      if (this[doneKey]) continue;
-      const fetched = this.node.inbound[idx].connection.fetch();
-      if (fetched.result === FetchResult.OK) {
-        list.push(fetched.rowSet);
-        return true;
-      }
-      if (fetched.result === FetchResult.FINISHED) {
-        this[doneKey] = true;
-        return true;
-      }
-    }
-    return false;
-  }
-
-  // One output batch = selected left rows × selected right rows of one
-  // left-batch/right-batch pair, columns glued left ++ right.
-  glue(leftItem, rightItem) {
-    const leftRows = selectedRowIndices(leftItem);
-    const rightRows = selectedRowIndices(rightItem);
-    const total = leftRows.length * rightRows.length;
-    if (total === 0) return null;
-    const columns = [];
-    for (let c = 0; c < leftItem.batch.columns.length; ++c) {
-      const src = leftItem.batch.columns[c];
-      const values = new Array(total);
-      let k = 0;
-      for (const lr of leftRows) {
-        const value = src.values[lr];
-        for (let j = 0; j < rightRows.length; ++j) values[k++] = value;
-      }
-      columns.push({ name: src.name, type: src.type, values });
-    }
-    for (let c = 0; c < rightItem.batch.columns.length; ++c) {
-      const src = rightItem.batch.columns[c];
-      const values = new Array(total);
-      let k = 0;
-      for (let i = 0; i < leftRows.length; ++i) {
-        for (const rr of rightRows) values[k++] = src.values[rr];
-      }
-      columns.push({ name: src.name, type: src.type, values });
-    }
-    return { rowCount: total, columns };
-  }
-}
-
-function selectedRowIndices(item) {
-  const rows = [];
-  for (let r = 0; r < item.batch.rowCount; ++r) {
-    if (item.selection && !item.selection[r]) continue;
-    rows.push(r);
-  }
-  return rows;
 }
 
 function gatherTopSortPicks(stateBatch, tempBatch, arena, pickSrcPtr, pickIdxPtr, count) {
@@ -2337,7 +2328,7 @@ function taskNodeForStage(stage, layout, readSourceBatches, onProgress, shared) 
     return makeNode(new JoinTask(stage, layout, shared), stage.kind);
   }
   if (stage.kind === 'cross-join') {
-    return makeNode(new CrossJoinTask(stage), stage.kind);
+    return makeNode(new CrossJoinTask(stage, layout, shared), stage.kind);
   }
   if (stage.kind === 'sort' || stage.kind === 'top-sort') {
     return makeNode(new SortTask(stage, layout, shared), stage.kind);

@@ -1,18 +1,11 @@
 #include <qdb/exec/join_exec.h>
 
 #include <qdb/exec/kernel_rowset.h>
-#include <qdb/modules/qumirdb_runtime.h>
-#include <qdb/plan/types/nullable.h>
 
-#include <qumir/error.h>
-
-#include <algorithm>
-#include <cstring>
-#include <new>
+#include <stdexcept>
+#include <utility>
 
 namespace NQdb {
-
-using namespace NQumir::NAst;
 
 namespace {
 
@@ -22,214 +15,17 @@ constexpr int64_t JoinOp(EJoinKernelOp op) {
     return static_cast<int64_t>(op);
 }
 
-// Owns the gathered buffers behind an output TRowSet (one batch, cross join).
-struct TJoinedRowSetData {
-    std::vector<TGatheredColumn> Gathered;
-    std::vector<TColumn> Columns;
-};
-
-void DestroyJoinedRowSet(TRowSet* rowSet) {
-    delete static_cast<TJoinedRowSetData*>(rowSet->Private);
-}
-
-// Validity of source row `row` in column `col` (true == non-null).
-bool SourceValid(const TColumn& col, int32_t row) {
-    if (!col.Mask) {
-        return true;
-    }
-    const int32_t bit = col.MaskBitOffset + row;
-    return ((col.Mask[bit / 8] >> (bit % 8)) & 1) != 0;
-}
-
-// Reads offset `i` of a variable-length column (OffsetWidth 4 or 8).
-int64_t OffsetAt(const TColumn& col, int32_t i) {
-    if (col.OffsetWidth == 8) {
-        return static_cast<const int64_t*>(col.Offsets)[i];
-    }
-    return static_cast<const int32_t*>(col.Offsets)[i];
-}
-
-void ClearBit(std::vector<uint8_t>& mask, size_t i) {
-    mask[i / 8] &= ~(uint8_t(1) << (i % 8));
-}
-
-std::vector<TJoinColumnRef> BuildJoinColumns(
-    const TTypePtr& leftType,
-    const TTypePtr& rightType,
-    bool includeRight)
-{
-    std::vector<TJoinColumnRef> columns;
-    auto* leftStruct = static_cast<TStructType*>(leftType.get());
-    auto* rightStruct = static_cast<TStructType*>(rightType.get());
-    if (leftStruct) {
-        for (int32_t i = 0; i < static_cast<int32_t>(leftStruct->Fields.size()); ++i) {
-            columns.push_back({EJoinSide::Left, i, leftStruct->Fields[i].second});
-        }
-    }
-    if (rightStruct && includeRight) {
-        for (int32_t j = 0; j < static_cast<int32_t>(rightStruct->Fields.size()); ++j) {
-            columns.push_back({EJoinSide::Right, j, rightStruct->Fields[j].second});
-        }
-    }
-    return columns;
-}
-
-bool DrainBuilder(TJoinOutputBuilder& builder, TRowSet& rowSet) {
-    if (builder.NextBatch(rowSet)) {
-        return true;
-    }
-    builder.ClearPairs();
-    return false;
+constexpr int64_t CrossJoinOp(ECrossJoinKernelOp op) {
+    return static_cast<int64_t>(op);
 }
 
 } // namespace
 
-size_t JoinColumnFixedWidth(const TTypePtr& type) {
-    auto inner = UnwrapNamedType(UnwrapNullableType(type));
-    if (auto integer = TMaybeType<TIntegerType>(inner)) {
-        return static_cast<size_t>(integer.Cast()->BitWidth() / 8);
-    }
-    if (TMaybeType<TFloatType>(inner)) {
-        return 8;
-    }
-    if (TMaybeType<TStringType>(inner)) {
-        return 0; // variable-length
-    }
-    throw NQumir::TError(
-        "join cannot materialize column of type " +
-        (type ? type->ToString() : std::string("<null>")));
-}
-
-void TakeColumn(const TRowStore& store, const std::vector<TRowId>& rowIds,
-    int32_t srcColIdx, const TTypePtr& type, TGatheredColumn& out)
-{
-    const size_t n = rowIds.size();
-    const size_t width = JoinColumnFixedWidth(type);
-
-    out.Data.clear();
-    out.Offsets.clear();
-    out.Mask.assign((n + 7) / 8, 0xff); // start all-valid; clear bits for nulls
-    bool anyNull = false;
-
-    auto markNull = [&](size_t j) {
-        ClearBit(out.Mask, j);
-        anyNull = true;
-    };
-
-    if (width == 0) {
-        // String: pass 1 computes lengths/offsets, pass 2 copies payload bytes.
-        out.Offsets.resize(n + 1);
-        out.Offsets[0] = 0;
-        for (size_t j = 0; j < n; ++j) {
-            const TRowId id = rowIds[j];
-            int64_t len = 0;
-            if (id == kNullRowId) {
-                markNull(j);
-            } else {
-                const TColumn& col = store.Column(id, srcColIdx);
-                const int32_t row = RowIndex(id);
-                if (!SourceValid(col, row)) {
-                    markNull(j);
-                } else {
-                    len = OffsetAt(col, row + 1) - OffsetAt(col, row);
-                }
-            }
-            out.Offsets[j + 1] = out.Offsets[j] + len;
-        }
-        out.Data.resize(static_cast<size_t>(out.Offsets[n]));
-        for (size_t j = 0; j < n; ++j) {
-            const TRowId id = rowIds[j];
-            if (id == kNullRowId) {
-                continue;
-            }
-            const TColumn& col = store.Column(id, srcColIdx);
-            const int32_t row = RowIndex(id);
-            if (!SourceValid(col, row)) {
-                continue;
-            }
-            const int64_t start = OffsetAt(col, row);
-            const int64_t len = OffsetAt(col, row + 1) - start;
-            if (len > 0) {
-                std::memcpy(out.Data.data() + out.Offsets[j], col.Data + start, len);
-            }
-        }
-        out.Column = TColumn{
-            .Data = out.Data.data(),
-            .Mask = anyNull ? out.Mask.data() : nullptr,
-            .Offsets = out.Offsets.data(),
-            .OffsetWidth = 8,
-        };
-    } else {
-        // Fixed-width: copy `width` bytes per row; null/absent rows stay zeroed.
-        out.Data.assign(n * width, 0);
-        for (size_t j = 0; j < n; ++j) {
-            const TRowId id = rowIds[j];
-            if (id == kNullRowId) {
-                markNull(j);
-                continue;
-            }
-            const TColumn& col = store.Column(id, srcColIdx);
-            const int32_t row = RowIndex(id);
-            if (!SourceValid(col, row)) {
-                markNull(j);
-                continue;
-            }
-            std::memcpy(out.Data.data() + j * width, col.Data + row * width, width);
-        }
-        out.Column = TColumn{
-            .Data = out.Data.data(),
-            .Mask = anyNull ? out.Mask.data() : nullptr,
-        };
-    }
-
-    if (!anyNull) {
-        out.Mask.clear();
-    }
-}
-
-bool TJoinOutputBuilder::NextBatch(TRowSet& out) {
-    if (Cursor_ >= LeftIds_.size()) {
-        return false;
-    }
-    const size_t n = std::min<size_t>(
-        static_cast<size_t>(BatchRows_), LeftIds_.size() - Cursor_);
-
-    const std::vector<TRowId> leftSlice(
-        LeftIds_.begin() + Cursor_, LeftIds_.begin() + Cursor_ + n);
-    const std::vector<TRowId> rightSlice(
-        RightIds_.begin() + Cursor_, RightIds_.begin() + Cursor_ + n);
-
-    auto* data = new TJoinedRowSetData;
-    data->Gathered.resize(Columns_.size());
-    data->Columns.resize(Columns_.size());
-    for (size_t c = 0; c < Columns_.size(); ++c) {
-        const auto& ref = Columns_[c];
-        const TRowStore& store = (ref.Side == EJoinSide::Left) ? *Left_ : *Right_;
-        const auto& ids = (ref.Side == EJoinSide::Left) ? leftSlice : rightSlice;
-        TakeColumn(store, ids, ref.SrcColIdx, ref.Type, data->Gathered[c]);
-        data->Columns[c] = data->Gathered[c].Column;
-    }
-
-    out = TRowSet{
-        .Columns = data->Columns.data(),
-        .ColumnCount = static_cast<int64_t>(Columns_.size()),
-        .RowCount = static_cast<int64_t>(n),
-        .Selection = nullptr,
-        .Destroy = DestroyJoinedRowSet,
-        .Private = data,
-        .RefCount = 1,
-    };
-    Cursor_ += n;
-    return true;
-}
-
 TInnerJoinProcessor::TInnerJoinProcessor(
     TJoinKernels kernels,
-    EJoinType joinType,
-    bool hasResidual)
+    EJoinType joinType)
     : Kernels_(std::move(kernels))
     , JoinType_(joinType)
-    , HasResidual_(hasResidual)
 {
 }
 
@@ -239,13 +35,6 @@ bool TInnerJoinProcessor::IsOuter() const {
 
 bool TInnerJoinProcessor::IsSemiAnti() const {
     return JoinType_ == EJoinType::LeftSemi || JoinType_ == EJoinType::LeftAnti;
-}
-
-void TInnerJoinProcessor::CollectMatchedLeftIds() {
-    for (int64_t i = 0; i < PairBuffer_.Count; ++i) {
-        MatchedLeftIds_.insert(PairBuffer_.Data[2 * i]);
-    }
-    PairBuffer_.Count = 0;
 }
 
 TInnerJoinProcessor::~TInnerJoinProcessor() {
@@ -585,11 +374,7 @@ bool TInnerJoinProcessor::PullSemiAntiBatch(
                 JoinOp(EJoinKernelOp::UpdateLeft))) {
             throw std::runtime_error("join kernel update failed");
         }
-        if (HasResidual_) {
-            CollectMatchedLeftIds();
-        } else {
-            PairBuffer_.Count = 0;
-        }
+        PairBuffer_.Count = 0;
         return true;
     }
     if (!RightDone_) {
@@ -616,11 +401,7 @@ bool TInnerJoinProcessor::PullSemiAntiBatch(
             Release(&batch);
             throw std::runtime_error("join kernel update failed");
         }
-        if (HasResidual_) {
-            CollectMatchedLeftIds();
-        } else {
-            PairBuffer_.Count = 0;
-        }
+        PairBuffer_.Count = 0;
         Release(&batch);
         return true;
     }
@@ -637,44 +418,9 @@ void TInnerJoinProcessor::FinalizeSemiAntiJoin() {
             &PairBuffer_,
             const_cast<TRowSet*>(LeftRows_.Data()),
             const_cast<TRowSet*>(RightRows_.Data()),
-            0,
+            LeftRows_.BatchCount(),
             JoinOp(EJoinKernelOp::Finalize))) {
         throw std::runtime_error("join semi/anti finalize failed");
-    }
-    SemiAntiFinalized_ = true;
-}
-
-void TInnerJoinProcessor::FinalizeResidualSemiAntiJoin() {
-    // Host-side pb_push mirror (same allocator, same growth); this whole scan
-    // moves into the kernel together with the matched-id tracking.
-    auto push = [&](TRowId leftId, TRowId rightId) {
-        if (PairBuffer_.Count == PairBuffer_.Capacity) {
-            const int64_t newCap =
-                PairBuffer_.Capacity ? PairBuffer_.Capacity * 2 : 1024;
-            auto* grown = static_cast<int64_t*>(
-                qdb_realloc(PairBuffer_.Data, newCap * 16));
-            if (!grown) {
-                throw std::bad_alloc();
-            }
-            PairBuffer_.Data = grown;
-            PairBuffer_.Capacity = newCap;
-        }
-        PairBuffer_.Data[2 * PairBuffer_.Count] = leftId;
-        PairBuffer_.Data[2 * PairBuffer_.Count + 1] = rightId;
-        ++PairBuffer_.Count;
-    };
-
-    // Emit each left row once: SEMI keeps matched, ANTI keeps unmatched.
-    for (int32_t b = 0; b < LeftRows_.BatchCount(); ++b) {
-        const int32_t cnt = LeftRows_.Batch(b).RowCount;
-        for (int32_t r = 0; r < cnt; ++r) {
-            const TRowId id = MakeRowId(b, r);
-            const bool matched = MatchedLeftIds_.count(id) > 0;
-            if ((JoinType_ == EJoinType::LeftSemi && matched) ||
-                (JoinType_ == EJoinType::LeftAnti && !matched)) {
-                push(id, kNullRowId);
-            }
-        }
     }
     SemiAntiFinalized_ = true;
 }
@@ -695,11 +441,7 @@ EJoinProcessorResult TInnerJoinProcessor::ProcessSemiAnti(
             return EJoinProcessorResult::NEED_DATA;
         }
     }
-    if (HasResidual_) {
-        FinalizeResidualSemiAntiJoin();
-    } else {
-        FinalizeSemiAntiJoin();
-    }
+    FinalizeSemiAntiJoin();
     if (DrainMaterialized(output)) {
         return EJoinProcessorResult::OK;
     }
@@ -743,20 +485,44 @@ EJoinProcessorResult TInnerJoinProcessor::Process(
     return BothDone_ ? finishedResult() : EJoinProcessorResult::NEED_DATA;
 }
 
-namespace {
-
-bool CrossRowSelected(const TRowSet& batch, int32_t row) {
-    return !batch.Selection || batch.Selection[row] != 0;
+TCrossJoinProcessor::TCrossJoinProcessor(TCrossJoinKernels kernels)
+    : Kernels_(std::move(kernels))
+{
 }
 
-} // namespace
+TCrossJoinProcessor::~TCrossJoinProcessor() {
+    if (Kernels_.Dispatch) {
+        Kernels_.Dispatch(
+            nullptr,
+            0,
+            nullptr,
+            0,
+            &PairBuffer_,
+            CrossJoinOp(ECrossJoinKernelOp::Destroy));
+    }
+}
 
-TCrossJoinProcessor::TCrossJoinProcessor(
-    TTypePtr leftType,
-    TTypePtr rightType)
-{
-    Builder_.emplace(&LeftRows_, &RightRows_,
-        BuildJoinColumns(std::move(leftType), std::move(rightType), true));
+bool TCrossJoinProcessor::DrainMaterialized(TRowSet& rowSet) {
+    if (MaterializeCursor_ >= PairBuffer_.Count) {
+        return false;
+    }
+    auto* leftStore = const_cast<TRowSet*>(LeftRows_.Data());
+    auto* rightStore = const_cast<TRowSet*>(RightRows_.Data());
+    TRowSet out{};
+    const int64_t produced = Kernels_.Materialize(
+        &PairBuffer_, leftStore, rightStore, leftStore, rightStore,
+        MaterializeCursor_, kJoinOutputBatchRows, &out);
+    if (produced <= 0) {
+        throw std::runtime_error("cross join materialize failed");
+    }
+    out.Destroy = DestroyKernelOwnedRowSet;
+    MaterializeCursor_ += produced;
+    if (MaterializeCursor_ >= PairBuffer_.Count) {
+        PairBuffer_.Count = 0;
+        MaterializeCursor_ = 0;
+    }
+    rowSet = out;
+    return true;
 }
 
 EJoinProcessorResult TCrossJoinProcessor::Process(
@@ -764,6 +530,10 @@ EJoinProcessorResult TCrossJoinProcessor::Process(
     const TFetch& right,
     TRowSet& output)
 {
+    if (DrainMaterialized(output)) {
+        return EJoinProcessorResult::OK;
+    }
+
     // Phase 1: fully buffer the (broadcast) right side.
     if (!RightDrained_) {
         for (;;) {
@@ -784,7 +554,7 @@ EJoinProcessorResult TCrossJoinProcessor::Process(
     // Phase 2: stream left, pairing each selected left row with every selected
     // right row.
     for (;;) {
-        if (DrainBuilder(*Builder_, output)) {
+        if (DrainMaterialized(output)) {
             return EJoinProcessorResult::OK;
         }
         if (LeftDone_) {
@@ -804,21 +574,17 @@ EJoinProcessorResult TCrossJoinProcessor::Process(
             continue;
         }
         const int32_t li = LeftRows_.PushBatch(batch);
-        const int32_t leftCount = LeftRows_.Batch(li).RowCount;
-        for (int32_t l = 0; l < leftCount; ++l) {
-            if (!CrossRowSelected(LeftRows_.Batch(li), l)) {
-                continue;
-            }
-            const TRowId leftId = MakeRowId(li, l);
-            for (int32_t rb = 0; rb < RightRows_.BatchCount(); ++rb) {
-                const TRowSet& rightBatch = RightRows_.Batch(rb);
-                for (int32_t r = 0; r < rightBatch.RowCount; ++r) {
-                    if (!CrossRowSelected(rightBatch, r)) {
-                        continue;
-                    }
-                    Builder_->AddPair(leftId, MakeRowId(rb, r));
-                }
-            }
+        if (!Kernels_.Dispatch(
+                const_cast<TRowSet*>(&LeftRows_.Batch(li)),
+                li,
+                const_cast<TRowSet*>(RightRows_.Data()),
+                RightRows_.BatchCount(),
+                &PairBuffer_,
+                CrossJoinOp(ECrossJoinKernelOp::Emit))) {
+            throw std::runtime_error("cross join kernel update failed");
+        }
+        if (DrainMaterialized(output)) {
+            return EJoinProcessorResult::OK;
         }
     }
 }

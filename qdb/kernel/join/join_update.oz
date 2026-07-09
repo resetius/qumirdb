@@ -110,6 +110,47 @@
         (block (return #f)))
       (return #t)))
 
+  ;; Insert a stored row under `key` without probing the opposite table.
+  ;; Used by residual SEMI / ANTI: the right table is an i64 matched-id set, not
+  ;; a join-key table, so left build must not call jt_probe_and_emit first.
+  (fun jt_insert_row_only ((var own <ref HashTable>)
+                           (var key <named Key (template)>)
+                           (var own_row_id i64)) -> bool
+    (block
+      (var own_keys =
+        (cast (field own Keys) <ptr <named Key (template)>>))
+      (var own_slot = (call rh_lookup_slot own_keys (field own Dist)
+                        (field own SlotId) (field own Capacity) key))
+      (if (== own_slot (: -1 i64))
+        (block
+          (var capacity = (field own Capacity))
+          (var size = (field own Size))
+          (if (> (+ size (: 1 i64)) (- capacity (/ capacity (: 4 i64))))
+            (block
+              (if (! (call aht_rehash own (* capacity (: 2 i64)) key))
+                (block (return #f)))
+              (= capacity (field own Capacity))))
+          (= own_keys
+            (cast (field own Keys) <ptr <named Key (template)>>))
+          (= own_slot size)
+          (if (! (call rh_insert_displace own_keys (field own Dist)
+                    (field own SlotId) capacity key own_slot))
+            (block (return #f)))
+          (var group_keys =
+            (cast (field own GroupKeys) <ptr <named Key (template)>>))
+          (= group_keys [own_slot] key)
+          (var own_aggs = (field own AggBuffers))
+          (var own_counts = (index own_aggs (: 0 i64)))
+          (var own_caps = (index own_aggs (: 1 i64)))
+          (var own_datas = (index own_aggs (: 2 i64)))
+          (= own_counts [own_slot] (: 0 i64))
+          (= own_caps [own_slot] (: 0 i64))
+          (= own_datas [own_slot] (: 0 i64))
+          (field_assign own Size (+ size (: 1 i64)))))
+      (if (! (call jb_append own own_slot own_row_id))
+        (block (return #f)))
+      (return #t)))
+
   ;; Insert only the key into own table without storing a row ID.
   ;; Used for the non-retained side (right side) of SEMI / ANTI joins —
   ;; the right table is queried for key existence only, not row materialization.

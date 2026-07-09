@@ -87,6 +87,12 @@ BuildJoinKernelLibrary() {
     if (auto e = add(ReadJoinKernel("join_update.oz"))) {
         return std::unexpected(*e);
     }
+    if (auto e = add(ReadJoinKernel("join_semi_anti.oz"))) {
+        return std::unexpected(*e);
+    }
+    if (auto e = add(ReadJoinKernel("join_cross.oz"))) {
+        return std::unexpected(*e);
+    }
     return library;
 }
 

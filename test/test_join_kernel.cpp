@@ -757,6 +757,69 @@ TEST(JoinMaterialize, SemiAntiOutputsLeftColumnsOnly) {
     FreeMaterializedRowSet(out);
 }
 
+TEST(CompileCrossJoin, EmitsSelectedPairsAndMaterializesStringPayload) {
+    using namespace NQumir::NAst;
+    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
+    TStructType leftType({{"lk", i64}, {"lname", std::make_shared<TStringType>()}});
+    TStructType rightType({{"rv", i64}});
+
+    TKernelCompiler compiler;
+    auto spec = NKernel::BuildCrossJoinKernelSpec(leftType, rightType);
+    auto kernels = compiler.CompileCrossJoin(spec);
+
+    std::vector<int64_t> lk = {1, 2, 3};
+    std::string lnameBytes = "abbccc";
+    std::vector<int64_t> lnameOffsets = {0, 1, 3, 6};
+    std::vector<uint8_t> lsel = {1, 0, 1};
+    std::vector<TColumn> lcols = {
+        TColumn{.Data = reinterpret_cast<char*>(lk.data())},
+        TColumn{.Data = lnameBytes.data(),
+            .Offsets = lnameOffsets.data(), .OffsetWidth = 8},
+    };
+    TRowSet lbatch{.Columns = lcols.data(), .ColumnCount = 2,
+        .RowCount = 3, .Selection = lsel.data(), .RefCount = 1};
+
+    std::vector<int64_t> rv = {10, 20};
+    std::vector<uint8_t> rsel = {0, 1};
+    std::vector<TColumn> rcols = {
+        TColumn{.Data = reinterpret_cast<char*>(rv.data())},
+    };
+    TRowSet rbatch{.Columns = rcols.data(), .ColumnCount = 1,
+        .RowCount = 2, .Selection = rsel.data(), .RefCount = 1};
+
+    TPairBuffer pairs{};
+    ASSERT_TRUE(kernels.Dispatch(
+        &lbatch, 0, &rbatch, 1, &pairs,
+        static_cast<int64_t>(ECrossJoinKernelOp::Emit)));
+    ASSERT_EQ(pairs.Count, 2);
+    EXPECT_EQ(pairs.Data[0], PackRowId(0, 0));
+    EXPECT_EQ(pairs.Data[1], PackRowId(0, 1));
+    EXPECT_EQ(pairs.Data[2], PackRowId(0, 2));
+    EXPECT_EQ(pairs.Data[3], PackRowId(0, 1));
+
+    TRowSet out{};
+    ASSERT_EQ(kernels.Materialize(
+        &pairs, &lbatch, &rbatch, &lbatch, &rbatch, 0, 100, &out), 2);
+    ASSERT_EQ(out.RowCount, 2);
+    ASSERT_EQ(out.ColumnCount, 3);
+
+    const auto* outLk = reinterpret_cast<const int64_t*>(out.Columns[0].Data);
+    EXPECT_EQ(outLk[0], 1);
+    EXPECT_EQ(outLk[1], 3);
+    const auto& outName = out.Columns[1];
+    const auto* offsets = static_cast<const int64_t*>(outName.Offsets);
+    EXPECT_EQ(std::string(outName.Data + offsets[0], outName.Data + offsets[1]), "a");
+    EXPECT_EQ(std::string(outName.Data + offsets[1], outName.Data + offsets[2]), "ccc");
+    const auto* outRv = reinterpret_cast<const int64_t*>(out.Columns[2].Data);
+    EXPECT_EQ(outRv[0], 20);
+    EXPECT_EQ(outRv[1], 20);
+
+    FreeMaterializedRowSet(out);
+    kernels.Dispatch(
+        nullptr, 0, nullptr, 0, &pairs,
+        static_cast<int64_t>(ECrossJoinKernelOp::Destroy));
+}
+
 int main(int argc, char** argv) {
     testing::InitGoogleTest(&argc, argv);
     NQumir::NCodeGen::TLLVMInitializer initializer;

@@ -103,6 +103,10 @@ TOperatorKernelSpec BuildJoinKernelSpec(
     EJoinType type,
     const NQumir::NAst::TExprPtr& residualPredicate = nullptr);
 
+TOperatorKernelSpec BuildCrossJoinKernelSpec(
+    const NQumir::NAst::TStructType& leftType,
+    const NQumir::NAst::TStructType& rightType);
+
 void PrintKernelSpec(std::ostream& out, const TOperatorKernelSpec& spec);
 
 } // namespace NKernel

@@ -10,8 +10,6 @@
 #include <deque>
 #include <functional>
 #include <memory>
-#include <optional>
-#include <unordered_set>
 #include <vector>
 
 namespace NQdb {
@@ -84,26 +82,6 @@ private:
     std::vector<TRowSet> Batches_;
 };
 
-// One materialized output column with owned backing buffers. `Column` points
-// into Data / Offsets / Mask, so a TGatheredColumn must outlive any TRowSet
-// referencing its Column.
-struct TGatheredColumn {
-    std::vector<char> Data;        // fixed bytes, or string payload bytes
-    std::vector<int64_t> Offsets;  // string offsets (OffsetWidth 8); empty for fixed
-    std::vector<uint8_t> Mask;     // null bitmap; empty == all valid
-    TColumn Column{};
-};
-
-// Byte width of a fixed-width physical type; 0 means variable-length (string).
-// Throws NQumir::TError for types the join cannot yet materialize (e.g. bool).
-size_t JoinColumnFixedWidth(const NQumir::NAst::TTypePtr& type);
-
-// Gathers `srcColIdx` of `store` at the given RowIds into `out` (owned buffers).
-// kNullRowId rows and source nulls become null in the output. `type` selects
-// fixed-width vs string materialization.
-void TakeColumn(const TRowStore& store, const std::vector<TRowId>& rowIds,
-    int32_t srcColIdx, const NQumir::NAst::TTypePtr& type, TGatheredColumn& out);
-
 // Default target rows per output batch (drain granularity).
 inline constexpr int64_t kJoinOutputBatchRows = 1024;
 
@@ -113,58 +91,6 @@ enum class EJoinStreamMode {
     Symmetric,
     StreamLeftAgainstRight,
     StreamRightAgainstLeft,
-};
-
-// One output column: which side it comes from, the source column index in that
-// side's batches, and its physical type. Order follows ComputeJoinOutputType
-// (all left columns, then all right columns).
-struct TJoinColumnRef {
-    EJoinSide Side;
-    int32_t SrcColIdx;
-    NQumir::NAst::TTypePtr Type;
-};
-
-// Accumulates matched (left, right) RowId pairs and drains them into owned
-// output TRowSets of at most BatchRows rows each (gather via TakeColumn).
-// Holds (non-owning) pointers to the two stores. The matcher (kernel or stub)
-// appends pairs via AddPair; the executor drains via NextBatch.
-class TJoinOutputBuilder {
-public:
-    TJoinOutputBuilder(const TRowStore* left, const TRowStore* right,
-        std::vector<TJoinColumnRef> columns,
-        int64_t batchRows = kJoinOutputBatchRows)
-        : Left_(left)
-        , Right_(right)
-        , Columns_(std::move(columns))
-        , BatchRows_(batchRows)
-    {}
-
-    void AddPair(TRowId leftId, TRowId rightId) {
-        LeftIds_.push_back(leftId);
-        RightIds_.push_back(rightId);
-    }
-
-    bool HasPending() const { return Cursor_ < LeftIds_.size(); }
-    size_t PendingCount() const { return LeftIds_.size() - Cursor_; }
-
-    void ClearPairs() {
-        LeftIds_.clear();
-        RightIds_.clear();
-        Cursor_ = 0;
-    }
-
-    // Materializes up to BatchRows pending pairs into `out` (owned TRowSet with
-    // custom Destroy). Returns false if nothing is pending.
-    bool NextBatch(TRowSet& out);
-
-private:
-    const TRowStore* Left_;
-    const TRowStore* Right_;
-    std::vector<TJoinColumnRef> Columns_;
-    int64_t BatchRows_;
-    std::vector<TRowId> LeftIds_;
-    std::vector<TRowId> RightIds_;
-    size_t Cursor_ = 0;
 };
 
 enum class EJoinFetchResult {
@@ -185,8 +111,7 @@ public:
 
     TInnerJoinProcessor(
         TJoinKernels kernels,
-        EJoinType joinType = EJoinType::Inner,
-        bool hasResidual = false);
+        EJoinType joinType = EJoinType::Inner);
     TInnerJoinProcessor(const TInnerJoinProcessor&) = delete;
     TInnerJoinProcessor& operator=(const TInnerJoinProcessor&) = delete;
     ~TInnerJoinProcessor();
@@ -211,12 +136,10 @@ private:
     bool DrainReadyOutput(TRowSet& rowSet);
     bool DrainMaterialized(TRowSet& rowSet);
     void DrainStreamingPairs(const TRowSet& streamBatch, EJoinSide streamSide);
-    void CollectMatchedLeftIds();
     bool PullOneInputBatch(const TFetch& left, const TFetch& right);
     bool PullSemiAntiBatch(const TFetch& left, const TFetch& right);
     void FinalizeOuterJoin();
     void FinalizeSemiAntiJoin();
-    void FinalizeResidualSemiAntiJoin();
     EJoinProcessorResult ProcessSemiAnti(
         const TFetch& left, const TFetch& right, TRowSet& output);
     EJoinSide ChooseSymmetricPullSide() const;
@@ -224,10 +147,8 @@ private:
 private:
     TJoinKernels Kernels_;
     EJoinType JoinType_ = EJoinType::Inner;
-    bool HasResidual_ = false;
     bool OuterFinalized_ = false;
     bool SemiAntiFinalized_ = false;
-    std::unordered_set<TRowId> MatchedLeftIds_;
     TRowStore LeftRows_;
     TRowStore RightRows_;
     std::array<uint8_t, TKernelCompiler::kHashTableSize> LeftTable_{};
@@ -249,19 +170,18 @@ private:
     int64_t LastRightBatchRows_ = 0;
 };
 
-// Fetch-driven Cartesian product join for the scheduler cross-scalar path:
-// buffers the (small, broadcast) right side, then streams left batches, pairing
-// each left row with every right row. Residual filtering is applied downstream
-// (cross -> filter).
+// Fetch-driven Cartesian product join for the scheduler cross-scalar path.
+// Buffers the broadcast right side, emits row-id pairs in xj_dispatch, then
+// materializes through the shared jt_materialize kernel. Residual filtering is
+// applied downstream (cross -> filter).
 class TCrossJoinProcessor {
 public:
     using TFetch = std::function<EJoinFetchResult(TRowSet&)>;
 
-    TCrossJoinProcessor(
-        NQumir::NAst::TTypePtr leftType,
-        NQumir::NAst::TTypePtr rightType);
+    explicit TCrossJoinProcessor(TCrossJoinKernels kernels);
     TCrossJoinProcessor(const TCrossJoinProcessor&) = delete;
     TCrossJoinProcessor& operator=(const TCrossJoinProcessor&) = delete;
+    ~TCrossJoinProcessor();
 
     EJoinProcessorResult Process(
         const TFetch& left,
@@ -269,9 +189,21 @@ public:
         TRowSet& output);
 
 private:
+    struct TPairBufferState {
+        int64_t Count = 0;
+        int64_t Capacity = 0;
+        int64_t* Data = nullptr;
+    };
+    static_assert(sizeof(TPairBufferState) == TKernelCompiler::kPairBufferSize);
+
+    bool DrainMaterialized(TRowSet& rowSet);
+
+private:
+    TCrossJoinKernels Kernels_;
     TRowStore LeftRows_;
     TRowStore RightRows_;
-    std::optional<TJoinOutputBuilder> Builder_;
+    TPairBufferState PairBuffer_;
+    int64_t MaterializeCursor_ = 0;
     bool RightDrained_ = false;
     bool LeftDone_ = false;
     int64_t RightTotalRows_ = 0;

@@ -162,15 +162,40 @@ using TJoinMaterialize = std::function<int64_t(
 struct TJoinKernels {
     // jt_dispatch(left, right, batch, batchIdx, pairs, leftStore, rightStore,
     //             arg, op) -> bool.
-    // Init uses arg as initial capacity and initializes both hash tables with
-    // the generated key size. UpdateRight/Finalize are specialized by the
-    // compiled join type, so host code does not select jt_insert_key_only vs
-    // jt_process_right or left/right outer finalization itself.
+    // Init uses arg as initial capacity. Residual SEMI/ANTI Finalize uses arg
+    // as left-store batch count so the kernel can scan selected left rows.
+    // UpdateRight/Finalize are specialized by the compiled join type, so host
+    // code does not select jt_insert_key_only vs jt_process_right or
+    // left/right outer finalization itself.
     TJoinDispatch Dispatch;
 
     // Output materialization: the per-column gather (types, null masks, string
     // payloads, outer-join null padding) is baked into the generated
     // jt_materialize, so host code only cursors over the pair buffer.
+    TJoinMaterialize Materialize;
+};
+
+enum class ECrossJoinKernelOp : int64_t {
+    Emit = 0,
+    Destroy = 1,
+};
+
+using TCrossJoinDispatch = std::function<bool(
+    TRowSet* batch,
+    int64_t batchIdx,
+    TRowSet* rightStore,
+    int64_t rightBatchCount,
+    void* pairs,
+    int64_t op)>;
+
+struct TCrossJoinKernels {
+    // xj_dispatch(batch, batchIdx, rightStore, rightBatchCount, pairs, op) -> bool.
+    // Emit appends canonical row-id pairs for one left batch against the buffered
+    // right store. Destroy frees PairBuffer storage.
+    TCrossJoinDispatch Dispatch;
+
+    // Same generated materializer as equi-join: cross emits row-id pairs and
+    // host code only cursors over PairBuffer.
     TJoinMaterialize Materialize;
 };
 
@@ -273,6 +298,10 @@ public:
     TJoinKernels CompileJoin(
         const NKernel::TOperatorKernelSpec& spec);
 
+    // Compiles the keyless cross join kernels described by `spec`.
+    TCrossJoinKernels CompileCrossJoin(
+        const NKernel::TOperatorKernelSpec& spec);
+
     // Compiles rowset-wide hash helpers for the join keys described by `spec`.
     // Each dispatch fills one uint64 hash per physical input row. Selection is
     // not applied by the helper; callers skip unselected rows during scatter.
@@ -287,8 +316,8 @@ private:
     // into the injected `jt_residual_filter` (evaluated per matched pair before
     // emit), reading columns from the inner schema `innerType` (left fields ++
     // right fields, split at `leftFieldCount`). For LeftSemi/LeftAnti with a
-    // residual predicate the process functions are generated as INNER (they emit
-    // pairs); the executor dedups matched left IDs.
+    // residual predicate, generated kernels mark matched left row IDs and
+    // finalize semi/anti output without host-side scans.
     TJoinKernels CompileJoin(
         const NQumir::NAst::TStructType& leftType,
         const NQumir::NAst::TStructType& rightType,
