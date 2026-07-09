@@ -7,6 +7,7 @@
 #include <qdb/kernel/lib.h>
 #include <qdb/modules/qumirdb.h>
 #include <qdb/modules/qumirdb_runtime.h>
+#include <qdb/plan/types/nullable.h>
 
 #include "qumirdb_source_module.h"
 
@@ -528,6 +529,232 @@ TEST(JoinKernelGeneric, Int32KeyTriggersRehash) {
     pbDestroy(&pairs);
     jtDestroy(&left);
     jtDestroy(&right);
+}
+
+namespace {
+
+// Packs (batch_idx << 32) | row the way the join kernels emit row ids.
+constexpr int64_t PackRowId(int64_t batchIdx, int64_t row) {
+    return (batchIdx << 32) | (row & 0xffffffff);
+}
+
+// Frees the buffers a jt_materialize call allocated (mirrors the host's
+// kernel-owned-rowset Destroy callback).
+void FreeMaterializedRowSet(TRowSet& rowSet) {
+    auto* owners = static_cast<int64_t*>(rowSet.Private);
+    ASSERT_NE(owners, nullptr);
+    for (int64_t i = 0; i < owners[0]; ++i) {
+        qdb_free(reinterpret_cast<void*>(owners[i + 1]));
+    }
+    qdb_free(owners);
+    rowSet.Private = nullptr;
+}
+
+bool MaskBit(const TColumn& col, int64_t row) {
+    return ((col.Mask[row / 8] >> (row % 8)) & 1) != 0;
+}
+
+} // namespace
+
+TEST(JoinMaterialize, GathersFixedAndStringColumnsWithNullPadding) {
+    using namespace NQumir::NAst;
+    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
+    auto i32 = std::make_shared<TIntegerType>(TIntegerType::I32);
+    TStructType leftType({{"lk", i64}, {"lname", std::make_shared<TStringType>()}});
+    TStructType rightType({{"rk", i64}, {"rv", i32}});
+
+    TKernelCompiler compiler;
+    auto spec = NKernel::BuildJoinKernelSpec(
+        leftType, rightType, {{"lk", "rk"}}, EJoinType::Left);
+    auto kernels = compiler.CompileJoin(spec);
+
+    // Left store: one batch of 3 rows with a string payload column.
+    std::vector<int64_t> lk = {1, 2, 3};
+    std::string lnameBytes = "abb"; // "a", "bb", ""
+    std::vector<int64_t> lnameOffsets = {0, 1, 3, 3};
+    std::vector<TColumn> lcols = {
+        TColumn{.Data = reinterpret_cast<char*>(lk.data())},
+        TColumn{.Data = lnameBytes.data(),
+            .Offsets = lnameOffsets.data(), .OffsetWidth = 8},
+    };
+    TRowSet lbatch{.Columns = lcols.data(), .ColumnCount = 2,
+        .RowCount = 3, .RefCount = 1};
+
+    // Right store: one batch of 2 rows with an i32 payload column.
+    std::vector<int64_t> rk = {1, 2};
+    std::vector<int32_t> rv = {10, 20};
+    std::vector<TColumn> rcols = {
+        TColumn{.Data = reinterpret_cast<char*>(rk.data())},
+        TColumn{.Data = reinterpret_cast<char*>(rv.data())},
+    };
+    TRowSet rbatch{.Columns = rcols.data(), .ColumnCount = 2,
+        .RowCount = 2, .RefCount = 1};
+
+    // Hand-built pairs: two matches plus one outer-padded left row (right -1).
+    std::vector<int64_t> pairData = {
+        PackRowId(0, 0), PackRowId(0, 0),
+        PackRowId(0, 1), PackRowId(0, 1),
+        PackRowId(0, 2), -1,
+    };
+    TPairBuffer pairs{.Count = 3, .Capacity = 3, .Data = pairData.data()};
+
+    TRowSet out{};
+    ASSERT_EQ(kernels.Materialize(
+        &pairs, &lbatch, &rbatch, &lbatch, &rbatch, 0, 100, &out), 3);
+    ASSERT_EQ(out.RowCount, 3);
+    ASSERT_EQ(out.ColumnCount, 4);
+    EXPECT_EQ(out.Selection, nullptr);
+    EXPECT_EQ(out.RefCount, 1);
+
+    // lk: all rows valid.
+    const auto* outLk = reinterpret_cast<const int64_t*>(out.Columns[0].Data);
+    EXPECT_EQ(outLk[0], 1);
+    EXPECT_EQ(outLk[1], 2);
+    EXPECT_EQ(outLk[2], 3);
+    for (int64_t j = 0; j < 3; ++j) {
+        EXPECT_TRUE(MaskBit(out.Columns[0], j));
+    }
+
+    // lname: string payloads follow pair order.
+    const auto& lname = out.Columns[1];
+    ASSERT_EQ(lname.OffsetWidth, 8);
+    const auto* offsets = static_cast<const int64_t*>(lname.Offsets);
+    EXPECT_EQ(std::string(lname.Data + offsets[0], lname.Data + offsets[1]), "a");
+    EXPECT_EQ(std::string(lname.Data + offsets[1], lname.Data + offsets[2]), "bb");
+    EXPECT_EQ(offsets[3], offsets[2]); // ""
+
+    // rv (i32): matched rows carry values, the padded row is NULL.
+    const auto* outRv = reinterpret_cast<const int32_t*>(out.Columns[3].Data);
+    EXPECT_EQ(outRv[0], 10);
+    EXPECT_EQ(outRv[1], 20);
+    EXPECT_EQ(outRv[2], 0); // zeroed padding
+    EXPECT_TRUE(MaskBit(out.Columns[3], 0));
+    EXPECT_TRUE(MaskBit(out.Columns[3], 1));
+    EXPECT_FALSE(MaskBit(out.Columns[3], 2));
+    EXPECT_FALSE(MaskBit(out.Columns[2], 2)); // rk padded NULL too
+
+    FreeMaterializedRowSet(out);
+
+    // start/limit cursoring: one row starting at pair 1.
+    TRowSet slice{};
+    ASSERT_EQ(kernels.Materialize(
+        &pairs, &lbatch, &rbatch, &lbatch, &rbatch, 1, 1, &slice), 1);
+    ASSERT_EQ(slice.RowCount, 1);
+    EXPECT_EQ(reinterpret_cast<const int64_t*>(slice.Columns[0].Data)[0], 2);
+    EXPECT_EQ(reinterpret_cast<const int32_t*>(slice.Columns[3].Data)[0], 20);
+    FreeMaterializedRowSet(slice);
+
+    // Exhausted / empty cursor positions leave the output untouched.
+    TRowSet empty{};
+    EXPECT_EQ(kernels.Materialize(
+        &pairs, &lbatch, &rbatch, &lbatch, &rbatch, 3, 100, &empty), 0);
+    EXPECT_EQ(empty.Columns, nullptr);
+    TPairBuffer noPairs{};
+    EXPECT_EQ(kernels.Materialize(
+        &noPairs, &lbatch, &rbatch, &lbatch, &rbatch, 0, 100, &empty), 0);
+}
+
+TEST(JoinMaterialize, PropagatesSourceNullsAndReadsStreamBatches) {
+    using namespace NQumir::NAst;
+    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
+    TStructType leftType({{"lk", i64},
+        {"lv", std::make_shared<TNullable>(i64)}});
+    TStructType rightType({{"rk", i64}});
+
+    TKernelCompiler compiler;
+    auto spec = NKernel::BuildJoinKernelSpec(
+        leftType, rightType, {{"lk", "rk"}}, EJoinType::Inner);
+    auto kernels = compiler.CompileJoin(spec);
+
+    // Left store: 2 rows; lv row 1 is NULL at the source.
+    std::vector<int64_t> lk = {1, 2};
+    std::vector<int64_t> lv = {100, 200};
+    std::vector<uint8_t> lvMask = {0b01}; // row 0 valid, row 1 null
+    std::vector<TColumn> lcols = {
+        TColumn{.Data = reinterpret_cast<char*>(lk.data())},
+        TColumn{.Data = reinterpret_cast<char*>(lv.data()), .Mask = lvMask.data()},
+    };
+    TRowSet lbatch{.Columns = lcols.data(), .ColumnCount = 2,
+        .RowCount = 2, .RefCount = 1};
+
+    // Right store batch and a DIFFERENT right stream batch: pairs with a
+    // stream-encoded right id (batch -1) must read the stream batch.
+    std::vector<int64_t> rkStore = {7};
+    std::vector<TColumn> rcolsStore = {
+        TColumn{.Data = reinterpret_cast<char*>(rkStore.data())}};
+    TRowSet rstore{.Columns = rcolsStore.data(), .ColumnCount = 1,
+        .RowCount = 1, .RefCount = 1};
+    std::vector<int64_t> rkStream = {42, 43};
+    std::vector<TColumn> rcolsStream = {
+        TColumn{.Data = reinterpret_cast<char*>(rkStream.data())}};
+    TRowSet rstream{.Columns = rcolsStream.data(), .ColumnCount = 1,
+        .RowCount = 2, .RefCount = 1};
+
+    std::vector<int64_t> pairData = {
+        PackRowId(0, 0), PackRowId(0, 0),  // store right row -> 7
+        PackRowId(0, 1), PackRowId(-1, 1), // stream right row -> 43
+    };
+    TPairBuffer pairs{.Count = 2, .Capacity = 2, .Data = pairData.data()};
+
+    TRowSet out{};
+    ASSERT_EQ(kernels.Materialize(
+        &pairs, &lbatch, &rstore, &lbatch, &rstream, 0, 100, &out), 2);
+    ASSERT_EQ(out.RowCount, 2);
+    ASSERT_EQ(out.ColumnCount, 3);
+
+    // lv: source null propagated.
+    EXPECT_EQ(reinterpret_cast<const int64_t*>(out.Columns[1].Data)[0], 100);
+    EXPECT_TRUE(MaskBit(out.Columns[1], 0));
+    EXPECT_FALSE(MaskBit(out.Columns[1], 1));
+
+    // rk: row 0 from the store, row 1 from the stream batch.
+    const auto* outRk = reinterpret_cast<const int64_t*>(out.Columns[2].Data);
+    EXPECT_EQ(outRk[0], 7);
+    EXPECT_EQ(outRk[1], 43);
+
+    FreeMaterializedRowSet(out);
+}
+
+TEST(JoinMaterialize, SemiAntiOutputsLeftColumnsOnly) {
+    using namespace NQumir::NAst;
+    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
+    TStructType leftType({{"lk", i64}, {"lv", i64}});
+    TStructType rightType({{"rk", i64}});
+
+    TKernelCompiler compiler;
+    auto spec = NKernel::BuildJoinKernelSpec(
+        leftType, rightType, {{"lk", "rk"}}, EJoinType::LeftSemi);
+    auto kernels = compiler.CompileJoin(spec);
+
+    std::vector<int64_t> lk = {1, 2};
+    std::vector<int64_t> lv = {10, 20};
+    std::vector<TColumn> lcols = {
+        TColumn{.Data = reinterpret_cast<char*>(lk.data())},
+        TColumn{.Data = reinterpret_cast<char*>(lv.data())},
+    };
+    TRowSet lbatch{.Columns = lcols.data(), .ColumnCount = 2,
+        .RowCount = 2, .RefCount = 1};
+
+    // Semi/anti pairs carry right = -1; the right side must not be read.
+    std::vector<int64_t> pairData = {
+        PackRowId(0, 1), -1,
+        PackRowId(0, 0), -1,
+    };
+    TPairBuffer pairs{.Count = 2, .Capacity = 2, .Data = pairData.data()};
+
+    TRowSet out{};
+    ASSERT_EQ(kernels.Materialize(
+        &pairs, &lbatch, nullptr, &lbatch, nullptr, 0, 100, &out), 2);
+    ASSERT_EQ(out.RowCount, 2);
+    ASSERT_EQ(out.ColumnCount, 2); // left columns only
+    const auto* outLk = reinterpret_cast<const int64_t*>(out.Columns[0].Data);
+    const auto* outLv = reinterpret_cast<const int64_t*>(out.Columns[1].Data);
+    EXPECT_EQ(outLk[0], 2);
+    EXPECT_EQ(outLv[0], 20);
+    EXPECT_EQ(outLk[1], 1);
+    EXPECT_EQ(outLv[1], 10);
+
+    FreeMaterializedRowSet(out);
 }
 
 int main(int argc, char** argv) {

@@ -85,6 +85,28 @@ std::vector<NQumir::NAst::TExprPtr> GenJoinKeyOpsFunDecls(const TJoinKeyDescript
 // the compiler. Must be prepended to the program before any use of the Key.
 std::vector<NQumir::NAst::TExprPtr> GenJoinKeyTypeDecls(const TJoinKeyDescriptor& key);
 
+// Generates the output materializer entrypoint:
+//   jt_materialize(pairs, left_store, right_store, stream_left, stream_right,
+//                  start, limit, out) -> i64
+// Gathers up to `limit` pairs beginning at `start` from the pair buffer into a
+// complete output TRowSet: allocates every buffer with qdb_alloc (recorded in
+// an owners list stored in out.Private), decodes packed row ids (id == -1 is
+// outer-join null padding; batch index -1 reads the stream_* batch instead of
+// the store), and writes fixed-width values, string payloads (two passes:
+// sizes into Offsets, then bytes), and validity masks. Output columns are the
+// left fields followed by the right fields (right omitted for semi/anti); the
+// per-column read/write code is fully specialized at generation time. Returns
+// the number of rows materialized (0 leaves `out` untouched). The caller
+// assigns out.Destroy (the kernel sets it to null).
+NQumir::NAst::TExprPtr GenJoinMaterializeAst(
+    const NQumir::NAst::TStructType& leftType,
+    const NQumir::NAst::TStructType& rightType,
+    bool includeRight,
+    NQumir::NAst::TTypePtr columnType,
+    NQumir::NAst::TTypePtr rowSetType,
+    NQumir::NAst::TTypePtr pairBufferType,
+    NQumir::NAst::TTypePtr stringViewType);
+
 // Generates the single external join entrypoint:
 //   jt_dispatch(left, right, batch, batch_idx, pairs, left_store, right_store,
 //               arg, op) -> bool

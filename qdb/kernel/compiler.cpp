@@ -16,6 +16,7 @@
 #include <qumir/error.h>
 #include <qumir/parser/core/printer.h>
 
+#include <algorithm>
 #include <span>
 #include <stdexcept>
 #include <unordered_map>
@@ -1290,10 +1291,34 @@ TJoinKernels TKernelCompiler::CompileJoin(
         program.push_back(NKernel::GenJoinDispatchAst(
             keySize, type, isResidualSemiAnti,
             rowSetType, hashTableType, pairBufferType));
+        // Output materializer: semi/anti joins emit only the left columns.
+        // String output columns need qdb_string_copy_bytes from string_ops.oz.
+        const bool includeRight = !isSemiAnti;
+        const bool hasStringOutput = [&] {
+            auto isString = [](const auto& field) {
+                return static_cast<bool>(TMaybeType<TStringType>(
+                    UnwrapNamedType(UnwrapNullableType(field.second))));
+            };
+            return std::any_of(leftType.Fields.begin(), leftType.Fields.end(), isString) ||
+                (includeRight && std::any_of(
+                    rightType.Fields.begin(), rightType.Fields.end(), isString));
+        }();
+        if (hasStringOutput) {
+            auto stringOps = NKernel::ParseFunctionLibrary(
+                NKernel::ReadAggregationKernel("string_ops.oz"));
+            if (!stringOps) {
+                throw NQumir::TError(
+                    "CompileJoin: string_ops.oz: " + stringOps.error().ToString());
+            }
+            for (auto& f : *stringOps) program.push_back(std::move(f));
+        }
+        program.push_back(NKernel::GenJoinMaterializeAst(
+            leftType, rightType, includeRight,
+            columnType, rowSetType, pairBufferType, stringViewType));
         return program;
     };
 
-    std::vector<std::string> entries = {"jt_dispatch"};
+    std::vector<std::string> entries = {"jt_dispatch", "jt_materialize"};
 
     auto program = std::make_shared<TBlockExpr>(NQumir::TLocation{}, buildProgram());
     PrintKernelAst(Diagnostics_, "join", program);
@@ -1304,6 +1329,8 @@ TJoinKernels TKernelCompiler::CompileJoin(
     auto slot = kernel.Slot;
     using TDispatchFn = bool(*)(
         void*, void*, TRowSet*, int64_t, void*, TRowSet*, TRowSet*, int64_t, int64_t);
+    using TMaterializeFn = int64_t(*)(
+        void*, TRowSet*, TRowSet*, TRowSet*, TRowSet*, int64_t, int64_t, TRowSet*);
 
     TJoinKernels kernels;
     kernels.Dispatch = [slot](
@@ -1318,6 +1345,18 @@ TJoinKernels TKernelCompiler::CompileJoin(
         int64_t op) {
         return reinterpret_cast<TDispatchFn>(slot->Fns[0])(
             left, right, batch, batchIdx, pairs, leftStore, rightStore, arg, op);
+    };
+    kernels.Materialize = [slot](
+        void* pairs,
+        TRowSet* leftStore,
+        TRowSet* rightStore,
+        TRowSet* streamLeft,
+        TRowSet* streamRight,
+        int64_t start,
+        int64_t limit,
+        TRowSet* out) {
+        return reinterpret_cast<TMaterializeFn>(slot->Fns[1])(
+            pairs, leftStore, rightStore, streamLeft, streamRight, start, limit, out);
     };
     return kernels;
 }

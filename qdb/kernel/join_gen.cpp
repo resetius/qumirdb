@@ -8,6 +8,8 @@
 
 #include <qumir/error.h>
 
+#include <algorithm>
+
 namespace NQdb::NKernel {
 
 using namespace NQumir::NAst;
@@ -920,6 +922,423 @@ NQumir::NAst::TExprPtr GenJoinHashBatchAst(
     return std::make_shared<TFunDecl>(
         loc, funcName, std::move(params),
         std::make_shared<TBlockExpr>(loc, std::move(body)), boolType);
+}
+
+namespace {
+
+// One output column of the generated materializer: which side it reads,
+// the source column index on that side, and its logical type.
+struct TJoinOutputColumn {
+    bool IsLeft = true;
+    int32_t SrcColIdx = 0;
+    NQumir::NAst::TTypePtr Type;
+    bool IsString = false;
+    int64_t FixedWidth = 0; // bytes; 0 for strings
+};
+
+std::vector<TJoinOutputColumn> BuildJoinOutputColumns(
+    const TStructType& leftType,
+    const TStructType& rightType,
+    bool includeRight)
+{
+    auto classify = [](const TTypePtr& type, TJoinOutputColumn& col) {
+        auto inner = UnwrapNamedType(UnwrapNullableType(type));
+        if (auto integer = TMaybeType<TIntegerType>(inner)) {
+            col.FixedWidth = integer.Cast()->BitWidth() / 8;
+        } else if (TMaybeType<TFloatType>(inner)) {
+            col.FixedWidth = 8;
+        } else if (TMaybeType<TStringType>(inner)) {
+            col.IsString = true;
+        } else {
+            throw NQumir::TError(
+                "GenJoinMaterializeAst: cannot materialize column of type " +
+                (type ? type->ToString() : std::string("<null>")));
+        }
+    };
+
+    std::vector<TJoinOutputColumn> columns;
+    for (int32_t i = 0; i < static_cast<int32_t>(leftType.Fields.size()); ++i) {
+        TJoinOutputColumn col{.IsLeft = true, .SrcColIdx = i,
+            .Type = leftType.Fields[i].second};
+        classify(col.Type, col);
+        columns.push_back(std::move(col));
+    }
+    if (includeRight) {
+        for (int32_t i = 0; i < static_cast<int32_t>(rightType.Fields.size()); ++i) {
+            TJoinOutputColumn col{.IsLeft = false, .SrcColIdx = i,
+                .Type = rightType.Fields[i].second};
+            classify(col.Type, col);
+            columns.push_back(std::move(col));
+        }
+    }
+    return columns;
+}
+
+} // namespace
+
+NQumir::NAst::TExprPtr GenJoinMaterializeAst(
+    const NQumir::NAst::TStructType& leftType,
+    const NQumir::NAst::TStructType& rightType,
+    bool includeRight,
+    NQumir::NAst::TTypePtr columnType,
+    NQumir::NAst::TTypePtr rowSetType,
+    NQumir::NAst::TTypePtr pairBufferType,
+    NQumir::NAst::TTypePtr stringViewType)
+{
+    namespace Oz = NKernel::NOz;
+    NQumir::TLocation loc{};
+
+    constexpr int64_t kColumnSize = 48; // sizeof(TColumn), see modules/qumirdb.cpp
+    constexpr int64_t kPtrSize = 8;
+
+    const auto columns = BuildJoinOutputColumns(leftType, rightType, includeRight);
+    const int64_t columnCount = static_cast<int64_t>(columns.size());
+    const bool anyString = std::any_of(columns.begin(), columns.end(),
+        [](const TJoinOutputColumn& c) { return c.IsString; });
+    const bool anyRight = std::any_of(columns.begin(), columns.end(),
+        [](const TJoinOutputColumn& c) { return !c.IsLeft; });
+
+    // owners: columns array + per column Data + Mask (+ Offsets for strings).
+    int64_t ownedPtrCount = 1;
+    for (const auto& col : columns) {
+        ownedPtrCount += col.IsString ? 3 : 2;
+    }
+
+    auto i8Type = std::make_shared<TIntegerType>(TIntegerType::I8);
+    auto i32Type = std::make_shared<TIntegerType>(TIntegerType::I32);
+    auto i64Type = std::make_shared<TIntegerType>(TIntegerType::I64);
+    auto u8Type = std::make_shared<TIntegerType>(TIntegerType::U8);
+    auto boolType = std::make_shared<TBoolType>();
+    auto ptrI8Type = std::make_shared<TPointerType>(i8Type);
+    auto ptrU8Type = std::make_shared<TPointerType>(u8Type);
+    auto ptrI64Type = std::make_shared<TPointerType>(i64Type);
+
+    auto ptrColumnType = ColumnPointerType(columnType, rowSetType);
+    auto columnValueType = PointerPointeeOr(ptrColumnType, columnType);
+    auto rowSetRefType = std::make_shared<TReferenceType>(
+        AsNamed("TRowSet", rowSetType));
+    auto rowSetPtrType = std::make_shared<TPointerType>(
+        AsNamed("TRowSet", rowSetType));
+    auto pairBufferRefType = std::make_shared<TReferenceType>(
+        AsNamed("PairBuffer", pairBufferType));
+
+    auto number = [&](int64_t value) -> TExprPtr {
+        return Oz::TypedInt(value, i64Type);
+    };
+    auto allocAs = [&](TTypePtr type, TExprPtr byteSize) -> TExprPtr {
+        return Oz::Cast(
+            Oz::Call("qdb_alloc", {std::move(byteSize)}), std::move(type));
+    };
+    auto column = [&](size_t idx) -> TExprPtr {
+        return Oz::Index("columns", number(static_cast<int64_t>(idx)));
+    };
+
+    Oz::TFunBuilder builder("jt_materialize");
+    builder
+        .Param("pairs", pairBufferRefType)
+        .Param("left_store", rowSetPtrType)
+        .Param("right_store", rowSetPtrType)
+        .Param("stream_left", rowSetRefType)
+        .Param("stream_right", rowSetRefType)
+        .Param("start", i64Type)
+        .Param("limit", i64Type)
+        .Param("out", rowSetRefType)
+        .Return(i64Type)
+        .Var("n", i64Type)
+        .Assign("n", Oz::Sub(Oz::Field("pairs", "Count"), Oz::Ident("start")))
+        .Stmt(Oz::If(
+            Oz::Bin(TOperator("<"), Oz::Ident("limit"), Oz::Ident("n")),
+            Oz::Block({Oz::Assign("n", Oz::Ident("limit"))})))
+        .Stmt(Oz::If(
+            Oz::Bin(TOperator("<="), Oz::Ident("n"), number(0)),
+            Oz::Block({Oz::Return(number(0))})))
+        .Var("pair_data", ptrI64Type)
+        .Assign("pair_data", Oz::Field("pairs", "Data"))
+        .Var("mask_bytes", i64Type)
+        .Assign("mask_bytes",
+            Oz::Bin(TOperator(">>"),
+                Oz::Add(Oz::Ident("n"), number(7)), number(3)))
+        .Var("owners", ptrI64Type)
+        .Assign("owners", allocAs(ptrI64Type,
+            number((ownedPtrCount + 1) * kPtrSize)))
+        .Stmt(Oz::ArrayAssign("owners", number(0), number(ownedPtrCount)))
+        .Var("owner_idx", i64Type)
+        .Assign("owner_idx", number(1));
+
+    auto remember = [&](const std::string& ptrName) {
+        builder
+            .Stmt(Oz::ArrayAssign("owners", Oz::Ident("owner_idx"),
+                Oz::Cast(Oz::Ident(ptrName), i64Type)))
+            .Assign("owner_idx",
+                Oz::Add(Oz::Ident("owner_idx"), number(1)));
+    };
+
+    builder
+        .Var("columns", ptrColumnType)
+        .Assign("columns", allocAs(ptrColumnType,
+            number(std::max<int64_t>(columnCount, 1) * kColumnSize)));
+    remember("columns");
+
+    // Allocation phase: fixed-width Data now, string Data after the size pass.
+    for (size_t c = 0; c < columns.size(); ++c) {
+        const auto& col = columns[c];
+        const std::string dataName = "col_data_" + std::to_string(c);
+        const std::string maskName = "col_mask_" + std::to_string(c);
+        const std::string offsetsName = "col_offsets_" + std::to_string(c);
+
+        if (col.IsString) {
+            builder
+                .Var(offsetsName, ptrI64Type)
+                .Assign(offsetsName, allocAs(ptrI64Type,
+                    Oz::Mul(Oz::Add(Oz::Ident("n"), number(1)), number(8))));
+            remember(offsetsName);
+            builder
+                .Stmt(Oz::ArrayAssign(offsetsName, number(0), number(0)))
+                .Stmt(Oz::FieldAssign(column(c), "Offsets", Oz::Ident(offsetsName)))
+                .Stmt(Oz::FieldAssign(column(c), "OffsetWidth",
+                    Oz::TypedInt(8, u8Type)));
+        } else {
+            builder
+                .Var(dataName, ptrU8Type)
+                .Assign(dataName, allocAs(ptrU8Type,
+                    Oz::Mul(Oz::Ident("n"), number(col.FixedWidth))));
+            remember(dataName);
+            builder
+                .Stmt(Oz::FieldAssign(column(c), "Data",
+                    Oz::Cast(Oz::Ident(dataName), ptrI8Type)))
+                .Stmt(Oz::FieldAssign(column(c), "Offsets", Oz::NullPtr(ptrI64Type)))
+                .Stmt(Oz::FieldAssign(column(c), "OffsetWidth",
+                    Oz::TypedInt(0, u8Type)));
+        }
+        builder
+            .Var(maskName, ptrU8Type)
+            .Assign(maskName, allocAs(ptrU8Type, Oz::Ident("mask_bytes")));
+        remember(maskName);
+        builder
+            .Stmt(Oz::FieldAssign(column(c), "Mask", Oz::Ident(maskName)))
+            .Stmt(Oz::FieldAssign(column(c), "MaskBitOffset", Oz::TypedInt(0, i32Type)))
+            .Stmt(Oz::FieldAssign(column(c), "DataBitOffset", Oz::TypedInt(0, i32Type)));
+    }
+
+    // Per-row decode of one side's packed row id. Emits, into `stmts`:
+    //   <side>_id, <side>_null, <side>_row, <side>_cols.
+    // The null-padding check (id == -1) must precede the batch decode:
+    // -1 >> 32 == -1 would collide with the stream-batch encoding.
+    auto decodeSide = [&](std::vector<TExprPtr>& stmts, const std::string& side,
+        int64_t pairOffset, const char* storeName, const char* streamName)
+    {
+        const std::string idName = side + "_id";
+        const std::string nullName = side + "_null";
+        const std::string rowName = side + "_row";
+        const std::string batchName = side + "_batch";
+        const std::string colsName = side + "_cols";
+
+        auto pairIndex = Oz::Add(
+            Oz::Mul(Oz::Add(Oz::Ident("start"), Oz::Ident("j")), number(2)),
+            number(pairOffset));
+        stmts.push_back(Oz::Var(idName, i64Type));
+        stmts.push_back(Oz::Assign(idName,
+            Oz::Index("pair_data", std::move(pairIndex))));
+        stmts.push_back(Oz::Var(nullName, boolType));
+        stmts.push_back(Oz::Assign(nullName,
+            Oz::Bin(TOperator("=="), Oz::Ident(idName), number(-1))));
+        stmts.push_back(Oz::Var(rowName, i64Type));
+        stmts.push_back(Oz::Assign(rowName, number(0)));
+        stmts.push_back(Oz::Var(colsName, ptrColumnType));
+        stmts.push_back(Oz::Assign(colsName, Oz::NullPtr(ptrColumnType)));
+
+        auto storeColumns = std::make_shared<TFieldAccessExpr>(loc,
+            std::make_shared<TIndexExpr>(loc,
+                Oz::Ident(storeName), Oz::Ident(batchName)),
+            "Columns");
+        stmts.push_back(Oz::If(
+            Oz::Unary(TOperator("!"), Oz::Ident(nullName)),
+            Oz::Block({
+                Oz::Var(batchName, i64Type),
+                Oz::Assign(batchName,
+                    Oz::Bin(TOperator(">>"), Oz::Ident(idName), number(32))),
+                Oz::Assign(rowName,
+                    Oz::Bin(TOperator("&"), Oz::Ident(idName), number(0xffffffff))),
+                Oz::If(
+                    Oz::Bin(TOperator("=="), Oz::Ident(batchName), number(-1)),
+                    Oz::Block({Oz::Assign(colsName,
+                        Oz::Field(streamName, "Columns"))}),
+                    Oz::Block({Oz::Assign(colsName, storeColumns)})),
+            })));
+    };
+
+    // Per-row source-column materialization shared by both passes. Wrapping the
+    // logical type as nullable makes BuildColumnValueAst derive validity from
+    // the source Mask (mask == null -> valid), so a non-nullable source column
+    // costs one dead check instead of a separate code path.
+    auto materializeSource = [&](std::vector<TExprPtr>& stmts, size_t c,
+        const std::string& prefix) -> TColumnValueAst
+    {
+        const auto& col = columns[c];
+        const std::string side = col.IsLeft ? "left" : "right";
+        const std::string srcName = prefix + "_src";
+
+        stmts.push_back(Oz::Var(srcName, columnValueType));
+        stmts.push_back(Oz::Assign(srcName,
+            Oz::Index(side + "_cols", number(col.SrcColIdx))));
+
+        auto logicalType = IsNullableType(col.Type)
+            ? col.Type
+            : std::make_shared<TNullable>(col.Type);
+        auto value = BuildColumnValueAst(
+            srcName, side + "_row", prefix, logicalType, stringViewType);
+        stmts.insert(stmts.end(),
+            std::make_move_iterator(value.Setup.begin()),
+            std::make_move_iterator(value.Setup.end()));
+        return value;
+    };
+
+    // Pass A (strings only): accumulate payload sizes into Offsets.
+    if (anyString) {
+        std::vector<TExprPtr> loop;
+        decodeSide(loop, "left", 0, "left_store", "stream_left");
+        if (anyRight) {
+            decodeSide(loop, "right", 1, "right_store", "stream_right");
+        }
+        for (size_t c = 0; c < columns.size(); ++c) {
+            const auto& col = columns[c];
+            if (!col.IsString) {
+                continue;
+            }
+            const std::string side = col.IsLeft ? "left" : "right";
+            const std::string lenName = "len_" + std::to_string(c);
+            const std::string offsetsName = "col_offsets_" + std::to_string(c);
+
+            loop.push_back(Oz::Var(lenName, i64Type));
+            loop.push_back(Oz::Assign(lenName, number(0)));
+            std::vector<TExprPtr> read;
+            auto value = materializeSource(read, c, "sz_" + std::to_string(c));
+            // The nullable string path yields a zero StringView when invalid,
+            // so Size is already 0 for source nulls.
+            read.push_back(Oz::Assign(lenName,
+                std::make_shared<TFieldAccessExpr>(loc, value.Value, "Size")));
+            loop.push_back(Oz::If(
+                Oz::Unary(TOperator("!"), Oz::Ident(side + "_null")),
+                Oz::Block(std::move(read))));
+            loop.push_back(Oz::ArrayAssign(offsetsName,
+                Oz::Add(Oz::Ident("j"), number(1)),
+                Oz::Add(
+                    Oz::Index(offsetsName, Oz::Ident("j")),
+                    Oz::Ident(lenName))));
+        }
+        loop.push_back(Oz::Assign("j", Oz::Add(Oz::Ident("j"), number(1))));
+
+        builder
+            .Var("j", i64Type)
+            .Assign("j", number(0))
+            .Stmt(Oz::While(
+                Oz::Bin(TOperator("<"), Oz::Ident("j"), Oz::Ident("n")),
+                Oz::Block(std::move(loop))));
+
+        // Now the payload sizes are known: allocate string Data buffers.
+        for (size_t c = 0; c < columns.size(); ++c) {
+            if (!columns[c].IsString) {
+                continue;
+            }
+            const std::string dataName = "col_data_" + std::to_string(c);
+            const std::string offsetsName = "col_offsets_" + std::to_string(c);
+            builder
+                .Var(dataName, ptrU8Type)
+                .Assign(dataName, allocAs(ptrU8Type,
+                    Oz::Index(offsetsName, Oz::Ident("n"))));
+            remember(dataName);
+            builder.Stmt(Oz::FieldAssign(column(c), "Data",
+                Oz::Cast(Oz::Ident(dataName), ptrI8Type)));
+        }
+    }
+
+    // Pass B: write values, copy string payloads, set validity bits.
+    {
+        std::vector<TExprPtr> loop;
+        decodeSide(loop, "left", 0, "left_store", "stream_left");
+        if (anyRight) {
+            decodeSide(loop, "right", 1, "right_store", "stream_right");
+        }
+        for (size_t c = 0; c < columns.size(); ++c) {
+            const auto& col = columns[c];
+            const std::string side = col.IsLeft ? "left" : "right";
+            const std::string validName = "out_valid_" + std::to_string(c);
+            const std::string dataName = "col_data_" + std::to_string(c);
+            const std::string maskName = "col_mask_" + std::to_string(c);
+            const std::string prefix = "mat_" + std::to_string(c);
+
+            loop.push_back(Oz::Var(validName, boolType));
+            loop.push_back(Oz::Assign(validName, Oz::Bool(false)));
+
+            if (col.IsString) {
+                const std::string offsetsName = "col_offsets_" + std::to_string(c);
+                const std::string svName = prefix + "_sv";
+                const std::string copyName = prefix + "_copied";
+                std::vector<TExprPtr> read;
+                auto value = materializeSource(read, c, prefix);
+                read.push_back(Oz::Assign(validName, value.IsValid));
+                read.push_back(Oz::Var(svName, value.ValueType));
+                read.push_back(Oz::Assign(svName, value.Value));
+                auto destination = Oz::Cast(
+                    Oz::Add(
+                        Oz::Cast(Oz::Ident(dataName), i64Type),
+                        Oz::Index(offsetsName, Oz::Ident("j"))),
+                    ptrU8Type);
+                read.push_back(Oz::Var(copyName, i64Type));
+                read.push_back(Oz::Assign(copyName,
+                    Oz::Call("qdb_string_copy_bytes", {
+                        std::move(destination),
+                        Oz::Field(svName, "Data"),
+                        Oz::Field(svName, "Size")})));
+                loop.push_back(Oz::If(
+                    Oz::Unary(TOperator("!"), Oz::Ident(side + "_null")),
+                    Oz::Block(std::move(read))));
+            } else {
+                const std::string valueName = prefix + "_out";
+                const std::string typedDataName = prefix + "_data";
+                std::vector<TExprPtr> read;
+                auto value = materializeSource(read, c, prefix);
+                read.push_back(Oz::Assign(validName, value.IsValid));
+                read.push_back(Oz::Assign(valueName, value.Value));
+                loop.push_back(Oz::Var(valueName, value.ValueType));
+                loop.push_back(Oz::Assign(valueName,
+                    Oz::Cast(number(0), value.ValueType)));
+                loop.push_back(Oz::If(
+                    Oz::Unary(TOperator("!"), Oz::Ident(side + "_null")),
+                    Oz::Block(std::move(read))));
+                auto typedPtr = std::make_shared<TPointerType>(value.ValueType);
+                loop.push_back(Oz::Var(typedDataName, typedPtr));
+                loop.push_back(Oz::Assign(typedDataName,
+                    Oz::Cast(Oz::Ident(dataName), typedPtr)));
+                loop.push_back(Oz::ArrayAssign(typedDataName,
+                    Oz::Ident("j"), Oz::Ident(valueName)));
+            }
+            loop.push_back(Oz::Call("qdb_bitmap_set_valid", {
+                Oz::Ident(maskName), Oz::Ident("j"), Oz::Ident(validName)}));
+        }
+        loop.push_back(Oz::Assign("j", Oz::Add(Oz::Ident("j"), number(1))));
+
+        if (anyString) {
+            builder.Assign("j", number(0));
+        } else {
+            builder.Var("j", i64Type).Assign("j", number(0));
+        }
+        builder.Stmt(Oz::While(
+            Oz::Bin(TOperator("<"), Oz::Ident("j"), Oz::Ident("n")),
+            Oz::Block(std::move(loop))));
+    }
+
+    builder
+        .Stmt(Oz::FieldAssign(Oz::Ident("out"), "Columns", Oz::Ident("columns")))
+        .Stmt(Oz::FieldAssign(Oz::Ident("out"), "ColumnCount", number(columnCount)))
+        .Stmt(Oz::FieldAssign(Oz::Ident("out"), "RowCount", Oz::Ident("n")))
+        .Stmt(Oz::FieldAssign(Oz::Ident("out"), "Selection", Oz::NullPtr(ptrU8Type)))
+        .Stmt(Oz::FieldAssign(Oz::Ident("out"), "Destroy", Oz::NullPtr(ptrI64Type)))
+        .Stmt(Oz::FieldAssign(Oz::Ident("out"), "Private", Oz::Ident("owners")))
+        .Stmt(Oz::FieldAssign(Oz::Ident("out"), "RefCount", number(1)))
+        .Stmt(Oz::Return(Oz::Ident("n")));
+
+    return std::move(builder).Build();
 }
 
 } // namespace NQdb::NKernel
