@@ -387,38 +387,6 @@ bool ContainsLogicalString(const NQumir::NAst::TTypePtr& originalType) {
     return false;
 }
 
-NQumir::NAst::TExprPtr ZeroValueExpr(
-    const NQumir::NAst::TTypePtr& originalType)
-{
-    using namespace NQumir::NAst;
-    NQumir::TLocation loc{};
-    auto i64Type = std::make_shared<TIntegerType>(TIntegerType::I64);
-    auto zero = std::make_shared<TNumberExpr>(loc, int64_t{0});
-    zero->Type = i64Type;
-    auto type = UnwrapNamedType(originalType);
-    if (TMaybeType<TIntegerType>(type)) {
-        auto value = std::make_shared<TNumberExpr>(loc, int64_t{0});
-        value->Type = originalType;
-        return value;
-    }
-    if (TMaybeType<TFloatType>(type) || TMaybeType<TBoolType>(type) ||
-        TMaybeType<TPointerType>(type)) {
-        return std::make_shared<TCastExpr>(loc, std::move(zero), originalType);
-    }
-    if (auto structure = TMaybeType<TStructType>(type)) {
-        std::vector<TExprPtr> fields;
-        fields.reserve(structure.Cast()->Fields.size());
-        for (const auto& [_, fieldType] : structure.Cast()->Fields) {
-            fields.push_back(ZeroValueExpr(fieldType));
-        }
-        return std::make_shared<TStructConstructExpr>(
-            loc, originalType, std::move(fields));
-    }
-    throw std::invalid_argument(
-        "ZeroValueExpr: unsupported type " +
-        (originalType ? originalType->ToString() : std::string("<null>")));
-}
-
 NQumir::NAst::TExprPtr KeyOwnedBytesExpr(
     const NQumir::NAst::TTypePtr& originalType,
     const std::string& root,
@@ -556,6 +524,38 @@ NQumir::NAst::TExprPtr CloneKeyValue(
 }
 
 } // namespace
+
+NQumir::NAst::TExprPtr ZeroValueExpr(
+    const NQumir::NAst::TTypePtr& originalType)
+{
+    using namespace NQumir::NAst;
+    NQumir::TLocation loc{};
+    auto i64Type = std::make_shared<TIntegerType>(TIntegerType::I64);
+    auto zero = std::make_shared<TNumberExpr>(loc, int64_t{0});
+    zero->Type = i64Type;
+    auto type = UnwrapNamedType(originalType);
+    if (TMaybeType<TIntegerType>(type)) {
+        auto value = std::make_shared<TNumberExpr>(loc, int64_t{0});
+        value->Type = originalType;
+        return value;
+    }
+    if (TMaybeType<TFloatType>(type) || TMaybeType<TBoolType>(type) ||
+        TMaybeType<TPointerType>(type)) {
+        return std::make_shared<TCastExpr>(loc, std::move(zero), originalType);
+    }
+    if (auto structure = TMaybeType<TStructType>(type)) {
+        std::vector<TExprPtr> fields;
+        fields.reserve(structure.Cast()->Fields.size());
+        for (const auto& [_, fieldType] : structure.Cast()->Fields) {
+            fields.push_back(ZeroValueExpr(fieldType));
+        }
+        return std::make_shared<TStructConstructExpr>(
+            loc, originalType, std::move(fields));
+    }
+    throw std::invalid_argument(
+        "ZeroValueExpr: unsupported type " +
+        (originalType ? originalType->ToString() : std::string("<null>")));
+}
 
 std::vector<NQumir::NAst::TExprPtr> GenKeyOperationFunDecls(
     const TAggregateKeyDescriptor& key)

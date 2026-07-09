@@ -19,6 +19,8 @@
 #include <memory>
 #include <string>
 #include <tuple>
+#include <unordered_set>
+#include <utility>
 #include <vector>
 
 using namespace NQdb;
@@ -59,11 +61,29 @@ constexpr int64_t JoinOpCode(EJoinKernelOp op) {
 std::unique_ptr<NQumir::TLLVMRunner> CompileJoinEntry(
     const std::string& entryName, void*& entry)
 {
+    using namespace NQumir::NAst;
     auto lib = NKernel::BuildJoinKernelLibrary();
     if (!lib) {
         ADD_FAILURE() << lib.error().ToString();
         return {};
     }
+    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
+    TStructType leftType({{"lk", i64}});
+    TStructType rightType({{"rk", i64}});
+    auto keyDesc = NKernel::BuildJoinKeyDescriptor(
+        leftType, rightType, {{"lk", "rk"}});
+    std::vector<TExprPtr> stmts;
+    for (auto& f : NKernel::GenJoinKeyTypeDecls(keyDesc)) stmts.push_back(std::move(f));
+    for (auto& f : NKernel::GenJoinKeyOpsFunDecls(keyDesc)) stmts.push_back(std::move(f));
+    for (auto& f : NKernel::GenJoinKeyOwnershipFunDecls(keyDesc)) stmts.push_back(std::move(f));
+    auto dualLib = NKernel::BuildJoinDualKeyLibrary();
+    if (!dualLib) {
+        ADD_FAILURE() << dualLib.error().ToString();
+        return {};
+    }
+    for (auto& f : *dualLib) stmts.push_back(std::move(f));
+    for (auto& f : *lib) stmts.push_back(std::move(f));
+
     NQumir::TLLVMRunnerOptions options;
     options.CoreInput = true;
     options.NativeCode = true;
@@ -71,7 +91,7 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileJoinEntry(
     NQdb::NTest::ConfigureQumirDbSourceModule(options);
     auto runner = std::make_unique<NQumir::TLLVMRunner>(options);
     auto program = std::make_shared<NQumir::NAst::TBlockExpr>(
-        NQumir::TLocation{}, std::move(*lib));
+        NQumir::TLocation{}, std::move(stmts));
     NQdb::NTest::AddQumirDbUse(program);
     std::string error;
     entry = runner->CompileKernelAst(program, entryName, &error);
@@ -340,17 +360,16 @@ TEST(CompileJoin, ProbeOnlyStreamsWithoutInserting) {
         0, JoinOpCode(EJoinKernelOp::Destroy));
 }
 
-TEST(CompileJoin, RejectsStringKeyNonInnerAndIncompatible) {
+TEST(CompileJoin, AcceptsStringKeyAndRejectsUnsupportedSpecs) {
     using namespace NQumir::NAst;
     auto i64 = [] { return std::make_shared<TIntegerType>(TIntegerType::I64); };
     TKernelCompiler compiler;
 
-    // String keys are not supported yet (fixed-key scope).
     TStructType strLeft({{"lk", std::make_shared<TStringType>()}});
     TStructType strRight({{"rk", std::make_shared<TStringType>()}});
     auto stringSpec = NKernel::BuildJoinKernelSpec(
         strLeft, strRight, {{"lk", "rk"}}, EJoinType::Inner);
-    EXPECT_THROW(compiler.CompileJoin(stringSpec), NQumir::TError);
+    EXPECT_NO_THROW(compiler.CompileJoin(stringSpec));
 
     TStructType leftType({{"lk", i64()}});
     TStructType rightType({{"rk", i64()}});
@@ -376,27 +395,38 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileGenericJoin(
     const NKernel::TJoinKeyDescriptor& keyDesc, const std::string& entry, void*& fn)
 {
     using namespace NQumir::NAst;
-    TTypePtr columnType, rowSetType, hashTableType, pairBufferType;
+    TTypePtr columnType, rowSetType, hashTableType, pairBufferType, stringViewType;
     for (const auto& et : NQumir::NRegistry::QumirDbExternalTypes()) {
         if (et.Name == "TColumn") columnType = et.Type;
         else if (et.Name == "TRowSet") rowSetType = et.Type;
         else if (et.Name == "HashTable") hashTableType = et.Type;
         else if (et.Name == "PairBuffer") pairBufferType = et.Type;
+        else if (et.Name == "StringView") stringViewType = et.Type;
     }
     auto lib = NKernel::BuildJoinKernelLibrary();
     if (!lib) { ADD_FAILURE() << lib.error().ToString(); return {}; }
     std::vector<TExprPtr> program;
     for (auto& f : NKernel::GenJoinKeyTypeDecls(keyDesc)) program.push_back(std::move(f));
+    if (keyDesc.HasDistinctLookupType()) {
+        auto stringOps = NKernel::ParseFunctionLibrary(
+            NKernel::ReadAggregationKernel("string_ops.oz"));
+        if (!stringOps) { ADD_FAILURE() << stringOps.error().ToString(); return {}; }
+        for (auto& f : *stringOps) program.push_back(std::move(f));
+    }
     for (auto& f : NKernel::GenJoinKeyOpsFunDecls(keyDesc)) program.push_back(std::move(f));
+    for (auto& f : NKernel::GenJoinKeyOwnershipFunDecls(keyDesc)) program.push_back(std::move(f));
+    auto dualLib = NKernel::BuildJoinDualKeyLibrary();
+    if (!dualLib) { ADD_FAILURE() << dualLib.error().ToString(); return {}; }
+    for (auto& f : *dualLib) program.push_back(std::move(f));
     for (auto& f : *lib) program.push_back(std::move(f));
     program.push_back(NKernel::GenJoinProcessAst(keyDesc, true, "jt_process_left",
-        columnType, rowSetType, hashTableType, pairBufferType));
+        columnType, rowSetType, hashTableType, pairBufferType, stringViewType));
     program.push_back(NKernel::GenJoinProcessAst(keyDesc, false, "jt_process_right",
-        columnType, rowSetType, hashTableType, pairBufferType));
+        columnType, rowSetType, hashTableType, pairBufferType, stringViewType));
     program.push_back(NKernel::GenJoinProbeAst(keyDesc, true, "jt_probe_left_stream",
-        columnType, rowSetType, hashTableType, pairBufferType));
+        columnType, rowSetType, hashTableType, pairBufferType, stringViewType));
     program.push_back(NKernel::GenJoinProbeAst(keyDesc, false, "jt_probe_right_stream",
-        columnType, rowSetType, hashTableType, pairBufferType));
+        columnType, rowSetType, hashTableType, pairBufferType, stringViewType));
 
     NQumir::TLLVMRunnerOptions options;
     options.CoreInput = true;
@@ -818,6 +848,234 @@ TEST(CompileCrossJoin, EmitsSelectedPairsAndMaterializesStringPayload) {
     kernels.Dispatch(
         nullptr, 0, nullptr, 0, &pairs,
         static_cast<int64_t>(ECrossJoinKernelOp::Destroy));
+}
+
+namespace {
+
+// Owned backing storage for one string column (payload bytes + i64 offsets).
+struct TStringColumn {
+    std::string Bytes;
+    std::vector<int64_t> Offsets;
+
+    explicit TStringColumn(const std::vector<std::string>& values) {
+        Offsets.push_back(0);
+        for (const auto& value : values) {
+            Bytes += value;
+            Offsets.push_back(static_cast<int64_t>(Bytes.size()));
+        }
+    }
+
+    TColumn Column() {
+        return TColumn{.Data = Bytes.data(),
+            .Offsets = Offsets.data(), .OffsetWidth = 8};
+    }
+};
+
+std::string ReadString(const TColumn& col, int64_t row) {
+    const auto* offsets = static_cast<const int64_t*>(col.Offsets);
+    return std::string(col.Data + offsets[row], col.Data + offsets[row + 1]);
+}
+
+} // namespace
+
+TEST(JoinStringKey, InnerJoinMatchesAndMaterializes) {
+    using namespace NQumir::NAst;
+    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
+    TStructType leftType({{"lk", std::make_shared<TStringType>()}, {"lv", i64}});
+    TStructType rightType({{"rk", std::make_shared<TStringType>()}, {"rv", i64}});
+
+    TKernelCompiler compiler;
+    auto spec = NKernel::BuildJoinKernelSpec(
+        leftType, rightType, {{"lk", "rk"}}, EJoinType::Inner);
+    auto kernels = compiler.CompileJoin(spec);
+
+    TStringColumn lk({"apple", "banana", "apple"});
+    std::vector<int64_t> lv = {10, 20, 30};
+    std::vector<TColumn> lcols = {
+        lk.Column(), TColumn{.Data = reinterpret_cast<char*>(lv.data())}};
+    TRowSet lbatch{.Columns = lcols.data(), .ColumnCount = 2,
+        .RowCount = 3, .RefCount = 1};
+
+    TStringColumn rk({"banana", "apple", "cherry"});
+    std::vector<int64_t> rv = {100, 200, 300};
+    std::vector<TColumn> rcols = {
+        rk.Column(), TColumn{.Data = reinterpret_cast<char*>(rv.data())}};
+    TRowSet rbatch{.Columns = rcols.data(), .ColumnCount = 2,
+        .RowCount = 3, .RefCount = 1};
+
+    THashTable left{}, right{};
+    TPairBuffer pairs{};
+    ASSERT_TRUE(kernels.Dispatch(&left, &right, nullptr, 0, &pairs, nullptr, nullptr,
+        4, JoinOpCode(EJoinKernelOp::Init)));
+    ASSERT_TRUE(kernels.Dispatch(&left, &right, &lbatch, 0, &pairs, &lbatch, &rbatch,
+        0, JoinOpCode(EJoinKernelOp::UpdateLeft)));
+    ASSERT_TRUE(kernels.Dispatch(&left, &right, &rbatch, 0, &pairs, &lbatch, &rbatch,
+        0, JoinOpCode(EJoinKernelOp::UpdateRight)));
+
+    TRowSet out{};
+    ASSERT_EQ(kernels.Materialize(
+        &pairs, &lbatch, &rbatch, &lbatch, &rbatch, 0, 100, &out), 3);
+    std::vector<std::tuple<std::string, int64_t, int64_t>> got;
+    for (int64_t i = 0; i < out.RowCount; ++i) {
+        got.emplace_back(
+            ReadString(out.Columns[0], i),
+            reinterpret_cast<const int64_t*>(out.Columns[1].Data)[i],
+            reinterpret_cast<const int64_t*>(out.Columns[3].Data)[i]);
+        EXPECT_EQ(ReadString(out.Columns[0], i), ReadString(out.Columns[2], i));
+    }
+    std::vector<std::tuple<std::string, int64_t, int64_t>> expected = {
+        {"apple", 10, 200}, {"apple", 30, 200}, {"banana", 20, 100}};
+    std::sort(got.begin(), got.end());
+    EXPECT_EQ(got, expected);
+    FreeMaterializedRowSet(out);
+
+    kernels.Dispatch(&left, &right, nullptr, 0, &pairs, nullptr, nullptr,
+        0, JoinOpCode(EJoinKernelOp::Destroy));
+}
+
+TEST(JoinStringKey, SemiAntiClonesRightKeysAndSurvivesRehash) {
+    using namespace NQumir::NAst;
+    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
+    TStructType leftType({{"lk", std::make_shared<TStringType>()}, {"lv", i64}});
+    TStructType rightType({{"rk", std::make_shared<TStringType>()}});
+
+    // ~20 distinct string keys over 40 right rows force rehashes from
+    // capacity 4 and exercise owned-key cloning + carry across rehash.
+    std::vector<std::string> leftKeys, rightKeys;
+    std::vector<int64_t> lv;
+    int seed = 4242;
+    auto rnd = [&]() { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed; };
+    for (int i = 0; i < 30; ++i) {
+        leftKeys.push_back("key_" + std::to_string(rnd() % 30));
+        lv.push_back(i);
+    }
+    for (int i = 0; i < 40; ++i) {
+        rightKeys.push_back("key_" + std::to_string(rnd() % 20));
+    }
+
+    TKernelCompiler compiler;
+    auto spec = NKernel::BuildJoinKernelSpec(
+        leftType, rightType, {{"lk", "rk"}}, EJoinType::LeftAnti);
+    auto kernels = compiler.CompileJoin(spec);
+
+    TStringColumn lk(leftKeys);
+    std::vector<TColumn> lcols = {
+        lk.Column(), TColumn{.Data = reinterpret_cast<char*>(lv.data())}};
+    TRowSet lbatch{.Columns = lcols.data(), .ColumnCount = 2,
+        .RowCount = static_cast<int64_t>(leftKeys.size()), .RefCount = 1};
+
+    TStringColumn rk(rightKeys);
+    std::vector<TColumn> rcols = {rk.Column()};
+    TRowSet rbatch{.Columns = rcols.data(), .ColumnCount = 1,
+        .RowCount = static_cast<int64_t>(rightKeys.size()), .RefCount = 1};
+
+    THashTable left{}, right{};
+    TPairBuffer pairs{};
+    ASSERT_TRUE(kernels.Dispatch(&left, &right, nullptr, 0, &pairs, nullptr, nullptr,
+        4, JoinOpCode(EJoinKernelOp::Init)));
+    ASSERT_TRUE(kernels.Dispatch(&left, &right, &lbatch, 0, &pairs, &lbatch, nullptr,
+        0, JoinOpCode(EJoinKernelOp::UpdateLeft)));
+    // Right batches are released immediately by the host, so the kernel must
+    // clone right keys into owned storage; scribbling over the source payload
+    // after the update proves it.
+    ASSERT_TRUE(kernels.Dispatch(&left, &right, &rbatch, -1, &pairs, &lbatch, nullptr,
+        0, JoinOpCode(EJoinKernelOp::UpdateRight)));
+    std::fill(rk.Bytes.begin(), rk.Bytes.end(), '#');
+    EXPECT_GT(right.Capacity, 4); // rehash happened while inserting right keys
+
+    ASSERT_TRUE(kernels.Dispatch(&left, &right, nullptr, 0, &pairs, &lbatch, nullptr,
+        0, JoinOpCode(EJoinKernelOp::Finalize)));
+
+    TRowSet out{};
+    std::vector<std::pair<std::string, int64_t>> got;
+    if (pairs.Count > 0) {
+        ASSERT_EQ(kernels.Materialize(
+            &pairs, &lbatch, nullptr, &lbatch, nullptr, 0, 1000, &out),
+            pairs.Count);
+        for (int64_t i = 0; i < out.RowCount; ++i) {
+            got.emplace_back(
+                ReadString(out.Columns[0], i),
+                reinterpret_cast<const int64_t*>(out.Columns[1].Data)[i]);
+        }
+        FreeMaterializedRowSet(out);
+    }
+
+    std::unordered_set<std::string> rset(rightKeys.begin(), rightKeys.end());
+    std::vector<std::pair<std::string, int64_t>> expected;
+    for (size_t i = 0; i < leftKeys.size(); ++i) {
+        if (!rset.count(leftKeys[i])) {
+            expected.emplace_back(leftKeys[i], lv[i]);
+        }
+    }
+    std::sort(got.begin(), got.end());
+    std::sort(expected.begin(), expected.end());
+    EXPECT_EQ(got, expected);
+
+    kernels.Dispatch(&left, &right, nullptr, 0, &pairs, nullptr, nullptr,
+        0, JoinOpCode(EJoinKernelOp::Destroy));
+}
+
+TEST(JoinStringKey, CompositeStringIntKey) {
+    using namespace NQumir::NAst;
+    auto i64 = std::make_shared<TIntegerType>(TIntegerType::I64);
+    TStructType leftType({{"lk", std::make_shared<TStringType>()},
+        {"ln", i64}, {"lv", i64}});
+    TStructType rightType({{"rk", std::make_shared<TStringType>()},
+        {"rn", i64}, {"rv", i64}});
+
+    TKernelCompiler compiler;
+    auto spec = NKernel::BuildJoinKernelSpec(
+        leftType, rightType, {{"lk", "rk"}, {"ln", "rn"}}, EJoinType::Inner);
+    auto kernels = compiler.CompileJoin(spec);
+
+    TStringColumn lk({"a", "a", "b"});
+    std::vector<int64_t> ln = {1, 2, 1};
+    std::vector<int64_t> lv = {10, 20, 30};
+    std::vector<TColumn> lcols = {
+        lk.Column(),
+        TColumn{.Data = reinterpret_cast<char*>(ln.data())},
+        TColumn{.Data = reinterpret_cast<char*>(lv.data())}};
+    TRowSet lbatch{.Columns = lcols.data(), .ColumnCount = 3,
+        .RowCount = 3, .RefCount = 1};
+
+    TStringColumn rk({"a", "b", "a"});
+    std::vector<int64_t> rn = {1, 1, 3};
+    std::vector<int64_t> rv = {100, 200, 300};
+    std::vector<TColumn> rcols = {
+        rk.Column(),
+        TColumn{.Data = reinterpret_cast<char*>(rn.data())},
+        TColumn{.Data = reinterpret_cast<char*>(rv.data())}};
+    TRowSet rbatch{.Columns = rcols.data(), .ColumnCount = 3,
+        .RowCount = 3, .RefCount = 1};
+
+    THashTable left{}, right{};
+    TPairBuffer pairs{};
+    ASSERT_TRUE(kernels.Dispatch(&left, &right, nullptr, 0, &pairs, nullptr, nullptr,
+        8, JoinOpCode(EJoinKernelOp::Init)));
+    ASSERT_TRUE(kernels.Dispatch(&left, &right, &lbatch, 0, &pairs, &lbatch, &rbatch,
+        0, JoinOpCode(EJoinKernelOp::UpdateLeft)));
+    ASSERT_TRUE(kernels.Dispatch(&left, &right, &rbatch, 0, &pairs, &lbatch, &rbatch,
+        0, JoinOpCode(EJoinKernelOp::UpdateRight)));
+
+    TRowSet out{};
+    ASSERT_EQ(kernels.Materialize(
+        &pairs, &lbatch, &rbatch, &lbatch, &rbatch, 0, 100, &out), 2);
+    std::vector<std::tuple<std::string, int64_t, int64_t, int64_t>> got;
+    for (int64_t i = 0; i < out.RowCount; ++i) {
+        got.emplace_back(
+            ReadString(out.Columns[0], i),
+            reinterpret_cast<const int64_t*>(out.Columns[1].Data)[i],
+            reinterpret_cast<const int64_t*>(out.Columns[2].Data)[i],
+            reinterpret_cast<const int64_t*>(out.Columns[5].Data)[i]);
+    }
+    std::vector<std::tuple<std::string, int64_t, int64_t, int64_t>> expected = {
+        {"a", 1, 10, 100}, {"b", 1, 30, 200}};
+    std::sort(got.begin(), got.end());
+    EXPECT_EQ(got, expected);
+    FreeMaterializedRowSet(out);
+
+    kernels.Dispatch(&left, &right, nullptr, 0, &pairs, nullptr, nullptr,
+        0, JoinOpCode(EJoinKernelOp::Destroy));
 }
 
 int main(int argc, char** argv) {

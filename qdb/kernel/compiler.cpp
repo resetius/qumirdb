@@ -1167,7 +1167,7 @@ TCrossJoinKernels TKernelCompiler::CompileCrossJoin(
     auto stringViewType = QumirDbNamedType("StringView");
 
     auto buildProgram = [&]() -> std::vector<TExprPtr> {
-        auto library = NKernel::BuildJoinKernelLibrary();
+        auto library = NKernel::BuildCrossJoinKernelLibrary();
         if (!library) {
             throw NQumir::TError(
                 "CompileCrossJoin: " + library.error().ToString());
@@ -1276,11 +1276,23 @@ TJoinHashKernels TKernelCompiler::CompileJoinHash(
 
     auto columnType = QumirDbNamedType("TColumn");
     auto rowSetType = QumirDbNamedType("TRowSet");
+    auto stringViewType = QumirDbNamedType("StringView");
 
     auto buildProgram = [&]() -> std::vector<TExprPtr> {
         std::vector<TExprPtr> program;
         for (auto& f : NKernel::GenJoinKeyTypeDecls(keyDesc)) {
             program.push_back(std::move(f));
+        }
+        // String keys hash as StringView: the rh_hash overload calls
+        // qdb_string_hash from string_ops.oz.
+        if (keyDesc.HasDistinctLookupType()) {
+            auto stringOps = NKernel::ParseFunctionLibrary(
+                NKernel::ReadAggregationKernel("string_ops.oz"));
+            if (!stringOps) {
+                throw NQumir::TError(
+                    "CompileJoinHash: string_ops.oz: " + stringOps.error().ToString());
+            }
+            for (auto& f : *stringOps) program.push_back(std::move(f));
         }
         for (auto& f : NKernel::GenJoinKeyOpsFunDecls(keyDesc)) {
             program.push_back(std::move(f));
@@ -1290,13 +1302,15 @@ TJoinHashKernels TKernelCompiler::CompileJoinHash(
             /*isLeft=*/true,
             "jt_hash_left",
             columnType,
-            rowSetType));
+            rowSetType,
+            stringViewType));
         program.push_back(NKernel::GenJoinHashBatchAst(
             keyDesc,
             /*isLeft=*/false,
             "jt_hash_right",
             columnType,
-            rowSetType));
+            rowSetType,
+            stringViewType));
         return program;
     };
 
@@ -1338,8 +1352,7 @@ TJoinKernels TKernelCompiler::CompileJoin(
     }
 
     // Unified key descriptor (reuses the aggregation key machinery). Throws on
-    // incompatible types / missing columns; string keys are rejected by
-    // GenJoinProcessAst below.
+    // incompatible types / missing columns.
     const auto keyDesc = NKernel::BuildJoinKeyDescriptor(leftType, rightType, keys);
     const int64_t keySize = static_cast<int64_t>(keyDesc.Size);
 
@@ -1371,30 +1384,70 @@ TJoinKernels TKernelCompiler::CompileJoin(
             }
         }
 
+        // Program order follows BuildGenericAggregateProgramAst: type decls,
+        // string ops (callees of the key-ops overloads), per-key overloads
+        // (rh_hash / rh_key_equal / key_owned_bytes / key_clone_owned), the
+        // generic dual-key HashTable helpers they instantiate, then the join
+        // library and the generated per-query functions.
+        const bool includeRight = !isSemiAnti;
+        const bool hasStringOutput = [&] {
+            auto isString = [](const auto& field) {
+                return static_cast<bool>(TMaybeType<TStringType>(
+                    UnwrapNamedType(UnwrapNullableType(field.second))));
+            };
+            return std::any_of(leftType.Fields.begin(), leftType.Fields.end(), isString) ||
+                (includeRight && std::any_of(
+                    rightType.Fields.begin(), rightType.Fields.end(), isString));
+        }();
+
         std::vector<TExprPtr> program;
         for (auto& f : NKernel::GenJoinKeyTypeDecls(keyDesc)) program.push_back(std::move(f));
+        if (hasStringOutput || keyDesc.HasDistinctLookupType()) {
+            auto stringOps = NKernel::ParseFunctionLibrary(
+                NKernel::ReadAggregationKernel("string_ops.oz"));
+            if (!stringOps) {
+                throw NQumir::TError(
+                    "CompileJoin: string_ops.oz: " + stringOps.error().ToString());
+            }
+            for (auto& f : *stringOps) program.push_back(std::move(f));
+        }
         for (auto& f : NKernel::GenJoinKeyOpsFunDecls(keyDesc)) program.push_back(std::move(f));
+        for (auto& f : NKernel::GenJoinKeyOwnershipFunDecls(keyDesc)) {
+            program.push_back(std::move(f));
+        }
+        auto dualKeyLibrary = NKernel::BuildJoinDualKeyLibrary();
+        if (!dualKeyLibrary) {
+            throw NQumir::TError("CompileJoin: " + dualKeyLibrary.error().ToString());
+        }
+        for (auto& f : *dualKeyLibrary) program.push_back(std::move(f));
         for (auto& f : *library) program.push_back(std::move(f));
         program.push_back(NKernel::GenJoinProcessAst(keyDesc, /*isLeft=*/true,
-            "jt_process_left", columnType, rowSetType, hashTableType, pairBufferType));
+            "jt_process_left", columnType, rowSetType, hashTableType, pairBufferType,
+            stringViewType));
         program.push_back(NKernel::GenJoinProcessAst(keyDesc, /*isLeft=*/false,
-            "jt_process_right", columnType, rowSetType, hashTableType, pairBufferType));
+            "jt_process_right", columnType, rowSetType, hashTableType, pairBufferType,
+            stringViewType));
         program.push_back(NKernel::GenJoinProbeAst(keyDesc, /*isLeft=*/true,
-            "jt_probe_left_stream", columnType, rowSetType, hashTableType, pairBufferType));
+            "jt_probe_left_stream", columnType, rowSetType, hashTableType, pairBufferType,
+            stringViewType));
         program.push_back(NKernel::GenJoinProbeAst(keyDesc, /*isLeft=*/false,
-            "jt_probe_right_stream", columnType, rowSetType, hashTableType, pairBufferType));
+            "jt_probe_right_stream", columnType, rowSetType, hashTableType, pairBufferType,
+            stringViewType));
         if (isResidualSemiAnti) {
             program.push_back(NKernel::GenJoinInsertRowsOnlyAst(
                 keyDesc, /*isLeft=*/true, "jt_insert_left_only",
-                columnType, rowSetType, hashTableType, pairBufferType));
+                columnType, rowSetType, hashTableType, pairBufferType,
+                stringViewType));
             program.push_back(NKernel::GenJoinProbeMarkAst(
                 keyDesc, /*isLeft=*/false, "jt_probe_right_mark",
-                columnType, rowSetType, hashTableType, pairBufferType));
+                columnType, rowSetType, hashTableType, pairBufferType,
+                stringViewType));
         }
         if (isSemiAnti && !isResidualSemiAnti) {
             program.push_back(NKernel::GenJoinInsertKeyOnlyAst(
                 keyDesc, "jt_insert_key_only",
-                columnType, rowSetType, hashTableType, pairBufferType));
+                columnType, rowSetType, hashTableType, pairBufferType,
+                stringViewType));
             program.push_back(NKernel::GenJoinFinalizeSemiAntiAst(
                 keyDesc, /*isAnti=*/type == EJoinType::LeftAnti,
                 "jt_finalize_semi_anti", hashTableType, pairBufferType));
@@ -1409,26 +1462,6 @@ TJoinKernels TKernelCompiler::CompileJoin(
             keySize, type, isResidualSemiAnti,
             rowSetType, hashTableType, pairBufferType));
         // Output materializer: semi/anti joins emit only the left columns.
-        // String output columns need qdb_string_copy_bytes from string_ops.oz.
-        const bool includeRight = !isSemiAnti;
-        const bool hasStringOutput = [&] {
-            auto isString = [](const auto& field) {
-                return static_cast<bool>(TMaybeType<TStringType>(
-                    UnwrapNamedType(UnwrapNullableType(field.second))));
-            };
-            return std::any_of(leftType.Fields.begin(), leftType.Fields.end(), isString) ||
-                (includeRight && std::any_of(
-                    rightType.Fields.begin(), rightType.Fields.end(), isString));
-        }();
-        if (hasStringOutput) {
-            auto stringOps = NKernel::ParseFunctionLibrary(
-                NKernel::ReadAggregationKernel("string_ops.oz"));
-            if (!stringOps) {
-                throw NQumir::TError(
-                    "CompileJoin: string_ops.oz: " + stringOps.error().ToString());
-            }
-            for (auto& f : *stringOps) program.push_back(std::move(f));
-        }
         program.push_back(NKernel::GenJoinMaterializeAst(
             leftType, rightType, includeRight,
             columnType, rowSetType, pairBufferType, stringViewType));

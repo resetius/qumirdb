@@ -21,7 +21,8 @@ NQumir::NAst::TExprPtr GenJoinInsertKeyOnlyAst(
     NQumir::NAst::TTypePtr columnType,
     NQumir::NAst::TTypePtr rowSetType,
     NQumir::NAst::TTypePtr hashTableType,
-    NQumir::NAst::TTypePtr pairBufferType);
+    NQumir::NAst::TTypePtr pairBufferType,
+    NQumir::NAst::TTypePtr stringViewType);
 
 // Generates jt_finalize_semi / jt_finalize_anti: iterates own.GroupKeys,
 // probes opp for each key, and pushes matching (SEMI) or non-matching (ANTI)
@@ -43,8 +44,6 @@ NQumir::NAst::TExprPtr GenJoinFinalizeSemiAntiAst(
 //   <funcName>(own: <ref HashTable>, opp: <ref HashTable>,
 //              batch: <ref TRowSet>, batch_idx: i64, pairs: <ref PairBuffer>) -> bool
 //
-// Stage-4 scope: fixed-width keys only (integer/f64/composite). Throws
-// NQumir::TError for string keys (which need the dual-key path).
 NQumir::NAst::TExprPtr GenJoinProcessAst(
     const TJoinKeyDescriptor& key,
     bool isLeft,
@@ -52,7 +51,8 @@ NQumir::NAst::TExprPtr GenJoinProcessAst(
     NQumir::NAst::TTypePtr columnType,
     NQumir::NAst::TTypePtr rowSetType,
     NQumir::NAst::TTypePtr hashTableType,
-    NQumir::NAst::TTypePtr pairBufferType);
+    NQumir::NAst::TTypePtr pairBufferType,
+    NQumir::NAst::TTypePtr stringViewType);
 
 // Generates one side's insert-only function (same ABI as GenJoinProcessAst):
 // reads keys from the batch and inserts row ids into the own table without
@@ -64,7 +64,8 @@ NQumir::NAst::TExprPtr GenJoinInsertRowsOnlyAst(
     NQumir::NAst::TTypePtr columnType,
     NQumir::NAst::TTypePtr rowSetType,
     NQumir::NAst::TTypePtr hashTableType,
-    NQumir::NAst::TTypePtr pairBufferType);
+    NQumir::NAst::TTypePtr pairBufferType,
+    NQumir::NAst::TTypePtr stringViewType);
 
 // Generates one side's probe-only function (jt_probe_left_stream /
 // jt_probe_right_stream): reads stream batch keys, probes the already-built
@@ -76,7 +77,8 @@ NQumir::NAst::TExprPtr GenJoinProbeAst(
     NQumir::NAst::TTypePtr columnType,
     NQumir::NAst::TTypePtr rowSetType,
     NQumir::NAst::TTypePtr hashTableType,
-    NQumir::NAst::TTypePtr pairBufferType);
+    NQumir::NAst::TTypePtr pairBufferType,
+    NQumir::NAst::TTypePtr stringViewType);
 
 // Generates residual SEMI/ANTI right-side probe: reads right batch keys, probes
 // the left build table, applies jt_residual_filter, and marks matched left row
@@ -88,7 +90,8 @@ NQumir::NAst::TExprPtr GenJoinProbeMarkAst(
     NQumir::NAst::TTypePtr columnType,
     NQumir::NAst::TTypePtr rowSetType,
     NQumir::NAst::TTypePtr hashTableType,
-    NQumir::NAst::TTypePtr pairBufferType);
+    NQumir::NAst::TTypePtr pairBufferType,
+    NQumir::NAst::TTypePtr stringViewType);
 
 // Generates one side's rowset hash helper for shuffle:
 //   <funcName>(batch: <ref TRowSet>, hashes: <ptr u64>) -> bool
@@ -99,11 +102,17 @@ NQumir::NAst::TExprPtr GenJoinHashBatchAst(
     bool isLeft,
     const std::string& funcName,
     NQumir::NAst::TTypePtr columnType,
-    NQumir::NAst::TTypePtr rowSetType);
+    NQumir::NAst::TTypePtr rowSetType,
+    NQumir::NAst::TTypePtr stringViewType);
 
 // Generates the rh_hash / rh_key_equal overloads for the join key type, reusing
 // the aggregation key-ops generator (GenKeyOperationFunDecls).
 std::vector<NQumir::NAst::TExprPtr> GenJoinKeyOpsFunDecls(const TJoinKeyDescriptor& key);
+
+// Generates the key_owned_bytes / key_clone_owned overloads for the join key
+// type (owned-string cloning), reusing the aggregation ownership generator.
+std::vector<NQumir::NAst::TExprPtr> GenJoinKeyOwnershipFunDecls(
+    const TJoinKeyDescriptor& key);
 
 // Emits the (type ...) declarations that make the named Key type(s) known to
 // the compiler. Must be prepended to the program before any use of the Key.

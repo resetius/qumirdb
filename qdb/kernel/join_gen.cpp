@@ -40,6 +40,19 @@ TTypePtr PointerPointeeOr(const TTypePtr& pointerType, const TTypePtr& fallback)
     return fallback ? fallback : NamedType("TColumn");
 }
 
+TAggregateKeyDescriptor JoinKeyAggregateShim(const TJoinKeyDescriptor& key) {
+    TAggregateKeyDescriptor shim;
+    shim.TypeName = key.TypeName;
+    shim.LookupTypeName = key.LookupTypeName;
+    shim.StoredTypeName = key.StoredTypeName;
+    shim.KeyType = key.KeyType;
+    shim.LookupType = key.LookupType;
+    shim.StoredType = key.StoredType;
+    shim.Size = key.Size;
+    shim.Alignment = key.Alignment;
+    return shim;
+}
+
 } // namespace
 
 std::vector<NQumir::NAst::TExprPtr> GenJoinKeyTypeDecls(const TJoinKeyDescriptor& key) {
@@ -57,17 +70,13 @@ std::vector<NQumir::NAst::TExprPtr> GenJoinKeyTypeDecls(const TJoinKeyDescriptor
 }
 
 std::vector<NQumir::NAst::TExprPtr> GenJoinKeyOpsFunDecls(const TJoinKeyDescriptor& key) {
-    // GenKeyOperationFunDecls only reads the type fields, so a thin shim suffices.
-    TAggregateKeyDescriptor shim;
-    shim.TypeName = key.TypeName;
-    shim.LookupTypeName = key.LookupTypeName;
-    shim.StoredTypeName = key.StoredTypeName;
-    shim.KeyType = key.KeyType;
-    shim.LookupType = key.LookupType;
-    shim.StoredType = key.StoredType;
-    shim.Size = key.Size;
-    shim.Alignment = key.Alignment;
-    return GenKeyOperationFunDecls(shim);
+    return GenKeyOperationFunDecls(JoinKeyAggregateShim(key));
+}
+
+std::vector<NQumir::NAst::TExprPtr> GenJoinKeyOwnershipFunDecls(
+    const TJoinKeyDescriptor& key)
+{
+    return GenKeyOwnershipFunDecls(JoinKeyAggregateShim(key));
 }
 
 NQumir::NAst::TExprPtr GenJoinInsertKeyOnlyAst(
@@ -76,14 +85,10 @@ NQumir::NAst::TExprPtr GenJoinInsertKeyOnlyAst(
     NQumir::NAst::TTypePtr columnType,
     NQumir::NAst::TTypePtr rowSetType,
     NQumir::NAst::TTypePtr hashTableType,
-    NQumir::NAst::TTypePtr pairBufferType)
+    NQumir::NAst::TTypePtr pairBufferType,
+    NQumir::NAst::TTypePtr stringViewType)
 {
     NQumir::TLocation loc{};
-
-    if (key.HasDistinctLookupType()) {
-        throw NQumir::TError(
-            "GenJoinInsertKeyOnlyAst: string keys not supported yet");
-    }
 
     auto i64Type = std::make_shared<TIntegerType>();
     auto u8Type = std::make_shared<TIntegerType>(TIntegerType::U8);
@@ -172,13 +177,13 @@ NQumir::NAst::TExprPtr GenJoinInsertKeyOnlyAst(
         keyFields.push_back(BuildColumnValueAst(
             "key_column_" + std::to_string(fi), "i",
             "key_value_" + std::to_string(fi),
-            std::move(logicalType), nullptr));
+            std::move(logicalType), stringViewType));
     }
 
-    auto namedKey = TMaybeType<TNamedType>(key.KeyType);
+    auto namedKey = TMaybeType<TNamedType>(key.LookupType);
     auto keyStruct = namedKey
         ? TMaybeType<TStructType>(namedKey.Cast()->UnderlyingType)
-        : TMaybeType<TStructType>(key.KeyType);
+        : TMaybeType<TStructType>(key.LookupType);
     if (!keyStruct) {
         throw NQumir::TError("GenJoinInsertKeyOnlyAst: key must be a struct");
     }
@@ -193,9 +198,13 @@ NQumir::NAst::TExprPtr GenJoinInsertKeyOnlyAst(
             : keyFields[fieldIndex].Value);
     }
     TExprPtr keyValue = std::make_shared<TStructConstructExpr>(
-        loc, key.KeyType, std::move(structFields));
+        loc, key.LookupType, std::move(structFields));
 
-    auto insertCall = call("jt_insert_slot_only", {ident("own"), std::move(keyValue)});
+    body.push_back(var("stored_witness", key.StoredType));
+    body.push_back(assign("stored_witness", ZeroValueExpr(key.StoredType)));
+
+    auto insertCall = call("jt_insert_slot_only", {
+        ident("own"), std::move(keyValue), ident("stored_witness")});
 
     std::vector<TExprPtr> process;
     for (auto& kf : keyFields) {
@@ -231,11 +240,6 @@ NQumir::NAst::TExprPtr GenJoinFinalizeSemiAntiAst(
     NQumir::NAst::TTypePtr pairBufferType)
 {
     NQumir::TLocation loc{};
-
-    if (key.HasDistinctLookupType()) {
-        throw NQumir::TError(
-            "GenJoinFinalizeSemiAntiAst: string keys not supported yet");
-    }
 
     auto i64Type = std::make_shared<TIntegerType>();
     auto boolType = std::make_shared<TBoolType>();
@@ -398,14 +402,10 @@ NQumir::NAst::TExprPtr GenJoinBatchAst(
     NQumir::NAst::TTypePtr rowSetType,
     NQumir::NAst::TTypePtr hashTableType,
     NQumir::NAst::TTypePtr pairBufferType,
+    NQumir::NAst::TTypePtr stringViewType,
     EJoinBatchMode mode)
 {
     NQumir::TLocation loc{};
-
-    if (key.HasDistinctLookupType()) {
-        throw NQumir::TError(
-            "GenJoinBatchAst: string keys are not supported yet (Stage 4 fixed-key scope)");
-    }
 
     auto i64Type = std::make_shared<TIntegerType>();
     auto u8Type = std::make_shared<TIntegerType>(TIntegerType::U8);
@@ -493,6 +493,10 @@ NQumir::NAst::TExprPtr GenJoinBatchAst(
     body.push_back(var("selection_is_null", boolType));
     body.push_back(assign("selection_is_null",
         binary("==", cast(ident("selection"), i64Type), numI64(0))));
+    // The stored_witness value only binds the StoredKey template type at the
+    // generic dual-key call sites; a zero value works for every mode.
+    body.push_back(var("stored_witness", key.StoredType));
+    body.push_back(assign("stored_witness", ZeroValueExpr(key.StoredType)));
     body.push_back(var("i", i64Type));
     body.push_back(assign("i", numI64(0)));
 
@@ -506,15 +510,15 @@ NQumir::NAst::TExprPtr GenJoinBatchAst(
         keyFields.push_back(BuildColumnValueAst(
             "key_column_" + std::to_string(fieldIndex), "i",
             "key_value_" + std::to_string(fieldIndex),
-            std::move(logicalType), /*stringViewType=*/nullptr));
+            std::move(logicalType), stringViewType));
     }
 
     // Build the <named Key> struct value (key_N <- Value, valid_N <- IsValid,
     // padding <- 0), in the order the Key struct declares.
-    auto namedKey = TMaybeType<TNamedType>(key.KeyType);
+    auto namedKey = TMaybeType<TNamedType>(key.LookupType);
     auto keyStruct = namedKey
         ? TMaybeType<TStructType>(namedKey.Cast()->UnderlyingType)
-        : TMaybeType<TStructType>(key.KeyType);
+        : TMaybeType<TStructType>(key.LookupType);
     if (!keyStruct) {
         throw NQumir::TError("GenJoinBatchAst: key must be a struct");
     }
@@ -529,7 +533,7 @@ NQumir::NAst::TExprPtr GenJoinBatchAst(
             : keyFields[fieldIndex].Value);
     }
     TExprPtr keyValue = std::make_shared<TStructConstructExpr>(
-        loc, key.KeyType, std::move(structFields));
+        loc, key.LookupType, std::move(structFields));
 
     // own_row_id = (batch_idx << 32) | (i & 0xffffffff)
     auto ownRowId = binary("+",
@@ -539,7 +543,8 @@ NQumir::NAst::TExprPtr GenJoinBatchAst(
     TExprPtr emitCall;
     if (mode == EJoinBatchMode::ProbeInsert) {
         emitCall = call("jt_emit_and_insert", {
-            ident("own"), ident("opp"), std::move(keyValue), std::move(ownRowId),
+            ident("own"), ident("opp"), std::move(keyValue),
+            ident("stored_witness"), std::move(ownRowId),
             numI64(isLeft ? 1 : 0), ident("pairs"),
             ident("left_store"), ident("right_store"),
         });
@@ -548,7 +553,8 @@ NQumir::NAst::TExprPtr GenJoinBatchAst(
             return std::make_shared<TIndexExpr>(loc, ident(store), numI64(0));
         };
         emitCall = call("jt_probe_and_emit", {
-            ident("build"), std::move(keyValue), std::move(ownRowId),
+            ident("build"), std::move(keyValue), ident("stored_witness"),
+            std::move(ownRowId),
             numI64(isLeft ? 1 : 0), ident("pairs"),
             ident("left_store"), ident("right_store"),
             isLeft ? ident("batch") : storeBatchRef("left_store"),
@@ -556,13 +562,15 @@ NQumir::NAst::TExprPtr GenJoinBatchAst(
         });
     } else if (mode == EJoinBatchMode::InsertOnly) {
         emitCall = call("jt_insert_row_only", {
-            ident("own"), std::move(keyValue), std::move(ownRowId),
+            ident("own"), std::move(keyValue), ident("stored_witness"),
+            std::move(ownRowId),
         });
     } else {
         emitCall = call("jt_probe_and_mark", {
             ident("build"),
             ident("matched"),
             std::move(keyValue),
+            ident("stored_witness"),
             std::move(ownRowId),
             ident("left_store"),
             ident("right_store"),
@@ -607,11 +615,12 @@ NQumir::NAst::TExprPtr GenJoinProcessAst(
     NQumir::NAst::TTypePtr columnType,
     NQumir::NAst::TTypePtr rowSetType,
     NQumir::NAst::TTypePtr hashTableType,
-    NQumir::NAst::TTypePtr pairBufferType)
+    NQumir::NAst::TTypePtr pairBufferType,
+    NQumir::NAst::TTypePtr stringViewType)
 {
     return GenJoinBatchAst(key, isLeft, funcName, std::move(columnType),
         std::move(rowSetType), std::move(hashTableType), std::move(pairBufferType),
-        EJoinBatchMode::ProbeInsert);
+        std::move(stringViewType), EJoinBatchMode::ProbeInsert);
 }
 
 NQumir::NAst::TExprPtr GenJoinInsertRowsOnlyAst(
@@ -621,11 +630,12 @@ NQumir::NAst::TExprPtr GenJoinInsertRowsOnlyAst(
     NQumir::NAst::TTypePtr columnType,
     NQumir::NAst::TTypePtr rowSetType,
     NQumir::NAst::TTypePtr hashTableType,
-    NQumir::NAst::TTypePtr pairBufferType)
+    NQumir::NAst::TTypePtr pairBufferType,
+    NQumir::NAst::TTypePtr stringViewType)
 {
     return GenJoinBatchAst(key, isLeft, funcName, std::move(columnType),
         std::move(rowSetType), std::move(hashTableType), std::move(pairBufferType),
-        EJoinBatchMode::InsertOnly);
+        std::move(stringViewType), EJoinBatchMode::InsertOnly);
 }
 
 NQumir::NAst::TExprPtr GenJoinProbeAst(
@@ -635,11 +645,12 @@ NQumir::NAst::TExprPtr GenJoinProbeAst(
     NQumir::NAst::TTypePtr columnType,
     NQumir::NAst::TTypePtr rowSetType,
     NQumir::NAst::TTypePtr hashTableType,
-    NQumir::NAst::TTypePtr pairBufferType)
+    NQumir::NAst::TTypePtr pairBufferType,
+    NQumir::NAst::TTypePtr stringViewType)
 {
     return GenJoinBatchAst(key, isLeft, funcName, std::move(columnType),
         std::move(rowSetType), std::move(hashTableType), std::move(pairBufferType),
-        EJoinBatchMode::ProbeOnly);
+        std::move(stringViewType), EJoinBatchMode::ProbeOnly);
 }
 
 NQumir::NAst::TExprPtr GenJoinProbeMarkAst(
@@ -649,11 +660,12 @@ NQumir::NAst::TExprPtr GenJoinProbeMarkAst(
     NQumir::NAst::TTypePtr columnType,
     NQumir::NAst::TTypePtr rowSetType,
     NQumir::NAst::TTypePtr hashTableType,
-    NQumir::NAst::TTypePtr pairBufferType)
+    NQumir::NAst::TTypePtr pairBufferType,
+    NQumir::NAst::TTypePtr stringViewType)
 {
     return GenJoinBatchAst(key, isLeft, funcName, std::move(columnType),
         std::move(rowSetType), std::move(hashTableType), std::move(pairBufferType),
-        EJoinBatchMode::ProbeMark);
+        std::move(stringViewType), EJoinBatchMode::ProbeMark);
 }
 
 NQumir::NAst::TExprPtr GenJoinDispatchAst(
@@ -888,14 +900,10 @@ NQumir::NAst::TExprPtr GenJoinHashBatchAst(
     bool isLeft,
     const std::string& funcName,
     NQumir::NAst::TTypePtr columnType,
-    NQumir::NAst::TTypePtr rowSetType)
+    NQumir::NAst::TTypePtr rowSetType,
+    NQumir::NAst::TTypePtr stringViewType)
 {
     NQumir::TLocation loc{};
-
-    if (key.HasDistinctLookupType()) {
-        throw NQumir::TError(
-            "GenJoinHashBatchAst: string keys are not supported yet");
-    }
 
     auto i64Type = std::make_shared<TIntegerType>();
     auto u64Type = std::make_shared<TIntegerType>(TIntegerType::U64);
@@ -972,13 +980,13 @@ NQumir::NAst::TExprPtr GenJoinHashBatchAst(
         keyFields.push_back(BuildColumnValueAst(
             "key_column_" + std::to_string(fieldIndex), "i",
             "hash_key_value_" + std::to_string(fieldIndex),
-            std::move(logicalType), /*stringViewType=*/nullptr));
+            std::move(logicalType), stringViewType));
     }
 
-    auto namedKey = TMaybeType<TNamedType>(key.KeyType);
+    auto namedKey = TMaybeType<TNamedType>(key.LookupType);
     auto keyStruct = namedKey
         ? TMaybeType<TStructType>(namedKey.Cast()->UnderlyingType)
-        : TMaybeType<TStructType>(key.KeyType);
+        : TMaybeType<TStructType>(key.LookupType);
     if (!keyStruct) {
         throw NQumir::TError("GenJoinHashBatchAst: key must be a struct");
     }
@@ -993,7 +1001,7 @@ NQumir::NAst::TExprPtr GenJoinHashBatchAst(
             : keyFields[fieldIndex].Value);
     }
     TExprPtr keyValue = std::make_shared<TStructConstructExpr>(
-        loc, key.KeyType, std::move(structFields));
+        loc, key.LookupType, std::move(structFields));
 
     std::vector<TExprPtr> process;
     for (auto& keyField : keyFields) {

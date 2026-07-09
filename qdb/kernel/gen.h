@@ -73,6 +73,11 @@ std::vector<NQumir::NAst::TExprPtr> GenKeyOperationFunDecls(
 std::vector<NQumir::NAst::TExprPtr> GenKeyOwnershipFunDecls(
     const TAggregateKeyDescriptor& key);
 
+// Builds a zero value of `type`: 0 / 0.0 / false / null pointer, or a struct
+// with every field zeroed. Used for the stored_witness argument that binds the
+// StoredKey template type at dual-key call sites.
+NQumir::NAst::TExprPtr ZeroValueExpr(const NQumir::NAst::TTypePtr& type);
+
 void SubstFieldsInPlace(
     NQumir::NAst::TExprPtr& expr,
     const std::unordered_set<std::string>& fieldNames,
