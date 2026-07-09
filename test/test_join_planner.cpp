@@ -120,6 +120,42 @@ TEST(JoinPlanner, InnerJoinE2E) {
     EXPECT_EQ(got, expected);
 }
 
+TEST(JoinPlanner, CrossJoinE2E) {
+    std::vector<int64_t> lk = {1, 2};
+    std::vector<int64_t> lv = {10, 20};
+    std::vector<int64_t> rk = {7, 8};
+    std::vector<int64_t> rv = {70, 80};
+    std::vector<TColumn> lcols, rcols;
+    TVectorSource left({"lk", "lv"}, {KeyValBatch(lk.data(), lv.data(), 2, lcols)});
+    TVectorSource right({"rk", "rv"}, {KeyValBatch(rk.data(), rv.data(), 2, rcols)});
+
+    auto plan = PlanJoin(
+        "(rel join (rel source \"L\") (rel source \"R\") () (inner))",
+        left, right);
+
+    std::vector<std::tuple<int64_t, int64_t, int64_t, int64_t>> got;
+    TRowSet out{};
+    while (plan->Next(out)) {
+        ASSERT_EQ(out.ColumnCount, 4);
+        for (int64_t i = 0; i < out.RowCount; ++i) {
+            got.emplace_back(
+                reinterpret_cast<const int64_t*>(out.Columns[0].Data)[i],
+                reinterpret_cast<const int64_t*>(out.Columns[1].Data)[i],
+                reinterpret_cast<const int64_t*>(out.Columns[2].Data)[i],
+                reinterpret_cast<const int64_t*>(out.Columns[3].Data)[i]);
+        }
+        Release(&out);
+    }
+
+    std::vector<std::tuple<int64_t, int64_t, int64_t, int64_t>> expected = {
+        {1, 10, 7, 70}, {1, 10, 8, 80},
+        {2, 20, 7, 70}, {2, 20, 8, 80},
+    };
+    std::sort(got.begin(), got.end());
+    std::sort(expected.begin(), expected.end());
+    EXPECT_EQ(got, expected);
+}
+
 TEST(JoinPlanner, SchedulerThreadedInnerJoinE2E) {
     std::vector<int64_t> lk = {1, 2, 1, 3}, lv = {10, 20, 30, 40};
     std::vector<int64_t> rk = {1, 1, 3, 4}, rv = {100, 200, 300, 400};
@@ -273,6 +309,69 @@ TEST(JoinPlanner, CompositeI32KeyE2E) {
     }
     // (1,7)x(1,7) and (2,7)x(2,7) match -> 2 rows.
     EXPECT_EQ(rows, 2);
+}
+
+TEST(JoinPlanner, ResidualLeftSemiMarksInKernel) {
+    std::vector<int64_t> lk = {1, 1, 2}, lv = {10, 20, 30};
+    std::vector<int64_t> rk = {1, 2}, rv = {10, 30};
+    std::vector<TColumn> lcols, rcols;
+    TVectorSource left({"lk", "lv"}, {KeyValBatch(lk.data(), lv.data(), 3, lcols)});
+    TVectorSource right({"rk", "rv"}, {KeyValBatch(rk.data(), rv.data(), 2, rcols)});
+
+    auto plan = PlanJoin(
+        "(rel join (rel source \"L\") (rel source \"R\") "
+        "((lk rk)) (left_semi) (!= lv rv))",
+        left, right);
+
+    std::vector<std::tuple<int64_t, int64_t>> got;
+    TRowSet out{};
+    while (plan->Next(out)) {
+        ASSERT_EQ(out.ColumnCount, 2);
+        for (int64_t i = 0; i < out.RowCount; ++i) {
+            got.emplace_back(
+                reinterpret_cast<const int64_t*>(out.Columns[0].Data)[i],
+                reinterpret_cast<const int64_t*>(out.Columns[1].Data)[i]);
+        }
+        Release(&out);
+    }
+
+    std::vector<std::tuple<int64_t, int64_t>> expected = {{1, 20}};
+    EXPECT_EQ(got, expected);
+}
+
+TEST(JoinPlanner, ResidualLeftAntiHonorsLeftSelection) {
+    std::vector<int64_t> lk = {1, 2, 3, 4}, lv = {10, 20, 30, 40};
+    std::vector<uint8_t> selection = {1, 0, 1, 0};
+    std::vector<TColumn> lcols;
+    auto lbatch = KeyValBatch(lk.data(), lv.data(), 4, lcols);
+    lbatch.Selection = selection.data();
+
+    auto leftType = std::vector<TTypePtr>{I64T(), I64T()};
+    TVectorSource left({"lk", "lv"}, {lbatch}, leftType);
+    TVectorSource right({"rk", "rv"}, {}, leftType);
+
+    auto plan = PlanJoin(
+        "(rel join (rel source \"L\") (rel source \"R\") "
+        "((lk rk)) (left_anti) (!= lv rv))",
+        left, right);
+
+    std::vector<std::tuple<int64_t, int64_t>> got;
+    TRowSet out{};
+    while (plan->Next(out)) {
+        ASSERT_EQ(out.ColumnCount, 2);
+        for (int64_t i = 0; i < out.RowCount; ++i) {
+            got.emplace_back(
+                reinterpret_cast<const int64_t*>(out.Columns[0].Data)[i],
+                reinterpret_cast<const int64_t*>(out.Columns[1].Data)[i]);
+        }
+        Release(&out);
+    }
+
+    std::vector<std::tuple<int64_t, int64_t>> expected = {
+        {1, 10},
+        {3, 30},
+    };
+    EXPECT_EQ(got, expected);
 }
 
 int main(int argc, char** argv) {

@@ -1531,8 +1531,6 @@ bool BrowserSupportsJoin(NQdb::EJoinType type, bool hasResidual) {
     if ((type == EJoinType::Left || type == EJoinType::Right) && !hasResidual) {
         return true;
     }
-    // Semi/anti with residual compiles as an inner kernel; the runtime dedups
-    // matched left ids and finalizes with a JS scan.
     if (type == EJoinType::LeftSemi || type == EJoinType::LeftAnti) {
         return true;
     }
@@ -1673,9 +1671,9 @@ struct TExecGraphBuilder {
     }
 
     // Keyless join = cross product (a scalar-subquery broadcast in practice).
-    // The glue is pure column stitching; the residual predicate runs as a
-    // plain filter node over the glued schema, reusing the kernel the lowerer
-    // generated for the join operator.
+    // Pair emission is handled by the generated cross-join kernel; the
+    // residual predicate runs as a plain filter node over the glued schema,
+    // reusing the filter kernel the lowerer generated for the join operator.
     TExecGraphBuildResult BuildCrossJoin(
         NQdb::TJoinOperator& join,
         const TExecGraphBuildResult& left,
@@ -1701,8 +1699,18 @@ struct TExecGraphBuilder {
             static_cast<NQumir::NAst::TStructType*>(right.OutputType.get());
         auto* outStruct =
             static_cast<NQumir::NAst::TStructType*>(outputType->get());
+        const auto* crossKernel = FindKernel(Kernels, &join, "cross-join");
+        if (!crossKernel) {
+            Unsupported = UnsupportedExec("cross join kernel was not generated");
+            return {};
+        }
+        if (EmbedWasm && crossKernel->Artifacts->Wasm.empty()) {
+            Unsupported = UnsupportedExec("cross join kernel failed to compile to wasm");
+            return {};
+        }
         const int64_t crossId = AddNode(llvm::json::Object{
             {"kind", "cross-join"},
+            {"wasm", crossKernel->Artifacts->Wasm},
             {"leftColumns", StructColumnsJson(*leftStruct)},
             {"rightColumns", StructColumnsJson(*rightStruct)},
             {"output", StructColumnsJson(*outStruct)},

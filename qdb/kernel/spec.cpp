@@ -291,6 +291,36 @@ TOperatorKernelSpec BuildJoinKernelSpec(
     };
 }
 
+TOperatorKernelSpec BuildCrossJoinKernelSpec(
+    const NQumir::NAst::TStructType& leftType,
+    const NQumir::NAst::TStructType& rightType)
+{
+    auto outputType = ComputeJoinOutputType(
+        std::make_shared<NQumir::NAst::TStructType>(leftType.Fields),
+        std::make_shared<NQumir::NAst::TStructType>(rightType.Fields),
+        EJoinType::Inner);
+    if (!outputType) {
+        throw std::runtime_error(
+            "cross join kernel spec: " + outputType.error().ToString());
+    }
+
+    return TOperatorKernelSpec{
+        .Kind = EOperatorKernelKind::Binary,
+        .OperatorName = "cross-join",
+        .InputSchemas = {
+            std::make_shared<NQumir::NAst::TStructType>(leftType.Fields),
+            std::make_shared<NQumir::NAst::TStructType>(rightType.Fields),
+        },
+        .OutputSchema = std::move(*outputType),
+        .JoinType = EJoinType::Inner,
+        .Entrypoints = {
+            {.Name = "xj_dispatch", .Abi = "bool(ptr TRowSet, i64, ptr TRowSet, i64, ptr PairBuffer, i64)"},
+            {.Name = "jt_materialize", .Abi = "i64(ptr PairBuffer, ptr TRowSet, ptr TRowSet, ptr TRowSet, ptr TRowSet, i64, i64, ptr TRowSet)"},
+        },
+        .SourceModules = {"qumirdb"},
+    };
+}
+
 void PrintKernelSpec(std::ostream& out, const TOperatorKernelSpec& spec) {
     out << "kernel-spec " << spec.OperatorName << "\n";
     out << "  kind: " << KernelKindName(spec.Kind) << "\n";

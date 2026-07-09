@@ -243,6 +243,31 @@ TEST(KernelSpec, BuildsJoinSpecFromEquiKeys) {
     EXPECT_EQ(spec.SourceModules[0], "qumirdb");
 }
 
+TEST(KernelSpec, BuildsCrossJoinSpec) {
+    using namespace NQumir::NAst;
+
+    auto i64 = std::make_shared<TIntegerType>();
+    TStructType left({
+        {"lk", i64},
+    });
+    TStructType right({
+        {"rv", i64},
+    });
+
+    auto spec = NKernel::BuildCrossJoinKernelSpec(left, right);
+
+    EXPECT_EQ(spec.Kind, NKernel::EOperatorKernelKind::Binary);
+    EXPECT_EQ(spec.OperatorName, "cross-join");
+    EXPECT_EQ(spec.JoinType, EJoinType::Inner);
+    ASSERT_EQ(spec.InputSchemas.size(), 2u);
+    EXPECT_TRUE(spec.JoinKeys.empty());
+    ASSERT_EQ(spec.Entrypoints.size(), 2u);
+    EXPECT_EQ(spec.Entrypoints[0].Name, "xj_dispatch");
+    EXPECT_EQ(spec.Entrypoints[1].Name, "jt_materialize");
+    ASSERT_EQ(spec.SourceModules.size(), 1u);
+    EXPECT_EQ(spec.SourceModules[0], "qumirdb");
+}
+
 TEST(OzFunBuilder, BuildsFunctionDeclaration) {
     using namespace NQumir::NAst;
 

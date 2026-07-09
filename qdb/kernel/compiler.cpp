@@ -1136,6 +1136,115 @@ TJoinKernels TKernelCompiler::CompileJoin(
         residualPredicate, innerType, leftFieldCount);
 }
 
+TCrossJoinKernels TKernelCompiler::CompileCrossJoin(
+    const NKernel::TOperatorKernelSpec& spec)
+{
+    using namespace NQumir::NAst;
+
+    if (spec.Kind != NKernel::EOperatorKernelKind::Binary ||
+        spec.OperatorName != "cross-join") {
+        throw NQumir::TError("CompileCrossJoin: expected cross-join kernel spec");
+    }
+    if (spec.InputSchemas.size() != 2) {
+        throw NQumir::TError("CompileCrossJoin: expected two input schemas");
+    }
+
+    auto leftType = TMaybeType<TStructType>(spec.InputSchemas[0]);
+    auto rightType = TMaybeType<TStructType>(spec.InputSchemas[1]);
+    if (!leftType || !rightType) {
+        throw NQumir::TError("CompileCrossJoin: input schemas must be structs");
+    }
+
+    if (Diagnostics_) {
+        *Diagnostics_ << "\n========== KERNEL SPEC ==========\n";
+        NKernel::PrintKernelSpec(*Diagnostics_, spec);
+        *Diagnostics_ << "=================================\n";
+    }
+
+    auto columnType = QumirDbNamedType("TColumn");
+    auto rowSetType = QumirDbNamedType("TRowSet");
+    auto pairBufferType = QumirDbNamedType("PairBuffer");
+    auto stringViewType = QumirDbNamedType("StringView");
+
+    auto buildProgram = [&]() -> std::vector<TExprPtr> {
+        auto library = NKernel::BuildJoinKernelLibrary();
+        if (!library) {
+            throw NQumir::TError(
+                "CompileCrossJoin: " + library.error().ToString());
+        }
+
+        std::vector<TExprPtr> program;
+        for (auto& f : *library) {
+            program.push_back(std::move(f));
+        }
+
+        const bool hasStringOutput = [&] {
+            auto isString = [](const auto& field) {
+                return static_cast<bool>(TMaybeType<TStringType>(
+                    UnwrapNamedType(UnwrapNullableType(field.second))));
+            };
+            return std::any_of(
+                leftType.Cast()->Fields.begin(), leftType.Cast()->Fields.end(), isString) ||
+                std::any_of(
+                    rightType.Cast()->Fields.begin(), rightType.Cast()->Fields.end(), isString);
+        }();
+        if (hasStringOutput) {
+            auto stringOps = NKernel::ParseFunctionLibrary(
+                NKernel::ReadAggregationKernel("string_ops.oz"));
+            if (!stringOps) {
+                throw NQumir::TError(
+                    "CompileCrossJoin: string_ops.oz: " +
+                    stringOps.error().ToString());
+            }
+            for (auto& f : *stringOps) {
+                program.push_back(std::move(f));
+            }
+        }
+
+        program.push_back(NKernel::GenJoinMaterializeAst(
+            *leftType.Cast(), *rightType.Cast(), /*includeRight=*/true,
+            columnType, rowSetType, pairBufferType, stringViewType));
+        return program;
+    };
+
+    std::vector<std::string> entries = {"xj_dispatch", "jt_materialize"};
+    auto program = std::make_shared<TBlockExpr>(NQumir::TLocation{}, buildProgram());
+    PrintKernelAst(Diagnostics_, "cross-join", program);
+
+    auto kernel = EmitKernel("cross-join", entries, std::move(program));
+    FinishKernelDiagnostics(Diagnostics_);
+
+    auto slot = kernel.Slot;
+    using TDispatchFn = bool(*)(TRowSet*, int64_t, TRowSet*, int64_t, void*, int64_t);
+    using TMaterializeFn = int64_t(*)(
+        void*, TRowSet*, TRowSet*, TRowSet*, TRowSet*, int64_t, int64_t, TRowSet*);
+
+    TCrossJoinKernels kernels;
+    kernels.Dispatch = [slot](
+        TRowSet* batch,
+        int64_t batchIdx,
+        TRowSet* rightStore,
+        int64_t rightBatchCount,
+        void* pairs,
+        int64_t op) {
+        return reinterpret_cast<TDispatchFn>(slot->Fns[0])(
+            batch, batchIdx, rightStore, rightBatchCount, pairs, op);
+    };
+    kernels.Materialize = [slot](
+        void* pairs,
+        TRowSet* leftStore,
+        TRowSet* rightStore,
+        TRowSet* streamLeft,
+        TRowSet* streamRight,
+        int64_t start,
+        int64_t limit,
+        TRowSet* out) {
+        return reinterpret_cast<TMaterializeFn>(slot->Fns[1])(
+            pairs, leftStore, rightStore, streamLeft, streamRight, start, limit, out);
+    };
+    return kernels;
+}
+
 TJoinHashKernels TKernelCompiler::CompileJoinHash(
     const NKernel::TOperatorKernelSpec& spec)
 {
@@ -1274,6 +1383,14 @@ TJoinKernels TKernelCompiler::CompileJoin(
             "jt_probe_left_stream", columnType, rowSetType, hashTableType, pairBufferType));
         program.push_back(NKernel::GenJoinProbeAst(keyDesc, /*isLeft=*/false,
             "jt_probe_right_stream", columnType, rowSetType, hashTableType, pairBufferType));
+        if (isResidualSemiAnti) {
+            program.push_back(NKernel::GenJoinInsertRowsOnlyAst(
+                keyDesc, /*isLeft=*/true, "jt_insert_left_only",
+                columnType, rowSetType, hashTableType, pairBufferType));
+            program.push_back(NKernel::GenJoinProbeMarkAst(
+                keyDesc, /*isLeft=*/false, "jt_probe_right_mark",
+                columnType, rowSetType, hashTableType, pairBufferType));
+        }
         if (isSemiAnti && !isResidualSemiAnti) {
             program.push_back(NKernel::GenJoinInsertKeyOnlyAst(
                 keyDesc, "jt_insert_key_only",

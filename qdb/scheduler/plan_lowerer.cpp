@@ -120,19 +120,16 @@ struct TTopSortBlockingState {
 struct TSchedulerInnerJoinState {
     TSchedulerInnerJoinState(
         TJoinKernels kernels,
-        EJoinType joinType,
-        bool hasResidual)
-        : Processor(std::move(kernels), joinType, hasResidual)
+        EJoinType joinType)
+        : Processor(std::move(kernels), joinType)
     {}
 
     TInnerJoinProcessor Processor;
 };
 
 struct TSchedulerCrossJoinState {
-    TSchedulerCrossJoinState(
-        NQumir::NAst::TTypePtr leftType,
-        NQumir::NAst::TTypePtr rightType)
-        : Processor(std::move(leftType), std::move(rightType))
+    explicit TSchedulerCrossJoinState(TCrossJoinKernels kernels)
+        : Processor(std::move(kernels))
     {}
 
     TCrossJoinProcessor Processor;
@@ -1435,6 +1432,19 @@ private:
         }
         auto crossType = *crossTypeExp;
 
+        auto* leftStruct = static_cast<NQumir::NAst::TStructType*>(leftType.get());
+        auto* rightStruct = static_cast<NQumir::NAst::TStructType*>(rightType.get());
+        if (!leftStruct || !rightStruct) {
+            throw std::runtime_error("scheduler cross join inputs must have TStructType");
+        }
+        auto kernelSpec = NKernel::BuildCrossJoinKernelSpec(*leftStruct, *rightStruct);
+        const auto crossGroup = StageGroup("join", &join);
+        TKernelCompiler compiler(KernelOptions(crossGroup, &join));
+        auto crossKernels = std::make_shared<TCrossJoinKernels>(
+            [&]() {
+                TStageDiagnosticsScope diagnosticsScope(Diagnostics_, crossGroup);
+                return compiler.CompileCrossJoin(kernelSpec);
+            }());
         auto crossCode = MakeBinaryJoinCode<TSchedulerCrossJoinState>();
 
         const bool hasResidual = join.Filter() != nullptr;
@@ -1451,7 +1461,7 @@ private:
         for (size_t m = 0; m < lanes; ++m) {
             auto task = std::make_unique<NScheduler::TBinaryBlockingTask>(
                 crossCode,
-                std::make_shared<TSchedulerCrossJoinState>(leftType, rightType),
+                std::make_shared<TSchedulerCrossJoinState>(*crossKernels),
                 NScheduler::TInputPort{.Connection = &vectorRef, .Lane = m},
                 NScheduler::TInputPort{.Connection = scalarInput, .Lane = m},
                 NScheduler::TOutputPort{.Connection = crossOut, .Lane = m});
@@ -1549,8 +1559,7 @@ private:
             auto task = std::make_unique<NScheduler::TBinaryBlockingTask>(
                 joinCode,
                 std::make_shared<TSchedulerInnerJoinState>(
-                    *joinKernels, join.JoinType(),
-                    join.Filter() != nullptr),
+                    *joinKernels, join.JoinType()),
                 NScheduler::TInputPort{
                     .Connection = &leftPipeRef, .Lane = 0},
                 NScheduler::TInputPort{
@@ -1592,8 +1601,7 @@ private:
             auto task = std::make_unique<NScheduler::TBinaryBlockingTask>(
                 joinCode,
                 std::make_shared<TSchedulerInnerJoinState>(
-                    *joinKernels, join.JoinType(),
-                    join.Filter() != nullptr),
+                    *joinKernels, join.JoinType()),
                 NScheduler::TInputPort{
                     .Connection = leftShuf.Connection, .Lane = j},
                 NScheduler::TInputPort{

@@ -54,10 +54,34 @@ NQumir::NAst::TExprPtr GenJoinProcessAst(
     NQumir::NAst::TTypePtr hashTableType,
     NQumir::NAst::TTypePtr pairBufferType);
 
+// Generates one side's insert-only function (same ABI as GenJoinProcessAst):
+// reads keys from the batch and inserts row ids into the own table without
+// probing the opposite table. Used by residual SEMI/ANTI for the left build.
+NQumir::NAst::TExprPtr GenJoinInsertRowsOnlyAst(
+    const TJoinKeyDescriptor& key,
+    bool isLeft,
+    const std::string& funcName,
+    NQumir::NAst::TTypePtr columnType,
+    NQumir::NAst::TTypePtr rowSetType,
+    NQumir::NAst::TTypePtr hashTableType,
+    NQumir::NAst::TTypePtr pairBufferType);
+
 // Generates one side's probe-only function (jt_probe_left_stream /
 // jt_probe_right_stream): reads stream batch keys, probes the already-built
 // opposite table, and emits pairs without inserting stream rows into any table.
 NQumir::NAst::TExprPtr GenJoinProbeAst(
+    const TJoinKeyDescriptor& key,
+    bool isLeft,
+    const std::string& funcName,
+    NQumir::NAst::TTypePtr columnType,
+    NQumir::NAst::TTypePtr rowSetType,
+    NQumir::NAst::TTypePtr hashTableType,
+    NQumir::NAst::TTypePtr pairBufferType);
+
+// Generates residual SEMI/ANTI right-side probe: reads right batch keys, probes
+// the left build table, applies jt_residual_filter, and marks matched left row
+// ids in the matched-id table instead of emitting output pairs.
+NQumir::NAst::TExprPtr GenJoinProbeMarkAst(
     const TJoinKeyDescriptor& key,
     bool isLeft,
     const std::string& funcName,

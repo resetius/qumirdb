@@ -17,6 +17,13 @@ namespace NQdb {
 
 using namespace NQumir::NAst;
 
+struct TGatheredColumn {
+    std::vector<char> Data;
+    std::vector<int64_t> Offsets;
+    std::vector<uint8_t> Mask;
+    TColumn Column{};
+};
+
 struct TTopSortPick {
     uint8_t Src = 0; // 0 = old state, 1 = incoming temp batch
     uint32_t Idx = 0;
