@@ -185,8 +185,7 @@ TOperatorKernelSpec BuildAggregateKernelSpec(
         .Aggregates = std::move(aggregateSpecs),
         .Entrypoints = {
             {.Name = "agg_dispatch", .Abi = "i64(ptr HashTable, ptr TRowSet, i64, i64)"},
-            {.Name = "agg_measure_keys", .Abi = "i64(ptr HashTable, ptr i64, i64)"},
-            {.Name = "agg_finalize", .Abi = "i64(ptr HashTable, ptr ptr TColumn, ptr ptr i64, ptr ptr u8, i64)"},
+            {.Name = "agg_finish_rowset", .Abi = "i64(ptr HashTable, ptr TRowSet)"},
         },
         .SourceModules = {"qumirdb"},
     };

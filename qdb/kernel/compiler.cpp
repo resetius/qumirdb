@@ -1036,7 +1036,7 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
     PrintKernelAst(Diagnostics_, "aggregate", *program);
     auto kernel = EmitKernel(
         "aggregate",
-        {"agg_dispatch", "agg_measure_keys", "agg_finalize"},
+        {"agg_dispatch", "agg_finish_rowset"},
         std::move(*program));
     FinishKernelDiagnostics(Diagnostics_);
 
@@ -1062,18 +1062,14 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
     }
 
     using TDispatchFn = int64_t(*)(void*, TRowSet*, int64_t, int64_t);
-    using TMeasureFn = int64_t(*)(void*, int64_t*, int64_t);
-    using TFinalizeFn = int64_t(*)(void*, void**, int64_t**, uint8_t**, int64_t);
+    using TFinishRowSetFn = int64_t(*)(void*, TRowSet*);
 
     auto slot = kernel.Slot;
     kernels.Dispatch = [slot](void* ht, TRowSet* batch, int64_t arg, int64_t op) {
         return reinterpret_cast<TDispatchFn>(slot->Fns[0])(ht, batch, arg, op);
     };
-    kernels.Measure = [slot](void* ht, int64_t* outputKeyBytes, int64_t outputCapacity) {
-        return reinterpret_cast<TMeasureFn>(slot->Fns[1])(ht, outputKeyBytes, outputCapacity);
-    };
-    kernels.Finalize = [slot](void* ht, void** outputKeyBuffers, int64_t** outputBuffers, uint8_t** outputAggMasks, int64_t outputCapacity) {
-        return reinterpret_cast<TFinalizeFn>(slot->Fns[2])(ht, outputKeyBuffers, outputBuffers, outputAggMasks, outputCapacity);
+    kernels.FinishRowSet = [slot](void* ht, TRowSet* output) {
+        return reinterpret_cast<TFinishRowSetFn>(slot->Fns[1])(ht, output);
     };
     return kernels;
 }

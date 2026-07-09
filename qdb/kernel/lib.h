@@ -89,10 +89,9 @@ BuildGenericAggregateMeasureProgramAst(
     const TAggregateKeyDescriptor& key,
     NQumir::NAst::TTypePtr hashTableType);
 
-// One program with all three aggregate entries (agg_dispatch,
-// agg_measure_keys, agg_finalize) sharing a single copy of the type decls and
-// libraries. One kernel = one wasm module = one linear memory, which the
-// browser runtime needs to pass the hash table between the phases.
+// One program with aggregate update/finalize entries sharing a single copy of
+// the type decls and libraries. Internal measure/finalize helpers stay in the
+// module; external callers use agg_dispatch and agg_finish_rowset.
 std::expected<NQumir::NAst::TExprPtr, NQumir::TError>
 BuildGenericAggregateFusedProgramAst(
     const NQumir::NAst::TStructType& inputType,

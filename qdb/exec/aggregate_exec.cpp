@@ -1,10 +1,9 @@
 #include <qdb/exec/aggregate_exec.h>
+#include <qdb/modules/qumirdb_runtime.h>
 
 #include <cstdint>
-#include <memory>
 #include <stdexcept>
 #include <utility>
-#include <vector>
 
 namespace NQdb {
 
@@ -33,35 +32,16 @@ constexpr int64_t kOpInit = 0;
 constexpr int64_t kOpUpdate = 1;
 constexpr int64_t kOpDestroy = 2;
 
-struct TAggregateRowSetData {
-    struct TAlignedByteBuffer {
-        void Resize(size_t byteSize) {
-            Words.resize((byteSize + sizeof(uint64_t) - 1) / sizeof(uint64_t));
-        }
-
-        void* Data() {
-            return Words.data();
-        }
-
-        std::vector<uint64_t> Words;
-    };
-
-    struct TKeyBuffer {
-        TAlignedByteBuffer Fixed;
-        std::vector<char> Data;
-        std::vector<int64_t> Offsets;
-        std::vector<uint8_t> Mask;
-        TColumn Column{};
-    };
-
-    std::vector<TKeyBuffer> Keys;
-    std::vector<std::vector<int64_t>> AggBuffers;
-    std::vector<std::vector<uint8_t>> AggMasks;
-    std::vector<TColumn> Columns;
-};
-
 void DestroyAggregateRowSet(TRowSet* rowSet) {
-    delete static_cast<TAggregateRowSetData*>(rowSet->Private);
+    auto* owners = static_cast<int64_t*>(rowSet->Private);
+    if (!owners) {
+        return;
+    }
+    const int64_t count = owners[0];
+    for (int64_t i = 0; i < count; ++i) {
+        qdb_free(reinterpret_cast<void*>(owners[i + 1]));
+    }
+    qdb_free(owners);
 }
 
 } // namespace
@@ -104,90 +84,13 @@ bool TAggregateProcessor::Finish(TRowSet& rowSet)
     EnsureInit();
 
     const int64_t size = reinterpret_cast<THashTable*>(HashTable_.data())->Size;
-
-    auto* data = new TAggregateRowSetData;
-    data->Keys.resize(Kernels_.OutputKeys.size());
-    std::vector<int64_t> outputKeyBytes(Kernels_.OutputKeys.size());
-    const int64_t measured = Kernels_.Measure(
-        HashTable_.data(),
-        outputKeyBytes.data(),
-        size);
-    if (measured != size) {
-        Destroy();
-        delete data;
-        throw std::runtime_error("aggregate measure returned an unexpected row count");
-    }
-
-    std::vector<void*> outputKeyBuffers(Kernels_.OutputKeys.size());
-    for (size_t i = 0; i < Kernels_.OutputKeys.size(); ++i) {
-        auto& keyBuffer = data->Keys[i];
-        if (Kernels_.OutputKeys[i].IsNullable) {
-            keyBuffer.Mask.resize((size + 7) / 8);
-        }
-        auto* mask = keyBuffer.Mask.empty() ? nullptr : keyBuffer.Mask.data();
-        if (Kernels_.OutputKeys[i].Kind == EAggregateOutputKeyKind::String) {
-            keyBuffer.Data.resize(outputKeyBytes[i]);
-            keyBuffer.Offsets.resize(size + 1);
-            keyBuffer.Column = TColumn{
-                .Data = keyBuffer.Data.data(),
-                .Mask = mask,
-                .Offsets = keyBuffer.Offsets.data(),
-                .OffsetWidth = 8,
-            };
-        } else {
-            keyBuffer.Fixed.Resize(outputKeyBytes[i]);
-            keyBuffer.Column = TColumn{
-                .Data = reinterpret_cast<char*>(keyBuffer.Fixed.Data()),
-                .Mask = mask};
-        }
-        outputKeyBuffers[i] = &keyBuffer.Column;
-    }
-
-    data->AggBuffers.resize(Kernels_.NumAggs);
-    data->AggMasks.resize(Kernels_.NumAggs);
-    std::vector<int64_t*> outputBuffers(Kernels_.NumAggs);
-    std::vector<uint8_t*> outputAggMasks(Kernels_.NumAggs, nullptr);
-    for (size_t i = 0; i < Kernels_.NumAggs; ++i) {
-        data->AggBuffers[i].resize(size);
-        outputBuffers[i] = data->AggBuffers[i].data();
-        if (i < Kernels_.OutputAggs.size() && Kernels_.OutputAggs[i].IsNullable) {
-            data->AggMasks[i].resize((size + 7) / 8);
-            outputAggMasks[i] = data->AggMasks[i].data();
-        }
-    }
-
-    const int64_t finalized = Kernels_.Finalize(
-        HashTable_.data(),
-        outputKeyBuffers.data(),
-        outputBuffers.data(),
-        outputAggMasks.data(),
-        size);
-    Destroy();
+    const int64_t finalized = Kernels_.FinishRowSet(HashTable_.data(), &rowSet);
+    Destroyed_ = true;
     if (finalized != size) {
-        delete data;
         throw std::runtime_error("aggregate finalize returned an unexpected row count");
     }
 
-    data->Columns.reserve(Kernels_.OutputKeys.size() + Kernels_.NumAggs);
-    for (auto& buffer : data->Keys) {
-        data->Columns.push_back(buffer.Column);
-    }
-    for (size_t i = 0; i < data->AggBuffers.size(); ++i) {
-        auto& mask = data->AggMasks[i];
-        data->Columns.push_back(TColumn{
-            .Data = reinterpret_cast<char*>(data->AggBuffers[i].data()),
-            .Mask = mask.empty() ? nullptr : mask.data()});
-    }
-
-    rowSet = {
-        .Columns = data->Columns.data(),
-        .ColumnCount = static_cast<int64_t>(data->Columns.size()),
-        .RowCount = size,
-        .Selection = nullptr,
-        .Destroy = DestroyAggregateRowSet,
-        .Private = data,
-        .RefCount = 1,
-    };
+    rowSet.Destroy = DestroyAggregateRowSet;
     return true;
 }
 

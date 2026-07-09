@@ -147,6 +147,17 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
     NQumir::NAst::TTypePtr hashTableType,
     NQumir::NAst::TTypePtr columnType = nullptr);
 
+// Builds agg_finish_rowset(ht, out_rowset) -> i64. The generated function
+// allocates output TColumn buffers with qdb_alloc, calls
+// agg_measure_keys/agg_finalize, writes a complete TRowSet into out_rowset, and
+// destroys ht before returning.
+NQumir::NAst::TExprPtr GenGenericAggregateFinishRowSetAst(
+    const TAggregateKeyDescriptor& key,
+    const TAggReducerLayout& layout,
+    NQumir::NAst::TTypePtr hashTableType,
+    NQumir::NAst::TTypePtr columnType,
+    NQumir::NAst::TTypePtr rowSetType);
+
 // Measures the output Data bytes required for each logical key column.
 // Fixed-width columns report row_count * field.Size; string columns report
 // the sum of stored byte lengths. Returns ht.Size or -1 on capacity failure.

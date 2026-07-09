@@ -38,6 +38,7 @@ NQumir::NAst::TExprPtr Var(std::string name, NQumir::NAst::TTypePtr type);
 NQumir::NAst::TExprPtr Assign(std::string name, NQumir::NAst::TExprPtr value);
 
 NQumir::NAst::TExprPtr Int(int64_t v);
+NQumir::NAst::TExprPtr TypedInt(int64_t v, NQumir::NAst::TTypePtr type);
 NQumir::NAst::TExprPtr Float(double v);
 NQumir::NAst::TExprPtr Bool(bool v);
 NQumir::NAst::TExprPtr String(std::string v);
@@ -49,14 +50,22 @@ NQumir::NAst::TExprPtr Mul(NQumir::NAst::TExprPtr l, NQumir::NAst::TExprPtr r);
 NQumir::NAst::TExprPtr Div(NQumir::NAst::TExprPtr l, NQumir::NAst::TExprPtr r);
 
 NQumir::NAst::TExprPtr Call(std::string name, std::vector<NQumir::NAst::TExprPtr> args = {});
+NQumir::NAst::TExprPtr Cast(NQumir::NAst::TExprPtr expr, NQumir::NAst::TTypePtr type);
+NQumir::NAst::TExprPtr NullPtr(NQumir::NAst::TTypePtr type);
+NQumir::NAst::TExprPtr Unary(NQumir::NAst::TOperator op, NQumir::NAst::TExprPtr value);
 NQumir::NAst::TExprPtr If(NQumir::NAst::TExprPtr cond, NQumir::NAst::TExprPtr thenBody, NQumir::NAst::TExprPtr elseBody = nullptr);
 
 NQumir::NAst::TExprPtr While(NQumir::NAst::TExprPtr cond, NQumir::NAst::TExprPtr body);
 
 NQumir::NAst::TExprPtr Index(NQumir::NAst::TExprPtr collection, NQumir::NAst::TExprPtr index);
 NQumir::NAst::TExprPtr Index(std::string collection, NQumir::NAst::TExprPtr index);
+NQumir::NAst::TExprPtr ArrayAssign(std::string collection, NQumir::NAst::TExprPtr index, NQumir::NAst::TExprPtr value);
+NQumir::NAst::TExprPtr ArrayAssign(std::string collection, std::vector<NQumir::NAst::TExprPtr> indices, NQumir::NAst::TExprPtr value);
+
+NQumir::NAst::TExprPtr Field(NQumir::NAst::TExprPtr object, std::string field);
+NQumir::NAst::TExprPtr Field(std::string object, std::string field);
+NQumir::NAst::TExprPtr FieldAssign(NQumir::NAst::TExprPtr object, std::string field, NQumir::NAst::TExprPtr value);
 
 } // namespace NOz
 } // namespace NKernel
 } // namespace NQdb
-
