@@ -32,7 +32,8 @@ sort by 0
 */
 
 template<typename T>
-std::make_unsigned_t<T> RadixKey(T x) {
+requires (std::is_integral_v<T> && !std::is_same_v<T, bool>)
+auto RadixKey(T x) {
     using U = std::make_unsigned_t<T>;
     U u = std::bit_cast<U>(x);
 
