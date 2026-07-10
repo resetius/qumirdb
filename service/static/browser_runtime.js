@@ -1783,17 +1783,6 @@ function stableSortRowSetForStore(arena, layout, rowSet) {
   };
 }
 
-function jsValueBatchForRowSet(rowSet, layout, arena) {
-  if (batchHasJsValues(rowSet.batch)) {
-    return rowSet.batch;
-  }
-  if (!rowSet.batch.wasm) {
-    throw new Error('rowset has no JS values and no wasm handle');
-  }
-  return materializeWasmRowSet(
-    arena, layout, rowSet.batch.columns, rowSet.batch.wasm.rowsetPtr);
-}
-
 function runSortKernelRowSets(kernel, layout, rowSets, radixKeys, limit) {
   const arena = kernel.holder.arena;
 
@@ -2611,27 +2600,6 @@ class CrossJoinTask {
   }
 }
 
-function gatherTopSortPicks(stateBatch, tempBatch, arena, pickSrcPtr, pickIdxPtr, count) {
-  const shape = stateBatch.columns.length > 0
-    ? stateBatch.columns
-    : tempBatch.columns;
-  const columns = shape.map(col => ({
-    name: col.name,
-    type: col.type,
-    values: new Array(count),
-  }));
-  const dv = arena.view();
-  for (let i = 0; i < count; ++i) {
-    const src = dv.getUint8(pickSrcPtr + i);
-    const idx = dv.getUint32(pickIdxPtr + i * 4, true);
-    const batch = src === 0 ? stateBatch : tempBatch;
-    for (let c = 0; c < columns.length; ++c) {
-      columns[c].values[i] = batch.columns[c].values[idx];
-    }
-  }
-  return { rowCount: count, columns };
-}
-
 class TopSortWasmState {
   constructor(stage, layout, shared) {
     this.stage = stage;
@@ -2671,22 +2639,28 @@ class TopSortWasmState {
     }
 
     const arena = this.shared.arena;
-    const stateRowSet = marshalRowSet(
-      arena,
-      this.layout,
-      this.stateBatch.columns,
-      this.stateBatch.rowCount,
-      false,
-      null);
+    const oldStateBatch = this.stateBatch;
+    const stateWasm = oldStateBatch?.wasm;
+    const stateRowSet = stateWasm
+      ? { rowsetPtr: stateWasm.rowsetPtr, ownedPtr: 0 }
+      : marshalRowSet(
+        arena,
+        this.layout,
+        oldStateBatch.columns,
+        oldStateBatch.rowCount,
+        false,
+        null);
     const batchRowSet = stableSortRowSetForStore(arena, this.layout, rowSet);
     const pickCapacity = Math.min(
       this.limit, this.stateBatch.rowCount + n);
     const workStride = this.stage.radixKeys.some(key => key.isString) ? 4 : 1;
-    const rowIdsPtr = arena.alloc(Math.max(n, 1) * 8, 8);
+    const rowIdsPtr = arena.alloc(Math.max(n, pickCapacity, 1) * 8, 8);
     const workPtr = arena.alloc(Math.max(n, 1) * workStride * 8, 8);
     const countsPtr = arena.alloc((this.stage.radixNullable ? 257 : 256) * 4, 4);
     const pickSrcPtr = arena.alloc(Math.max(pickCapacity, 1), 1);
     const pickIdxPtr = arena.alloc(Math.max(pickCapacity, 1) * 4, 4);
+    const outRowSetPtr = arena.alloc(this.layout.rowset.size, 8);
+    let outRowSetTransferred = false;
 
     const dv = arena.view();
     let outRow = 0;
@@ -2707,16 +2681,31 @@ class TopSortWasmState {
         BigInt(n),
         BigInt(pickSrcPtr),
         BigInt(pickIdxPtr),
-        BigInt(this.limit)));
-      const tempBatch = jsValueBatchForRowSet(rowSet, this.layout, arena);
-      this.stateBatch = gatherTopSortPicks(
-        this.stateBatch, tempBatch, arena, pickSrcPtr, pickIdxPtr, out);
+        BigInt(this.limit),
+        BigInt(outRowSetPtr)));
+      if (out <= 0) {
+        this.stateBatch = emptyBatchForRowSets([rowSet]);
+      } else {
+        outRowSetTransferred = true;
+        this.stateBatch = makeWasmOwnedBatch(
+          { arena, layout: this.layout },
+          outRowSetPtr,
+          outputShapeFromRowSets([rowSet]));
+      }
     } finally {
-      freeMarshalledRowSet(arena, this.layout, stateRowSet.rowsetPtr);
+      if (stateRowSet.ownedPtr) {
+        freeMarshalledRowSet(arena, this.layout, stateRowSet.ownedPtr);
+      }
+      if (oldStateBatch?.wasm) {
+        releaseWasmRowSet({ batch: oldStateBatch });
+      }
       if (batchRowSet.ownedPtr) {
         freeMarshalledRowSet(arena, this.layout, batchRowSet.ownedPtr);
       }
       releaseWasmRowSet(rowSet);
+      if (!outRowSetTransferred) {
+        arena.free(outRowSetPtr);
+      }
       arena.free(rowIdsPtr);
       arena.free(workPtr);
       arena.free(countsPtr);

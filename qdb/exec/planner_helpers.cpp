@@ -310,7 +310,8 @@ TSortRuntimeProcess BuildSortRuntimeProcess(
                 }
             }
             TKernelCompiler topSortCompiler(std::move(options));
-            (void)topSortCompiler.CompileTopSort(sortInputs.RadixKeys, &inputType);
+            radixKernel.TopSortDispatch =
+                topSortCompiler.CompileTopSort(sortInputs.RadixKeys, &inputType);
         }
         if (sink) {
             // Resolved key metadata for the exec exporter, on both emitted

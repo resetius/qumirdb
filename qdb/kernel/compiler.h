@@ -74,9 +74,9 @@ NQumir::NAst::TExprPtr BuildRadixSortNullableProgramAst(
     const NQumir::NAst::TStructType* materializeType = nullptr);
 
 // Top-sort program (entry qdb_top_sort_update): sorts incoming batch row ids
-// with the same radix cascade as full sort, then merges the current top-K state
-// with that sorted batch. It writes pick_src/pick_idx pairs:
-// src=0 -> old state row, src=1 -> incoming batch row.
+// with the same radix cascade as full sort, merges the current top-K state with
+// that sorted batch, and with a materialize schema writes the new state into a
+// kernel-owned TRowSet. pick_src/pick_idx are scratch buffers, not host output.
 NQumir::NAst::TExprPtr BuildTopSortMergeProgramAst(
     const std::vector<TSortRadixKeyInput>& keys,
     const NQumir::NAst::TStructType* materializeType = nullptr);
@@ -259,7 +259,8 @@ public:
         int64_t n,
         uint8_t* pickSrc,
         uint32_t* pickIdx,
-        int64_t limit)>;
+        int64_t limit,
+        TRowSet* output)>;
 
     // sizeof(HashTable) per modules/qumirdb.cpp's layout — callers of
     // CompileAggregate must allocate a zero-initialized buffer this large
