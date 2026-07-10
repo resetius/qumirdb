@@ -37,6 +37,7 @@ window.addEventListener('DOMContentLoaded', () => {
   initDrawers();
   initTabs();
   initGraphControls();
+  initDiagnosticCopy();
   initQueries();
   initDatasets();
   initActions();
@@ -109,6 +110,56 @@ function initGraphControls() {
   $('#inspector-artifact-select').addEventListener('change', event => {
     renderSelectedInspectorArtifact(Number(event.target.value || 0));
   });
+}
+
+function initDiagnosticCopy() {
+  bindCopyButton('#inspector-copy', () => $('#inspector-body').textContent || '');
+  bindCopyButton('#logical-copy', () => $('#logical-plan').textContent || '');
+  bindCopyButton('#details-copy', () => $('#details').textContent || '');
+}
+
+function bindCopyButton(buttonSelector, readText) {
+  const button = $(buttonSelector);
+  if (!button) {
+    return;
+  }
+  const defaultTitle = button.title;
+  const defaultLabel = button.getAttribute('aria-label') || defaultTitle;
+  button.addEventListener('click', async () => {
+    const text = readText();
+    if (!text) {
+      return;
+    }
+    try {
+      await copyText(text);
+      button.title = 'Copied';
+      button.setAttribute('aria-label', 'Copied');
+    } catch (error) {
+      button.title = 'Copy failed';
+      button.setAttribute('aria-label', 'Copy failed');
+      console.warn('copy failed', error);
+    }
+    setTimeout(() => {
+      button.title = defaultTitle;
+      button.setAttribute('aria-label', defaultLabel);
+    }, 1200);
+  });
+}
+
+async function copyText(text) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.setAttribute('readonly', '');
+  textarea.style.position = 'fixed';
+  textarea.style.left = '-9999px';
+  document.body.appendChild(textarea);
+  textarea.select();
+  document.execCommand('copy');
+  textarea.remove();
 }
 
 function initQueries() {
@@ -650,6 +701,7 @@ async function runBrowser(sql, dataset) {
       elapsedMs,
       timings: result.timings || [],
       scheduler: result.scheduler || null,
+      memory: result.memory || null,
       connections: result.connections || []
     });
     setStatus('finished');
