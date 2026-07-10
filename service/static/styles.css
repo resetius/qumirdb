@@ -528,6 +528,39 @@ button:hover {
   opacity: 0.7;
 }
 
+.query-meta {
+  flex: none;
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.query-stop {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 3px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s ease, color 0.12s ease, background 0.12s ease;
+}
+
+.query-item:hover .query-stop,
+.query-stop:focus-visible {
+  opacity: 1;
+}
+
+.query-stop:hover {
+  color: #ff6b6b;
+  background: rgba(255, 107, 107, 0.12);
+}
+
 .dataset-item {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
