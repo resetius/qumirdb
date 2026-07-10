@@ -1,6 +1,7 @@
 const DB_NAME = 'qumirdb-browser-storage';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const DATASET_STORE = 'datasets';
+const WORKSPACE_STORE = 'workspaceState';
 
 let dbPromise = null;
 
@@ -15,11 +16,41 @@ function openDb() {
       if (!db.objectStoreNames.contains(DATASET_STORE)) {
         db.createObjectStore(DATASET_STORE, { keyPath: 'id' });
       }
+      // Out-of-line keys: value is the workspace slot, key is `${query}:${dataset}`.
+      if (!db.objectStoreNames.contains(WORKSPACE_STORE)) {
+        db.createObjectStore(WORKSPACE_STORE);
+      }
     };
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
   });
   return dbPromise;
+}
+
+function withNamedStore(storeName, mode, fn) {
+  return openDb().then(db => new Promise((resolve, reject) => {
+    const tx = db.transaction(storeName, mode);
+    const store = tx.objectStore(storeName);
+    const result = fn(store);
+    tx.oncomplete = () => resolve(result);
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
+  }));
+}
+
+export async function getWorkspaceState(key) {
+  return withNamedStore(WORKSPACE_STORE, 'readonly',
+    store => requestResult(store.get(key)));
+}
+
+export async function putWorkspaceState(key, value) {
+  await withNamedStore(WORKSPACE_STORE, 'readwrite',
+    store => store.put(value, key));
+}
+
+export async function deleteWorkspaceState(key) {
+  await withNamedStore(WORKSPACE_STORE, 'readwrite',
+    store => store.delete(key));
 }
 
 async function withStore(mode, fn) {
