@@ -22,6 +22,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <fcntl.h>
 #include <unistd.h>
 
 using namespace NNet;
@@ -30,6 +31,7 @@ namespace {
 
 struct TOptions {
     std::function<TPipe(const std::string&, const std::vector<std::string>&, bool)> PipeFactory;
+    NNet::TPollerBase* Poller = nullptr;
     std::string StaticDir = QDB_SERVICE_STATIC_DIR;
     std::string BinaryDir = QDB_BUILD_BIN_DIR;
     std::string SourceDir = QDB_SOURCE_ROOT_DIR;
@@ -588,6 +590,30 @@ private:
         return std::filesystem::temp_directory_path() / name;
     }
 
+    // Streams a file to the response with a known Content-Length, reading it in
+    // fixed-size chunks via coroio's TFileHandle instead of slurping the whole
+    // file into memory. Takes ownership of `fd` (TFileHandle closes it).
+    TFuture<void> SendFile(
+        TResponse& response,
+        int fd,
+        uint64_t size,
+        const std::string& contentType)
+    {
+        response.SetHeader("Content-Type", contentType);
+        response.SetHeader("Content-Length", std::to_string(size));
+        co_await response.SendHeaders();
+
+        TFileHandle file(fd, *Options_.Poller);
+        std::vector<char> buf(1 << 18);
+        for (;;) {
+            ssize_t n = co_await file.ReadSome(buf.data(), buf.size());
+            if (n <= 0) {
+                break;
+            }
+            co_await response.WriteBodyChunk(buf.data(), static_cast<size_t>(n));
+        }
+    }
+
     TFuture<void> ServeSourceZip(TResponse& response) {
         if (!SourceAvailable_) {
             response.SetStatus(404);
@@ -695,15 +721,19 @@ private:
             co_return;
         }
 
-        std::ifstream in(target, std::ios::binary);
-        std::string data(
-            (std::istreambuf_iterator<char>(in)),
-            std::istreambuf_iterator<char>());
+        const int fd = ::open(target.c_str(), O_RDONLY);
+        if (fd < 0) {
+            response.SetStatus(404);
+            co_await SendText(response, "Not Found", "text/plain; charset=utf-8");
+            co_return;
+        }
 
         response.SetHeader(
             "Content-Disposition",
             "attachment; filename=\"" + JsonEscape(fileName) + "\"");
-        co_await SendText(response, data, ContentType(target.extension().string()));
+        const auto size = fs::file_size(target, ec);
+        co_await SendFile(response, fd, ec ? 0 : static_cast<uint64_t>(size),
+            ContentType(target.extension().string()));
     }
 
     TFuture<void> ServeStatic(TResponse& response, std::string uriPath) {
@@ -732,13 +762,16 @@ private:
             co_return;
         }
 
-        std::ifstream in(target, std::ios::binary);
-        std::string data(
-            (std::istreambuf_iterator<char>(in)),
-            std::istreambuf_iterator<char>());
+        const int fd = ::open(target.c_str(), O_RDONLY);
+        if (fd < 0) {
+            response.SetStatus(404);
+            co_await SendText(response, "Not Found", "text/plain; charset=utf-8");
+            co_return;
+        }
 
-        auto contentType = ContentType(target.extension().string());
-        co_await SendText(response, data, contentType);
+        const auto size = fs::file_size(target, ec);
+        co_await SendFile(response, fd, ec ? 0 : static_cast<uint64_t>(size),
+            ContentType(target.extension().string()));
     }
 
     std::string ContentType(const std::string& ext) const {
@@ -827,6 +860,7 @@ int main(int argc, char** argv) {
     {
         return TPipe(loop.Poller(), cmd, args, stderrToStdout);
     };
+    options.Poller = &loop.Poller();
 
     TRouter router(std::move(options));
     auto logger = [](const std::string& msg) {
