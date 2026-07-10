@@ -557,15 +557,19 @@ NQumir::NAst::TExprPtr BuildTopSortMergePicksAst()
 }
 
 NQumir::NAst::TExprPtr BuildTopSortUpdateAst(
-    const std::vector<TSortRadixKeyInput>& keys)
+    const std::vector<TSortRadixKeyInput>& keys,
+    bool materializeOutput)
 {
     using namespace NQumir::NAst;
     namespace Oz = NKernel::NOz;
 
     auto i64Type = std::make_shared<TIntegerType>();
+    auto i8Type = std::make_shared<TIntegerType>(TIntegerType::I8);
     auto u8Type = std::make_shared<TIntegerType>(TIntegerType::U8);
     auto u32Type = std::make_shared<TIntegerType>(TIntegerType::U32);
-    auto rowSetPtrType = Ptr(QumirDbNamedType("TRowSet"));
+    auto rowSetType = QumirDbNamedType("TRowSet");
+    auto rowSetPtrType = Ptr(rowSetType);
+    auto rowSetRefType = std::make_shared<TReferenceType>(rowSetType);
     auto ptrI64Type = Ptr(i64Type);
     auto ptrU32Type = Ptr(u32Type);
     auto ptrU8Type = Ptr(u8Type);
@@ -587,6 +591,9 @@ NQumir::NAst::TExprPtr BuildTopSortUpdateAst(
         .Param("pick_idx", ptrU32Type)
         .Param("limit", i64Type)
         .Return(i64Type);
+    if (materializeOutput) {
+        builder.Param("out_rowset", rowSetRefType);
+    }
 
     for (size_t k = keys.size(); k > 0; --k) {
         const size_t keyIdx = k - 1;
@@ -597,15 +604,57 @@ NQumir::NAst::TExprPtr BuildTopSortUpdateAst(
             BoolConst(keys[keyIdx].NullsFirst),
             "batch"));
     }
-    builder.Stmt(Oz::Return(Oz::Call("qdb_top_sort_merge_picks", {
-        Oz::Ident("state"),
-        Oz::Ident("batch"),
-        Oz::Ident("row_ids"),
-        Oz::Ident("n"),
-        Oz::Ident("pick_src"),
-        Oz::Ident("pick_idx"),
-        Oz::Ident("limit"),
-    })));
+    builder
+        .Var("out_count", i64Type)
+        .Assign("out_count", Oz::Call("qdb_top_sort_merge_picks", {
+            Oz::Ident("state"),
+            Oz::Ident("batch"),
+            Oz::Ident("row_ids"),
+            Oz::Ident("n"),
+            Oz::Ident("pick_src"),
+            Oz::Ident("pick_idx"),
+            Oz::Ident("limit"),
+        }));
+    if (!materializeOutput) {
+        builder.Stmt(Oz::Return(Oz::Ident("out_count")));
+        return std::move(builder).Build();
+    }
+
+    builder.Stmt(Oz::If(
+        Oz::Bin(TOperator("<="), Oz::Ident("out_count"), Int64Literal(0)),
+        Oz::Block({Oz::Return(Int64Literal(0))})));
+    builder
+        .Var("materialize_store", rowSetPtrType)
+        .Assign("materialize_store", Oz::Cast(
+            Oz::Call("qdb_alloc", {Oz::Mul(Int64Literal(2), Int64Literal(56))}),
+            rowSetPtrType))
+        .Stmt(Oz::ArrayAssign("materialize_store", Int64Literal(0), Deref(Oz::Ident("state"))))
+        .Stmt(Oz::ArrayAssign("materialize_store", Int64Literal(1), Deref(Oz::Ident("batch"))))
+        .Var("i", i64Type)
+        .Assign("i", Int64Literal(0))
+        .Stmt(Oz::While(
+            Oz::Bin(TOperator("<"), Oz::Ident("i"), Oz::Ident("out_count")),
+            Oz::Block({
+                Oz::ArrayAssign("row_ids", Oz::Ident("i"),
+                    Oz::Bin(TOperator("|"),
+                        Oz::Bin(TOperator("<<"),
+                            Oz::Cast(Oz::Index("pick_src", Oz::Ident("i")), i64Type),
+                            Int64Literal(32)),
+                        Oz::Cast(Oz::Index("pick_idx", Oz::Ident("i")), i64Type))),
+                Oz::Assign("i", Oz::Add(Oz::Ident("i"), Int64Literal(1))),
+            })))
+        .Var("materialized", i64Type)
+        .Assign("materialized", Oz::Call("sort_materialize_row_ids", {
+            Oz::Ident("materialize_store"),
+            Oz::Ident("row_ids"),
+            Int64Literal(0),
+            Oz::Ident("out_count"),
+            Oz::Ident("out_rowset"),
+        }))
+        .Stmt(Oz::Call("qdb_free", {
+            Oz::Cast(Oz::Ident("materialize_store"), Ptr(i8Type)),
+        }))
+        .Stmt(Oz::Return(Oz::Ident("materialized")));
     return std::move(builder).Build();
 }
 
@@ -908,13 +957,13 @@ NQumir::NAst::TExprPtr BuildTopSortMergeProgramAst(
     };
     addLibrary("radix.oz", false);
     addLibrary("sort_rowids.oz", true);
-    programStmts.push_back(BuildTopSortTempBeforeStateAst(keys));
-    programStmts.push_back(BuildTopSortMergePicksAst());
-    programStmts.push_back(BuildTopSortUpdateAst(keys));
     if (materializeType) {
         AddSortMaterializeLibrary(programStmts, "BuildTopSortMergeProgramAst");
         programStmts.push_back(BuildSortMaterializeWrapperAst(*materializeType));
     }
+    programStmts.push_back(BuildTopSortTempBeforeStateAst(keys));
+    programStmts.push_back(BuildTopSortMergePicksAst());
+    programStmts.push_back(BuildTopSortUpdateAst(keys, materializeType != nullptr));
     return std::make_shared<TBlockExpr>(NQumir::TLocation{}, std::move(programStmts));
 }
 
@@ -1098,6 +1147,9 @@ TKernelCompiler::TTopSortDispatch TKernelCompiler::CompileTopSort(
 {
     using namespace NQumir::NAst;
 
+    if (!materializeType) {
+        throw NQumir::TError("CompileTopSort: materialize schema is required");
+    }
     auto program = BuildTopSortMergeProgramAst(keys, materializeType);
     PrintKernelAst(Diagnostics_, "top-sort.fused", program);
 
@@ -1109,7 +1161,7 @@ TKernelCompiler::TTopSortDispatch TKernelCompiler::CompileTopSort(
 
     using TTopSortFn = int64_t(*)(
         TRowSet*, TRowSet*, int64_t*, int64_t*, uint32_t*,
-        int64_t, uint8_t*, uint32_t*, int64_t);
+        int64_t, uint8_t*, uint32_t*, int64_t, TRowSet*);
     return [slot = kernel.Slot](
         TRowSet* state,
         TRowSet* batch,
@@ -1119,9 +1171,10 @@ TKernelCompiler::TTopSortDispatch TKernelCompiler::CompileTopSort(
         int64_t n,
         uint8_t* pickSrc,
         uint32_t* pickIdx,
-        int64_t limit) {
+        int64_t limit,
+        TRowSet* output) {
         return reinterpret_cast<TTopSortFn>(slot->Fns[0])(
-            state, batch, rowIds, work, counts, n, pickSrc, pickIdx, limit);
+            state, batch, rowIds, work, counts, n, pickSrc, pickIdx, limit, output);
     };
 }
 

@@ -25,48 +25,13 @@ struct TGatheredColumn {
     TColumn Column{};
 };
 
-struct TTopSortPick {
-    uint8_t Src = 0; // 0 = old state, 1 = incoming temp batch
-    uint32_t Idx = 0;
-};
-
-struct TTopSortState {
-    std::vector<TGatheredColumn> Gathered;
-    std::vector<TColumn> Columns;
-    int64_t RowCount = 0;
-
-    const TRowSet RowSet() const {
-        return TRowSet{
-            .Columns = const_cast<TColumn*>(Columns.data()),
-            .ColumnCount = static_cast<int64_t>(Columns.size()),
-            .RowCount = RowCount,
-            .Selection = nullptr,
-            .Destroy = nullptr,
-            .Private = nullptr,
-            .RefCount = 1,
-        };
-    }
-};
-
 struct TTopSortScratch {
-    std::unique_ptr<TTopSortState> State = std::make_unique<TTopSortState>();
-    std::vector<uint32_t> TempRows;
+    TRowSet State{};
     std::vector<TRowId> TempRowIds;
     std::vector<TRowId> Work;
     std::vector<uint32_t> Counts;
-    std::unique_ptr<bool[]> Descs;
-    std::unique_ptr<bool[]> NullsFirsts;
-    size_t KeyCapacity = 0;
-    std::vector<TTopSortPick> Picks;
-
-    void EnsureKeyCapacity(size_t keyCount) {
-        if (KeyCapacity == keyCount) {
-            return;
-        }
-        Descs = std::make_unique<bool[]>(keyCount);
-        NullsFirsts = std::make_unique<bool[]>(keyCount);
-        KeyCapacity = keyCount;
-    }
+    std::vector<uint8_t> PickSrc;
+    std::vector<uint32_t> PickIdx;
 };
 
 namespace {
@@ -89,6 +54,13 @@ void DestroyLimitRowSet(TRowSet* rowSet) {
     auto* data = static_cast<TLimitRowSetData*>(rowSet->Private);
     Release(&data->Input);
     delete data;
+}
+
+void ReleaseKernelState(TRowSet& rowSet) {
+    if (rowSet.RefCount > 0) {
+        Release(&rowSet);
+    }
+    rowSet = {};
 }
 
 bool IsBitSet(const uint8_t* data, int64_t bit) {
@@ -253,142 +225,6 @@ bool SortRowsLess(const TRowStore& store, const std::vector<TSortKey>& keys,
     return false;
 }
 
-bool SortRowsLessColumns(const TColumn* leftColumns, int32_t leftRow,
-    const TColumn* rightColumns, int32_t rightRow,
-    const std::vector<TSortKey>& keys,
-    const std::vector<TSortColumnRef>& keyColumns)
-{
-    for (size_t i = 0; i < keys.size(); ++i) {
-        const auto& keyColumn = keyColumns[i];
-        const TColumn& leftColumn = leftColumns[keyColumn.Index];
-        const TColumn& rightColumn = rightColumns[keyColumn.Index];
-        const bool leftValid = SourceValid(leftColumn, leftRow);
-        const bool rightValid = SourceValid(rightColumn, rightRow);
-        if (!leftValid || !rightValid) {
-            if (leftValid != rightValid) {
-                return EffectiveNulls(keys[i]) == ESortNulls::First ? !leftValid : leftValid;
-            }
-            continue;
-        }
-
-        int cmp = CompareValues(leftColumn, leftRow, rightColumn, rightRow, keyColumn.Type);
-        if (cmp != 0) {
-            if (keys[i].Direction == ESortDirection::Desc) {
-                cmp = -cmp;
-            }
-            return cmp < 0;
-        }
-    }
-    return false;
-}
-
-size_t SortColumnFixedWidth(const TTypePtr& type);
-
-void GatherTopSortColumn(const TColumn& stateColumn, const TColumn& tempColumn,
-    const std::vector<TTopSortPick>& picks, size_t pickCount,
-    const TTypePtr& type, TGatheredColumn& out)
-{
-    const auto valueType = UnwrapNamedType(UnwrapNullableType(type));
-    const bool isBool = static_cast<bool>(TMaybeType<TBoolType>(valueType));
-    const bool isString = static_cast<bool>(TMaybeType<TStringType>(valueType));
-    const size_t width = SortColumnFixedWidth(type);
-
-    out.Data.clear();
-    out.Offsets.clear();
-    out.Mask.assign((pickCount + 7) / 8, 0xff);
-    bool anyNull = false;
-
-    auto source = [&](const TTopSortPick& pick) -> std::pair<const TColumn&, int32_t> {
-        return pick.Src == 0
-            ? std::pair<const TColumn&, int32_t>{stateColumn, static_cast<int32_t>(pick.Idx)}
-            : std::pair<const TColumn&, int32_t>{tempColumn, static_cast<int32_t>(pick.Idx)};
-    };
-    auto markNull = [&](size_t i) {
-        ClearBit(out.Mask, i);
-        anyNull = true;
-    };
-
-    if (isString) {
-        out.Offsets.resize(pickCount + 1);
-        out.Offsets[0] = 0;
-        for (size_t i = 0; i < pickCount; ++i) {
-            auto [col, row] = source(picks[i]);
-            int64_t len = 0;
-            if (!SourceValid(col, row)) {
-                markNull(i);
-            } else {
-                len = OffsetAt(col, row + 1) - OffsetAt(col, row);
-            }
-            out.Offsets[i + 1] = out.Offsets[i] + len;
-        }
-        out.Data.resize(static_cast<size_t>(out.Offsets[pickCount]));
-        for (size_t i = 0; i < pickCount; ++i) {
-            auto [col, row] = source(picks[i]);
-            if (!SourceValid(col, row)) {
-                continue;
-            }
-            const int64_t begin = OffsetAt(col, row);
-            const int64_t len = OffsetAt(col, row + 1) - begin;
-            if (len > 0) {
-                std::memcpy(out.Data.data() + out.Offsets[i], col.Data + begin, len);
-            }
-        }
-        out.Column = TColumn{
-            .Data = out.Data.data(),
-            .Mask = anyNull ? out.Mask.data() : nullptr,
-            .Offsets = out.Offsets.data(),
-            .OffsetWidth = 8,
-        };
-    } else if (isBool) {
-        out.Data.assign((pickCount + 7) / 8, 0);
-        for (size_t i = 0; i < pickCount; ++i) {
-            auto [col, row] = source(picks[i]);
-            if (!SourceValid(col, row)) {
-                markNull(i);
-                continue;
-            }
-            if (BoolAt(col, row)) {
-                out.Data[i / 8] |= char(uint8_t(1) << (i % 8));
-            }
-        }
-        out.Column = TColumn{
-            .Data = out.Data.data(),
-            .DataBitOffset = 0,
-            .Mask = anyNull ? out.Mask.data() : nullptr,
-        };
-    } else {
-        out.Data.assign(pickCount * width, 0);
-        for (size_t i = 0; i < pickCount; ++i) {
-            auto [col, row] = source(picks[i]);
-            if (!SourceValid(col, row)) {
-                markNull(i);
-                continue;
-            }
-            std::memcpy(out.Data.data() + i * width,
-                col.Data + static_cast<int64_t>(row) * width, width);
-        }
-        out.Column = TColumn{
-            .Data = out.Data.data(),
-            .Mask = anyNull ? out.Mask.data() : nullptr,
-        };
-    }
-
-    if (!anyNull) {
-        out.Mask.clear();
-    }
-}
-
-bool HasAnyNullMask(const TRowStore& store, const std::vector<TRowId>& rows,
-    int32_t columnIdx)
-{
-    for (TRowId rowId : rows) {
-        if (store.Column(rowId, columnIdx).Mask) {
-            return true;
-        }
-    }
-    return false;
-}
-
 size_t SortColumnFixedWidth(const TTypePtr& type) {
     auto valueType = UnwrapNamedType(UnwrapNullableType(type));
     if (auto integer = TMaybeType<TIntegerType>(valueType)) {
@@ -519,13 +355,6 @@ size_t RadixWorkStride(const std::vector<TSortColumnRef>& keyColumns) {
         }
     }
     return 1;
-}
-
-bool HasAnyNullMask(const TRowSet& batch, const std::vector<uint32_t>& rows,
-    int32_t columnIdx)
-{
-    const TColumn& column = batch.Columns[columnIdx];
-    return column.Mask && !rows.empty();
 }
 
 } // namespace
@@ -767,53 +596,11 @@ TTopSortProcessor::TTopSortProcessor(
     , Scratch_(std::make_unique<TTopSortScratch>())
 {}
 
-TTopSortProcessor::~TTopSortProcessor() = default;
-
-bool TTopSortProcessor::TryRadixSortBatch(
-    const TRowSet& batch,
-    std::vector<uint32_t>& rows)
+TTopSortProcessor::~TTopSortProcessor()
 {
-    if (rows.empty()) {
-        return true;
+    if (Scratch_) {
+        ReleaseKernelState(Scratch_->State);
     }
-    if (rows.size() > std::numeric_limits<uint32_t>::max()) {
-        return false;
-    }
-    const bool useNullable = static_cast<bool>(RadixKernel_.NullableDispatch);
-    auto dispatch = useNullable ? RadixKernel_.NullableDispatch : RadixKernel_.Dispatch;
-    if (!RadixKernel_.Enabled || !dispatch) {
-        return false;
-    }
-    if (KeyColumns_.size() != Keys_.size()) {
-        return false;
-    }
-
-    auto& scratch = *Scratch_;
-    scratch.EnsureKeyCapacity(Keys_.size());
-    scratch.TempRowIds.resize(rows.size());
-    scratch.Work.resize(rows.size() * RadixWorkStride(KeyColumns_));
-    scratch.Counts.assign(useNullable ? 257 : 256, 0);
-    for (size_t i = 0; i < rows.size(); ++i) {
-        scratch.TempRowIds[i] = MakeRowId(0, static_cast<int32_t>(rows[i]));
-    }
-
-    for (size_t k = 0; k < Keys_.size(); ++k) {
-        scratch.Descs[k] = Keys_[k].Direction == ESortDirection::Desc;
-        scratch.NullsFirsts[k] = EffectiveNulls(Keys_[k]) == ESortNulls::First;
-    }
-
-    auto* store = const_cast<TRowSet*>(&batch);
-    TRowSet unused{};
-    dispatch(store, scratch.TempRowIds.data(),
-        scratch.Work.data(), scratch.Counts.data(),
-        static_cast<int64_t>(scratch.TempRowIds.size()),
-        scratch.Descs.get(), scratch.NullsFirsts.get(),
-        true, 0, 0, &unused);
-
-    for (size_t i = 0; i < rows.size(); ++i) {
-        rows[i] = static_cast<uint32_t>(RowIndex(scratch.TempRowIds[i]));
-    }
-    return true;
 }
 
 void TTopSortProcessor::Add(TRowSet& batch)
@@ -826,73 +613,62 @@ void TTopSortProcessor::Add(TRowSet& batch)
         batch = {};
         return;
     }
-
-    auto* outputType = static_cast<TStructType*>(OutputType_.get());
-    if (!outputType) {
+    if (!RadixKernel_.Enabled || !RadixKernel_.TopSortDispatch) {
+        Release(&batch);
+        batch = {};
+        throw std::runtime_error("top-sort kernel is unavailable");
+    }
+    if (!static_cast<TStructType*>(OutputType_.get())) {
         throw std::runtime_error("top-sort output must have TStructType");
     }
 
-    auto& tempRows = Scratch_->TempRows;
-    auto& picks = Scratch_->Picks;
-    tempRows.clear();
-    tempRows.reserve(static_cast<size_t>(batch.RowCount));
+    auto& scratch = *Scratch_;
+    scratch.TempRowIds.clear();
+    scratch.TempRowIds.reserve(static_cast<size_t>(batch.RowCount));
     for (int32_t row = 0; row < batch.RowCount; ++row) {
         if (RowSelected(batch, row)) {
-            tempRows.push_back(static_cast<uint32_t>(row));
+            scratch.TempRowIds.push_back(MakeRowId(0, row));
         }
     }
-
-    if (!TryRadixSortBatch(batch, tempRows)) {
-        std::stable_sort(tempRows.begin(), tempRows.end(),
-            [&](uint32_t lhs, uint32_t rhs) {
-                return SortRowsLessColumns(batch.Columns, static_cast<int32_t>(lhs),
-                    batch.Columns, static_cast<int32_t>(rhs), Keys_, KeyColumns_);
-            });
+    const size_t selectedRows = scratch.TempRowIds.size();
+    if (selectedRows == 0) {
+        Release(&batch);
+        batch = {};
+        return;
     }
 
-    const TRowSet stateView = Scratch_->State->RowSet();
-    const size_t stateRows = static_cast<size_t>(Scratch_->State->RowCount);
+    const bool useNullable = static_cast<bool>(RadixKernel_.NullableDispatch);
+    const size_t stateRows = static_cast<size_t>(scratch.State.RowCount);
     const size_t limit = static_cast<size_t>(Limit_);
-    const size_t pickCount = std::min(limit, stateRows + tempRows.size());
-    picks.resize(pickCount);
+    const size_t pickCapacity = std::min(limit, stateRows + selectedRows);
+    scratch.TempRowIds.resize(std::max(selectedRows, pickCapacity));
+    scratch.Work.resize(selectedRows * RadixWorkStride(KeyColumns_));
+    scratch.Counts.assign(useNullable ? 257 : 256, 0);
+    scratch.PickSrc.resize(pickCapacity);
+    scratch.PickIdx.resize(pickCapacity);
 
-    size_t left = 0;
-    size_t right = 0;
-    size_t out = 0;
-    while (out < pickCount && (left < stateRows || right < tempRows.size())) {
-        if (right == tempRows.size()) {
-            picks[out++] = TTopSortPick{0, static_cast<uint32_t>(left++)};
-            continue;
-        }
-        if (left == stateRows) {
-            picks[out++] = TTopSortPick{1, tempRows[right++]};
-            continue;
-        }
-
-        const uint32_t tempRow = tempRows[right];
-        if (SortRowsLessColumns(batch.Columns, static_cast<int32_t>(tempRow),
-                stateView.Columns, static_cast<int32_t>(left), Keys_, KeyColumns_)) {
-            picks[out++] = TTopSortPick{1, tempRow};
-            ++right;
-        } else {
-            picks[out++] = TTopSortPick{0, static_cast<uint32_t>(left++)};
-        }
+    TRowSet next{};
+    const int64_t produced = RadixKernel_.TopSortDispatch(
+        &scratch.State,
+        &batch,
+        scratch.TempRowIds.data(),
+        scratch.Work.data(),
+        scratch.Counts.data(),
+        static_cast<int64_t>(selectedRows),
+        scratch.PickSrc.data(),
+        scratch.PickIdx.data(),
+        Limit_,
+        &next);
+    if (produced < 0) {
+        Release(&batch);
+        batch = {};
+        throw std::runtime_error("top-sort kernel update failed");
     }
-
-    auto next = std::make_unique<TTopSortState>();
-    next->Gathered.resize(outputType->Fields.size());
-    next->Columns.resize(outputType->Fields.size());
-    next->RowCount = static_cast<int64_t>(pickCount);
-    for (size_t c = 0; c < outputType->Fields.size(); ++c) {
-        const TColumn emptyState{};
-        const TColumn& stateColumn = Scratch_->State->RowCount == 0
-            ? emptyState
-            : stateView.Columns[c];
-        GatherTopSortColumn(stateColumn, batch.Columns[c], picks, pickCount,
-            outputType->Fields[c].second, next->Gathered[c]);
-        next->Columns[c] = next->Gathered[c].Column;
+    if (produced > 0) {
+        next.Destroy = DestroyKernelOwnedRowSet;
+        ReleaseKernelState(scratch.State);
+        scratch.State = next;
     }
-    Scratch_->State = std::move(next);
     Release(&batch);
     batch = {};
 }
@@ -905,39 +681,41 @@ void TTopSortProcessor::Finish()
 bool TTopSortProcessor::Next(TRowSet& rowSet)
 {
     Finish();
-    if (!Scratch_ || !Scratch_->State ||
-        Cursor_ >= static_cast<size_t>(Scratch_->State->RowCount)) {
+    if (!Scratch_ || Cursor_ >= static_cast<size_t>(Scratch_->State.RowCount)) {
         return false;
     }
 
     const size_t n = std::min<size_t>(
-        static_cast<size_t>(BatchRows_), static_cast<size_t>(Scratch_->State->RowCount) - Cursor_);
-    std::vector<TTopSortPick> picks(n);
+        static_cast<size_t>(BatchRows_),
+        static_cast<size_t>(Scratch_->State.RowCount) - Cursor_);
+    Scratch_->TempRowIds.resize(n);
     for (size_t i = 0; i < n; ++i) {
-        picks[i] = TTopSortPick{0, static_cast<uint32_t>(Cursor_ + i)};
+        Scratch_->TempRowIds[i] = MakeRowId(0, static_cast<int32_t>(Cursor_ + i));
     }
 
-    auto* outputType = static_cast<TStructType*>(OutputType_.get());
-    auto* data = new TSortedRowSetData;
-    data->Gathered.resize(outputType->Fields.size());
-    data->Columns.resize(outputType->Fields.size());
-    const TColumn emptyTemp{};
-    for (size_t c = 0; c < outputType->Fields.size(); ++c) {
-        GatherTopSortColumn(Scratch_->State->Columns[c], emptyTemp, picks, n,
-            outputType->Fields[c].second, data->Gathered[c]);
-        data->Columns[c] = data->Gathered[c].Column;
+    auto dispatch = RadixKernel_.NullableDispatch
+        ? RadixKernel_.NullableDispatch
+        : RadixKernel_.Dispatch;
+    if (!RadixKernel_.Enabled || !dispatch) {
+        throw std::runtime_error("top-sort materialize kernel is unavailable");
     }
-
-    rowSet = TRowSet{
-        .Columns = data->Columns.data(),
-        .ColumnCount = static_cast<int64_t>(data->Columns.size()),
-        .RowCount = static_cast<int64_t>(n),
-        .Selection = nullptr,
-        .Destroy = DestroySortedRowSet,
-        .Private = data,
-        .RefCount = 1,
-    };
-    Cursor_ += n;
+    const int64_t produced = dispatch(
+        &Scratch_->State,
+        Scratch_->TempRowIds.data(),
+        nullptr,
+        nullptr,
+        static_cast<int64_t>(n),
+        nullptr,
+        nullptr,
+        false,
+        0,
+        static_cast<int64_t>(n),
+        &rowSet);
+    if (produced <= 0) {
+        return false;
+    }
+    rowSet.Destroy = DestroyKernelOwnedRowSet;
+    Cursor_ += static_cast<size_t>(produced);
     return true;
 }
 
