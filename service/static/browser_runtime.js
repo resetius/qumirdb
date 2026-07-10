@@ -1096,14 +1096,6 @@ function createQdbEnv(getMemory, holder) {
     qdb_date_year: dateYear,
     qdb_sql_date: sqlDate,
     qdb_sql_interval: sqlInterval,
-    qdb_bitmap_set_valid: (bitmap, index, valid) => {
-      const mem = new Uint8Array(getMemory().buffer);
-      const i = BigInt(index);
-      const byteIndex = Number(bitmap) + Number(i >> 3n);
-      const bit = 1 << Number(i & 7n);
-      if (valid) mem[byteIndex] |= bit;
-      else mem[byteIndex] &= ~bit;
-    },
 
     qdb_sv_lit_eq: svLit(EQ), qdb_sv_lit_ne: svLit(NE), qdb_sv_lit_lt: svLit(LT),
     qdb_sv_lit_le: svLit(LE), qdb_sv_lit_gt: svLit(GT), qdb_sv_lit_ge: svLit(GE),

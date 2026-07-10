@@ -249,16 +249,6 @@ int32_t qdb_sql_interval(const char* amount, const char* unit) {
     return n;
 }
 
-void qdb_bitmap_set_valid(uint8_t* bitmap, int64_t index, bool valid) {
-    const auto byteIndex = static_cast<size_t>(index >> 3);
-    const auto bit = static_cast<uint8_t>(1u << (index & 7));
-    if (valid) {
-        bitmap[byteIndex] |= bit;
-    } else {
-        bitmap[byteIndex] &= static_cast<uint8_t>(~bit);
-    }
-}
-
 int64_t qdb_sql_bool_and(int64_t left, int64_t right) {
     left = left < 0 ? 1 : left;
     right = right < 0 ? 1 : right;

@@ -110,7 +110,15 @@
        (attrs extern) (block))
 
   (fun qdb_bitmap_set_valid ((var bitmap <ptr u8>) (var index i64) (var valid bool)) -> void
-       (attrs extern) (block))
+    (block
+      (var byte_index = (>> index (: 3 i64)))
+      (var bit = (<< (: 1 i64) (& index (: 7 i64))))
+      (var byte = (cast (index bitmap byte_index) i64))
+      (if valid
+        (block
+          (= bitmap [byte_index] (cast (| byte bit) u8)))
+        (block
+          (= bitmap [byte_index] (cast (& byte (^ bit (: 255 i64))) u8))))))
 
   (fun qdb_sql_bool_and ((var left i64) (var right i64)) -> i64 (attrs extern) (block))
   (fun qdb_sql_bool_or ((var left i64) (var right i64)) -> i64 (attrs extern) (block))
