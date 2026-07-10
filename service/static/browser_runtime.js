@@ -1681,6 +1681,12 @@ const JoinOp = Object.freeze({
   DESTROY: 6n,
 });
 
+const JoinStreamMode = Object.freeze({
+  SYMMETRIC: 'symmetric',
+  STREAM_LEFT_AGAINST_RIGHT: 'stream-left-against-right',
+  STREAM_RIGHT_AGAINST_LEFT: 'stream-right-against-left',
+});
+
 const CrossJoinOp = Object.freeze({
   EMIT: 0n,
   DESTROY: 1n,
@@ -1730,10 +1736,8 @@ function createJoinState(kernel, layout, stage) {
     pairBuffer,
     leftStore: new WasmRowStore(arena, layout),
     rightStore: new WasmRowStore(arena, layout),
-    // Reused marshalling buffer for the streamed (probe) side of an inner join:
-    // the right side is probed batch-by-batch and never stored, so a grow-only
-    // writer keeps its memory bounded (mirrors the filter/project/aggregate
-    // input path).
+    // Reused marshalling buffer for the streamed probe-only side once one input
+    // finishes. Mirrors TInnerJoinProcessor's StreamLeft/StreamRight modes.
     streamWriter: new RowSetWriter(arena, layout),
     materializeCursor: 0,
     semiAntiFinalized: false,
@@ -1746,12 +1750,10 @@ function isInnerJoin(stage) {
   return stage.joinType === 'inner';
 }
 
-// Streams one probe-side (right) batch of an INNER join: builds the left table
-// beforehand, so the right side only probes (STREAM_RIGHT = jt_probe_right_stream,
-// no insert) and is never stored. Pairs carry right batch index -1 and are
-// materialized immediately against the live batch, then the pair buffer is
-// reset. Bounds memory to the build (left) side alone. Returns the output batches.
-function streamJoinRightBatch(state, rowSet, asWasm = false) {
+// Streams one probe-only batch after the opposite side has finished. Pairs that
+// reference the stream batch use batch index -1, so they must be materialized
+// before the input rowset is released.
+function streamJoinBatch(state, side, rowSet, asWasm = false) {
   const { arena, layout } = state;
   const { batch, selection } = rowSet;
   const wasm = wasmRowSetForSelection(batch, selection);
@@ -1759,6 +1761,7 @@ function streamJoinRightBatch(state, rowSet, asWasm = false) {
     ? wasm.rowsetPtr
     : state.streamWriter.write(
         batch.columns, batch.rowCount, false, selection).rowsetPtr;
+  const isLeft = side === 0;
   try {
     const ok = state.dispatch(
       BigInt(state.leftTable),
@@ -1769,7 +1772,7 @@ function streamJoinRightBatch(state, rowSet, asWasm = false) {
       BigInt(state.leftStore.dataPtr()),
       BigInt(state.rightStore.dataPtr()),
       0n,
-      JoinOp.STREAM_RIGHT);
+      isLeft ? JoinOp.STREAM_LEFT : JoinOp.STREAM_RIGHT);
     if (!ok) {
       throw new Error('join stream failed');
     }
@@ -1777,10 +1780,11 @@ function streamJoinRightBatch(state, rowSet, asWasm = false) {
     const count = Number(
       arena.view().getBigInt64(state.pairBuffer + pairLayout.count, true));
     const results = [];
+    const streamLeftPtr = isLeft ? rowsetPtr : state.leftStore.dataPtr();
+    const streamRightPtr = isLeft ? state.rightStore.dataPtr() : rowsetPtr;
     while (state.materializeCursor < count) {
-      // stream_right = the live right rowset; stream_left unused (left ids are stored).
       results.push(drainMaterializedBatch(
-        state, 1024, state.leftStore.dataPtr(), rowsetPtr, asWasm));
+        state, 1024, streamLeftPtr, streamRightPtr, asWasm));
     }
     arena.view().setBigInt64(state.pairBuffer + pairLayout.count, 0n, true);
     state.materializeCursor = 0;
@@ -2710,6 +2714,12 @@ class JoinTask {
     this.done = false;
     this.leftDone = false;
     this.rightDone = false;
+    this.bothDone = false;
+    this.streamMode = JoinStreamMode.SYMMETRIC;
+    this.storedLeftRows = 0;
+    this.storedRightRows = 0;
+    this.lastLeftBatchRows = 0;
+    this.lastRightBatchRows = 0;
     this.rows = 0;
   }
 
@@ -2737,16 +2747,7 @@ class JoinTask {
       return this.execute();
     }
 
-    const progressed = this.pullOneInputBatch();
-    if (progressed) {
-      this.ready.push(...drainJoinPairs(this.state, 1024, asWasm));
-      if (this.ready.length > 0) {
-        return this.execute();
-      }
-      return TaskResult.OK;
-    }
-
-    if (this.leftDone && this.rightDone) {
+    if (this.bothDone || (this.leftDone && this.rightDone)) {
       if (isLeftSemiAntiJoin(this.stage) && !this.state.semiAntiFinalized) {
         finalizeSemiAntiJoinState(this.state);
         this.ready.push(...drainJoinPairs(this.state, 1024, asWasm));
@@ -2766,6 +2767,20 @@ class JoinTask {
       this.done = true;
       return TaskResult.FINISHED;
     }
+
+    const progressed = this.pullOneInputBatch();
+    if (progressed) {
+      this.ready.push(...drainJoinPairs(this.state, 1024, asWasm));
+      if (this.ready.length > 0) {
+        return this.execute();
+      }
+      if ((this.leftDone || this.rightDone) &&
+          !this.bothDone &&
+          !(this.leftDone && this.rightDone)) {
+        return TaskResult.NEED_DATA;
+      }
+      return TaskResult.OK;
+    }
     return TaskResult.NEED_DATA;
   }
 
@@ -2773,75 +2788,110 @@ class JoinTask {
     if (isLeftSemiAntiJoin(this.stage)) {
       return this.pullOneSemiAntiInputBatch();
     }
-    if (isInnerJoin(this.stage)) {
-      return this.pullOneInnerStreamingBatch(
-        downstreamConsumesWasm(this.node));
-    }
-    // Outer joins keep both sides buffered: the finalize scan needs the build
-    // table plus the stored rows to emit unmatched padding.
-    if (!this.leftDone) {
-      const fetched = this.node.inbound[0].connection.fetch();
-      if (fetched.result === FetchResult.OK) {
-        updateJoinState(this.state, 0, fetched.rowSet);
-        this.rows += fetched.rowSet.batch.rowCount;
-        return true;
-      }
-      if (fetched.result === FetchResult.FINISHED) {
-        this.leftDone = true;
-        return true;
-      }
-    }
-
-    if (!this.rightDone) {
-      const fetched = this.node.inbound[1].connection.fetch();
-      if (fetched.result === FetchResult.OK) {
-        updateJoinState(this.state, 1, fetched.rowSet);
-        this.rows += fetched.rowSet.batch.rowCount;
-        return true;
-      }
-      if (fetched.result === FetchResult.FINISHED) {
-        this.rightDone = true;
-        return true;
-      }
-    }
-
-    return false;
+    return this.pullOneSymmetricInputBatch(
+      downstreamConsumesWasm(this.node),
+      isInnerJoin(this.stage));
   }
 
-  // Inner join: build the left side to completion (stored + hash table), then
-  // STREAM the right (probe) side — never storing it — so peak memory is bounded
-  // by the build side rather than both inputs. The probe emits pairs that are
-  // materialized against the live right batch inside streamJoinRightBatch.
-  pullOneInnerStreamingBatch(asWasm) {
-    if (!this.leftDone) {
-      const fetched = this.node.inbound[0].connection.fetch();
-      if (fetched.result === FetchResult.OK) {
-        updateJoinState(this.state, 0, fetched.rowSet);
-        this.rows += fetched.rowSet.batch.rowCount;
-        return true;
+  chooseSymmetricPullSide() {
+    if (this.storedLeftRows === 0 && this.storedRightRows === 0) {
+      return 0;
+    }
+    if (this.storedLeftRows <= this.storedRightRows) {
+      if (this.lastLeftBatchRows > 0 &&
+          this.storedLeftRows + this.lastLeftBatchRows >= this.storedRightRows) {
+        return 1;
       }
-      if (fetched.result === FetchResult.FINISHED) {
-        this.leftDone = true;
-        return true;
-      }
+      return 0;
+    }
+    if (this.lastRightBatchRows > 0 &&
+        this.storedRightRows + this.lastRightBatchRows >= this.storedLeftRows) {
+      return 0;
+    }
+    return 1;
+  }
+
+  processStoredSide(side) {
+    const fetched = this.node.inbound[side].connection.fetch();
+    if (fetched.result === FetchResult.NO_DATA) {
       return false;
     }
-
-    if (!this.rightDone) {
-      const fetched = this.node.inbound[1].connection.fetch();
-      if (fetched.result === FetchResult.OK) {
-        this.ready.push(...streamJoinRightBatch(
-          this.state, fetched.rowSet, asWasm));
-        this.rows += fetched.rowSet.batch.rowCount;
-        return true;
-      }
-      if (fetched.result === FetchResult.FINISHED) {
-        this.rightDone = true;
-        return true;
-      }
+    if (fetched.result === FetchResult.FINISHED) {
+      if (side === 0) this.leftDone = true;
+      else this.rightDone = true;
+      return true;
     }
+    const rows = fetched.rowSet.batch.rowCount;
+    updateJoinState(this.state, side, fetched.rowSet);
+    this.rows += rows;
+    if (side === 0) {
+      this.storedLeftRows += rows;
+      this.lastLeftBatchRows = rows;
+    } else {
+      this.storedRightRows += rows;
+      this.lastRightBatchRows = rows;
+    }
+    return true;
+  }
 
-    return false;
+  processStreamSide(side, asWasm) {
+    const fetched = this.node.inbound[side].connection.fetch();
+    if (fetched.result === FetchResult.NO_DATA) {
+      return false;
+    }
+    if (fetched.result === FetchResult.FINISHED) {
+      if (side === 0) this.leftDone = true;
+      else this.rightDone = true;
+      this.bothDone = true;
+      return true;
+    }
+    this.ready.push(...streamJoinBatch(this.state, side, fetched.rowSet, asWasm));
+    this.rows += fetched.rowSet.batch.rowCount;
+    return true;
+  }
+
+  pullOneSymmetricInputBatch(asWasm, allowStreaming) {
+    for (;;) {
+      if (this.leftDone && this.rightDone) {
+        this.bothDone = true;
+        return false;
+      }
+      if (allowStreaming &&
+          this.streamMode === JoinStreamMode.STREAM_LEFT_AGAINST_RIGHT) {
+        return this.processStreamSide(0, asWasm);
+      }
+      if (allowStreaming &&
+          this.streamMode === JoinStreamMode.STREAM_RIGHT_AGAINST_LEFT) {
+        return this.processStreamSide(1, asWasm);
+      }
+
+      if (this.leftDone) {
+        if (allowStreaming) {
+          this.streamMode = JoinStreamMode.STREAM_RIGHT_AGAINST_LEFT;
+          continue;
+        }
+        return this.processStoredSide(1);
+      }
+      if (this.rightDone) {
+        if (allowStreaming) {
+          this.streamMode = JoinStreamMode.STREAM_LEFT_AGAINST_RIGHT;
+          continue;
+        }
+        return this.processStoredSide(0);
+      }
+
+      const first = this.chooseSymmetricPullSide();
+      if (first === 0) {
+        if (this.processStoredSide(0)) {
+          return true;
+        }
+        return this.processStoredSide(1);
+      }
+      if (this.processStoredSide(1)) {
+        return true;
+      }
+      return this.processStoredSide(0);
+    }
   }
 
   pullOneSemiAntiInputBatch() {
