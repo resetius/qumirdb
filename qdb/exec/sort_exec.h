@@ -10,7 +10,6 @@
 
 namespace NQdb {
 
-struct TTopSortState;
 struct TTopSortScratch;
 
 struct TSortColumnRef {
@@ -22,6 +21,7 @@ struct TSortRadixKernel {
     bool Enabled = false;
     TKernelCompiler::TSortRadixCompositeDispatch Dispatch;
     TKernelCompiler::TSortRadixCompositeNullableDispatch NullableDispatch;
+    TKernelCompiler::TTopSortDispatch TopSortDispatch;
 };
 
 class TSortProcessor {
@@ -98,8 +98,6 @@ public:
     bool Next(TRowSet& rowSet);
 
 private:
-    bool TryRadixSortBatch(const TRowSet& batch, std::vector<uint32_t>& rows);
-
     NQumir::NAst::TTypePtr OutputType_;
     std::vector<TSortKey> Keys_;
     std::vector<TSortColumnRef> KeyColumns_;
