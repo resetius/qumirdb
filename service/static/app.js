@@ -49,7 +49,20 @@ window.addEventListener('DOMContentLoaded', () => {
   initQueries();
   initDatasets();
   initActions();
+  initSourceDownload();
 });
+
+async function initSourceDownload() {
+  const link = $('#source-download');
+  if (!link) {
+    return;
+  }
+  const info = await getJson('/api/version');
+  if (info && info.sourceAvailable) {
+    link.hidden = false;
+    window.lucide?.createIcons();
+  }
+}
 
 function initEditor() {
   const textarea = $('#sql-editor');

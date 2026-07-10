@@ -8,4 +8,5 @@ target_include_directories(qdb_web PRIVATE ${LLVM_INCLUDE_DIRS}) # json
 target_compile_definitions(qdb_web PRIVATE
     QDB_SERVICE_STATIC_DIR="${CMAKE_CURRENT_SOURCE_DIR}/static"
     QDB_BUILD_BIN_DIR="$<TARGET_FILE_DIR:qdb_plan_export>"
+    QDB_SOURCE_ROOT_DIR="${CMAKE_SOURCE_DIR}"
 )

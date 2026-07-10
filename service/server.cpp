@@ -32,6 +32,7 @@ struct TOptions {
     std::function<TPipe(const std::string&, const std::vector<std::string>&, bool)> PipeFactory;
     std::string StaticDir = QDB_SERVICE_STATIC_DIR;
     std::string BinaryDir = QDB_BUILD_BIN_DIR;
+    std::string SourceDir = QDB_SOURCE_ROOT_DIR;
     std::vector<std::string> DataDirs;
     std::vector<std::string> LocalDataDirs;
 };
@@ -216,6 +217,15 @@ public:
         if (ec || BinaryBase_.empty()) {
             BinaryBase_ = std::filesystem::path(Options_.BinaryDir).lexically_normal();
         }
+        SourceBase_ = std::filesystem::weakly_canonical(Options_.SourceDir, ec);
+        if (ec || SourceBase_.empty()) {
+            SourceBase_ = std::filesystem::path(Options_.SourceDir).lexically_normal();
+        }
+        std::error_code srcEc;
+        SourceAvailable_ =
+            !Options_.SourceDir.empty() &&
+            std::filesystem::is_directory(SourceBase_, srcEc) &&
+            std::filesystem::exists(SourceBase_ / ".git", srcEc);
         BuildDatasets();
     }
 
@@ -248,12 +258,19 @@ private:
     TFuture<void> Get(const TRequest& request, TResponse& response) {
         const auto& path = request.Uri().Path();
         if (path == "/api/version") {
-            co_await SendJson(response,
-                "{\"name\":\"QumirDB Workbench\",\"version\":1}");
+            co_await SendJson(response, ToJsonString(llvm::json::Object{
+                {"name", "QumirDB Workbench"},
+                {"version", 1},
+                {"sourceAvailable", SourceAvailable_},
+            }));
             co_return;
         }
         if (path == "/api/datasets") {
             co_await SendJson(response, ServerDatasetsJson());
+            co_return;
+        }
+        if (path == "/api/source.zip") {
+            co_await ServeSourceZip(response);
             co_return;
         }
         if (path.starts_with("/api/local-data/")) {
@@ -571,6 +588,71 @@ private:
         return std::filesystem::temp_directory_path() / name;
     }
 
+    TFuture<void> ServeSourceZip(TResponse& response) {
+        if (!SourceAvailable_) {
+            response.SetStatus(404);
+            co_await SendText(response, "source not available",
+                "text/plain; charset=utf-8");
+            co_return;
+        }
+
+        // Snapshot the working-copy content of tracked files into a temporary
+        // git index and archive that tree, so the download reflects on-disk
+        // sources (including uncommitted edits) but contains tracked files only.
+        // The temp index is seeded from the real one; `git add -u` then updates
+        // only already-tracked paths and never adds untracked/ignored files.
+        static constexpr const char* script =
+            "set -e\n"
+            "cd \"$1\"\n"
+            "idx=\"$(mktemp -t qdbidx.XXXXXX)\"\n"
+            "trap 'rm -f \"$idx\"' EXIT\n"
+            "cp \"$(git rev-parse --git-path index)\" \"$idx\"\n"
+            "GIT_INDEX_FILE=\"$idx\" git add -u\n"
+            "tree=\"$(GIT_INDEX_FILE=\"$idx\" git write-tree)\"\n"
+            "exec git archive --format=zip \"$tree\"\n";
+
+        auto pipe = Options_.PipeFactory(
+            "/bin/sh",
+            {"-c", script, "sh", SourceBase_.string()},
+            /*stderrToStdout=*/false);
+        pipe.CloseWrite();
+
+        std::string output;
+        char buf[65536];
+        for (;;) {
+            ssize_t n = co_await pipe.ReadSome(buf, sizeof(buf));
+            if (n <= 0) {
+                break;
+            }
+            output.append(buf, static_cast<size_t>(n));
+        }
+
+        std::string errorOutput;
+        for (;;) {
+            ssize_t n = co_await pipe.ReadSomeErr(buf, sizeof(buf));
+            if (n <= 0) {
+                break;
+            }
+            errorOutput.append(buf, static_cast<size_t>(n));
+        }
+
+        const int exitCode = pipe.Wait();
+        if (exitCode != 0) {
+            co_await SendJson(response,
+                ToJsonString(ErrorJson(
+                    "source",
+                    "git archive failed with code " + std::to_string(exitCode) +
+                        ": " + errorOutput)),
+                500);
+            co_return;
+        }
+
+        response.SetHeader(
+            "Content-Disposition",
+            "attachment; filename=\"qumirdb-source.zip\"");
+        co_await SendText(response, output, "application/zip");
+    }
+
     TFuture<void> ServeLocalData(TResponse& response, const std::string& uriPath) {
         namespace fs = std::filesystem;
         constexpr std::string_view prefix = "/api/local-data/";
@@ -697,6 +779,8 @@ private:
     TOptions Options_;
     std::filesystem::path StaticBase_;
     std::filesystem::path BinaryBase_;
+    std::filesystem::path SourceBase_;
+    bool SourceAvailable_ = false;
     std::vector<TServerDataset> ServerDatasets_;
 };
 
@@ -712,6 +796,8 @@ int main(int argc, char** argv) {
             options.StaticDir = argv[++i];
         } else if (!std::strcmp(argv[i], "--binary-dir") && i + 1 < argc) {
             options.BinaryDir = argv[++i];
+        } else if (!std::strcmp(argv[i], "--source-dir") && i + 1 < argc) {
+            options.SourceDir = argv[++i];
         } else if (!std::strcmp(argv[i], "--data") && i + 1 < argc) {
             options.DataDirs.push_back(argv[++i]);
         } else if (!std::strcmp(argv[i], "--local-data") && i + 1 < argc) {
@@ -719,6 +805,7 @@ int main(int argc, char** argv) {
         } else if (!std::strcmp(argv[i], "--help")) {
             std::cout << "Usage: " << argv[0]
                       << " [--port n] [--static-dir dir] [--binary-dir dir]"
+                      << " [--source-dir dir]"
                       << " [--data dir ...] [--local-data dir ...]\n";
             return 0;
         }
