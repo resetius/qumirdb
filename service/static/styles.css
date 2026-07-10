@@ -347,6 +347,12 @@ button:hover {
   white-space: nowrap;
 }
 
+.diagnostic-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
 .inspector-artifact-select {
   width: calc(100% - 16px);
   margin: 8px;
@@ -512,8 +518,20 @@ button:hover {
   font-size: 12px;
 }
 
+.diagnostic-panel {
+  position: relative;
+  min-height: 100%;
+}
+
+.diagnostic-copy {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 2;
+}
+
 .details {
-  padding: 12px;
+  padding: 12px 44px 12px 12px;
   white-space: pre-wrap;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12px;
@@ -523,7 +541,7 @@ button:hover {
 .plan-text {
   min-height: 100%;
   margin: 0;
-  padding: 12px;
+  padding: 12px 44px 12px 12px;
   overflow: auto;
   white-space: pre;
   color: var(--text);
