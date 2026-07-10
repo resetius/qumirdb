@@ -114,23 +114,6 @@ export class BucketAllocator {
     this.liveBytes -= this.classes[idx];
     this.freeLists[idx].push(p);
   }
-
-  realloc(ptr, size) {
-    const p = Number(ptr);
-    const n = Math.max(Number(size), 1);
-    if (!p) return this.malloc(n);
-    const oldIdx = this.blockClass.get(p);
-    if (oldIdx !== undefined && this.classes[oldIdx] >= n) {
-      return p; // fits in the current class: grow in place
-    }
-    const np = this.malloc(n);
-    if (oldIdx !== undefined) {
-      const mem = new Uint8Array(this.memory.buffer);
-      mem.copyWithin(np, p, p + Math.min(this.classes[oldIdx], n));
-      this.free(p);
-    }
-    return np;
-  }
 }
 
 export function align(value, to) {

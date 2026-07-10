@@ -23,7 +23,8 @@
           (var blocks = (index blocks_ref (: 0 i64)))
           (var grown = (cast
             (call qdb_realloc
-              (cast blocks <ptr i8>) (* new_capacity (: 8 i64)))
+              (cast blocks <ptr i8>)
+              (* count (: 8 i64)) (* new_capacity (: 8 i64)))
             <ptr <ptr u8>>))
           (if (== (cast grown i64) (: 0 i64))
             (block (return #f)))
@@ -101,7 +102,7 @@
           (var grown = (cast
             (call qdb_realloc
               (cast (field ht OwnedBlocks) <ptr i8>)
-              (* new_capacity (: 8 i64)))
+              (* count (: 8 i64)) (* new_capacity (: 8 i64)))
             <ptr <ptr u8>>))
           (if (== (cast grown i64) (: 0 i64))
             (block (return #f)))

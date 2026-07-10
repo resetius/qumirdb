@@ -15,12 +15,9 @@ void* qdb_alloc(int64_t size) {
     return std::malloc(static_cast<size_t>(size));
 }
 
-void* qdb_realloc(void* ptr, int64_t size) {
-    if (size < 0) {
-        return nullptr;
-    }
-    return std::realloc(ptr, static_cast<size_t>(size));
-}
+// Note: qdb_realloc is intentionally NOT provided here. It is implemented in Oz
+// (qumirdb.oz) on top of qdb_alloc/qdb_free, taking the old size so it copies
+// only the live bytes.
 
 void qdb_free(void* ptr) {
     std::free(ptr);

@@ -50,8 +50,37 @@
       (return (!= (& (>> byte bit_pos) (: 1 i64)) (: 0 i64)))))
 
   (fun qdb_alloc ((var size i64)) -> <ptr i8> (attrs extern) (block))
-  (fun qdb_realloc ((var ptr <ptr i8>) (var size i64)) -> <ptr i8> (attrs extern) (block))
   (fun qdb_free ((var ptr <ptr i8>)) -> void (attrs extern) (block))
+
+  ;; realloc implemented in Oz on top of qdb_alloc/qdb_free: the caller passes
+  ;; the number of live bytes to preserve (old_size), so we copy only that much
+  ;; instead of the whole old allocation. Word-copy the 8-byte-aligned bulk, then
+  ;; a byte tail for any remainder.
+  (fun qdb_realloc
+       ((var ptr <ptr i8>) (var old_size i64) (var new_size i64)) -> <ptr i8>
+    (block
+      (if (== (cast ptr i64) (: 0 i64))
+        (block (return (call qdb_alloc new_size))))
+      (var new_ptr = (call qdb_alloc new_size))
+      (if (== (cast new_ptr i64) (: 0 i64))
+        (block (return (cast (: 0 i64) <ptr i8>))))
+      (var copy = old_size)
+      (if (< new_size copy) (block (= copy new_size)))
+      (var words = (>> copy (: 3 i64)))
+      (var src_words = (cast ptr <ptr i64>))
+      (var dst_words = (cast new_ptr <ptr i64>))
+      (var i = (: 0 i64))
+      (while (< i words)
+        (block
+          (= dst_words [i] (index src_words i))
+          (= i (+ i (: 1 i64)))))
+      (var b = (<< words (: 3 i64)))
+      (while (< b copy)
+        (block
+          (= new_ptr [b] (index ptr b))
+          (= b (+ b (: 1 i64)))))
+      (call qdb_free ptr)
+      (return new_ptr)))
 
   (fun qdb_filter_string_compare
        ((var left <ptr u8>)

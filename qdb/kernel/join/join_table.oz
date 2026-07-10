@@ -52,9 +52,9 @@
           (var new_cap i64)
           (if (== capacity (: 0 i64))
             (block (= new_cap (: 4 i64)))
-            (block (= new_cap (* capacity (: 2 i64)))))
+            (block (= new_cap (+ capacity (/ capacity (: 2 i64))))))
           (var new_data =
-            (cast (call qdb_realloc (cast data <ptr i8>) (* new_cap (: 8 i64))) <ptr i64>))
+            (cast (call qdb_realloc (cast data <ptr i8>) (* count (: 8 i64)) (* new_cap (: 8 i64))) <ptr i64>))
           (if (== (cast new_data i64) (: 0 i64)) (block (return #f)))
           (= data new_data)
           (= capacity new_cap)
@@ -78,9 +78,9 @@
           (var new_cap i64)
           (if (== capacity (: 0 i64))
             (block (= new_cap (: 4 i64)))
-            (block (= new_cap (* capacity (: 2 i64)))))
+            (block (= new_cap (+ capacity (/ capacity (: 2 i64))))))
           (var new_data =
-            (cast (call qdb_realloc (cast data <ptr i8>) (* new_cap (: 16 i64))) <ptr i64>))
+            (cast (call qdb_realloc (cast data <ptr i8>) (* count (: 16 i64)) (* new_cap (: 16 i64))) <ptr i64>))
           (if (== (cast new_data i64) (: 0 i64)) (block (return #f)))
           (= data new_data)
           (= capacity new_cap)

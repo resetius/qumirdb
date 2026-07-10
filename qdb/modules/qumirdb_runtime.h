@@ -10,7 +10,6 @@ extern "C" {
 // family so they can be registered as external functions in the QumirDb
 // module and resolved by the LLVM JIT via the process symbol table.
 void* qdb_alloc(int64_t size);
-void* qdb_realloc(void* ptr, int64_t size);
 void qdb_free(void* ptr);
 
 int64_t qdb_filter_string_compare(
