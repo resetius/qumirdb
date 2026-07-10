@@ -3,11 +3,14 @@ import { renderGraph } from './graph.js';
 import { tpchQueries } from './tpch_queries.js';
 import {
   addFilesToBrowserDataset,
+  addStoredFilesToBrowserDataset,
   createBrowserDataset,
   deleteBrowserDataset,
   listBrowserDatasets,
   removeFileFromBrowserDataset,
-  renameBrowserDataset
+  renameBrowserDataset,
+  writeOpfsFileStream,
+  writeOpfsStoredFile
 } from './browser_storage.js';
 import { readParquetTable } from './browser_parquet.js';
 
@@ -16,6 +19,9 @@ const $ = selector => document.querySelector(selector);
 const QUERIES_KEY = 'qdb.web.queries';
 const ACTIVE_QUERY_KEY = 'qdb.web.activeQuery';
 const ACTIVE_DATASET_KEY = 'qdb.web.activeDataset';
+const WORKSPACE_STATE_KEY = 'qdb.web.workspaceState';
+const LOCAL_DATA_DOWNLOAD_CONCURRENCY = 4;
+const MAX_PERSISTED_RESULT_ROWS = 1000;
 
 let editor = null;
 let activeQueryId = localStorage.getItem(ACTIVE_QUERY_KEY) || '';
@@ -28,8 +34,10 @@ let lastExplainKey = null;
 let graphMode = 'logical';
 let resultRows = [];
 let resultSort = null;
+let resultMeta = null;
 let inspectorSummaryText = '';
 let inspectorArtifactItems = [];
+let toastTimer = 0;
 
 window.addEventListener('DOMContentLoaded', () => {
   window.lucide?.createIcons();
@@ -99,11 +107,10 @@ function initGraphControls() {
   for (const button of document.querySelectorAll('.graph-mode')) {
     button.addEventListener('click', () => {
       graphMode = button.dataset.mode || 'logical';
-      for (const item of document.querySelectorAll('.graph-mode')) {
-        item.classList.toggle('active', item === button);
-      }
+      updateGraphModeButtons();
       renderCurrentGraph();
       clearInspector();
+      saveWorkspaceState();
     });
   }
   $('#inspector-clear').addEventListener('click', clearInspector);
@@ -179,6 +186,8 @@ function initQueries() {
   }
 
   $('#query-new').addEventListener('click', () => {
+    saveActiveQuerySql();
+    saveWorkspaceState();
     const queries = loadQueries();
     const query = {
       id: crypto.randomUUID(),
@@ -190,6 +199,7 @@ function initQueries() {
     localStorage.setItem(ACTIVE_QUERY_KEY, activeQueryId);
     saveQueries(queries);
     setSql('');
+    restoreWorkspaceState();
     renderQueries();
   });
   renderQueries();
@@ -244,11 +254,16 @@ function renderQueries() {
     button.type = 'button';
     button.textContent = query.name;
     button.addEventListener('click', () => {
+      if (query.id === activeQueryId) {
+        return;
+      }
       saveActiveQuerySql();
+      saveWorkspaceState();
       activeQueryId = query.id;
       localStorage.setItem(ACTIVE_QUERY_KEY, activeQueryId);
       const freshQuery = loadQueries().find(item => item.id === activeQueryId);
       setSql(freshQuery?.sql || '');
+      restoreWorkspaceState();
       renderQueries();
     });
     root.appendChild(button);
@@ -266,6 +281,7 @@ async function initDatasets() {
     event.target.value = '';
   });
   renderDatasets();
+  restoreWorkspaceState();
 }
 
 async function loadBrowserDatasets() {
@@ -300,8 +316,7 @@ async function createEmptyBrowserDataset() {
   try {
     const dataset = await createBrowserDataset(trimmed);
     browserDatasets = await loadBrowserDatasets();
-    activeDatasetId = dataset.id;
-    localStorage.setItem(ACTIVE_DATASET_KEY, activeDatasetId);
+    switchActiveDataset(dataset.id);
     renderDatasets();
   } catch (error) {
     showDetails({
@@ -333,6 +348,20 @@ function ensureActiveDataset() {
   } else {
     localStorage.removeItem(ACTIVE_DATASET_KEY);
   }
+}
+
+function switchActiveDataset(datasetId) {
+  if (datasetId === activeDatasetId) {
+    return;
+  }
+  saveWorkspaceState();
+  activeDatasetId = datasetId || '';
+  if (activeDatasetId) {
+    localStorage.setItem(ACTIVE_DATASET_KEY, activeDatasetId);
+  } else {
+    localStorage.removeItem(ACTIVE_DATASET_KEY);
+  }
+  restoreWorkspaceState();
 }
 
 async function addFilesToActiveBrowserDataset(files) {
@@ -374,6 +403,171 @@ async function addFilesToActiveBrowserDataset(files) {
   }
 }
 
+async function downloadLocalDataset(dataset) {
+  const source = dataset.source || {};
+  const files = source.files || [];
+  if (source.kind !== 'local' || !files.length) {
+    showDetails({ ok: false, error: { message: 'No downloadable parquet files.' } });
+    selectTab('details');
+    return;
+  }
+
+  const existing = downloadedBrowserDatasetFor(dataset);
+  const target = existing || {
+    id: crypto.randomUUID(),
+    name: dataset.name,
+    source: {
+      kind: 'browser',
+      storage: 'opfs',
+      files: [],
+      downloadedFrom: {
+        id: dataset.id,
+        name: dataset.name,
+        path: source.path || ''
+      }
+    },
+    tables: []
+  };
+
+  setStatus('downloading');
+  setRunProgress(0);
+  showToast(`Download started: ${dataset.name}`);
+  try {
+    const totalBytes = Math.max(
+      files.reduce((sum, item) => sum + Math.max(Number(item.size || 0), 0), 0),
+      1);
+    const progressByFile = new Array(files.length).fill(0);
+    const updateFileProgress = (index, bytes) => {
+      progressByFile[index] = Math.max(progressByFile[index], bytes);
+      const completedBytes = progressByFile.reduce((sum, value) => sum + value, 0);
+      setRunProgress(completedBytes / totalBytes);
+    };
+    const storedFiles = await downloadLocalDataFiles(
+      target.id,
+      files,
+      LOCAL_DATA_DOWNLOAD_CONCURRENCY,
+      updateFileProgress);
+
+    const tableByFile = new Map((dataset.tables || []).map(table => [
+      table.sourceFile || `${table.name}.parquet`,
+      table
+    ]));
+    const tables = storedFiles.map(file => {
+      const table = tableByFile.get(file.name);
+      if (!table) {
+        throw new Error(`missing table metadata for ${file.name}`);
+      }
+      return {
+        ...table,
+        sourceFile: file.name
+      };
+    });
+    await addStoredFilesToBrowserDataset(target, storedFiles, tables);
+    browserDatasets = await loadBrowserDatasets();
+    const updated = browserDatasets.find(item =>
+      item.source?.downloadedFrom?.id === dataset.id) ||
+      browserDatasets.find(item => item.id === target.id);
+    switchActiveDataset(updated?.id || target.id);
+    renderDatasets();
+    setStatus('dataset ready');
+    setRunProgress(null);
+  } catch (error) {
+    setStatus('download failed');
+    setRunProgress(null);
+    showDetails({
+      ok: false,
+      error: {
+        stage: 'local-data',
+        message: error.message || String(error)
+      }
+    });
+    selectTab('details');
+  }
+}
+
+async function downloadLocalDataFiles(datasetId, files, concurrency, onProgress) {
+  const controller = new AbortController();
+  try {
+    return await parallelMapLimit(files, concurrency, (item, index) =>
+      downloadLocalDataFile(datasetId, item, {
+        signal: controller.signal,
+        onProgress: bytes => onProgress(index, bytes)
+      }));
+  } catch (error) {
+    controller.abort();
+    throw error;
+  }
+}
+
+async function downloadLocalDataFile(datasetId, item, options) {
+  const response = await fetch(item.url, { signal: options.signal });
+  if (!response.ok) {
+    throw new Error(`failed to download ${item.name}: ${response.statusText}`);
+  }
+
+  if (!response.body?.getReader) {
+    const blob = await response.blob();
+    const bytes = blob.size || Number(item.size || 0);
+    options.onProgress?.(bytes);
+    return writeOpfsStoredFile(datasetId, new File(
+      [blob],
+      item.name,
+      { type: blob.type || response.headers.get('Content-Type') || 'application/octet-stream' }));
+  }
+
+  return writeOpfsFileStream(datasetId, item.name, response.body, {
+    type: response.headers.get('Content-Type') || 'application/octet-stream',
+    onProgress: bytes => options.onProgress?.(bytes)
+  });
+}
+
+async function parallelMapLimit(items, limit, fn) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+  const workerCount = Math.max(1, Math.min(Number(limit) || 1, items.length));
+  const workers = Array.from({ length: workerCount }, async () => {
+    for (;;) {
+      const index = nextIndex++;
+      if (index >= items.length) {
+        break;
+      }
+      results[index] = await fn(items[index], index);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
+function downloadedBrowserDatasetFor(dataset) {
+  return browserDatasets.find(item => item.source?.downloadedFrom?.id === dataset.id) || null;
+}
+
+async function deleteDownloadedLocalDataset(dataset) {
+  const downloaded = downloadedBrowserDatasetFor(dataset);
+  if (!downloaded) {
+    return;
+  }
+  if (!window.confirm(`Delete OPFS copy of ${dataset.name}?`)) {
+    return;
+  }
+  try {
+    await deleteBrowserDataset(downloaded.id);
+    browserDatasets = await loadBrowserDatasets();
+    switchActiveDataset(dataset.id);
+    renderDatasets();
+    setStatus('dataset deleted');
+  } catch (error) {
+    showDetails({
+      ok: false,
+      error: {
+        stage: 'browser-storage',
+        message: error.message || String(error)
+      }
+    });
+    selectTab('details');
+  }
+}
+
 async function renameActiveBrowserDataset(dataset) {
   const name = window.prompt('Dataset name', dataset.name || '');
   const trimmed = name?.trim();
@@ -402,18 +596,51 @@ function renderDatasets() {
   for (const dataset of allDatasets()) {
     const row = document.createElement('div');
     row.className = `dataset-item${dataset.id === activeDatasetId ? ' active' : ''}`;
+    let actionCount = 0;
     const button = document.createElement('button');
     button.className = 'dataset-select';
     button.type = 'button';
-    button.textContent = dataset.source?.kind === 'server'
-      ? `${dataset.name} · server`
-      : `${dataset.name} · browser`;
+    button.textContent = `${dataset.name} · ${datasetKindLabel(dataset)}`;
     button.addEventListener('click', () => {
-      activeDatasetId = dataset.id;
-      localStorage.setItem(ACTIVE_DATASET_KEY, activeDatasetId);
+      if (dataset.id === activeDatasetId) {
+        return;
+      }
+      switchActiveDataset(dataset.id);
       renderDatasets();
     });
     row.appendChild(button);
+    if (dataset.source?.kind === 'local') {
+      const downloaded = downloadedBrowserDatasetFor(dataset);
+      const download = document.createElement('button');
+      download.className = 'icon-button dataset-action';
+      download.type = 'button';
+      download.title = 'Download to OPFS';
+      download.setAttribute('aria-label', 'Download to OPFS');
+      download.innerHTML = '<i data-lucide="download"></i>';
+      download.addEventListener('click', async event => {
+        event.stopPropagation();
+        switchActiveDataset(dataset.id);
+        renderDatasets();
+        await downloadLocalDataset(dataset);
+      });
+      row.appendChild(download);
+      actionCount += 1;
+
+      if (downloaded) {
+        const removeDownloaded = document.createElement('button');
+        removeDownloaded.className = 'icon-button dataset-action';
+        removeDownloaded.type = 'button';
+        removeDownloaded.title = 'Delete OPFS copy';
+        removeDownloaded.setAttribute('aria-label', 'Delete OPFS copy');
+        removeDownloaded.innerHTML = '<i data-lucide="trash-2"></i>';
+        removeDownloaded.addEventListener('click', async event => {
+          event.stopPropagation();
+          await deleteDownloadedLocalDataset(dataset);
+        });
+        row.appendChild(removeDownloaded);
+        actionCount += 1;
+      }
+    }
     if (dataset.source?.kind === 'browser') {
       const upload = document.createElement('button');
       upload.className = 'icon-button dataset-action';
@@ -423,11 +650,12 @@ function renderDatasets() {
       upload.innerHTML = '<i data-lucide="upload"></i>';
       upload.addEventListener('click', event => {
         event.stopPropagation();
-        activeDatasetId = dataset.id;
-        localStorage.setItem(ACTIVE_DATASET_KEY, activeDatasetId);
+        switchActiveDataset(dataset.id);
+        renderDatasets();
         $('#dataset-files').click();
       });
       row.appendChild(upload);
+      actionCount += 1;
 
       const rename = document.createElement('button');
       rename.className = 'icon-button dataset-action';
@@ -440,6 +668,7 @@ function renderDatasets() {
         await renameActiveBrowserDataset(dataset);
       });
       row.appendChild(rename);
+      actionCount += 1;
 
       const remove = document.createElement('button');
       remove.className = 'icon-button dataset-action';
@@ -449,17 +678,40 @@ function renderDatasets() {
       remove.innerHTML = '<i data-lucide="trash-2"></i>';
       remove.addEventListener('click', async event => {
         event.stopPropagation();
+        const removedActive = dataset.id === activeDatasetId;
         await deleteBrowserDataset(dataset.id);
         browserDatasets = await loadBrowserDatasets();
+        const previousDatasetId = activeDatasetId;
         ensureActiveDataset();
+        if (removedActive || activeDatasetId !== previousDatasetId) {
+          restoreWorkspaceState();
+        }
         renderDatasets();
       });
       row.appendChild(remove);
+      actionCount += 1;
+    }
+    if (actionCount > 0) {
+      row.classList.add('has-actions');
+      row.style.setProperty('--dataset-actions', String(actionCount));
     }
     root.appendChild(row);
   }
   window.lucide?.createIcons();
   renderSchema(activeDataset());
+}
+
+function datasetKindLabel(dataset) {
+  if (dataset.source?.kind === 'server') {
+    return 'server';
+  }
+  if (dataset.source?.kind === 'local') {
+    return downloadedBrowserDatasetFor(dataset) ? 'downloaded' : 'download';
+  }
+  if (dataset.source?.downloadedFrom) {
+    return 'browser copy';
+  }
+  return 'browser';
 }
 
 function renderSchema(dataset) {
@@ -564,6 +816,16 @@ function initActions() {
     }
     if (dataset.source?.kind === 'browser') {
       await runBrowser(sql, dataset);
+      return;
+    }
+    if (dataset.source?.kind === 'local') {
+      showDetails({
+        ok: false,
+        error: {
+          message: 'Download this dataset to OPFS before running it in the browser.'
+        }
+      });
+      selectTab('details');
       return;
     }
     const key = explainKey(sql, dataset);
@@ -769,8 +1031,9 @@ function runBrowserWorker(exec, dataset, onProgress) {
 function renderBrowserResult(result, elapsedMs) {
   resultRows = [result.columns, ...result.rows];
   resultSort = null;
+  resultMeta = { rows: result.rows.length, elapsedMs, processingMs: elapsedMs };
   renderResultSummary(
-    { rows: result.rows.length, elapsedMs, processingMs: elapsedMs },
+    resultMeta,
     resultRows);
   renderResultTable(resultRows, { elapsedMs });
 }
@@ -809,6 +1072,12 @@ function currentGraph() {
   return lastBundle?.graphs?.[graphMode] || lastBundle?.graph || {};
 }
 
+function updateGraphModeButtons() {
+  for (const button of document.querySelectorAll('.graph-mode')) {
+    button.classList.toggle('active', (button.dataset.mode || 'logical') === graphMode);
+  }
+}
+
 function renderPlans(bundle) {
   $('#logical-plan').textContent = bundle.plans?.logicalText || bundle.plan?.logicalText || '';
 }
@@ -816,8 +1085,13 @@ function renderPlans(bundle) {
 function renderResult(result) {
   resultRows = parseCsv(result.csv || '');
   resultSort = null;
-  renderResultSummary(result, resultRows);
-  renderResultTable(resultRows, result);
+  resultMeta = {
+    rows: result.rows,
+    elapsedMs: result.elapsedMs,
+    processingMs: result.processingMs
+  };
+  renderResultSummary(resultMeta, resultRows);
+  renderResultTable(resultRows, resultMeta);
 }
 
 function renderResultSummary(result, rows) {
@@ -860,6 +1134,7 @@ function renderResultTable(rows, result = {}) {
     button.addEventListener('click', () => {
       toggleResultSort(index);
       renderResultTable(resultRows, result);
+      saveWorkspaceState();
     });
     cell.appendChild(button);
     headRow.appendChild(cell);
@@ -1076,6 +1351,173 @@ function renderSelectedInspectorArtifact(index) {
 
 function showDetails(value) {
   $('#details').textContent = JSON.stringify(value, null, 2);
+  saveWorkspaceState();
+}
+
+function restoreWorkspaceState(queryId = activeQueryId, datasetId = activeDatasetId) {
+  const state = loadWorkspaceState(queryId, datasetId);
+  if (!state) {
+    clearWorkspaceStateView();
+    return;
+  }
+
+  graphMode = state.graphMode || 'logical';
+  updateGraphModeButtons();
+
+  if (state.bundle) {
+    lastBundle = state.bundle;
+    renderCurrentGraph();
+    renderPlans(lastBundle);
+  } else {
+    lastBundle = null;
+    renderGraph($('#graph'), {}, showSelection);
+    $('#logical-plan').textContent = '';
+  }
+
+  if (typeof state.detailsText === 'string') {
+    $('#details').textContent = state.detailsText;
+  } else {
+    $('#details').textContent = '';
+  }
+
+  const storedRows = capResultRows(state.result?.rows || []);
+  if (storedRows.length) {
+    resultRows = storedRows;
+    resultSort = state.result?.sort || null;
+    resultMeta = state.result?.meta || {
+      rows: Math.max(storedRows.length - 1, 0),
+      elapsedMs: 0,
+      processingMs: 0
+    };
+    renderResultSummary(resultMeta, resultRows);
+    renderResultTable(resultRows, resultMeta);
+  } else {
+    clearResultView();
+  }
+  clearInspector();
+}
+
+function loadWorkspaceState(queryId = activeQueryId, datasetId = activeDatasetId) {
+  if (!queryId || !datasetId) {
+    return null;
+  }
+  try {
+    return JSON.parse(localStorage.getItem(workspaceStateKey(queryId, datasetId)) || 'null');
+  } catch {
+    return null;
+  }
+}
+
+function saveWorkspaceState(queryId = activeQueryId, datasetId = activeDatasetId) {
+  if (!queryId || !datasetId) {
+    return;
+  }
+  try {
+    const state = {
+      version: 1,
+      graphMode,
+      bundle: compactBundleForStorage(lastBundle),
+      detailsText: $('#details')?.textContent || '',
+      result: {
+        rows: capResultRows(resultRows),
+        sort: resultSort,
+        meta: resultMeta
+      }
+    };
+    localStorage.setItem(workspaceStateKey(queryId, datasetId), JSON.stringify(state));
+  } catch (error) {
+    console.warn('failed to save workspace state', error);
+  }
+}
+
+function workspaceStateKey(queryId, datasetId) {
+  return `${WORKSPACE_STATE_KEY}:${queryId}:${datasetId}`;
+}
+
+function clearWorkspaceStateView() {
+  lastBundle = null;
+  lastExplainKey = null;
+  graphMode = 'logical';
+  updateGraphModeButtons();
+  renderGraph($('#graph'), {}, showSelection);
+  $('#logical-plan').textContent = '';
+  $('#details').textContent = '';
+  clearResultView();
+  clearInspector();
+}
+
+function clearResultView() {
+  resultRows = [];
+  resultSort = null;
+  resultMeta = null;
+  $('#result-summary').textContent = 'not run';
+  $('#result-head').innerHTML = '<tr><th>Status</th><th>Rows</th><th>Time</th></tr>';
+  $('#result-body').innerHTML = '<tr><td>not run</td><td>0</td><td>0 ms</td></tr>';
+}
+
+function compactBundleForStorage(bundle) {
+  if (!bundle) {
+    return null;
+  }
+  return {
+    ok: bundle.ok,
+    format: bundle.format,
+    version: bundle.version,
+    mode: bundle.mode,
+    graph: bundle.graph || null,
+    graphs: bundle.graphs || null,
+    plan: bundle.plan || null,
+    plans: bundle.plans || null,
+    exec: compactExecForStorage(bundle.exec)
+  };
+}
+
+function compactExecForStorage(exec) {
+  if (!exec) {
+    return null;
+  }
+  return stripWasmFields(exec);
+}
+
+function stripWasmFields(value) {
+  if (Array.isArray(value)) {
+    return value.map(stripWasmFields);
+  }
+  if (!value || typeof value !== 'object') {
+    return value;
+  }
+
+  const out = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (key === 'wasm' || key === 'embedWasm') {
+      continue;
+    }
+    out[key] = stripWasmFields(item);
+  }
+  return out;
+}
+
+function capResultRows(rows) {
+  if (!Array.isArray(rows) || !rows.length) {
+    return [];
+  }
+  return [
+    rows[0],
+    ...rows.slice(1, MAX_PERSISTED_RESULT_ROWS + 1)
+  ];
+}
+
+function showToast(message, timeoutMs = 2600) {
+  const toast = $('#toast');
+  if (!toast) {
+    return;
+  }
+  window.clearTimeout(toastTimer);
+  toast.textContent = message;
+  toast.hidden = false;
+  toastTimer = window.setTimeout(() => {
+    toast.hidden = true;
+  }, timeoutMs);
 }
 
 function showInspectorJson(title, value) {

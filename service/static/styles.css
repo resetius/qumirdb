@@ -146,6 +146,24 @@ button:hover {
   display: none;
 }
 
+.toast {
+  position: fixed;
+  top: 58px;
+  right: 12px;
+  z-index: 50;
+  max-width: min(360px, calc(100vw - 24px));
+  padding: 9px 12px;
+  border: 1px solid #315a75;
+  background: #162432;
+  color: var(--text);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.28);
+  font-size: 13px;
+}
+
+.toast[hidden] {
+  display: none;
+}
+
 @keyframes spin {
   to {
     transform: rotate(360deg);
@@ -441,8 +459,8 @@ button:hover {
   margin-bottom: 6px;
 }
 
-.dataset-item:has(.dataset-action) {
-  grid-template-columns: minmax(0, 1fr) 32px 32px 32px;
+.dataset-item.has-actions {
+  grid-template-columns: minmax(0, 1fr) repeat(var(--dataset-actions), 32px);
 }
 
 .dataset-item.active .dataset-select {

@@ -33,12 +33,19 @@ struct TOptions {
     std::string StaticDir = QDB_SERVICE_STATIC_DIR;
     std::string BinaryDir = QDB_BUILD_BIN_DIR;
     std::vector<std::string> DataDirs;
+    std::vector<std::string> LocalDataDirs;
+};
+
+enum class EDatasetKind {
+    Server,
+    Local,
 };
 
 struct TServerDataset {
     std::string Id;
     std::string Name;
     std::filesystem::path Path;
+    EDatasetKind Kind = EDatasetKind::Server;
     llvm::json::Object Json;
 };
 
@@ -142,6 +149,57 @@ std::string TableNameFromPath(const std::filesystem::path& path) {
     return name;
 }
 
+std::string UrlEncode(std::string_view value) {
+    static constexpr char hex[] = "0123456789ABCDEF";
+    std::string out;
+    out.reserve(value.size());
+    for (unsigned char ch : value) {
+        if ((ch >= 'A' && ch <= 'Z') ||
+            (ch >= 'a' && ch <= 'z') ||
+            (ch >= '0' && ch <= '9') ||
+            ch == '-' || ch == '_' || ch == '.' || ch == '~')
+        {
+            out += static_cast<char>(ch);
+        } else {
+            out += '%';
+            out += hex[ch >> 4];
+            out += hex[ch & 0x0f];
+        }
+    }
+    return out;
+}
+
+int HexValue(char ch) {
+    if (ch >= '0' && ch <= '9') {
+        return ch - '0';
+    }
+    if (ch >= 'a' && ch <= 'f') {
+        return ch - 'a' + 10;
+    }
+    if (ch >= 'A' && ch <= 'F') {
+        return ch - 'A' + 10;
+    }
+    return -1;
+}
+
+std::string UrlDecode(std::string_view value) {
+    std::string out;
+    out.reserve(value.size());
+    for (size_t i = 0; i < value.size(); ++i) {
+        if (value[i] == '%' && i + 2 < value.size()) {
+            const int hi = HexValue(value[i + 1]);
+            const int lo = HexValue(value[i + 2]);
+            if (hi >= 0 && lo >= 0) {
+                out += static_cast<char>((hi << 4) | lo);
+                i += 2;
+                continue;
+            }
+        }
+        out += value[i] == '+' ? ' ' : value[i];
+    }
+    return out;
+}
+
 } // namespace
 
 class TRouter final : public IRouter {
@@ -196,6 +254,10 @@ private:
         }
         if (path == "/api/datasets") {
             co_await SendJson(response, ServerDatasetsJson());
+            co_return;
+        }
+        if (path.starts_with("/api/local-data/")) {
+            co_await ServeLocalData(response, path);
             co_return;
         }
         co_await ServeStatic(response, path);
@@ -273,7 +335,7 @@ private:
             co_return;
         }
 
-        auto* serverDataset = FindDataset(*datasetId);
+        auto* serverDataset = FindServerDataset(*datasetId);
         if (!serverDataset) {
             co_await SendJson(response,
                 ToJsonString(ErrorJson(
@@ -364,8 +426,9 @@ private:
     void BuildDatasets() {
         namespace fs = std::filesystem;
         ServerDatasets_.clear();
-        size_t index = 0;
-        for (const auto& dirValue : Options_.DataDirs) {
+        size_t serverIndex = 0;
+        size_t localIndex = 0;
+        auto addDir = [&](const std::string& dirValue, EDatasetKind kind, size_t index) {
             std::error_code ec;
             fs::path dir = fs::weakly_canonical(dirValue, ec);
             if (ec || dir.empty()) {
@@ -373,15 +436,24 @@ private:
             }
             if (!fs::exists(dir) || !fs::is_directory(dir)) {
                 std::cerr << "[QumirDB Web] skip data dir: " << dir << "\n";
-                continue;
+                return;
             }
 
             TServerDataset dataset;
-            dataset.Id = "server:" + std::to_string(index++);
+            dataset.Id = (kind == EDatasetKind::Server ? "server:" : "local:") +
+                std::to_string(index);
             dataset.Name = BaseName(dir);
             dataset.Path = dir;
+            dataset.Kind = kind;
             dataset.Json = BuildDatasetJson(dataset);
             ServerDatasets_.push_back(std::move(dataset));
+        };
+
+        for (const auto& dirValue : Options_.DataDirs) {
+            addDir(dirValue, EDatasetKind::Server, serverIndex++);
+        }
+        for (const auto& dirValue : Options_.LocalDataDirs) {
+            addDir(dirValue, EDatasetKind::Local, localIndex++);
         }
     }
 
@@ -398,6 +470,7 @@ private:
 
         for (const auto& file : files) {
             const auto tableName = TableNameFromPath(file);
+            const auto sourceFile = file.filename().string();
             try {
                 NQdb::TParquetSource source(file.string());
                 llvm::json::Array columns;
@@ -418,6 +491,7 @@ private:
 
                 tables.push_back(llvm::json::Object{
                     {"name", tableName},
+                    {"sourceFile", sourceFile},
                     {"columns", std::move(columns)},
                     {"stats", llvm::json::Object{
                         {"rows", rows},
@@ -431,13 +505,32 @@ private:
             }
         }
 
+        llvm::json::Array sourceFiles;
+        if (dataset.Kind == EDatasetKind::Local) {
+            for (const auto& file : files) {
+                std::error_code ec;
+                const auto size = fs::file_size(file, ec);
+                sourceFiles.push_back(llvm::json::Object{
+                    {"name", file.filename().string()},
+                    {"size", ec ? 0 : static_cast<int64_t>(size)},
+                    {"url", "/api/local-data/" + UrlEncode(dataset.Id) + "/" +
+                        UrlEncode(file.filename().string())},
+                });
+            }
+        }
+
+        llvm::json::Object source{
+            {"kind", dataset.Kind == EDatasetKind::Server ? "server" : "local"},
+            {"path", dataset.Path.string()},
+        };
+        if (dataset.Kind == EDatasetKind::Local) {
+            source["files"] = std::move(sourceFiles);
+        }
+
         return llvm::json::Object{
             {"id", dataset.Id},
             {"name", dataset.Name},
-            {"source", llvm::json::Object{
-                {"kind", "server"},
-                {"path", dataset.Path.string()},
-            }},
+            {"source", std::move(source)},
             {"tables", std::move(tables)},
         };
     }
@@ -453,9 +546,18 @@ private:
         });
     }
 
-    TServerDataset* FindDataset(llvm::StringRef id) {
+    TServerDataset* FindServerDataset(llvm::StringRef id) {
         for (auto& dataset : ServerDatasets_) {
-            if (dataset.Id == id) {
+            if (dataset.Kind == EDatasetKind::Server && dataset.Id == id) {
+                return &dataset;
+            }
+        }
+        return nullptr;
+    }
+
+    TServerDataset* FindLocalDataset(llvm::StringRef id) {
+        for (auto& dataset : ServerDatasets_) {
+            if (dataset.Kind == EDatasetKind::Local && dataset.Id == id) {
                 return &dataset;
             }
         }
@@ -467,6 +569,59 @@ private:
         auto name = "qumirdb-web-" + std::to_string(::getpid()) + "-" +
             std::to_string(nextId.fetch_add(1, std::memory_order_relaxed)) + ".sql";
         return std::filesystem::temp_directory_path() / name;
+    }
+
+    TFuture<void> ServeLocalData(TResponse& response, const std::string& uriPath) {
+        namespace fs = std::filesystem;
+        constexpr std::string_view prefix = "/api/local-data/";
+        const std::string rest = uriPath.substr(prefix.size());
+        const auto slash = rest.find('/');
+        if (slash == std::string::npos) {
+            response.SetStatus(404);
+            co_await SendText(response, "Not Found", "text/plain; charset=utf-8");
+            co_return;
+        }
+
+        const std::string datasetId = UrlDecode(std::string_view(rest).substr(0, slash));
+        const std::string fileName = UrlDecode(std::string_view(rest).substr(slash + 1));
+        auto* dataset = FindLocalDataset(datasetId);
+        const fs::path rel(fileName);
+        if (!dataset ||
+            fileName.empty() ||
+            rel.has_parent_path() ||
+            rel.filename().string() != fileName ||
+            rel.extension() != ".parquet")
+        {
+            response.SetStatus(404);
+            co_await SendText(response, "Not Found", "text/plain; charset=utf-8");
+            co_return;
+        }
+
+        std::error_code ec;
+        const fs::path base = fs::canonical(dataset->Path, ec);
+        if (ec) {
+            response.SetStatus(404);
+            co_await SendText(response, "Not Found", "text/plain; charset=utf-8");
+            co_return;
+        }
+        fs::path target = fs::canonical(base / rel, ec);
+        if (ec || !fs::exists(target) || !fs::is_regular_file(target) ||
+            target.parent_path() != base)
+        {
+            response.SetStatus(404);
+            co_await SendText(response, "Not Found", "text/plain; charset=utf-8");
+            co_return;
+        }
+
+        std::ifstream in(target, std::ios::binary);
+        std::string data(
+            (std::istreambuf_iterator<char>(in)),
+            std::istreambuf_iterator<char>());
+
+        response.SetHeader(
+            "Content-Disposition",
+            "attachment; filename=\"" + JsonEscape(fileName) + "\"");
+        co_await SendText(response, data, ContentType(target.extension().string()));
     }
 
     TFuture<void> ServeStatic(TResponse& response, std::string uriPath) {
@@ -512,6 +667,7 @@ private:
             {".json", "application/json; charset=utf-8"},
             {".svg", "image/svg+xml"},
             {".txt", "text/plain; charset=utf-8"},
+            {".parquet", "application/vnd.apache.parquet"},
         };
         auto it = types.find(ext);
         return it == types.end() ? "application/octet-stream" : it->second;
@@ -558,10 +714,12 @@ int main(int argc, char** argv) {
             options.BinaryDir = argv[++i];
         } else if (!std::strcmp(argv[i], "--data") && i + 1 < argc) {
             options.DataDirs.push_back(argv[++i]);
+        } else if (!std::strcmp(argv[i], "--local-data") && i + 1 < argc) {
+            options.LocalDataDirs.push_back(argv[++i]);
         } else if (!std::strcmp(argv[i], "--help")) {
             std::cout << "Usage: " << argv[0]
                       << " [--port n] [--static-dir dir] [--binary-dir dir]"
-                      << " [--data dir ...]\n";
+                      << " [--data dir ...] [--local-data dir ...]\n";
             return 0;
         }
     }
