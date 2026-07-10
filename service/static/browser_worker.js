@@ -1,5 +1,5 @@
 import { readOpfsFile } from './browser_storage.js';
-import { readParquetColumnBatches } from './browser_parquet.js';
+import { readParquetWasmColumnBatches } from './browser_parquet.js';
 import { executeBrowserPipelineScheduled } from './browser_runtime.js';
 
 self.onmessage = async event => {
@@ -12,8 +12,8 @@ self.onmessage = async event => {
     const progress = createProgressTracker(message.exec, message.dataset);
     const result = await executeBrowserPipelineScheduled(
       message.exec,
-      (stage, onProgress) => readBrowserSourceBatches(
-        message.dataset, stage, progress.wrap(stage, onProgress)),
+      (stage, onProgress, runtime) => readBrowserSourceBatches(
+        message.dataset, stage, progress.wrap(stage, onProgress), runtime),
       {
         onProgress(update) {
           self.postMessage({ type: 'progress', progress: update });
@@ -90,21 +90,21 @@ function sourceTotalUnits(dataset, stage) {
   return Math.max(rows * columns, 1);
 }
 
-async function* readBrowserSourceBatches(dataset, stage, onProgress) {
+async function* readBrowserSourceBatches(dataset, stage, onProgress, runtime) {
+  if (!runtime?.shared?.arena || !runtime?.layout) {
+    throw new Error('browser source needs shared wasm runtime context');
+  }
   const table = (dataset.tables || []).find(item => item.name === stage.table);
   if (!table) {
     throw new Error(`table not found in dataset: ${stage.table}`);
   }
   const fileName = table.sourceFile || `${table.name}.parquet`;
   const file = await readOpfsFile(dataset.id, fileName);
-  for await (const batch of readParquetColumnBatches(file, stage.columns, { onProgress })) {
-    yield {
-      rowCount: batch.rowCount,
-      columns: stage.columns.map(column => ({
-        name: column.name,
-        type: column.type,
-        values: batch.columns[column.name] || []
-      }))
-    };
+  for await (const batch of readParquetWasmColumnBatches(file, stage.columns, {
+    onProgress,
+    arena: runtime.shared.arena,
+    layout: runtime.layout,
+  })) {
+    yield batch;
   }
 }
