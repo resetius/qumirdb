@@ -1,3 +1,5 @@
+import { WasmSourceBatchBuilder } from './browser_runtime.js';
+
 const HYPARQUET_URL = 'https://cdn.jsdelivr.net/npm/hyparquet@latest/+esm';
 const HYPARQUET_COMPRESSORS_URL =
   'https://cdn.jsdelivr.net/npm/hyparquet-compressors@latest/+esm';
@@ -209,6 +211,101 @@ export async function* readParquetColumnBatches(file, requestedColumns, options 
     completedUnits += (range.end - range.start) * Math.max(columnNames.length, 1);
     yield batch;
   }
+}
+
+export async function* readParquetWasmColumnBatches(file, requestedColumns, options = {}) {
+  if (!options.arena || !options.layout) {
+    throw new Error('direct parquet source needs shared wasm memory');
+  }
+
+  const specs = requestedColumns.map(column =>
+    typeof column === 'string' ? { name: column } : column);
+  const columnNames = specs.map(column => column.name);
+  const metadata = await readMetadata(file);
+  const ranges = rowGroupRanges(metadata);
+  const totalRows = Number(metadata.num_rows ?? metadata.numRows ?? 0);
+  const totalUnits = Math.max(totalRows * Math.max(columnNames.length, 1), 1);
+  let completedUnits = 0;
+
+  for (let index = 0; index < ranges.length; ++index) {
+    const range = ranges[index];
+    let rangeUnits = 0;
+    const batch = await readParquetWasmColumnsRange(
+      file,
+      specs,
+      columnNames,
+      range,
+      options,
+      progress => {
+        rangeUnits += progress.units;
+        if (options.onProgress) {
+          options.onProgress({
+            phase: 'read',
+            rowGroup: index,
+            rowGroupCount: ranges.length,
+            rows: range.end,
+            totalRows,
+            completedUnits: completedUnits + rangeUnits,
+            totalUnits,
+          });
+        }
+      });
+    completedUnits += (range.end - range.start) * Math.max(columnNames.length, 1);
+    yield batch;
+  }
+}
+
+async function readParquetWasmColumnsRange(
+    file, specs, columnNames, range, options, onProgress = null) {
+  let rowCount = range ? range.end - range.start : null;
+  if (rowCount == null) {
+    const metadata = await readMetadata(file);
+    rowCount = Number(metadata.num_rows ?? metadata.numRows ?? 0);
+  }
+  const builder = new WasmSourceBatchBuilder(
+    options.arena,
+    options.layout,
+    specs,
+    rowCount);
+  if (columnNames.length === 0) {
+    return builder.finish();
+  }
+
+  const parquet = await loadHyparquet();
+  const asyncBuffer = parquet.asyncBufferFromFile
+    ? await parquet.asyncBufferFromFile(file)
+    : asyncBufferFromBlob(file);
+  const compressors = await loadCompressors();
+
+  if (typeof parquet.parquetRead !== 'function') {
+    throw new Error('hyparquet parquetRead API is not available');
+  }
+
+  const columnSet = new Set(columnNames.map(name => String(name)));
+  const readOptions = {
+    file: asyncBuffer,
+    columns: columnNames,
+    compressors,
+    onChunk({ columnName, columnData, rowStart, rowEnd }) {
+      const name = String(columnName);
+      if (!columnSet.has(name)) return;
+
+      const rawStart = Number(rowStart);
+      const rawEnd = Number(rowEnd);
+      const start = range && rawStart >= range.start ? rawStart - range.start : rawStart;
+      const end = range && rawEnd > range.start ? rawEnd - range.start : rawEnd;
+      builder.writeChunk(name, columnData, start, end);
+      if (onProgress) {
+        onProgress({ units: Math.max(end - start, 0) });
+      }
+    },
+  };
+  if (range) {
+    readOptions.rowStart = range.start;
+    readOptions.rowEnd = range.end;
+  }
+  await parquet.parquetRead(readOptions);
+  return builder.finish();
 }
 
 async function readParquetColumnsRange(file, specs, columnNames, range, onProgress = null) {
