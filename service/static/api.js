@@ -13,11 +13,12 @@ export async function getJson(path) {
   return data;
 }
 
-export async function postJson(path, payload) {
+export async function postJson(path, payload, signal) {
   const response = await fetch(path, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload)
+    body: JSON.stringify(payload),
+    signal
   });
   const text = await response.text();
   let data;

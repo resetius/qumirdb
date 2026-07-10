@@ -23,6 +23,7 @@
 #include <unordered_map>
 #include <vector>
 #include <fcntl.h>
+#include <signal.h>
 #include <unistd.h>
 
 using namespace NNet;
@@ -292,8 +293,37 @@ private:
             co_await Run(request, response);
             co_return;
         }
+        if (path == "/api/cancel") {
+            co_await Cancel(request, response);
+            co_return;
+        }
         response.SetStatus(404);
         co_await SendText(response, "Not Found", "text/plain; charset=utf-8");
+    }
+
+    static std::string QueryParam(const TRequest& request, const std::string& name) {
+        const auto& params = request.Uri().QueryParameters();
+        auto it = params.find(name);
+        return it == params.end() ? std::string() : it->second;
+    }
+
+    // Kills the child process of an in-flight run/explain identified by runId.
+    // qdb_web tracks each spawned process by the runId the client passes on the
+    // request; SIGKILL makes qdb exit, its pipes close, and the run coroutine
+    // unwinds normally (its registration is erased via RAII).
+    TFuture<void> Cancel(TRequest& request, TResponse& response) {
+        const auto runId = QueryParam(request, "runId");
+        bool killed = false;
+        if (!runId.empty()) {
+            auto it = ActiveRuns_.find(runId);
+            if (it != ActiveRuns_.end()) {
+                ::kill(it->second, SIGKILL);
+                killed = true;
+            }
+        }
+        co_await SendJson(response,
+            killed ? "{\"ok\":true,\"killed\":true}"
+                   : "{\"ok\":true,\"killed\":false}");
     }
 
     TFuture<void> Explain(TRequest& request, TResponse& response) {
@@ -303,6 +333,7 @@ private:
             exporter,
             {"--stdin-json", "--stdout-json"},
             /*stderrToStdout=*/true);
+        TRunRegistration runReg(this, QueryParam(request, "runId"), pipe.Pid());
 
         co_await TByteWriter(pipe).Write(body.data(), body.size());
         pipe.CloseWrite();
@@ -384,6 +415,7 @@ private:
                 "-i", queryFile.string(),
             },
             /*stderrToStdout=*/false);
+        TRunRegistration runReg(this, QueryParam(request, "runId"), pipe.Pid());
         pipe.CloseWrite();
 
         std::string output;
@@ -809,12 +841,38 @@ private:
     }
 
 private:
+    // RAII entry in the active-run registry: records runId -> child pid on
+    // construction and removes it when the run coroutine unwinds (any exit path).
+    class TRunRegistration {
+    public:
+        TRunRegistration(TRouter* router, std::string runId, int pid)
+            : Router_(router)
+            , RunId_(std::move(runId))
+        {
+            if (Router_ && !RunId_.empty()) {
+                Router_->ActiveRuns_[RunId_] = pid;
+            }
+        }
+        ~TRunRegistration() {
+            if (Router_ && !RunId_.empty()) {
+                Router_->ActiveRuns_.erase(RunId_);
+            }
+        }
+        TRunRegistration(const TRunRegistration&) = delete;
+        TRunRegistration& operator=(const TRunRegistration&) = delete;
+
+    private:
+        TRouter* Router_;
+        std::string RunId_;
+    };
+
     TOptions Options_;
     std::filesystem::path StaticBase_;
     std::filesystem::path BinaryBase_;
     std::filesystem::path SourceBase_;
     bool SourceAvailable_ = false;
     std::vector<TServerDataset> ServerDatasets_;
+    std::unordered_map<std::string, int> ActiveRuns_;
 };
 
 int main(int argc, char** argv) {

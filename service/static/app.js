@@ -39,6 +39,14 @@ let inspectorSummaryText = '';
 let inspectorArtifactItems = [];
 let toastTimer = 0;
 
+// Execution queue: at most one job runs at a time. `runningJob` is the current
+// one; `runQueue` holds pending jobs in order. A job is bound to the query +
+// dataset it was launched for so its result lands there regardless of what the
+// user is viewing.
+let runningJob = null;
+const runQueue = [];
+let jobSeq = 0;
+
 window.addEventListener('DOMContentLoaded', () => {
   window.lucide?.createIcons();
   initEditor();
@@ -263,9 +271,19 @@ function renderQueries() {
   root.replaceChildren();
   for (const query of loadQueries()) {
     const button = document.createElement('button');
-    button.className = `list-item${query.id === activeQueryId ? ' active' : ''}`;
+    button.className = `list-item query-item${query.id === activeQueryId ? ' active' : ''}`;
     button.type = 'button';
-    button.textContent = query.name;
+    const label = document.createElement('span');
+    label.className = 'query-name';
+    label.textContent = query.name;
+    button.appendChild(label);
+    const state = queryRunState(query.id);
+    if (state) {
+      const indicator = document.createElement('span');
+      indicator.className = state === 'running' ? 'query-spinner' : 'query-queued';
+      indicator.title = state === 'running' ? 'Running' : 'Queued';
+      button.appendChild(indicator);
+    }
     button.addEventListener('click', () => {
       if (query.id === activeQueryId) {
         return;
@@ -277,6 +295,9 @@ function renderQueries() {
       const freshQuery = loadQueries().find(item => item.id === activeQueryId);
       setSql(freshQuery?.sql || '');
       restoreWorkspaceState();
+      // The status label reflects live activity, not the selected query, so a
+      // run still in flight for the previous query must not read as this one's.
+      setStatus('idle');
       renderQueries();
     });
     root.appendChild(button);
@@ -819,53 +840,8 @@ async function removeBrowserDatasetFile(dataset, fileName) {
 }
 
 function initActions() {
-  $('#run-button').addEventListener('click', async () => {
-    const sql = getSql();
-    const dataset = activeDataset();
-    if (!dataset) {
-      showDetails({ ok: false, error: { message: 'Select a dataset first.' } });
-      selectTab('details');
-      return;
-    }
-    if (dataset.source?.kind === 'browser') {
-      await runBrowser(sql, dataset);
-      return;
-    }
-    if (dataset.source?.kind === 'local') {
-      showDetails({
-        ok: false,
-        error: {
-          message: 'Download this dataset to OPFS before running it in the browser.'
-        }
-      });
-      selectTab('details');
-      return;
-    }
-    const key = explainKey(sql, dataset);
-    if (lastExplainKey !== key) {
-      setStatus('explaining');
-      const explained = await explainCurrent(sql, dataset, false);
-      if (!explained) {
-        return;
-      }
-    }
-
-    setStatus('running');
-    const result = await postJson('/api/run', { sql, dataset });
-    if (result.ok === false) {
-      setStatus('run failed');
-      showDetails(result);
-      selectTab('details');
-      return;
-    }
-    renderResult(result);
-    showDetails({
-      format: result.format,
-      elapsedMs: result.elapsedMs,
-      stderr: result.stderr
-    });
-    setStatus('finished');
-    selectTab('result');
+  $('#run-button').addEventListener('click', () => {
+    enqueueRun(getSql(), activeDataset());
   });
 
   $('#explain-button').addEventListener('click', async () => {
@@ -881,13 +857,188 @@ function initActions() {
   });
 }
 
-async function explainCurrent(sql, dataset, selectGraph) {
+// Returns 'running' | 'queued' | null for a query id, used to draw the list
+// indicator. Keyed by query id only (a query appears once in the list).
+function queryRunState(queryId) {
+  if (runningJob && runningJob.queryId === queryId) {
+    return 'running';
+  }
+  if (runQueue.some(job => job.queryId === queryId)) {
+    return 'queued';
+  }
+  return null;
+}
+
+// Enqueues a run of the given query+dataset. Rules:
+//  - running the SAME query that is already running cancels it and re-queues
+//    (restart);
+//  - running a query that is already queued is ignored (no duplicates);
+//  - otherwise it joins the queue; the in-flight run keeps going.
+function enqueueRun(sql, dataset) {
+  if (!dataset) {
+    showDetails({ ok: false, error: { message: 'Select a dataset first.' } });
+    selectTab('details');
+    return;
+  }
+  if (dataset.source?.kind === 'local') {
+    showDetails({
+      ok: false,
+      error: {
+        message: 'Download this dataset to OPFS before running it in the browser.'
+      }
+    });
+    selectTab('details');
+    return;
+  }
+
+  const queryId = activeQueryId;
+  const datasetId = activeDatasetId;
+  const sameRunning = runningJob &&
+    runningJob.queryId === queryId &&
+    runningJob.datasetId === datasetId;
+  const alreadyQueued = runQueue.some(job =>
+    job.queryId === queryId && job.datasetId === datasetId);
+
+  if (sameRunning) {
+    cancelJob(runningJob);
+    if (alreadyQueued) {
+      return;
+    }
+  } else if (alreadyQueued) {
+    return;
+  }
+
+  runQueue.push({
+    id: ++jobSeq,
+    runId: (crypto.randomUUID?.() ||
+      `run-${Date.now()}-${Math.random().toString(16).slice(2)}`),
+    queryId,
+    datasetId,
+    sql,
+    dataset,
+    kind: dataset.source?.kind === 'browser' ? 'browser' : 'server',
+    cancelled: false,
+    cancel: null
+  });
+  renderQueries();
+  pumpQueue();
+}
+
+function cancelJob(job) {
+  job.cancelled = true;
+  if (typeof job.cancel === 'function') {
+    try {
+      job.cancel();
+    } catch {
+      // ignore
+    }
+  }
+}
+
+// Pulls the next job and runs it; enforces a single concurrent runner. When a
+// job finishes it clears `runningJob` and pumps the next one.
+function pumpQueue() {
+  if (runningJob) {
+    return;
+  }
+  const job = runQueue.shift();
+  if (!job) {
+    renderQueries();
+    return;
+  }
+  runningJob = job;
+  renderQueries();
+  const runner = job.kind === 'browser' ? executeBrowserJob : executeServerJob;
+  Promise.resolve()
+    .then(() => runner(job))
+    .catch(error => console.error('run job failed', error))
+    .finally(() => {
+      runningJob = null;
+      renderQueries();
+      pumpQueue();
+    });
+}
+
+async function executeServerJob(job) {
+  const { sql, dataset, queryId, datasetId, runId } = job;
+  const controller = new AbortController();
+  const query = `?runId=${encodeURIComponent(runId)}`;
+  job.cancel = () => {
+    controller.abort();
+    // Also kill the child process server-side so qdb stops crunching, not just
+    // the client fetch.
+    postJson(`/api/cancel${query}`, {}).catch(() => {});
+  };
+  const viewing = () => isActiveWorkspace(queryId, datasetId);
+
+  try {
+    const key = explainKey(sql, dataset);
+    if (lastExplainKey !== key) {
+      const explained = await explainCurrent(
+        sql, dataset, false, controller.signal, queryId, datasetId, runId);
+      if (job.cancelled || !explained) {
+        return;
+      }
+    }
+    if (viewing()) {
+      setStatus('running');
+    }
+    const result = await postJson(
+      `/api/run${query}`, { sql, dataset }, controller.signal);
+    if (job.cancelled) {
+      return;
+    }
+    if (result.ok === false) {
+      applyOutcome(queryId, datasetId,
+        () => {
+          setStatus('run failed');
+          showDetails(result);
+          selectTab('details');
+        },
+        () => persistErrorToSlot(queryId, datasetId, result));
+      return;
+    }
+    applyOutcome(queryId, datasetId,
+      () => {
+        renderResult(result);
+        showDetails({
+          format: result.format,
+          elapsedMs: result.elapsedMs,
+          stderr: result.stderr
+        });
+        setStatus('finished');
+        selectTab('result');
+      },
+      () => persistRunResultToSlot(queryId, datasetId, result));
+  } catch (error) {
+    if (job.cancelled || error.name === 'AbortError') {
+      return;
+    }
+    const payload = {
+      ok: false,
+      error: { stage: 'run', message: error.message || String(error) }
+    };
+    applyOutcome(queryId, datasetId,
+      () => {
+        setStatus('run failed');
+        showDetails(payload);
+        selectTab('details');
+      },
+      () => persistErrorToSlot(queryId, datasetId, payload));
+  }
+}
+
+async function explainCurrent(
+    sql, dataset, selectGraph, signal,
+    originQueryId = activeQueryId, originDatasetId = activeDatasetId, runId = '') {
   if (!dataset) {
     showDetails({ ok: false, error: { message: 'Select a dataset first.' } });
     selectTab('details');
     return false;
   }
-  setStatus('explaining');
+  if (isActiveWorkspace(originQueryId, originDatasetId)) {
+    setStatus('explaining');
+  }
   const request = {
     sql,
     dataset,
@@ -901,29 +1052,71 @@ async function explainCurrent(sql, dataset, selectGraph) {
       verboseKernels: true
     }
   };
-    const bundle = await postJson('/api/explain', request);
-    lastBundle = bundle;
+    const explainPath = runId
+      ? `/api/explain?runId=${encodeURIComponent(runId)}`
+      : '/api/explain';
+    let bundle;
+    try {
+      bundle = await postJson(explainPath, request, signal);
+    } catch (error) {
+      if (error.name === 'AbortError') {
+        return false;
+      }
+      bundle = {
+        ok: false,
+        error: { stage: 'explain', message: error.message || String(error) }
+      };
+    }
     if (bundle.ok === false) {
-      setStatus('explain failed');
-      showDetails(bundle);
-      selectTab('details');
+      applyOutcome(originQueryId, originDatasetId,
+        () => {
+          lastBundle = bundle;
+          setStatus('explain failed');
+          showDetails(bundle);
+          selectTab('details');
+        },
+        () => persistErrorToSlot(originQueryId, originDatasetId, bundle));
       return false;
     }
-    lastExplainKey = explainKey(sql, dataset);
-    renderCurrentGraph();
-    clearInspector();
-    renderPlans(bundle);
-    showDetails(bundleSummary(bundle));
-    setStatus('explained');
-    if (selectGraph) {
-      selectTab('graph');
-    }
+    applyOutcome(originQueryId, originDatasetId,
+      () => {
+        lastBundle = bundle;
+        lastExplainKey = explainKey(sql, dataset);
+        renderCurrentGraph();
+        clearInspector();
+        renderPlans(bundle);
+        showDetails(bundleSummary(bundle));
+        setStatus('explained');
+        if (selectGraph) {
+          selectTab('graph');
+        }
+      },
+      () => persistBundleToSlot(originQueryId, originDatasetId, bundle));
     return true;
 }
 
-async function runBrowser(sql, dataset) {
+async function executeBrowserJob(job) {
+  const { sql, dataset, queryId, datasetId, runId } = job;
+  const controller = new AbortController();
+  let activeWorker = null;
+  let rejectWorker = null;
+  job.cancel = () => {
+    controller.abort();
+    // Kill the server-side explain child (qdb_plan_export) if it is still going.
+    postJson(`/api/cancel?runId=${encodeURIComponent(runId)}`, {}).catch(() => {});
+    if (activeWorker) {
+      activeWorker.terminate();
+    }
+    if (rejectWorker) {
+      rejectWorker(new Error('cancelled'));
+    }
+  };
+  const viewing = () => isActiveWorkspace(queryId, datasetId);
+
   try {
-    setStatus('explaining');
+    if (viewing()) {
+      setStatus('explaining');
+    }
     const request = {
       sql,
       dataset,
@@ -935,42 +1128,72 @@ async function runBrowser(sql, dataset) {
         embedWasm: true
       }
     };
-    const bundle = await postJson('/api/explain', request);
-    lastBundle = bundle;
-    if (bundle.ok === false) {
-      setStatus('run failed');
-      showDetails(bundle);
-      selectTab('details');
+    const bundle = await postJson(
+      `/api/explain?runId=${encodeURIComponent(runId)}`, request, controller.signal);
+    if (job.cancelled) {
       return;
     }
-    lastExplainKey = explainKey(sql, dataset);
-    renderCurrentGraph();
-    renderPlans(bundle);
+    if (bundle.ok === false) {
+      applyOutcome(queryId, datasetId,
+        () => {
+          lastBundle = bundle;
+          setStatus('run failed');
+          showDetails(bundle);
+          selectTab('details');
+        },
+        () => persistErrorToSlot(queryId, datasetId, bundle));
+      return;
+    }
+    applyOutcome(queryId, datasetId,
+      () => {
+        lastBundle = bundle;
+        lastExplainKey = explainKey(sql, dataset);
+        renderCurrentGraph();
+        renderPlans(bundle);
+      },
+      () => persistBundleToSlot(queryId, datasetId, bundle));
 
     const exec = bundle.exec;
     if (!exec || exec.supported !== true) {
-      setStatus('run failed');
-      showDetails({
+      const payload = {
         ok: false,
         error: {
           stage: 'browser-exec',
           message: exec?.reason ||
             'This query is not supported for browser execution yet.'
         }
-      });
-      selectTab('details');
+      };
+      applyOutcome(queryId, datasetId,
+        () => {
+          setStatus('run failed');
+          showDetails(payload);
+          selectTab('details');
+        },
+        () => persistErrorToSlot(queryId, datasetId, payload));
       return;
     }
 
     const resolvedExec = resolveExecArtifacts(exec, bundle.artifacts || {});
 
-    setStatus('running');
-    setRunProgress(0);
+    if (viewing()) {
+      setStatus('running');
+      setRunProgress(0);
+    }
     const started = performance.now();
-    const result = await runBrowserWorker(resolvedExec, dataset, updateRunProgress);
+    const result = await runBrowserWorker(
+      resolvedExec,
+      dataset,
+      progress => {
+        if (viewing()) {
+          updateRunProgress(progress);
+        }
+      },
+      (worker, reject) => { activeWorker = worker; rejectWorker = reject; });
+    if (job.cancelled) {
+      return;
+    }
     const elapsedMs = performance.now() - started;
-    renderBrowserResult(result, elapsedMs);
-    showDetails({
+    const details = {
       mode: 'browser',
       rows: result.rows.length,
       elapsedMs,
@@ -978,18 +1201,33 @@ async function runBrowser(sql, dataset) {
       scheduler: result.scheduler || null,
       memory: result.memory || null,
       connections: result.connections || []
-    });
-    setStatus('finished');
-    setRunProgress(null);
-    selectTab('result');
+    };
+    applyOutcome(queryId, datasetId,
+      () => {
+        renderBrowserResult(result, elapsedMs);
+        showDetails(details);
+        setStatus('finished');
+        setRunProgress(null);
+        selectTab('result');
+      },
+      () => persistBrowserResultToSlot(
+        queryId, datasetId, result, elapsedMs, details));
   } catch (error) {
-    setStatus('run failed');
-    setRunProgress(null);
-    showDetails({
+    if (job.cancelled || error.name === 'AbortError') {
+      return;
+    }
+    const payload = {
       ok: false,
       error: { stage: 'browser-exec', message: error.message || String(error) }
-    });
-    selectTab('details');
+    };
+    applyOutcome(queryId, datasetId,
+      () => {
+        setStatus('run failed');
+        setRunProgress(null);
+        showDetails(payload);
+        selectTab('details');
+      },
+      () => persistErrorToSlot(queryId, datasetId, payload));
   }
 }
 
@@ -1014,11 +1252,12 @@ function resolveExecArtifacts(exec, artifacts) {
   throw new Error('exec plan is missing graph nodes');
 }
 
-function runBrowserWorker(exec, dataset, onProgress) {
+function runBrowserWorker(exec, dataset, onProgress, onWorker) {
   return new Promise((resolve, reject) => {
     const worker = new Worker(new URL('./browser_worker.js', import.meta.url), {
       type: 'module'
     });
+    onWorker?.(worker, reject);
     worker.onmessage = event => {
       const message = event.data || {};
       if (message.type === 'progress') {
@@ -1445,6 +1684,81 @@ function saveWorkspaceState(queryId = activeQueryId, datasetId = activeDatasetId
 
 function workspaceStateKey(queryId, datasetId) {
   return `${WORKSPACE_STATE_KEY}:${queryId}:${datasetId}`;
+}
+
+// True when the given query+dataset is still the one on screen. Async run/explain
+// completions use this to decide between updating the live view and persisting
+// their result to the originating query's slot instead.
+function isActiveWorkspace(queryId, datasetId) {
+  return queryId === activeQueryId && datasetId === activeDatasetId;
+}
+
+// Routes an async run/explain outcome: if its query+dataset is still on screen,
+// update the live view; otherwise persist it to that query's slot in the
+// background so switching back shows it.
+function applyOutcome(queryId, datasetId, live, persist) {
+  if (isActiveWorkspace(queryId, datasetId)) {
+    live();
+  } else {
+    persist();
+  }
+}
+
+function writeWorkspaceSlot(queryId, datasetId, patch) {
+  if (!queryId || !datasetId) {
+    return;
+  }
+  const state = loadWorkspaceState(queryId, datasetId) ||
+    { version: 1, graphMode: 'logical' };
+  Object.assign(state, patch);
+  try {
+    localStorage.setItem(workspaceStateKey(queryId, datasetId), JSON.stringify(state));
+  } catch (error) {
+    console.warn('failed to persist workspace slot', error);
+  }
+}
+
+function persistBundleToSlot(queryId, datasetId, bundle) {
+  writeWorkspaceSlot(queryId, datasetId, {
+    bundle: compactBundleForStorage(bundle),
+    detailsText: JSON.stringify(bundleSummary(bundle), null, 2)
+  });
+}
+
+function persistRunResultToSlot(queryId, datasetId, result) {
+  writeWorkspaceSlot(queryId, datasetId, {
+    result: {
+      rows: capResultRows(parseCsv(result.csv || '')),
+      sort: null,
+      meta: {
+        rows: result.rows,
+        elapsedMs: result.elapsedMs,
+        processingMs: result.processingMs
+      }
+    },
+    detailsText: JSON.stringify({
+      format: result.format,
+      elapsedMs: result.elapsedMs,
+      stderr: result.stderr
+    }, null, 2)
+  });
+}
+
+function persistBrowserResultToSlot(queryId, datasetId, result, elapsedMs, details) {
+  writeWorkspaceSlot(queryId, datasetId, {
+    result: {
+      rows: capResultRows([result.columns, ...result.rows]),
+      sort: null,
+      meta: { rows: result.rows.length, elapsedMs, processingMs: elapsedMs }
+    },
+    detailsText: JSON.stringify(details, null, 2)
+  });
+}
+
+function persistErrorToSlot(queryId, datasetId, payload) {
+  writeWorkspaceSlot(queryId, datasetId, {
+    detailsText: JSON.stringify(payload, null, 2)
+  });
 }
 
 function clearWorkspaceStateView() {
