@@ -20,6 +20,7 @@ const QUERIES_KEY = 'qdb.web.queries';
 const ACTIVE_QUERY_KEY = 'qdb.web.activeQuery';
 const ACTIVE_DATASET_KEY = 'qdb.web.activeDataset';
 const WORKSPACE_STATE_KEY = 'qdb.web.workspaceState';
+const LAST_RUN_KEY = 'qdb.web.lastRun';
 const LOCAL_DATA_DOWNLOAD_CONCURRENCY = 4;
 const MAX_PERSISTED_RESULT_ROWS = 1000;
 
@@ -277,13 +278,36 @@ function renderQueries() {
     label.className = 'query-name';
     label.textContent = query.name;
     button.appendChild(label);
+
+    const lastRun = loadLastRun(query.id);
+    if (lastRun) {
+      const meta = document.createElement('span');
+      meta.className = 'query-meta';
+      meta.textContent = formatDuration(lastRun.processingMs ?? lastRun.elapsedMs);
+      meta.title = `Last run ${formatRelativeTime(lastRun.at)}`;
+      button.appendChild(meta);
+    }
+
     const state = queryRunState(query.id);
     if (state) {
       const indicator = document.createElement('span');
       indicator.className = state === 'running' ? 'query-spinner' : 'query-queued';
       indicator.title = state === 'running' ? 'Running' : 'Queued';
       button.appendChild(indicator);
+
+      const stop = document.createElement('span');
+      stop.className = 'query-stop';
+      stop.setAttribute('role', 'button');
+      stop.setAttribute('aria-label', state === 'running' ? 'Stop' : 'Remove from queue');
+      stop.title = state === 'running' ? 'Stop' : 'Remove from queue';
+      stop.textContent = '✕';
+      stop.addEventListener('click', event => {
+        event.stopPropagation();
+        stopQuery(query.id);
+      });
+      button.appendChild(stop);
     }
+
     button.addEventListener('click', () => {
       if (query.id === activeQueryId) {
         return;
@@ -935,6 +959,24 @@ function cancelJob(job) {
   }
 }
 
+// Stop button on a query list item: drops any queued entries for the query and
+// cancels it if it is the one currently running. Unlike re-running, this does
+// not re-enqueue.
+function stopQuery(queryId) {
+  for (let i = runQueue.length - 1; i >= 0; i--) {
+    if (runQueue[i].queryId === queryId) {
+      runQueue.splice(i, 1);
+    }
+  }
+  if (runningJob && runningJob.queryId === queryId) {
+    if (isActiveWorkspace(runningJob.queryId, runningJob.datasetId)) {
+      setStatus('idle');
+    }
+    cancelJob(runningJob);
+  }
+  renderQueries();
+}
+
 // Pulls the next job and runs it; enforces a single concurrent runner. When a
 // job finishes it clears `runningJob` and pumps the next one.
 function pumpQueue() {
@@ -998,6 +1040,11 @@ async function executeServerJob(job) {
         () => persistErrorToSlot(queryId, datasetId, result));
       return;
     }
+    recordLastRun(queryId, datasetId, {
+      processingMs: result.processingMs,
+      elapsedMs: result.elapsedMs,
+      rows: result.rows
+    });
     applyOutcome(queryId, datasetId,
       () => {
         renderResult(result);
@@ -1202,6 +1249,11 @@ async function executeBrowserJob(job) {
       memory: result.memory || null,
       connections: result.connections || []
     };
+    recordLastRun(queryId, datasetId, {
+      processingMs: elapsedMs,
+      elapsedMs,
+      rows: result.rows.length
+    });
     applyOutcome(queryId, datasetId,
       () => {
         renderBrowserResult(result, elapsedMs);
@@ -1664,22 +1716,18 @@ function saveWorkspaceState(queryId = activeQueryId, datasetId = activeDatasetId
   if (!queryId || !datasetId) {
     return;
   }
-  try {
-    const state = {
-      version: 1,
-      graphMode,
-      bundle: compactBundleForStorage(lastBundle),
-      detailsText: $('#details')?.textContent || '',
-      result: {
-        rows: capResultRows(resultRows),
-        sort: resultSort,
-        meta: resultMeta
-      }
-    };
-    localStorage.setItem(workspaceStateKey(queryId, datasetId), JSON.stringify(state));
-  } catch (error) {
-    console.warn('failed to save workspace state', error);
-  }
+  const state = {
+    version: 1,
+    graphMode,
+    bundle: compactBundleForStorage(lastBundle),
+    detailsText: $('#details')?.textContent || '',
+    result: {
+      rows: capResultRows(resultRows),
+      sort: resultSort,
+      meta: resultMeta
+    }
+  };
+  persistWorkspaceState(workspaceStateKey(queryId, datasetId), state);
 }
 
 function workspaceStateKey(queryId, datasetId) {
@@ -1704,6 +1752,63 @@ function applyOutcome(queryId, datasetId, live, persist) {
   }
 }
 
+function isQuotaExceeded(error) {
+  return !!error && (
+    error.name === 'QuotaExceededError' ||
+    error.code === 22 ||
+    error.code === 1014);
+}
+
+function trySetItem(key, value) {
+  try {
+    localStorage.setItem(key, value);
+    return true;
+  } catch (error) {
+    if (!isQuotaExceeded(error)) {
+      console.warn('localStorage write failed', error);
+    }
+    return false;
+  }
+}
+
+// Frees room for `key` by dropping OTHER workspace slots, largest first, and
+// retrying after each removal — evicting only as many as needed.
+function evictWorkspaceSlotsAndRetry(key, value) {
+  const prefix = `${WORKSPACE_STATE_KEY}:`;
+  const others = [];
+  for (let i = 0; i < localStorage.length; i++) {
+    const k = localStorage.key(i);
+    if (k && k.startsWith(prefix) && k !== key) {
+      others.push([k, (localStorage.getItem(k) || '').length]);
+    }
+  }
+  others.sort((a, b) => b[1] - a[1]);
+  for (const [k] of others) {
+    localStorage.removeItem(k);
+    if (trySetItem(key, value)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Persists a workspace state, degrading gracefully under quota pressure:
+// evict other slots, and as a last resort drop the (large) bundle so at least
+// the result/details survive.
+function persistWorkspaceState(key, state) {
+  const value = JSON.stringify(state);
+  if (trySetItem(key, value) || evictWorkspaceSlotsAndRetry(key, value)) {
+    return;
+  }
+  if (state.bundle) {
+    const reduced = JSON.stringify({ ...state, bundle: null });
+    if (trySetItem(key, reduced) || evictWorkspaceSlotsAndRetry(key, reduced)) {
+      return;
+    }
+  }
+  console.warn('workspace state too large to persist:', key);
+}
+
 function writeWorkspaceSlot(queryId, datasetId, patch) {
   if (!queryId || !datasetId) {
     return;
@@ -1711,11 +1816,7 @@ function writeWorkspaceSlot(queryId, datasetId, patch) {
   const state = loadWorkspaceState(queryId, datasetId) ||
     { version: 1, graphMode: 'logical' };
   Object.assign(state, patch);
-  try {
-    localStorage.setItem(workspaceStateKey(queryId, datasetId), JSON.stringify(state));
-  } catch (error) {
-    console.warn('failed to persist workspace slot', error);
-  }
+  persistWorkspaceState(workspaceStateKey(queryId, datasetId), state);
 }
 
 function persistBundleToSlot(queryId, datasetId, bundle) {
@@ -1786,6 +1887,10 @@ function compactBundleForStorage(bundle) {
   if (!bundle) {
     return null;
   }
+  // Note: `exec` and `artifacts` are intentionally NOT stored. They are the
+  // largest part of a bundle (per-node plans, wasm) and are never read back on
+  // restore — only graph/plans are used to redraw. Keeping them here is what
+  // blew past the localStorage quota for heavy queries (e.g. TPC-H q13).
   return {
     ok: bundle.ok,
     format: bundle.format,
@@ -1794,34 +1899,8 @@ function compactBundleForStorage(bundle) {
     graph: bundle.graph || null,
     graphs: bundle.graphs || null,
     plan: bundle.plan || null,
-    plans: bundle.plans || null,
-    exec: compactExecForStorage(bundle.exec)
+    plans: bundle.plans || null
   };
-}
-
-function compactExecForStorage(exec) {
-  if (!exec) {
-    return null;
-  }
-  return stripWasmFields(exec);
-}
-
-function stripWasmFields(value) {
-  if (Array.isArray(value)) {
-    return value.map(stripWasmFields);
-  }
-  if (!value || typeof value !== 'object') {
-    return value;
-  }
-
-  const out = {};
-  for (const [key, item] of Object.entries(value)) {
-    if (key === 'wasm' || key === 'embedWasm') {
-      continue;
-    }
-    out[key] = stripWasmFields(item);
-  }
-  return out;
 }
 
 function capResultRows(rows) {
@@ -1920,6 +1999,56 @@ function formatDuration(ms) {
     return `${(value / 1000).toFixed(3)} s`;
   }
   return `${value.toFixed(0)} ms`;
+}
+
+function lastRunKey(queryId) {
+  return `${LAST_RUN_KEY}:${queryId}`;
+}
+
+// Records when a query last finished running (and how long it took), so the
+// query list can show it. Keyed by query id.
+function recordLastRun(queryId, datasetId, meta) {
+  if (!queryId) {
+    return;
+  }
+  try {
+    localStorage.setItem(lastRunKey(queryId), JSON.stringify({
+      at: Date.now(),
+      datasetId,
+      processingMs: meta.processingMs,
+      elapsedMs: meta.elapsedMs,
+      rows: meta.rows
+    }));
+  } catch {
+    // ignore quota errors
+  }
+}
+
+function loadLastRun(queryId) {
+  try {
+    return JSON.parse(localStorage.getItem(lastRunKey(queryId)) || 'null');
+  } catch {
+    return null;
+  }
+}
+
+function formatRelativeTime(at) {
+  if (!at) {
+    return '';
+  }
+  const seconds = Math.max(0, Math.round((Date.now() - at) / 1000));
+  if (seconds < 60) {
+    return `${seconds}s ago`;
+  }
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) {
+    return `${minutes}m ago`;
+  }
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) {
+    return `${hours}h ago`;
+  }
+  return `${Math.round(hours / 24)}d ago`;
 }
 
 function escapeHtml(value) {
