@@ -453,9 +453,14 @@ export class WasmSourceBatchBuilder {
       return;
     }
     const next = Math.max(bytes, this.dataCaps[index] ? this.dataCaps[index] * 2 : 64);
-    this.dataPtrs[index] = this.dataPtrs[index]
-      ? this.arena.realloc(this.dataPtrs[index], next)
-      : this.arena.alloc(next, 1);
+    const oldPtr = this.dataPtrs[index];
+    const newPtr = this.arena.alloc(next, 1);
+    if (oldPtr) {
+      // alloc may have grown (and detached) the buffer, so take the view after.
+      this.arena.bytes().copyWithin(newPtr, oldPtr, oldPtr + this.dataCaps[index]);
+      this.arena.free(oldPtr);
+    }
+    this.dataPtrs[index] = newPtr;
     this.dataCaps[index] = next;
   }
 
@@ -602,8 +607,8 @@ class WasmRowStore {
 }
 
 // One query-wide allocator over the shared linear memory. Backed by a
-// segregated free-list (BucketAllocator) so qdb_free / qdb_realloc actually
-// reclaim — bounding memory for join-heavy queries whose per-drain output and
+// segregated free-list (BucketAllocator) so qdb_free actually
+// reclaims — bounding memory for join-heavy queries whose per-drain output and
 // per-batch input buffers would otherwise accumulate forever in a bump arena.
 // Blocks are >= 16-byte aligned, satisfying every caller's alignment request.
 // As before, callers must finish all alloc() calls before taking a view()/
@@ -616,10 +621,6 @@ class Arena {
 
   alloc(bytes, _align = 8) {
     return this.allocator.malloc(bytes);
-  }
-
-  realloc(ptr, bytes) {
-    return this.allocator.realloc(ptr, bytes);
   }
 
   free(ptr) {
@@ -1081,10 +1082,9 @@ function createQdbEnv(getMemory, holder) {
   const norm = v => (v < 0n ? 1n : v);
   return {
     // malloc family over the query's shared linear memory (segregated
-    // free-list; realloc/free reclaim).
+    // free-list; free reclaims). qdb_realloc is not imported: it is implemented
+    // in Oz (qumirdb.oz) on top of qdb_alloc/qdb_free.
     qdb_alloc: (size) => BigInt(alloc(size)),
-    qdb_realloc: (ptr, size) =>
-      BigInt(holder.arena.realloc(Number(ptr), Math.max(Number(size), 1))),
     qdb_free: (ptr) => holder.arena.free(Number(ptr)),
 
     qdb_filter_string_compare: (ld, ls, rd, rs) =>
