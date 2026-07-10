@@ -114,7 +114,10 @@ limit 100;
                 <aside class="graph-inspector" aria-label="Graph selection">
                   <div class="inspector-header">
                     <div id="inspector-title" class="inspector-title">Selection</div>
-                    <button id="inspector-clear" class="icon-button" type="button" title="Clear selection" aria-label="Clear selection"><i data-lucide="x"></i></button>
+                    <div class="diagnostic-actions">
+                      <button id="inspector-copy" class="icon-button" type="button" title="Copy inspector" aria-label="Copy inspector"><i data-lucide="copy"></i></button>
+                      <button id="inspector-clear" class="icon-button" type="button" title="Clear selection" aria-label="Clear selection"><i data-lucide="x"></i></button>
+                    </div>
                   </div>
                   <select id="inspector-artifact-select" class="inspector-artifact-select" aria-label="Node artifact" hidden></select>
                   <pre id="inspector-body" class="inspector-body">Select a node or connection.</pre>
@@ -123,7 +126,10 @@ limit 100;
             </div>
           </div>
           <div id="logical-tab" class="tab-panel">
-            <pre id="logical-plan" class="plan-text"></pre>
+            <div class="diagnostic-panel">
+              <button id="logical-copy" class="icon-button diagnostic-copy" type="button" title="Copy logical plan" aria-label="Copy logical plan"><i data-lucide="copy"></i></button>
+              <pre id="logical-plan" class="plan-text"></pre>
+            </div>
           </div>
           <div id="result-tab" class="tab-panel">
             <div id="result-summary" class="result-summary">not run</div>
@@ -133,7 +139,10 @@ limit 100;
             </table>
           </div>
           <div id="details-tab" class="tab-panel">
-            <div id="details" class="details"></div>
+            <div class="diagnostic-panel">
+              <button id="details-copy" class="icon-button diagnostic-copy" type="button" title="Copy details" aria-label="Copy details"><i data-lucide="copy"></i></button>
+              <div id="details" class="details"></div>
+            </div>
           </div>
         </div>
       </section>

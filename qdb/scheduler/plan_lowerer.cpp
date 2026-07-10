@@ -573,6 +573,22 @@ private:
         node.DebugLabel = std::move(label);
     }
 
+    static std::string JoinDebugLabel(const TJoinOperator& join) {
+        if (join.Keys().empty()) {
+            return "cross-join " + std::string(JoinTypeName(join.JoinType()));
+        }
+        std::string label = "join " + std::string(JoinTypeName(join.JoinType()));
+        const auto& keys = join.Keys();
+        for (size_t i = 0; i < keys.size(); ++i) {
+            label += (i ? ", " : " [") + keys[i].Left + " = " + keys[i].Right;
+        }
+        label += "]";
+        if (join.Filter()) {
+            label += " residual";
+        }
+        return label;
+    }
+
     struct TBlockingTail {
         std::shared_ptr<const NScheduler::TBlockingCode> Code;
         std::function<std::shared_ptr<void>()> MakeState;
@@ -1469,7 +1485,7 @@ private:
             MarkNode(node,
                 "join",
                 StageGroup("join", &join),
-                "join");
+                JoinDebugLabel(join));
             Graph_.AddEdge(*vectorOut.Producers[m], node, vectorRef, m, m);
             if (directScalar) {
                 Graph_.AddEdge(*scalarOut.Producers[0], node, *scalarInput, 0, 0);
@@ -1569,7 +1585,7 @@ private:
             MarkNode(node,
                 "join",
                 joinGroup,
-                "join");
+                JoinDebugLabel(join));
             Graph_.AddEdge(*leftOut.Producers[0], node, leftPipeRef, 0, 0);
             Graph_.AddEdge(*rightOut.Producers[0], node, rightPipeRef, 0, 0);
             return TLoweredOutput{
@@ -1611,7 +1627,7 @@ private:
             MarkNode(node,
                 "join",
                 joinGroup,
-                "join");
+                JoinDebugLabel(join));
             for (size_t s = 0; s < leftLanes; ++s) {
                 Graph_.AddEdge(*leftShuf.Nodes[s], node, *leftShuf.Connection, s, j);
             }

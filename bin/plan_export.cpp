@@ -683,6 +683,67 @@ std::string ExprLine(const NQumir::NAst::TExprPtr& expr) {
         NQumir::NAst::NCore::TPrintOptions{.Pretty = false});
 }
 
+std::string JoinPlanLabel(const NQdb::TJoinOperator& join) {
+    std::string label = "join " + std::string(JoinTypeName(join.JoinType()));
+    const auto& keys = join.Keys();
+    for (size_t i = 0; i < keys.size(); ++i) {
+        label += (i ? ", " : " [") + keys[i].Left + " = " + keys[i].Right;
+    }
+    if (!keys.empty()) {
+        label += "]";
+    }
+    if (join.Filter()) {
+        label += " residual " + ExprLine(join.Filter());
+    }
+    return label;
+}
+
+std::string AggregatePlanLabel(const NQdb::TAggregateOperator& aggregate) {
+    std::string label = "aggregate";
+    const auto& keys = aggregate.GroupKeys();
+    for (size_t i = 0; i < keys.size(); ++i) {
+        label += (i ? ", " : " keys=[") + keys[i];
+    }
+    if (!keys.empty()) {
+        label += "]";
+    }
+    const auto& aggs = aggregate.Aggs();
+    for (size_t i = 0; i < aggs.size(); ++i) {
+        label += (i ? ", " : " aggs=[") + aggs[i].Name + "=" + aggs[i].Func;
+    }
+    if (!aggs.empty()) {
+        label += "]";
+    }
+    return label;
+}
+
+std::string SortKeyLabel(const NQdb::TSortKey& key) {
+    std::string label = key.Column;
+    label += " " + std::string(NQdb::SortDirectionName(key.Direction));
+    if (key.Nulls != NQdb::ESortNulls::Default) {
+        label += " " + std::string(NQdb::SortNullsName(key.Nulls));
+    }
+    return label;
+}
+
+std::string SortPlanLabel(
+    std::string_view kind,
+    const std::vector<NQdb::TSortKey>& keys,
+    std::optional<int64_t> limit = std::nullopt)
+{
+    std::string label(kind);
+    for (size_t i = 0; i < keys.size(); ++i) {
+        label += (i ? ", " : " [") + SortKeyLabel(keys[i]);
+    }
+    if (!keys.empty()) {
+        label += "]";
+    }
+    if (limit) {
+        label += " limit " + std::to_string(*limit);
+    }
+    return label;
+}
+
 std::string PlanLabel(const NQdb::TOperatorPtr& op) {
     using namespace NQdb;
 
@@ -706,38 +767,16 @@ std::string PlanLabel(const NQdb::TOperatorPtr& op) {
         return label + ")";
     }
     if (auto aggregate = TMaybeOp<TAggregateOperator>(op)) {
-        auto agg = aggregate.Cast();
-        std::string label = "aggregate";
-        const auto& keys = agg->GroupKeys();
-        for (size_t i = 0; i < keys.size(); ++i) {
-            label += (i ? ", " : " keys=[") + keys[i];
-        }
-        if (!keys.empty()) {
-            label += "]";
-        }
-        const auto& aggs = agg->Aggs();
-        for (size_t i = 0; i < aggs.size(); ++i) {
-            label += (i ? ", " : " aggs=[") + aggs[i].Name + "=" + aggs[i].Func;
-        }
-        if (!aggs.empty()) {
-            label += "]";
-        }
-        return label;
+        return AggregatePlanLabel(*aggregate.Cast());
     }
     if (auto join = TMaybeOp<TJoinOperator>(op)) {
-        auto j = join.Cast();
-        std::string label = "join " + std::string(JoinTypeName(j->JoinType()));
-        const auto& keys = j->Keys();
-        for (size_t i = 0; i < keys.size(); ++i) {
-            label += (i ? ", " : " [") + keys[i].Left + " = " + keys[i].Right;
-        }
-        if (!keys.empty()) {
-            label += "]";
-        }
-        if (j->Filter()) {
-            label += " residual " + ExprLine(j->Filter());
-        }
-        return label;
+        return JoinPlanLabel(*join.Cast());
+    }
+    if (auto sort = TMaybeOp<TSortOperator>(op)) {
+        return SortPlanLabel("sort", sort.Cast()->Keys());
+    }
+    if (auto sort = TMaybeOp<TTopSortOperator>(op)) {
+        return SortPlanLabel("top-sort", sort.Cast()->Keys(), sort.Cast()->Limit());
     }
     return std::string(op->RelName());
 }
@@ -1594,6 +1633,7 @@ std::optional<llvm::json::Object> BuildSortStageJson(
     }
     llvm::json::Object stage{
         {"wasm", wasmKernel->Artifacts->Wasm},
+        {"sortKeys", SortKeysJson(sortKeys)},
         {"radixKeys", std::move(keys)},
         {"radixNullable", anyNullableKey},
     };
@@ -1670,6 +1710,7 @@ struct TExecGraphBuilder {
         }
         const int64_t crossId = AddNode(llvm::json::Object{
             {"kind", "cross-join"},
+            {"label", JoinPlanLabel(join)},
             {"wasm", crossKernel->Artifacts->Wasm},
             {"leftColumns", StructColumnsJson(*leftStruct)},
             {"rightColumns", StructColumnsJson(*rightStruct)},
@@ -1693,6 +1734,8 @@ struct TExecGraphBuilder {
         }
         const int64_t filterId = AddNode(llvm::json::Object{
             {"kind", "filter"},
+            {"label", "filter " + ExprLine(join.Filter())},
+            {"predicate", ExprLine(join.Filter())},
             {"wasm", ref->Artifacts->Wasm},
         });
         AddEdge(crossId, filterId, 0);
@@ -1730,6 +1773,8 @@ struct TExecGraphBuilder {
                 }
                 const int64_t id = AddNode(llvm::json::Object{
                     {"kind", "filter"},
+                    {"label", "filter " + ExprLine(filter.Cast()->Predicate())},
+                    {"predicate", ExprLine(filter.Cast()->Predicate())},
                     {"wasm", ref->Artifacts->Wasm},
                 });
                 AddEdge(input.NodeId, id, 0);
@@ -1798,6 +1843,8 @@ struct TExecGraphBuilder {
                 }
                 const int64_t id = AddNode(llvm::json::Object{
                     {"kind", "aggregate"},
+                    {"label", AggregatePlanLabel(*aggregate.Cast())},
+                    {"groupKeys", StringArray(aggregate.Cast()->GroupKeys())},
                     {"wasm", ref->Artifacts->Wasm},
                     {"keyCount", static_cast<int64_t>(keyCount)},
                     {"output", std::move(output)},
@@ -1856,6 +1903,7 @@ struct TExecGraphBuilder {
                     NKernel::BuildJoinKeyDescriptor(*leftStruct, *rightStruct, keyPairs);
                 const int64_t id = AddNode(llvm::json::Object{
                     {"kind", "join"},
+                    {"label", JoinPlanLabel(*join.Cast())},
                     {"joinType", std::string(JoinTypeName(join.Cast()->JoinType()))},
                     {"wasm", ref->Artifacts->Wasm},
                     {"keySize", static_cast<int64_t>(keyDesc.Size)},
@@ -1884,6 +1932,7 @@ struct TExecGraphBuilder {
                     return {};
                 }
                 stage->insert({"kind", "sort"});
+                stage->insert({"label", SortPlanLabel("sort", sort.Cast()->Keys())});
                 const int64_t id = AddNode(std::move(*stage));
                 AddEdge(input.NodeId, id, 0);
                 return {.NodeId = id, .OutputType = input.OutputType};
@@ -1903,6 +1952,9 @@ struct TExecGraphBuilder {
                     return {};
                 }
                 stage->insert({"kind", "top-sort"});
+                stage->insert({
+                    "label",
+                    SortPlanLabel("top-sort", top.Cast()->Keys(), top.Cast()->Limit())});
                 stage->insert({"limit", top.Cast()->Limit()});
                 const int64_t id = AddNode(std::move(*stage));
                 AddEdge(input.NodeId, id, 0);

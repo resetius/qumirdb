@@ -529,17 +529,23 @@ class WasmRowStore {
     this.layout = layout;
     this.batches = [];
     this.ownedPtrs = []; // per batch: our marshalled rowset ptr to free, or 0 (pinned)
+    this.wasmHandles = [];
     this.storePtr = 0;
     this.capacity = 0;
   }
 
-  // `ownedPtr` is the marshalRowSet rowset this store may free at teardown; pass
-  // 0 when `rowsetPtr` is a pinned buffer owned by an upstream operator.
-  push(batch, rowsetPtr, ownedPtr = 0) {
+  // `ownedPtr` is the marshalRowSet rowset this store may free at teardown.
+  // When `ownedPtr` is 0, `wasmHandle` is a moved pinned handle owned by this
+  // store until freeMarshalled().
+  push(batch, rowsetPtr, ownedPtr = 0, wasmHandle = null) {
+    if (!ownedPtr && !wasmHandle) {
+      throw new Error('wasm row store needs either an owned rowset or a moved handle');
+    }
     this.ensureCapacity(this.batches.length + 1);
     const idx = this.batches.length;
     this.batches.push(batch);
     this.ownedPtrs.push(ownedPtr);
+    this.wasmHandles.push(wasmHandle ? moveWasmRowSetHandle(wasmHandle) : null);
     const size = this.layout.rowset.size;
     const memBytes = this.arena.bytes();
     memBytes.copyWithin(
@@ -552,13 +558,12 @@ class WasmRowStore {
   // Frees the column buffers of every batch this store marshalled itself, plus
   // the store array. Build sides linger for the whole query otherwise — the
   // dominant cross-join accumulation in multi-join plans (TPC-H Q18/Q21).
-  // Pinned batches (ownedPtr 0) are either source-owned or kernel-owned; the
-  // latter carries a destroy hook on batch.wasm.
+  // Pinned batches (ownedPtr 0) carry a moved wasm handle owned by this store.
   freeMarshalled() {
     for (let i = 0; i < this.ownedPtrs.length; ++i) {
       const owned = this.ownedPtrs[i];
       if (!owned) {
-        releaseWasmRowSet({ batch: this.batches[i] });
+        releaseWasmRowSetHandle(this.wasmHandles[i]);
         continue;
       }
       freeMarshalledRowSet(this.arena, this.layout, owned);
@@ -568,6 +573,7 @@ class WasmRowStore {
     this.capacity = 0;
     this.batches = [];
     this.ownedPtrs = [];
+    this.wasmHandles = [];
   }
 
   dataPtr() {
@@ -627,6 +633,10 @@ class Arena {
   bytes() {
     return new Uint8Array(this.memory.buffer);
   }
+
+  stats() {
+    return this.allocator.stats();
+  }
 }
 
 function createMemory64(initialPages) {
@@ -661,15 +671,77 @@ function selectionPtrOf(selection) {
   return selection?.kind === 'wasm-selection' ? selection.ptr : 0;
 }
 
-function attachBatchWasm(
-    batch, rowsetPtr, { pinned, selectionPtr = 0, destroy = null }) {
-  batch.wasm = {
+function makeWasmRowSetHandle(rowsetPtr, { pinned, selectionPtr = 0, destroy = null }) {
+  return {
     rowsetPtr,
     pinned: pinned === true,
     hasSelection: selectionPtr !== 0,
     selectionPtr,
     destroy,
+    refCount: typeof destroy === 'function' ? 1 : 0,
+    released: false,
   };
+}
+
+function assertLiveWasmRowSetHandle(wasm) {
+  if (wasm?.released) {
+    throw new Error('wasm rowset handle was already released');
+  }
+}
+
+function attachBatchWasm(
+    batch, rowsetPtr, { pinned, selectionPtr = 0, destroy = null }) {
+  const current = batch.wasm;
+  const sameOwner = current &&
+    !current.released &&
+    current.rowsetPtr === rowsetPtr &&
+    current.destroy === destroy;
+  const wasm = sameOwner
+    ? current
+    : makeWasmRowSetHandle(rowsetPtr, { pinned, selectionPtr, destroy });
+  wasm.pinned = pinned === true;
+  wasm.hasSelection = selectionPtr !== 0;
+  wasm.selectionPtr = selectionPtr;
+  batch.wasm = wasm;
+  return wasm;
+}
+
+function moveWasmRowSetHandle(wasm) {
+  if (!wasm) {
+    return null;
+  }
+  assertLiveWasmRowSetHandle(wasm);
+  return wasm;
+}
+
+function retainWasmRowSetHandle(wasm) {
+  if (!wasm) {
+    return null;
+  }
+  assertLiveWasmRowSetHandle(wasm);
+  if (typeof wasm.destroy !== 'function') {
+    throw new Error('cannot retain a non-owning wasm rowset handle');
+  }
+  ++wasm.refCount;
+  return wasm;
+}
+
+function releaseWasmRowSetHandle(wasm) {
+  if (!wasm || typeof wasm.destroy !== 'function') {
+    return;
+  }
+  assertLiveWasmRowSetHandle(wasm);
+  if (wasm.refCount <= 0) {
+    throw new Error('wasm rowset handle refcount underflow');
+  }
+  --wasm.refCount;
+  if (wasm.refCount !== 0) {
+    return;
+  }
+  const destroy = wasm.destroy;
+  wasm.destroy = null;
+  wasm.released = true;
+  destroy();
 }
 
 function wasmRowSetForSelection(batch, selection) {
@@ -677,6 +749,7 @@ function wasmRowSetForSelection(batch, selection) {
   if (!wasm) {
     return null;
   }
+  assertLiveWasmRowSetHandle(wasm);
   if (selection == null) {
     return wasm.hasSelection ? null : wasm;
   }
@@ -766,8 +839,9 @@ function takeRowSetRelease(rowSet) {
   }
   const wasm = rowSet?.batch?.wasm;
   if (typeof wasm?.destroy === 'function') {
-    releases.push(wasm.destroy);
-    wasm.destroy = null;
+    assertLiveWasmRowSetHandle(wasm);
+    rowSet.wasmReleaseMoved = true;
+    releases.push(() => releaseWasmRowSetHandle(wasm));
   }
   if (releases.length === 0) {
     return null;
@@ -785,11 +859,14 @@ function releaseWasmRowSet(rowSet) {
     rowSet.destroy = null;
     destroy();
   }
-  const wasm = rowSet?.batch?.wasm;
-  if (typeof wasm?.destroy === 'function') {
-    const destroy = wasm.destroy;
-    wasm.destroy = null;
-    destroy();
+  if (!rowSet?.wasmReleaseMoved) {
+    releaseWasmRowSetHandle(rowSet?.batch?.wasm);
+  }
+}
+
+function releaseWasmBatch(batch) {
+  if (batch) {
+    releaseWasmRowSet({ batch, selection: null });
   }
 }
 
@@ -1743,7 +1820,11 @@ function updateJoinState(state, side, rowSet) {
   let stored = false;
   if (isLeft || !semiAnti) {
     const store = isLeft ? state.leftStore : state.rightStore;
-    batchIdx = store.push(batch, rowsetPtr, wasm?.pinned ? 0 : rowsetPtr);
+    batchIdx = store.push(
+      batch,
+      rowsetPtr,
+      wasm?.pinned ? 0 : rowsetPtr,
+      wasm?.pinned ? wasm : null);
     batchPtr = store.dataPtr() + batchIdx * layout.rowset.size;
     stored = true;
   }
@@ -1910,20 +1991,27 @@ function stableRowSetForStore(state, rowSet) {
   const { batch, selection } = rowSet;
   const wasm = wasmRowSetForSelection(batch, selection);
   if (wasm?.pinned) {
-    return { rowsetPtr: wasm.rowsetPtr, ownedPtr: 0, releaseInput: false };
+    return {
+      rowsetPtr: wasm.rowsetPtr,
+      ownedPtr: 0,
+      wasmHandle: wasm,
+      releaseInput: false,
+    };
   }
   const marshalled = marshalRowSet(
     arena, layout, batch.columns, batch.rowCount, false, selection);
   return {
     rowsetPtr: marshalled.rowsetPtr,
     ownedPtr: marshalled.rowsetPtr,
+    wasmHandle: null,
     releaseInput: true,
   };
 }
 
 function updateCrossRightState(state, rowSet) {
-  const { rowsetPtr, ownedPtr, releaseInput } = stableRowSetForStore(state, rowSet);
-  state.rightStore.push(rowSet.batch, rowsetPtr, ownedPtr);
+  const { rowsetPtr, ownedPtr, wasmHandle, releaseInput } =
+    stableRowSetForStore(state, rowSet);
+  state.rightStore.push(rowSet.batch, rowsetPtr, ownedPtr, wasmHandle);
   if (releaseInput) {
     releaseWasmRowSet(rowSet);
   }
@@ -1935,8 +2023,9 @@ function updateCrossLeftState(state, rowSet) {
     releaseWasmRowSet(rowSet);
     return;
   }
-  const { rowsetPtr, ownedPtr, releaseInput } = stableRowSetForStore(state, rowSet);
-  const batchIdx = state.leftStore.push(rowSet.batch, rowsetPtr, ownedPtr);
+  const { rowsetPtr, ownedPtr, wasmHandle, releaseInput } =
+    stableRowSetForStore(state, rowSet);
+  const batchIdx = state.leftStore.push(rowSet.batch, rowsetPtr, ownedPtr, wasmHandle);
   const batchPtr = state.leftStore.dataPtr() + batchIdx * state.layout.rowset.size;
   try {
     const ok = state.dispatch(
@@ -2027,13 +2116,19 @@ function stableSortRowSetForStore(arena, layout, rowSet) {
   const { batch, selection } = rowSet;
   const wasm = wasmRowSetForSelection(batch, selection);
   if (wasm?.pinned) {
-    return { rowsetPtr: wasm.rowsetPtr, ownedPtr: 0, releaseInput: false };
+    return {
+      rowsetPtr: wasm.rowsetPtr,
+      ownedPtr: 0,
+      wasmHandle: wasm,
+      releaseInput: false,
+    };
   }
   const marshalled = marshalRowSet(
     arena, layout, batch.columns, batch.rowCount, false, selection);
   return {
     rowsetPtr: marshalled.rowsetPtr,
     ownedPtr: marshalled.rowsetPtr,
+    wasmHandle: null,
     releaseInput: true,
   };
 }
@@ -2056,7 +2151,7 @@ function runSortKernelRowSets(kernel, layout, rowSets, radixKeys, limit) {
       releaseInputs.push(rowSet);
     }
     storeBatchIndexes[b] = store.push(
-      rowSet.batch, stable.rowsetPtr, stable.ownedPtr);
+      rowSet.batch, stable.rowsetPtr, stable.ownedPtr, stable.wasmHandle);
   }
 
   if (n === 0) {
@@ -2229,6 +2324,13 @@ class OneToOneConnection {
     ++this.stats.emptyFetch;
     return { result: FetchResult.NO_DATA, rowSet: null };
   }
+
+  destroy() {
+    while (this.queue.length > 0) {
+      releaseWasmRowSet(this.queue.shift());
+    }
+    this.finished = true;
+  }
 }
 
 class UnsupportedConnection {
@@ -2252,6 +2354,7 @@ class UnsupportedConnection {
   push() { return this.unsupported(); }
   finish() { return this.unsupported(); }
   fetch() { return this.unsupported(); }
+  destroy() {}
 }
 
 class GatherConnection extends UnsupportedConnection {
@@ -2597,6 +2700,11 @@ class AggregateTask {
     }
     return TaskResult.OK;
   }
+
+  destroy() {
+    releaseWasmBatch(this.pending);
+    this.pending = null;
+  }
 }
 
 class JoinTask {
@@ -2774,6 +2882,16 @@ class JoinTask {
 
     return false;
   }
+
+  destroy() {
+    while (this.ready.length > 0) {
+      releaseWasmBatch(this.ready.shift());
+    }
+    if (this.state) {
+      finishJoinState(this.state);
+      this.state = null;
+    }
+  }
 }
 
 // Cross product of two inputs (in practice: a scalar-subquery broadcast, the
@@ -2855,6 +2973,16 @@ class CrossJoinTask {
     output.finish();
     this.done = true;
     return TaskResult.FINISHED;
+  }
+
+  destroy() {
+    while (this.ready.length > 0) {
+      releaseWasmBatch(this.ready.shift());
+    }
+    if (this.state) {
+      finishCrossJoinState(this.state);
+      this.state = null;
+    }
   }
 }
 
@@ -2975,6 +3103,11 @@ class TopSortWasmState {
   finish() {
     return this.stateBatch || { rowCount: 0, columns: [] };
   }
+
+  destroy() {
+    releaseWasmBatch(this.stateBatch);
+    this.stateBatch = null;
+  }
 }
 
 class SortTask {
@@ -3031,9 +3164,23 @@ class SortTask {
       'qdb_sort_run',
       this.shared);
     kernel.nullable = radixNullable;
+    const inputs = this.inputs;
+    this.inputs = [];
     this.pending = runRadixSortRowSets(
-      kernel, this.layout, this.inputs, this.stage.radixKeys, null);
+      kernel, this.layout, inputs, this.stage.radixKeys, null);
     return this.execute();
+  }
+
+  destroy() {
+    releaseWasmBatch(this.pending);
+    this.pending = null;
+    for (const rowSet of this.inputs) {
+      releaseWasmRowSet(rowSet);
+    }
+    this.inputs = [];
+    if (this.topSort) {
+      this.topSort.destroy();
+    }
   }
 }
 
@@ -3065,6 +3212,11 @@ class SinkTask {
     return materializeRowSets(
       this.rowSets, this.limit, this.layout, this.shared.arena);
   }
+
+  destroy() {
+    releaseWasmRowSets(this.rowSets, 0);
+    this.rowSets = [];
+  }
 }
 
 function makeNode(task, label) {
@@ -3073,29 +3225,92 @@ function makeNode(task, label) {
   return node;
 }
 
+function joinKeyLabel(key) {
+  const left = key?.left ?? key?.Left ?? '?';
+  const right = key?.right ?? key?.Right ?? '?';
+  return `${left} = ${right}`;
+}
+
+function sortKeyLabel(key) {
+  const column = key?.column ?? key?.Column ?? '?';
+  const direction = key?.direction ?? key?.Direction ?? '';
+  const nulls = key?.nulls ?? key?.Nulls ?? '';
+  const parts = [column];
+  if (direction && direction !== 'default') {
+    parts.push(direction);
+  }
+  if (nulls && nulls !== 'default' && nulls !== 'nulls-default') {
+    parts.push(String(nulls).startsWith('nulls-') ? nulls : `nulls ${nulls}`);
+  }
+  return parts.join(' ');
+}
+
+function aggregateLabel(stage) {
+  const keys = Array.isArray(stage.groupKeys) && stage.groupKeys.length > 0
+    ? ` keys=[${stage.groupKeys.join(', ')}]`
+    : '';
+  return `aggregate${keys}`;
+}
+
+function stageLabel(stage) {
+  if (typeof stage.label === 'string' && stage.label.length > 0) {
+    return stage.label;
+  }
+  if (stage.kind === 'source') {
+    return `source ${stage.table || '?'}`;
+  }
+  if (stage.kind === 'filter') {
+    return stage.predicate ? `filter ${stage.predicate}` : 'filter';
+  }
+  if (stage.kind === 'aggregate') {
+    return aggregateLabel(stage);
+  }
+  if (stage.kind === 'join') {
+    const type = stage.joinType || 'inner';
+    const keys = Array.isArray(stage.keys) && stage.keys.length > 0
+      ? ` [${stage.keys.map(joinKeyLabel).join(', ')}]`
+      : '';
+    const residual = stage.hasResidual ? ' residual' : '';
+    return `join ${type}${keys}${residual}`;
+  }
+  if (stage.kind === 'cross-join') {
+    return stage.hasResidual ? 'cross-join residual' : 'cross-join';
+  }
+  if (stage.kind === 'sort' || stage.kind === 'top-sort') {
+    const keys = Array.isArray(stage.sortKeys) && stage.sortKeys.length > 0
+      ? ` [${stage.sortKeys.map(sortKeyLabel).join(', ')}]`
+      : '';
+    const limit = stage.kind === 'top-sort' && stage.limit != null
+      ? ` limit ${stage.limit}`
+      : '';
+    return `${stage.kind}${keys}${limit}`;
+  }
+  return stage.kind;
+}
+
 function taskNodeForStage(stage, layout, readSourceBatches, onProgress, shared) {
   if (stage.kind === 'source') {
     return makeNode(
       new SourceTask(stage, layout, shared, readSourceBatches, onProgress || null),
-      stage.kind);
+      stageLabel(stage));
   }
   if (stage.kind === 'filter') {
-    return makeNode(new FilterTask(stage, layout, shared), stage.kind);
+    return makeNode(new FilterTask(stage, layout, shared), stageLabel(stage));
   }
   if (stage.kind === 'project') {
-    return makeNode(new ProjectTask(stage, layout, shared), stage.kind);
+    return makeNode(new ProjectTask(stage, layout, shared), stageLabel(stage));
   }
   if (stage.kind === 'aggregate') {
-    return makeNode(new AggregateTask(stage, layout, shared), stage.kind);
+    return makeNode(new AggregateTask(stage, layout, shared), stageLabel(stage));
   }
   if (stage.kind === 'join') {
-    return makeNode(new JoinTask(stage, layout, shared), stage.kind);
+    return makeNode(new JoinTask(stage, layout, shared), stageLabel(stage));
   }
   if (stage.kind === 'cross-join') {
-    return makeNode(new CrossJoinTask(stage, layout, shared), stage.kind);
+    return makeNode(new CrossJoinTask(stage, layout, shared), stageLabel(stage));
   }
   if (stage.kind === 'sort' || stage.kind === 'top-sort') {
-    return makeNode(new SortTask(stage, layout, shared), stage.kind);
+    return makeNode(new SortTask(stage, layout, shared), stageLabel(stage));
   }
   throw new Error(`unsupported exec stage: ${stage.kind}`);
 }
@@ -3138,6 +3353,38 @@ function buildScheduledGraph(exec, readSourceBatches, options, layout, shared) {
   return { roots, sink, nodes };
 }
 
+function cleanupScheduledGraph(nodes) {
+  const seenConnections = new Set();
+  const cleanup = (label, fn) => {
+    try {
+      fn();
+    } catch (error) {
+      console.warn(`browser runtime cleanup failed (${label})`, error);
+    }
+  };
+
+  for (const node of nodes) {
+    for (const edge of node.outbound) {
+      if (seenConnections.has(edge.connection)) {
+        continue;
+      }
+      seenConnections.add(edge.connection);
+      if (typeof edge.connection.destroy === 'function') {
+        cleanup(`connection ${edge.src.label}->${edge.dst.label}`, () => {
+          edge.connection.destroy();
+        });
+      }
+    }
+  }
+  for (const node of nodes) {
+    if (typeof node.task?.destroy === 'function') {
+      cleanup(`task ${node.label}`, () => {
+        node.task.destroy();
+      });
+    }
+  }
+}
+
 export async function executeBrowserPipelineScheduled(exec, readSourceBatches, options = {}) {
   if (!exec || exec.supported !== true) {
     throw new Error(exec?.reason || 'pipeline is not supported for browser execution');
@@ -3154,15 +3401,24 @@ export async function executeBrowserPipelineScheduled(exec, readSourceBatches, o
   const { roots, sink, nodes } =
     buildScheduledGraph(exec, readSourceBatches, options, layout, shared);
   const scheduler = new SingleThreadedScheduler(roots);
-  await scheduler.run();
-
-  const result = sink.task.result();
+  let completed = false;
+  let result;
+  try {
+    await scheduler.run();
+    result = sink.task.result();
+    completed = true;
+  } finally {
+    if (!completed) {
+      cleanupScheduledGraph(nodes);
+    }
+  }
   result.timings = nodes.map(node => ({
     stage: node.label,
     rows: node.rows,
     elapsedMs: node.elapsedMs,
   }));
   result.scheduler = scheduler.stats;
+  result.memory = shared.arena.stats();
   result.connections = nodes.flatMap(node =>
     node.outbound.map(edge => ({
       from: edge.src.label,
@@ -3228,6 +3484,7 @@ function materializeRowSets(rowSets, limit, layout, arena) {
       }
     } finally {
       releaseWasmRowSet(rowSet);
+      rowSets[setIndex] = null;
     }
     if (reachedLimit) {
       releaseWasmRowSets(rowSets, setIndex + 1);
