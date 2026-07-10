@@ -10,7 +10,10 @@ import {
   removeFileFromBrowserDataset,
   renameBrowserDataset,
   writeOpfsFileStream,
-  writeOpfsStoredFile
+  writeOpfsStoredFile,
+  getWorkspaceState,
+  putWorkspaceState,
+  deleteWorkspaceState
 } from './browser_storage.js';
 import { readParquetTable } from './browser_parquet.js';
 
@@ -19,7 +22,6 @@ const $ = selector => document.querySelector(selector);
 const QUERIES_KEY = 'qdb.web.queries';
 const ACTIVE_QUERY_KEY = 'qdb.web.activeQuery';
 const ACTIVE_DATASET_KEY = 'qdb.web.activeDataset';
-const WORKSPACE_STATE_KEY = 'qdb.web.workspaceState';
 const LAST_RUN_KEY = 'qdb.web.lastRun';
 const LOCAL_DATA_DOWNLOAD_CONCURRENCY = 4;
 const MAX_PERSISTED_RESULT_ROWS = 1000;
@@ -207,7 +209,7 @@ function initQueries() {
     setSql(activeQuery.sql || '');
   }
 
-  $('#query-new').addEventListener('click', () => {
+  $('#query-new').addEventListener('click', async () => {
     saveActiveQuerySql();
     saveWorkspaceState();
     const queries = loadQueries();
@@ -221,8 +223,8 @@ function initQueries() {
     localStorage.setItem(ACTIVE_QUERY_KEY, activeQueryId);
     saveQueries(queries);
     setSql('');
-    restoreWorkspaceState();
     renderQueries();
+    await restoreWorkspaceState();
   });
   renderQueries();
 }
@@ -308,7 +310,7 @@ function renderQueries() {
       button.appendChild(stop);
     }
 
-    button.addEventListener('click', () => {
+    button.addEventListener('click', async () => {
       if (query.id === activeQueryId) {
         return;
       }
@@ -318,11 +320,11 @@ function renderQueries() {
       localStorage.setItem(ACTIVE_QUERY_KEY, activeQueryId);
       const freshQuery = loadQueries().find(item => item.id === activeQueryId);
       setSql(freshQuery?.sql || '');
-      restoreWorkspaceState();
       // The status label reflects live activity, not the selected query, so a
       // run still in flight for the previous query must not read as this one's.
       setStatus('idle');
       renderQueries();
+      await restoreWorkspaceState();
     });
     root.appendChild(button);
   }
@@ -339,7 +341,7 @@ async function initDatasets() {
     event.target.value = '';
   });
   renderDatasets();
-  restoreWorkspaceState();
+  await restoreWorkspaceState();
 }
 
 async function loadBrowserDatasets() {
@@ -1658,8 +1660,8 @@ function showDetails(value) {
   saveWorkspaceState();
 }
 
-function restoreWorkspaceState(queryId = activeQueryId, datasetId = activeDatasetId) {
-  const state = loadWorkspaceState(queryId, datasetId);
+async function restoreWorkspaceState(queryId = activeQueryId, datasetId = activeDatasetId) {
+  const state = await loadWorkspaceState(queryId, datasetId);
   if (!state) {
     clearWorkspaceStateView();
     return;
@@ -1701,13 +1703,16 @@ function restoreWorkspaceState(queryId = activeQueryId, datasetId = activeDatase
   clearInspector();
 }
 
-function loadWorkspaceState(queryId = activeQueryId, datasetId = activeDatasetId) {
+async function loadWorkspaceState(queryId = activeQueryId, datasetId = activeDatasetId) {
   if (!queryId || !datasetId) {
     return null;
   }
+  // See any writes queued for this slot before reading it.
+  await workspaceWriteChain;
   try {
-    return JSON.parse(localStorage.getItem(workspaceStateKey(queryId, datasetId)) || 'null');
-  } catch {
+    return (await getWorkspaceState(workspaceStateKey(queryId, datasetId))) || null;
+  } catch (error) {
+    console.warn('workspace load failed', error);
     return null;
   }
 }
@@ -1727,11 +1732,12 @@ function saveWorkspaceState(queryId = activeQueryId, datasetId = activeDatasetId
       meta: resultMeta
     }
   };
-  persistWorkspaceState(workspaceStateKey(queryId, datasetId), state);
+  const key = workspaceStateKey(queryId, datasetId);
+  return queueWorkspaceWrite(() => putWorkspaceState(key, state));
 }
 
 function workspaceStateKey(queryId, datasetId) {
-  return `${WORKSPACE_STATE_KEY}:${queryId}:${datasetId}`;
+  return `${queryId}:${datasetId}`;
 }
 
 // True when the given query+dataset is still the one on screen. Async run/explain
@@ -1752,71 +1758,29 @@ function applyOutcome(queryId, datasetId, live, persist) {
   }
 }
 
-function isQuotaExceeded(error) {
-  return !!error && (
-    error.name === 'QuotaExceededError' ||
-    error.code === 22 ||
-    error.code === 1014);
-}
-
-function trySetItem(key, value) {
-  try {
-    localStorage.setItem(key, value);
-    return true;
-  } catch (error) {
-    if (!isQuotaExceeded(error)) {
-      console.warn('localStorage write failed', error);
-    }
-    return false;
-  }
-}
-
-// Frees room for `key` by dropping OTHER workspace slots, largest first, and
-// retrying after each removal — evicting only as many as needed.
-function evictWorkspaceSlotsAndRetry(key, value) {
-  const prefix = `${WORKSPACE_STATE_KEY}:`;
-  const others = [];
-  for (let i = 0; i < localStorage.length; i++) {
-    const k = localStorage.key(i);
-    if (k && k.startsWith(prefix) && k !== key) {
-      others.push([k, (localStorage.getItem(k) || '').length]);
-    }
-  }
-  others.sort((a, b) => b[1] - a[1]);
-  for (const [k] of others) {
-    localStorage.removeItem(k);
-    if (trySetItem(key, value)) {
-      return true;
-    }
-  }
-  return false;
-}
-
-// Persists a workspace state, degrading gracefully under quota pressure:
-// evict other slots, and as a last resort drop the (large) bundle so at least
-// the result/details survive.
-function persistWorkspaceState(key, state) {
-  const value = JSON.stringify(state);
-  if (trySetItem(key, value) || evictWorkspaceSlotsAndRetry(key, value)) {
-    return;
-  }
-  if (state.bundle) {
-    const reduced = JSON.stringify({ ...state, bundle: null });
-    if (trySetItem(key, reduced) || evictWorkspaceSlotsAndRetry(key, reduced)) {
-      return;
-    }
-  }
-  console.warn('workspace state too large to persist:', key);
+// All workspace-state writes go through this serialized chain so that
+// read-modify-write merges (writeWorkspaceSlot) never race each other or a
+// full save. Reads (loadWorkspaceState) await the chain first to see pending
+// writes.
+let workspaceWriteChain = Promise.resolve();
+function queueWorkspaceWrite(task) {
+  workspaceWriteChain = workspaceWriteChain.then(task).catch(error => {
+    console.warn('workspace persist failed', error);
+  });
+  return workspaceWriteChain;
 }
 
 function writeWorkspaceSlot(queryId, datasetId, patch) {
   if (!queryId || !datasetId) {
     return;
   }
-  const state = loadWorkspaceState(queryId, datasetId) ||
-    { version: 1, graphMode: 'logical' };
-  Object.assign(state, patch);
-  persistWorkspaceState(workspaceStateKey(queryId, datasetId), state);
+  const key = workspaceStateKey(queryId, datasetId);
+  return queueWorkspaceWrite(async () => {
+    const state = (await getWorkspaceState(key)) ||
+      { version: 1, graphMode: 'logical' };
+    Object.assign(state, patch);
+    await putWorkspaceState(key, state);
+  });
 }
 
 function persistBundleToSlot(queryId, datasetId, bundle) {
