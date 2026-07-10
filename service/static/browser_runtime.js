@@ -268,6 +268,261 @@ class RowSetWriter {
   }
 }
 
+function sourceChunkLength(values) {
+  if (!values || typeof values.length !== 'number') {
+    return 0;
+  }
+  return values.length;
+}
+
+function isNullish(value) {
+  return value === null || value === undefined;
+}
+
+function sourceNumericValue(column, value) {
+  if (column.type === 'i32' && value instanceof Date) {
+    return Math.floor(value.getTime() / 86400000);
+  }
+  return value;
+}
+
+function clearValidityBit(memBytes, maskPtr, row) {
+  memBytes[maskPtr + (row >> 3)] &= ~(1 << (row & 7));
+}
+
+export class WasmSourceBatchBuilder {
+  constructor(arena, layout, columns, rowCount) {
+    this.arena = arena;
+    this.layout = layout;
+    this.columns = shapeColumns(columns);
+    this.rowCount = Number(rowCount) || 0;
+    this.encoder = new TextEncoder();
+    this.columnsBase = this.columns.length > 0
+      ? arena.alloc(this.columns.length * layout.column.size, 8)
+      : 0;
+    this.rowsetPtr = arena.alloc(layout.rowset.size, 8);
+    this.nameToIndex = new Map(this.columns.map((column, index) => [column.name, index]));
+    this.dataPtrs = new Array(this.columns.length).fill(0);
+    this.dataCaps = new Array(this.columns.length).fill(0);
+    this.offsetsPtrs = new Array(this.columns.length).fill(0);
+    this.maskPtrs = new Array(this.columns.length).fill(0);
+    this.nextRows = new Array(this.columns.length).fill(0);
+    this.stringByteSizes = new Array(this.columns.length).fill(0);
+
+    for (let c = 0; c < this.columns.length; ++c) {
+      const column = this.columns[c];
+      if (column.type === 'string') {
+        this.offsetsPtrs[c] = arena.alloc((this.rowCount + 1) * 4, 4);
+        arena.bytes().fill(0, this.offsetsPtrs[c], this.offsetsPtrs[c] + (this.rowCount + 1) * 4);
+      } else {
+        const width = coreTypeWidth(column.type);
+        if (width <= 0) {
+          throw new Error(`unsupported source column type: ${column.type}`);
+        }
+        const bytes = Math.max(this.rowCount, 1) * width;
+        this.dataPtrs[c] = arena.alloc(bytes, 8);
+        this.dataCaps[c] = bytes;
+        arena.bytes().fill(0, this.dataPtrs[c], this.dataPtrs[c] + bytes);
+      }
+    }
+  }
+
+  writeChunk(columnName, columnData, start, end) {
+    const index = this.nameToIndex.get(String(columnName));
+    if (index === undefined) {
+      return;
+    }
+    const from = Number(start ?? 0);
+    const to = end == null ? from + sourceChunkLength(columnData) : Number(end);
+    if (from < 0 || to < from || to > this.rowCount) {
+      throw new Error(
+        `source chunk ${columnName} has invalid row range ${from}..${to} of ${this.rowCount}`);
+    }
+    const column = this.columns[index];
+    if (column.type === 'string') {
+      this.writeStringChunk(index, columnData, from, to);
+    } else {
+      this.writeNumericChunk(index, columnData, from, to);
+    }
+  }
+
+  writeNumericChunk(index, values, start, end) {
+    const column = this.columns[index];
+    if (start !== this.nextRows[index]) {
+      throw new Error(
+        `source chunks for ${column.name} are not contiguous at row ${this.nextRows[index]}`);
+    }
+    const count = end - start;
+    if (count <= 0) {
+      return;
+    }
+    const width = coreTypeWidth(column.type);
+    const bytes = typedColumnBytes(values, column.type, count);
+    if (bytes) {
+      this.arena.bytes().set(bytes, this.dataPtrs[index] + start * width);
+      this.nextRows[index] = end;
+      return;
+    }
+
+    let hasNull = false;
+    for (let i = 0; i < count; ++i) {
+      if (isNullish(values?.[i])) {
+        hasNull = true;
+        break;
+      }
+    }
+    if (hasNull) {
+      this.ensureMask(index);
+    }
+
+    const dv = this.arena.view();
+    const memBytes = this.arena.bytes();
+    for (let i = 0; i < count; ++i) {
+      const value = values?.[i];
+      const row = start + i;
+      if (isNullish(value)) {
+        clearValidityBit(memBytes, this.maskPtrs[index], row);
+        writeNumericValue(dv, this.dataPtrs[index] + row * width, column.type, 0);
+      } else {
+        writeNumericValue(
+          dv,
+          this.dataPtrs[index] + row * width,
+          column.type,
+          sourceNumericValue(column, value));
+      }
+    }
+    this.nextRows[index] = end;
+  }
+
+  writeStringChunk(index, values, start, end) {
+    if (start !== this.nextRows[index]) {
+      throw new Error(
+        `source chunks for ${this.columns[index].name} are not contiguous at row ${this.nextRows[index]}`);
+    }
+    let hasNull = false;
+    for (let i = 0; i < end - start; ++i) {
+      if (isNullish(values?.[i])) {
+        hasNull = true;
+        break;
+      }
+    }
+    if (hasNull) {
+      this.ensureMask(index);
+    }
+
+    let dv = this.arena.view();
+    const offsetsPtr = this.offsetsPtrs[index];
+    let size = this.stringByteSizes[index];
+
+    for (let i = 0; i < end - start; ++i) {
+      const row = start + i;
+      const value = values?.[i];
+      dv.setInt32(offsetsPtr + row * 4, size, true);
+      if (isNullish(value)) {
+        clearValidityBit(this.arena.bytes(), this.maskPtrs[index], row);
+      } else {
+        size = this.writeStringValue(index, String(value), size);
+        dv = this.arena.view();
+      }
+      dv.setInt32(offsetsPtr + (row + 1) * 4, size, true);
+    }
+    this.stringByteSizes[index] = size;
+    this.nextRows[index] = end;
+  }
+
+  writeStringValue(index, text, size) {
+    let rest = text;
+    while (rest.length > 0) {
+      const needed = size + Math.max(rest.length * 3, 1);
+      this.ensureStringCapacity(index, needed);
+      const memBytes = this.arena.bytes();
+      const start = this.dataPtrs[index] + size;
+      const end = this.dataPtrs[index] + this.dataCaps[index];
+      const written = this.encoder.encodeInto(rest, memBytes.subarray(start, end));
+      if (written.read <= 0 && rest.length > 0) {
+        throw new Error('TextEncoder.encodeInto made no progress');
+      }
+      size += written.written;
+      rest = rest.slice(written.read);
+    }
+    return size;
+  }
+
+  ensureStringCapacity(index, bytes) {
+    if (this.dataCaps[index] >= bytes) {
+      return;
+    }
+    const next = Math.max(bytes, this.dataCaps[index] ? this.dataCaps[index] * 2 : 64);
+    this.dataPtrs[index] = this.dataPtrs[index]
+      ? this.arena.realloc(this.dataPtrs[index], next)
+      : this.arena.alloc(next, 1);
+    this.dataCaps[index] = next;
+  }
+
+  ensureMask(index) {
+    if (this.maskPtrs[index]) {
+      return;
+    }
+    const bytes = Math.max((this.rowCount + 7) >> 3, 1);
+    this.maskPtrs[index] = this.arena.alloc(bytes, 8);
+    this.arena.bytes().fill(0xff, this.maskPtrs[index], this.maskPtrs[index] + bytes);
+  }
+
+  finish() {
+    for (let c = 0; c < this.columns.length; ++c) {
+      if (this.nextRows[c] !== this.rowCount) {
+        throw new Error(
+          `source column ${this.columns[c].name} ended at row ${this.nextRows[c]} of ${this.rowCount}`);
+      }
+      if (this.columns[c].type !== 'string') {
+        continue;
+      }
+      const offsetsPtr = this.offsetsPtrs[c];
+      const size = this.stringByteSizes[c];
+      if (!this.dataPtrs[c]) {
+        this.dataPtrs[c] = this.arena.alloc(1, 1);
+        this.dataCaps[c] = 1;
+      }
+      const dv = this.arena.view();
+      for (let row = this.nextRows[c]; row <= this.rowCount; ++row) {
+        dv.setInt32(offsetsPtr + row * 4, size, true);
+      }
+    }
+
+    const colLayout = this.layout.column;
+    const rsLayout = this.layout.rowset;
+    const dv = this.arena.view();
+    for (let c = 0; c < this.columns.length; ++c) {
+      const column = this.columns[c];
+      const colPtr = this.columnsBase + c * colLayout.size;
+      new Uint8Array(this.arena.memory.buffer, colPtr, colLayout.size).fill(0);
+      writePointer(dv, colPtr + colLayout.data, this.dataPtrs[c]);
+      if (this.maskPtrs[c]) {
+        writePointer(dv, colPtr + colLayout.mask, this.maskPtrs[c]);
+      }
+      if (column.type === 'string') {
+        writePointer(dv, colPtr + colLayout.offsets, this.offsetsPtrs[c]);
+        dv.setUint8(colPtr + colLayout.offsetWidth, 4);
+      }
+    }
+
+    new Uint8Array(this.arena.memory.buffer, this.rowsetPtr, rsLayout.size).fill(0);
+    writePointer(dv, this.rowsetPtr + rsLayout.columns, this.columnsBase);
+    dv.setBigInt64(this.rowsetPtr + rsLayout.columnCount, BigInt(this.columns.length), true);
+    dv.setBigInt64(this.rowsetPtr + rsLayout.rowCount, BigInt(this.rowCount), true);
+
+    const batch = {
+      rowCount: this.rowCount,
+      columns: shapeColumns(this.columns),
+    };
+    attachBatchWasm(batch, this.rowsetPtr, {
+      pinned: true,
+      destroy: () => freeMarshalledRowSet(this.arena, this.layout, this.rowsetPtr),
+    });
+    return batch;
+  }
+}
+
 class WasmRowStore {
   constructor(arena, layout) {
     this.arena = arena;
@@ -2163,7 +2418,10 @@ class SourceTask {
       return TaskResult.BLOCKED_OUTPUT;
     }
     if (!this.iterator) {
-      this.iterator = this.readSourceBatches(this.stage, this.onProgress)[Symbol.asyncIterator]();
+      this.iterator = this.readSourceBatches(this.stage, this.onProgress, {
+        layout: this.layout,
+        shared: this.shared,
+      })[Symbol.asyncIterator]();
     }
     const next = await this.iterator.next();
     if (next.done) {
