@@ -110,6 +110,50 @@ button:hover {
   font-weight: 700;
 }
 
+.brand-tech {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-left: 10px;
+  margin-left: 4px;
+  border-left: 1px solid var(--line);
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.brand-tech-label {
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 10px;
+}
+
+.brand-tech a {
+  color: var(--muted);
+  text-decoration: none;
+}
+
+.brand-tech a:hover {
+  color: var(--accent);
+}
+
+@media (max-width: 720px) {
+  .brand-tech {
+    display: none;
+  }
+}
+
+.copyright {
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+@media (max-width: 900px) {
+  .copyright {
+    display: none;
+  }
+}
+
 .status {
   color: var(--muted);
   font-size: 12px;
