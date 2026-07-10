@@ -2489,7 +2489,13 @@ function canConsumeWasmOutput(task) {
     return true;
   }
   const kind = task.stage?.kind;
-  return kind === 'aggregate' || kind === 'join' || kind === 'cross-join';
+  return kind === 'filter' ||
+    kind === 'project' ||
+    kind === 'aggregate' ||
+    kind === 'join' ||
+    kind === 'cross-join' ||
+    kind === 'sort' ||
+    kind === 'top-sort';
 }
 
 function downstreamConsumesWasm(node) {
