@@ -59,6 +59,49 @@ async function writeOpfsFile(datasetId, file) {
   return `datasets/${datasetId}/${file.name}`;
 }
 
+export async function writeOpfsStoredFile(datasetId, file) {
+  return {
+    name: file.name,
+    size: file.size,
+    type: file.type || 'application/octet-stream',
+    opfsPath: await writeOpfsFile(datasetId, file)
+  };
+}
+
+export async function writeOpfsFileStream(datasetId, fileName, stream, options = {}) {
+  const root = await datasetsDir(true);
+  const dir = await root.getDirectoryHandle(datasetId, { create: true });
+  const handle = await dir.getFileHandle(fileName, { create: true });
+  const writable = await handle.createWritable();
+  const reader = stream.getReader();
+  let size = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      await writable.write(value);
+      size += value.byteLength;
+      options.onProgress?.(size);
+    }
+    await writable.close();
+  } catch (error) {
+    try {
+      await writable.abort?.();
+    } catch {
+      // The original error is more useful.
+    }
+    throw error;
+  }
+  return {
+    name: fileName,
+    size,
+    type: options.type || 'application/octet-stream',
+    opfsPath: `datasets/${datasetId}/${fileName}`
+  };
+}
+
 export async function readOpfsFile(datasetId, fileName) {
   const root = await datasetsDir(false);
   const dir = await root.getDirectoryHandle(datasetId, { create: false });
@@ -136,14 +179,12 @@ export async function renameBrowserDataset(dataset, name) {
 export async function addFilesToBrowserDataset(dataset, files, tables) {
   const storedFiles = [];
   for (const file of files) {
-    storedFiles.push({
-      name: file.name,
-      size: file.size,
-      type: file.type || 'application/octet-stream',
-      opfsPath: await writeOpfsFile(dataset.id, file)
-    });
+    storedFiles.push(await writeOpfsStoredFile(dataset.id, file));
   }
+  return addStoredFilesToBrowserDataset(dataset, storedFiles, tables);
+}
 
+export async function addStoredFilesToBrowserDataset(dataset, storedFiles, tables) {
   const fileNames = new Set(storedFiles.map(file => file.name));
   const tableItems = tables.map(table => ({
     ...table,
