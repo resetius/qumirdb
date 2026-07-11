@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include "mock_source.h"
 
 #include <qdb/io/io.h>
 #include <qdb/io/schema.h>
@@ -33,26 +34,6 @@ using namespace NQumir::NAst::NCore;
 using namespace NQumir::NAst;
 
 namespace {
-
-// Schema-only mock; never executed (the equi-join pass is purely logical).
-struct TMockSource : ISource {
-    std::vector<std::string> Names;
-    std::vector<TColumnSchema> Cols;
-    TSchema Schema_;
-
-    explicit TMockSource(std::vector<std::string> names)
-        : Names(std::move(names))
-    {
-        Cols.reserve(Names.size());
-        for (const auto& name : Names) {
-            Cols.push_back({ .Name = name, .Type = std::make_shared<TIntegerType>(TIntegerType::I64) });
-        }
-        Schema_ = TSchema{ Cols };
-    }
-
-    const TSchema& Schema() const override { return Schema_; }
-    bool Next(TRowSet&) override { return false; }
-};
 
 TOperatorPtr Optimize(const std::string& sexp, const std::map<std::string, ISource*>& tables) {
     TRelParserOptions opts;
@@ -125,8 +106,8 @@ const TLimitOperator* AsLimit(const TOperatorPtr& op) {
 
 // one join: filter (== aid bid) over cross(A, B) -> key (a.aid, b.bid)
 TEST(EquiJoin, OneJoinFromFilter) {
-    TMockSource a({"aid", "aval"});
-    TMockSource b({"bid", "bval"});
+    NQdb::TMockSource a({"aid", "aval"});
+    NQdb::TMockSource b({"bid", "bval"});
     std::map<std::string, ISource*> tables = {{"A", &a}, {"B", &b}};
 
     auto root = Optimize(
@@ -140,9 +121,9 @@ TEST(EquiJoin, OneJoinFromFilter) {
 
 // two joins: ((A x B) x C) with aid=bid and bcid=cid
 TEST(EquiJoin, TwoJoinsFromFilter) {
-    TMockSource a({"aid", "aval"});
-    TMockSource b({"bid", "bcid", "bval"});
-    TMockSource c({"cid", "cval"});
+    NQdb::TMockSource a({"aid", "aval"});
+    NQdb::TMockSource b({"bid", "bcid", "bval"});
+    NQdb::TMockSource c({"cid", "cval"});
     std::map<std::string, ISource*> tables = {{"A", &a}, {"B", &b}, {"C", &c}};
 
     auto root = Optimize(
@@ -158,10 +139,10 @@ TEST(EquiJoin, TwoJoinsFromFilter) {
 
 // three joins: (((A x B) x C) x D) with aid=bid, bcid=cid, ccid=did
 TEST(EquiJoin, ThreeJoinsFromFilter) {
-    TMockSource a({"aid", "aval"});
-    TMockSource b({"bid", "bcid", "bval"});
-    TMockSource c({"cid", "ccid", "cval"});
-    TMockSource d({"did", "dval"});
+    NQdb::TMockSource a({"aid", "aval"});
+    NQdb::TMockSource b({"bid", "bcid", "bval"});
+    NQdb::TMockSource c({"cid", "ccid", "cval"});
+    NQdb::TMockSource d({"did", "dval"});
     std::map<std::string, ISource*> tables = {{"A", &a}, {"B", &b}, {"C", &c}, {"D", &d}};
 
     auto root = Optimize(
@@ -178,8 +159,8 @@ TEST(EquiJoin, ThreeJoinsFromFilter) {
 }
 
 TEST(EquiJoin, ExtractsKeysThroughLimitAndSort) {
-    TMockSource a({"aid", "aval"});
-    TMockSource b({"bid", "bval"});
+    NQdb::TMockSource a({"aid", "aval"});
+    NQdb::TMockSource b({"bid", "bval"});
 
     auto left = std::make_shared<TSourceOperator>(a, "A");
     left->SetAlias("a");
@@ -206,9 +187,9 @@ TEST(EquiJoin, ExtractsKeysThroughLimitAndSort) {
 }
 
 TEST(JoinOrder, ReordersThroughLimitAndSort) {
-    TMockSource a({"aid", "aval"});
-    TMockSource b({"bid", "bval"});
-    TMockSource c({"cid", "cval"});
+    NQdb::TMockSource a({"aid", "aval"});
+    NQdb::TMockSource b({"bid", "bval"});
+    NQdb::TMockSource c({"cid", "cval"});
 
     auto sourceA = std::make_shared<TSourceOperator>(a, "A");
     sourceA->SetAlias("a");

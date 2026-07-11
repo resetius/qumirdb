@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include "mock_source.h"
 
 #include <qumir/codegen/llvm/llvm_initializer.h>
 #include <qumir/parser/core/lexer.h>
@@ -25,28 +26,6 @@ using namespace NQumir::NAst;
 
 namespace {
 
-struct TStubSource : ISource {
-    std::vector<std::string> Names;
-    std::vector<TColumnSchema> Cols;
-    TSchema Schema_;
-    std::vector<TRowSet> Batches;
-    size_t Index = 0;
-
-    TStubSource(std::vector<std::string> names, std::vector<TTypePtr> types,
-        std::vector<TRowSet> batches)
-        : Names(std::move(names)), Batches(std::move(batches)) {
-        for (size_t i = 0; i < Names.size(); ++i) {
-            Cols.push_back({Names[i], types[i]});
-        }
-        Schema_ = TSchema{Cols};
-    }
-    const TSchema& Schema() const override { return Schema_; }
-    bool Next(TRowSet& rowSet) override {
-        if (Index >= Batches.size()) return false;
-        rowSet = Batches[Index++];
-        return true;
-    }
-};
 
 std::unique_ptr<TTestRuntime> Plan(
     const std::string& sexp,
@@ -83,7 +62,7 @@ TEST(ProjectE2E, IdentZeroCopyPlusComputed) {
         TColumn{.Data = reinterpret_cast<char*>(w.data())},
     };
     TRowSet batch{.Columns = cols.data(), .ColumnCount = 3, .RowCount = 3, .RefCount = 1};
-    TStubSource src({"x", "z", "w"},
+    NQdb::TMockSource src({"x", "z", "w"},
         {std::make_shared<TFloatType>(), std::make_shared<TFloatType>(),
          std::make_shared<TFloatType>()},
         {batch});
@@ -121,7 +100,7 @@ TEST(FilterE2E, PublishesSelectionFromUnaryStreamingShell) {
         TColumn{.Data = reinterpret_cast<char*>(values.data())},
     };
     TRowSet batch{.Columns = cols.data(), .ColumnCount = 1, .RowCount = 4, .RefCount = 1};
-    TStubSource src({"value"}, {std::make_shared<TIntegerType>()}, {batch});
+    NQdb::TMockSource src({"value"}, {std::make_shared<TIntegerType>()}, {batch});
 
     auto plan = Plan("(rel filter (rel source \"L\") (> value 1))", src);
 
@@ -148,7 +127,7 @@ TEST(ProjectE2E, SchedulerRuntimeRunsUnaryPipeline) {
         .RowCount = 4,
         .RefCount = 1,
     };
-    TStubSource src(
+    NQdb::TMockSource src(
         {"value", "payload"},
         {std::make_shared<TIntegerType>(), std::make_shared<TIntegerType>()},
         {batch});
@@ -201,7 +180,7 @@ TEST(ProjectE2E, SchedulerRuntimeRunsLimitTail) {
         .RowCount = 3,
         .RefCount = 1,
     };
-    TStubSource src(
+    NQdb::TMockSource src(
         {"value"},
         {std::make_shared<TIntegerType>()},
         {firstBatch, secondBatch});
