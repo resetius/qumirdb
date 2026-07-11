@@ -1,6 +1,7 @@
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(ARROW REQUIRED IMPORTED_TARGET arrow)
 pkg_check_modules(PARQUET REQUIRED IMPORTED_TARGET parquet)
+find_package(LLVM REQUIRED CONFIG)
 
 add_library(qumirdb
     stub.cpp
@@ -61,6 +62,7 @@ add_library(qumirdb
     scheduler/threaded_scheduler.cpp
 )
 target_include_directories(qumirdb PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)
+target_include_directories(qumirdb PRIVATE ${LLVM_INCLUDE_DIRS})
 target_compile_definitions(qumirdb PUBLIC QDB_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 target_compile_features(qumirdb PUBLIC cxx_std_23)
 if(UNIX AND NOT APPLE)

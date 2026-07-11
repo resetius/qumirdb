@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include "mock_source.h"
 
 #include <algorithm>
 #include <cstring>
@@ -86,14 +87,6 @@ std::string BuildAst(std::istream& in) {
     return NSql::PrintAst(parsed.value());
 }
 
-// Schema-less source used for plan-shape goldens; never executed.
-struct TStubSource : NQdb::ISource {
-    const NQdb::TSchema& Schema() const override { return Schema_; }
-    bool Next(NQdb::TRowSet&) override { return false; }
-
-    NQdb::TSchema Schema_;
-};
-
 std::string BuildPlan(std::istream& in) {
     NSql::TTokenStream ts(in);
     NSql::TParser parser;
@@ -103,11 +96,11 @@ std::string BuildPlan(std::istream& in) {
         return parsed.error().ToString() + "\n";
     }
 
-    std::vector<std::unique_ptr<TStubSource>> sources;
+    std::vector<std::unique_ptr<NQdb::TMockSource>> sources;
     auto factory = [&](std::string_view table)
         -> std::expected<NQdb::TOperatorPtr, NQumir::TError>
     {
-        auto& source = sources.emplace_back(std::make_unique<TStubSource>());
+        auto& source = sources.emplace_back(std::make_unique<NQdb::TMockSource>());
         return std::make_shared<NQdb::TSourceOperator>(*source, std::string(table));
     };
 

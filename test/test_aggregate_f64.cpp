@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include "mock_source.h"
 
 #include <qumir/codegen/llvm/llvm_initializer.h>
 #include <qumir/parser/core/lexer.h>
@@ -26,26 +27,6 @@ using namespace NQumir::NAst;
 
 namespace {
 
-struct TStubSource : ISource {
-    std::vector<std::string> Names;
-    std::vector<TColumnSchema> Cols;
-    TSchema Schema_;
-    std::vector<TRowSet> Batches;
-    size_t Index = 0;
-
-    TStubSource(std::vector<std::string> names, std::vector<TTypePtr> types,
-        std::vector<TRowSet> batches)
-        : Names(std::move(names)), Batches(std::move(batches)) {
-        for (size_t i = 0; i < Names.size(); ++i) Cols.push_back({Names[i], types[i]});
-        Schema_ = TSchema{Cols};
-    }
-    const TSchema& Schema() const override { return Schema_; }
-    bool Next(TRowSet& rowSet) override {
-        if (Index >= Batches.size()) return false;
-        rowSet = Batches[Index++];
-        return true;
-    }
-};
 
 std::unique_ptr<TTestRuntime> Plan(
     const std::string& sexp,
@@ -79,7 +60,7 @@ TEST(AggregateF64, SumMinMaxOverFloatColumn) {
         TColumn{.Data = reinterpret_cast<char*>(v.data())},
     };
     TRowSet batch{.Columns = cols.data(), .ColumnCount = 2, .RowCount = 4, .RefCount = 1};
-    TStubSource src({"k", "v"},
+    NQdb::TMockSource src({"k", "v"},
         {std::make_shared<TIntegerType>(TIntegerType::I64), std::make_shared<TFloatType>()},
         {batch});
 
@@ -126,7 +107,7 @@ TEST(AggregateF64, MultipleDistinctColumns) {
         TColumn{.Data = reinterpret_cast<char*>(b.data())},
     };
     TRowSet batch{.Columns = cols.data(), .ColumnCount = 3, .RowCount = 4, .RefCount = 1};
-    TStubSource src({"k", "a", "b"},
+    NQdb::TMockSource src({"k", "a", "b"},
         {std::make_shared<TIntegerType>(TIntegerType::I64),
          std::make_shared<TIntegerType>(TIntegerType::I64),
          std::make_shared<TFloatType>()},
@@ -178,7 +159,7 @@ TEST(AggregateF64, SchedulerUnaryPrefixFeedsAggregate) {
         .RowCount = 4,
         .RefCount = 1,
     };
-    TStubSource src(
+    NQdb::TMockSource src(
         {"k", "v"},
         {std::make_shared<TIntegerType>(TIntegerType::I64),
          std::make_shared<TFloatType>()},

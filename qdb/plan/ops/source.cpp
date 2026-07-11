@@ -25,6 +25,7 @@ TSourceOperator::TSourceOperator(ISource& source, std::string path)
     Type = std::make_shared<NQumir::NAst::TFunctionType>(
         std::vector<NQumir::NAst::TTypePtr>{},
         StructTypeFromSchema(source.Schema()));
+    Stats_ = source.Stats();
 }
 
 const std::string TSourceOperator::ToString() const {

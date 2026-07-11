@@ -7,9 +7,17 @@
 #include <arrow/api.h>
 #include <arrow/io/api.h>
 #include <arrow/memory_pool.h>
+#include <arrow/util/key_value_metadata.h>
 #include <parquet/arrow/reader.h>
+#include <parquet/metadata.h>
+#include <parquet/schema.h>
+#include <parquet/statistics.h>
 
+#include <llvm/Support/JSON.h>
+
+#include <bit>
 #include <numeric>
+#include <unordered_map>
 #include <utility>
 
 #include <qumir/parser/type.h>
@@ -150,6 +158,8 @@ void TParquetSource::Open()
     for (const auto& field : fileSchema->fields()) {
         FileNames_.push_back(field->name());
     }
+
+    LoadColumnStats();
 }
 
 std::vector<int> TParquetSource::EffectiveRowGroups() const
@@ -211,6 +221,229 @@ void TParquetSource::RefreshSchema()
         });
     }
     Schema_ = TSchema{std::span<const TColumnSchema>(Columns_)};
+}
+
+void TParquetSource::LoadStandardColumnStats(TStats& stats)
+{
+    auto metadata = FileReader_->parquet_reader()->metadata();
+    const int numColumns = metadata->num_columns();
+    const int numRowGroups = metadata->num_row_groups();
+    const parquet::SchemaDescriptor* schema = metadata->schema();
+
+    for (int c = 0; c < numColumns; ++c) {
+        const parquet::ColumnDescriptor* descr = schema->Column(c);
+        const parquet::Type::type physType = descr->physical_type();
+        const bool isFloat =
+            physType == parquet::Type::FLOAT || physType == parquet::Type::DOUBLE;
+
+        int64_t nullCount = 0;
+        bool haveNull = false;
+        bool haveMinMax = false;
+        double minD = 0.0;
+        double maxD = 0.0;
+        int64_t minI = 0;
+        int64_t maxI = 0;
+
+        for (int rg = 0; rg < numRowGroups; ++rg) {
+            auto colChunk = metadata->RowGroup(rg)->ColumnChunk(c);
+            if (!colChunk->is_stats_set()) {
+                continue;
+            }
+            auto st = colChunk->statistics();
+            if (!st) {
+                continue;
+            }
+            if (st->HasNullCount()) {
+                nullCount += st->null_count();
+                haveNull = true;
+            }
+            if (!st->HasMinMax()) {
+                continue;
+            }
+            switch (physType) {
+                case parquet::Type::INT32: {
+                    auto t = std::static_pointer_cast<parquet::Int32Statistics>(st);
+                    const int64_t lo = t->min();
+                    const int64_t hi = t->max();
+                    if (!haveMinMax || lo < minI) minI = lo;
+                    if (!haveMinMax || hi > maxI) maxI = hi;
+                    haveMinMax = true;
+                    break;
+                }
+                case parquet::Type::INT64: {
+                    auto t = std::static_pointer_cast<parquet::Int64Statistics>(st);
+                    const int64_t lo = t->min();
+                    const int64_t hi = t->max();
+                    if (!haveMinMax || lo < minI) minI = lo;
+                    if (!haveMinMax || hi > maxI) maxI = hi;
+                    haveMinMax = true;
+                    break;
+                }
+                case parquet::Type::FLOAT: {
+                    auto t = std::static_pointer_cast<parquet::FloatStatistics>(st);
+                    const double lo = t->min();
+                    const double hi = t->max();
+                    if (!haveMinMax || lo < minD) minD = lo;
+                    if (!haveMinMax || hi > maxD) maxD = hi;
+                    haveMinMax = true;
+                    break;
+                }
+                case parquet::Type::DOUBLE: {
+                    auto t = std::static_pointer_cast<parquet::DoubleStatistics>(st);
+                    const double lo = t->min();
+                    const double hi = t->max();
+                    if (!haveMinMax || lo < minD) minD = lo;
+                    if (!haveMinMax || hi > maxD) maxD = hi;
+                    haveMinMax = true;
+                    break;
+                }
+                default:
+                    // BYTE_ARRAY and others: no numeric min/max we store.
+                    break;
+            }
+        }
+
+        if (!haveNull && !haveMinMax) {
+            continue;
+        }
+
+        TStats::TColumnStats& columnStats = stats.ColumnStats[descr->name()];
+        if (haveNull) {
+            columnStats.NullCount = static_cast<uint64_t>(nullCount);
+        }
+        if (haveMinMax) {
+            if (isFloat) {
+                columnStats.MinValue = std::bit_cast<uint64_t>(minD);
+                columnStats.MaxValue = std::bit_cast<uint64_t>(maxD);
+            } else {
+                columnStats.MinValue = std::bit_cast<uint64_t>(minI);
+                columnStats.MaxValue = std::bit_cast<uint64_t>(maxI);
+            }
+        }
+    }
+}
+
+void TParquetSource::LoadColumnStats()
+{
+    auto metadata = FileReader_->parquet_reader()->metadata();
+
+    // Row count is always available from the parquet footer, even for a plain
+    // parquet with none of our custom metadata; per-column stats below are
+    // best-effort on top of it.
+    auto stats = std::make_shared<TStats>();
+    stats->RowCount = static_cast<uint64_t>(metadata->num_rows());
+    Stats_ = stats;
+
+    // Base layer: min/max/null_count from the standard parquet column
+    // statistics (present in most files). Our custom blob below adds NDV and
+    // histograms on top.
+    LoadStandardColumnStats(*stats);
+
+    auto kv = metadata->key_value_metadata();
+    if (!kv) {
+        return;
+    }
+    const int keyIdx = kv->FindKey("stats");
+    if (keyIdx < 0) {
+        return;
+    }
+
+    auto parsed = llvm::json::parse(kv->value(keyIdx));
+    if (!parsed) {
+        llvm::consumeError(parsed.takeError());
+        return;
+    }
+    const llvm::json::Object* root = parsed->getAsObject();
+    const llvm::json::Array* columns = root ? root->getArray("columns") : nullptr;
+    if (!columns) {
+        return;
+    }
+
+    // Physical types decide how min/max/histogram bit patterns are stored.
+    std::shared_ptr<arrow::Schema> fileSchema;
+    if (!FileReader_->GetSchema(&fileSchema).ok()) {
+        return;
+    }
+
+    std::unordered_map<std::string_view, size_t> indexByName;
+    indexByName.reserve(FileNames_.size());
+    for (size_t i = 0; i < FileNames_.size(); ++i) {
+        indexByName.emplace(FileNames_[i], i);
+    }
+
+    for (const auto& colValue : *columns) {
+        const llvm::json::Object* col = colValue.getAsObject();
+        auto name = col ? col->getString("name") : std::nullopt;
+        if (!name) {
+            continue;
+        }
+        auto found = indexByName.find(std::string_view(name->data(), name->size()));
+        if (found == indexByName.end()) {
+            continue;
+        }
+        const size_t idx = found->second;
+
+        const auto typeId =
+            fileSchema->field(static_cast<int>(idx))->type()->id();
+        const bool isFloat =
+            typeId == arrow::Type::FLOAT || typeId == arrow::Type::DOUBLE;
+        const bool isString =
+            typeId == arrow::Type::STRING || typeId == arrow::Type::LARGE_STRING;
+
+        // Store the raw 8-byte pattern matching the column's type: doubles keep
+        // their bit representation, every other numeric is widened to int64.
+        auto encode = [&](const llvm::json::Value& v) -> std::optional<uint64_t> {
+            if (isFloat) {
+                if (auto d = v.getAsNumber()) {
+                    return std::bit_cast<uint64_t>(*d);
+                }
+                return std::nullopt;
+            }
+            if (auto i = v.getAsInteger()) {
+                return std::bit_cast<uint64_t>(*i);
+            }
+            if (auto d = v.getAsNumber()) {
+                return std::bit_cast<uint64_t>(static_cast<int64_t>(*d));
+            }
+            return std::nullopt;
+        };
+
+        // Merge onto the standard stats already loaded for this column: the
+        // blob owns NDV/histogram; min/max/null_count only fill gaps the
+        // standard parquet statistics left empty.
+        TStats::TColumnStats& columnStats = stats->ColumnStats[FileNames_[idx]];
+        if (auto ndv = col->getInteger("ndv")) {
+            columnStats.Ndv = static_cast<uint64_t>(*ndv);
+        }
+        columnStats.NdvIsExact = col->getBoolean("ndv_exact").value_or(false);
+        if (!columnStats.NullCount) {
+            if (auto nullCount = col->getInteger("null_count")) {
+                columnStats.NullCount = static_cast<uint64_t>(*nullCount);
+            }
+        }
+
+        if (!isString) {
+            if (!columnStats.MinValue) {
+                if (const auto* minValue = col->get("min")) {
+                    columnStats.MinValue = encode(*minValue);
+                }
+            }
+            if (!columnStats.MaxValue) {
+                if (const auto* maxValue = col->get("max")) {
+                    columnStats.MaxValue = encode(*maxValue);
+                }
+            }
+            if (const llvm::json::Array* hist = col->getArray("histogram")) {
+                columnStats.Histogram.clear();
+                columnStats.Histogram.reserve(hist->size());
+                for (const auto& bucket : *hist) {
+                    if (auto encoded = encode(bucket)) {
+                        columnStats.Histogram.push_back(*encoded);
+                    }
+                }
+            }
+        }
+    }
 }
 
 TParquetSource::~TParquetSource() = default;

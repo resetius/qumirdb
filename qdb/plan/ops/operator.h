@@ -8,10 +8,13 @@
 #include <string>
 #include <unordered_set>
 
+#include "stats.h"
+
 namespace NQdb {
 
 struct IOperator : NQumir::NAst::TExpr {
     static constexpr const char* NodeId = "Rel";
+    TStatsPtr Stats_;
 
     const std::string_view NodeName() const override { return NodeId; }
     virtual std::string_view RelName() const = 0;

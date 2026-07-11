@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include "mock_source.h"
 
 #include <qdb/io/schema.h>
 #include "plan_runner.h"
@@ -28,41 +29,7 @@ using namespace NQdb;
 
 namespace {
 
-struct TStubSource : ISource {
-    explicit TStubSource(std::vector<TColumnSchema> columns)
-        : Cols_(std::move(columns))
-        , Schema_{Cols_}
-    {}
 
-    const TSchema& Schema() const override { return Schema_; }
-    bool Next(TRowSet&) override { return false; }
-
-    std::vector<TColumnSchema> Cols_;
-    TSchema Schema_;
-};
-
-struct TVectorSource : ISource {
-    TVectorSource(std::vector<TColumnSchema> columns, std::vector<TRowSet> batches)
-        : Cols_(std::move(columns))
-        , Schema_{Cols_}
-        , Batches_(std::move(batches))
-    {}
-
-    const TSchema& Schema() const override { return Schema_; }
-
-    bool Next(TRowSet& rowSet) override {
-        if (Cursor_ >= Batches_.size()) {
-            return false;
-        }
-        rowSet = Batches_[Cursor_++];
-        return true;
-    }
-
-    std::vector<TColumnSchema> Cols_;
-    TSchema Schema_;
-    std::vector<TRowSet> Batches_;
-    size_t Cursor_ = 0;
-};
 
 std::expected<TOperatorPtr, NQumir::TError> BuildSqlPlan(std::string_view sql, ISource& source) {
     std::istringstream in{std::string(sql)};
@@ -143,7 +110,7 @@ std::vector<std::string> FieldNames(const NQumir::NAst::TTypePtr& type) {
 
 TEST(SortPlan, BuildPlanWrapsOrderByAfterProjection) {
     auto i64 = std::make_shared<NQumir::NAst::TIntegerType>();
-    TStubSource source({{"a", i64}, {"b", i64}});
+    NQdb::TMockSource source({{"a", i64}, {"b", i64}});
     auto plan = BuildSqlPlan("SELECT a AS k FROM t ORDER BY k DESC NULLS LAST", source);
     ASSERT_TRUE(plan.has_value()) << (plan ? "" : plan.error().ToString());
 
@@ -162,7 +129,7 @@ TEST(SortPlan, BuildPlanWrapsOrderByAfterProjection) {
 
 TEST(SortPlan, BuildPlanKeepsLimitAboveSort) {
     auto i64 = std::make_shared<NQumir::NAst::TIntegerType>();
-    TStubSource source({{"a", i64}, {"b", i64}});
+    NQdb::TMockSource source({{"a", i64}, {"b", i64}});
     auto plan = BuildSqlPlan("SELECT a FROM t ORDER BY a LIMIT 3", source);
     ASSERT_TRUE(plan.has_value()) << (plan ? "" : plan.error().ToString());
 
@@ -178,7 +145,7 @@ TEST(SortPlan, BuildPlanKeepsLimitAboveSort) {
 
 TEST(SortPlan, TopSortPassRewritesLimitOverSort) {
     auto i64 = std::make_shared<NQumir::NAst::TIntegerType>();
-    TStubSource source({{"a", i64}, {"b", i64}});
+    NQdb::TMockSource source({{"a", i64}, {"b", i64}});
     auto plan = BuildSqlPlan("SELECT a FROM t ORDER BY a DESC LIMIT 3", source);
     ASSERT_TRUE(plan.has_value()) << (plan ? "" : plan.error().ToString());
 
@@ -196,7 +163,7 @@ TEST(SortPlan, TopSortPassRewritesLimitOverSort) {
 
 TEST(SortPlan, QualifyColumnsUpdatesTopSortKeys) {
     auto i64 = std::make_shared<NQumir::NAst::TIntegerType>();
-    TStubSource source({{"s_name", i64}});
+    NQdb::TMockSource source({{"s_name", i64}});
     auto sourceOp = std::make_shared<TSourceOperator>(source, "supplier.parquet");
     auto aggregate = std::make_shared<TAggregateOperator>(
         sourceOp,
@@ -222,7 +189,7 @@ TEST(SortPlan, QualifyColumnsUpdatesTopSortKeys) {
 
 TEST(SortPlan, BuildPlanRejectsOrderByExpressionForMvp) {
     auto i64 = std::make_shared<NQumir::NAst::TIntegerType>();
-    TStubSource source({{"a", i64}, {"b", i64}});
+    NQdb::TMockSource source({{"a", i64}, {"b", i64}});
     auto plan = BuildSqlPlan("SELECT a FROM t ORDER BY a + 1", source);
     ASSERT_FALSE(plan.has_value());
     EXPECT_NE(plan.error().ToString().find("ORDER BY currently supports only output column identifiers"),
@@ -233,7 +200,7 @@ TEST(SortPlan, ColumnPruningKeepsSortKeyColumns) {
     using namespace NQumir::NAst;
 
     auto i64 = std::make_shared<TIntegerType>();
-    TStubSource source({{"a", i64}, {"b", i64}, {"c", i64}});
+    NQdb::TMockSource source({{"a", i64}, {"b", i64}, {"c", i64}});
     auto sourceOp = std::make_shared<TSourceOperator>(source, "t");
     auto sort = std::make_shared<TSortOperator>(sourceOp, std::vector<TSortKey>{
         {.Column = "b", .Direction = ESortDirection::Asc},
@@ -265,7 +232,7 @@ TEST(SortExec, SortsStringAndNumericKeysAcrossBatches) {
 
     auto str = std::make_shared<TStringType>();
     auto i64 = std::make_shared<TIntegerType>();
-    TVectorSource source(
+    NQdb::TMockSource source(
         {{"name", str}, {"score", i64}},
         {batch1, batch2});
 
@@ -306,7 +273,7 @@ TEST(SortExec, SortsCompositeNumericKeysWithFusedRadixKernel) {
     TRowSet batch2 = MakeI64I64Batch(a2, b2, 2, columns2);
 
     auto i64 = std::make_shared<TIntegerType>();
-    TVectorSource source(
+    NQdb::TMockSource source(
         {{"a", i64}, {"b", i64}},
         {batch1, batch2});
 
@@ -344,7 +311,7 @@ TEST(SortExec, SchedulerRuntimeRunsSortTail) {
     TRowSet batch2 = MakeI64I64Batch(a2, b2, 2, columns2);
 
     auto i64 = std::make_shared<TIntegerType>();
-    TVectorSource source(
+    NQdb::TMockSource source(
         {{"a", i64}, {"b", i64}},
         {batch1, batch2});
 
@@ -380,7 +347,7 @@ TEST(SortExec, TopSortReturnsLimitFromOneBatch) {
     TRowSet batch = MakeI64I64Batch(keys, payload, 4, columns);
 
     auto i64 = std::make_shared<TIntegerType>();
-    TVectorSource source(
+    NQdb::TMockSource source(
         {{"k", i64}, {"payload", i64}},
         {batch});
     auto plan = BuildSqlPlan("SELECT k, payload FROM t ORDER BY k LIMIT 2", source);
@@ -413,7 +380,7 @@ TEST(SortExec, SchedulerRuntimeRunsTopSortTail) {
     TRowSet batch = MakeI64I64Batch(keys, payload, 4, columns);
 
     auto i64 = std::make_shared<TIntegerType>();
-    TVectorSource source(
+    NQdb::TMockSource source(
         {{"k", i64}, {"payload", i64}},
         {batch});
     auto sourceOp = std::make_shared<TSourceOperator>(source, "t");
@@ -450,7 +417,7 @@ TEST(SortExec, TopSortHonorsDescDirection) {
     TRowSet batch = MakeI64I64Batch(keys, payload, 4, columns);
 
     auto i64 = std::make_shared<TIntegerType>();
-    TVectorSource source(
+    NQdb::TMockSource source(
         {{"k", i64}, {"payload", i64}},
         {batch});
     auto plan = BuildSqlPlan("SELECT k, payload FROM t ORDER BY k DESC LIMIT 2", source);
@@ -486,7 +453,7 @@ TEST(SortExec, TopSortMergesBatchesStably) {
     TRowSet batch2 = MakeI64I64Batch(k2, p2, 3, columns2);
 
     auto i64 = std::make_shared<TIntegerType>();
-    TVectorSource source(
+    NQdb::TMockSource source(
         {{"k", i64}, {"payload", i64}},
         {batch1, batch2});
     auto plan = BuildSqlPlan("SELECT k, payload FROM t ORDER BY k LIMIT 5", source);
@@ -526,7 +493,7 @@ TEST(SortExec, TopSortHandlesNullableNumericKeys) {
     };
 
     auto i64 = std::make_shared<TIntegerType>();
-    TVectorSource source(
+    NQdb::TMockSource source(
         {{"k", std::make_shared<TNullable>(i64)}, {"payload", i64}},
         {batch});
     auto plan = BuildSqlPlan(
@@ -554,7 +521,7 @@ TEST(SortExec, EmptyInputProducesNoRows) {
     using namespace NQumir::NAst;
 
     auto i64 = std::make_shared<TIntegerType>();
-    TVectorSource source({{"a", i64}}, {});
+    NQdb::TMockSource source({{"a", i64}}, {});
 
     auto sourceOp = std::make_shared<TSourceOperator>(source, "t");
     auto root = std::make_shared<TSortOperator>(sourceOp, std::vector<TSortKey>{
@@ -576,7 +543,7 @@ TEST(SortExec, AllEqualNumericKeysKeepInputOrderWithRadixKernel) {
     TRowSet batch = MakeI64I64Batch(keys, payload, 4, columns);
 
     auto i64 = std::make_shared<TIntegerType>();
-    TVectorSource source(
+    NQdb::TMockSource source(
         {{"k", i64}, {"payload", i64}},
         {batch});
 
@@ -605,7 +572,7 @@ TEST(SortExec, ProjectionAfterSortSeesSortedRows) {
     TRowSet batch = MakeI64I64Batch(a, b, 4, columns);
 
     auto i64 = std::make_shared<TIntegerType>();
-    TVectorSource source(
+    NQdb::TMockSource source(
         {{"a", i64}, {"b", i64}},
         {batch});
 
@@ -638,7 +605,7 @@ TEST(SortExec, SortAfterAggregate) {
     TRowSet batch = MakeI64I64Batch(keys, values, 5, columns);
 
     auto i64 = std::make_shared<TIntegerType>();
-    TVectorSource source(
+    NQdb::TMockSource source(
         {{"k", i64}, {"v", i64}},
         {batch});
 
@@ -688,7 +655,7 @@ TEST(SortExec, NullableNumericKeysUseRadixNullOrdering) {
     };
 
     auto i64 = std::make_shared<TIntegerType>();
-    TVectorSource source(
+    NQdb::TMockSource source(
         {{"k", std::make_shared<TNullable>(i64)}, {"payload", i64}},
         {batch});
 
@@ -732,7 +699,7 @@ TEST(SortExec, NullableNumericKeysRespectDescNullsLast) {
     };
 
     auto i64 = std::make_shared<TIntegerType>();
-    TVectorSource source(
+    NQdb::TMockSource source(
         {{"k", std::make_shared<TNullable>(i64)}, {"payload", i64}},
         {batch});
 
@@ -770,7 +737,7 @@ TEST(SortExec, RespectsInputSelection) {
 
     auto str = std::make_shared<TStringType>();
     auto i64 = std::make_shared<TIntegerType>();
-    TVectorSource source(
+    NQdb::TMockSource source(
         {{"name", str}, {"score", i64}},
         {batch});
 

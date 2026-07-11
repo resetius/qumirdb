@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include "mock_source.h"
 
 #include <qumir/codegen/llvm/llvm_initializer.h>
 #include <qumir/parser/core/lexer.h>
@@ -32,45 +33,6 @@ using namespace NQumir::NAst::NCore;
 using namespace NQumir::NAst;
 
 namespace {
-
-// In-memory ISource over pre-built TRowSet batches.
-struct TVectorSource : ISource {
-    std::vector<std::string> Names;
-    std::vector<TColumnSchema> Cols;
-    TSchema Schema_;
-    std::vector<TRowSet> Batches;
-    size_t Index = 0;
-
-    TVectorSource(
-        std::vector<std::string> names,
-        std::vector<TRowSet> batches,
-        std::vector<TTypePtr> types = {})
-        : Names(std::move(names))
-        , Batches(std::move(batches))
-    {
-        if (types.empty()) {
-            types.resize(Names.size(),
-                std::make_shared<TIntegerType>(TIntegerType::I64));
-        }
-        if (types.size() != Names.size()) {
-            throw std::invalid_argument("TVectorSource names/types size mismatch");
-        }
-        for (size_t i = 0; i < Names.size(); ++i) {
-            Cols.push_back({Names[i], std::move(types[i])});
-        }
-        Schema_ = TSchema{Cols};
-    }
-
-    const TSchema& Schema() const override { return Schema_; }
-
-    bool Next(TRowSet& rowSet) override {
-        if (Index >= Batches.size()) {
-            return false;
-        }
-        rowSet = Batches[Index++];
-        return true;
-    }
-};
 
 // Parses `sexp` as a (rel aggregate ...) plan whose (rel source "...") leaf is
 // backed by `source`, runs AnnotateTypes + ApplyColumnPruning, and returns the
@@ -167,7 +129,7 @@ TEST(AggregateE2E, MultipleGroups) {
         });
     }
 
-    TVectorSource source({"k", "v"}, std::move(batches));
+    NQdb::TMockSource source({"k", "v"}, std::move(batches));
     auto root = ParsePlan(kPlanSexp, source);
 
     auto runtime = RunPlan(root);
@@ -223,7 +185,7 @@ TEST(AggregateE2E, SingleGroup) {
         .RefCount = 1,
     }};
 
-    TVectorSource source({"k", "v"}, std::move(batches));
+    NQdb::TMockSource source({"k", "v"}, std::move(batches));
     auto root = ParsePlan(kPlanSexp, source);
 
     auto runtime = RunPlan(root);
@@ -286,7 +248,7 @@ TEST(AggregateE2E, CompositeIntegerKeysProduceSeparateColumns) {
         });
     }
 
-    TVectorSource source({"k1", "k2", "v"}, std::move(batches));
+    NQdb::TMockSource source({"k1", "k2", "v"}, std::move(batches));
     auto root = ParsePlan(
         "(rel aggregate (rel source \"data.parquet\") (keys k1 k2) "
         "(agg c count) (agg s sum v))",
@@ -333,7 +295,7 @@ TEST(AggregateE2E, ScalarI32KeyPreservesTypedOutput) {
         .Private = nullptr,
         .RefCount = 1,
     }};
-    TVectorSource source(
+    NQdb::TMockSource source(
         {"k", "v"}, std::move(batches),
         {std::make_shared<TIntegerType>(TIntegerType::I32),
          std::make_shared<TIntegerType>(TIntegerType::I64)});
@@ -397,7 +359,7 @@ TEST(AggregateE2E, ScalarStringKeyOwnsFinalizedOutput) {
             .Columns = batchColumns[1].data(), .ColumnCount = 2, .RowCount = 3,
             .Selection = nullptr, .RefCount = 1},
     };
-    TVectorSource source(
+    NQdb::TMockSource source(
         {"k", "v"}, std::move(batches),
         {std::make_shared<TStringType>(),
          std::make_shared<TIntegerType>(TIntegerType::I64)});
@@ -441,7 +403,7 @@ TEST(AggregateE2E, NullStringKeysGroupTogetherAndDifferFromEmpty) {
     std::vector<TRowSet> batches = {TRowSet{
         .Columns = columns.data(), .ColumnCount = 2, .RowCount = 4,
         .Selection = nullptr, .RefCount = 1}};
-    TVectorSource source(
+    NQdb::TMockSource source(
         {"k", "v"}, std::move(batches),
         {std::make_shared<TNullable>(std::make_shared<TStringType>()),
          std::make_shared<TIntegerType>(TIntegerType::I64)});
@@ -481,7 +443,7 @@ TEST(AggregateE2E, NullIntegerKeysIgnorePayloadAndDifferFromZero) {
     std::vector<TRowSet> batches = {TRowSet{
         .Columns = columns.data(), .ColumnCount = 2, .RowCount = 4,
         .Selection = nullptr, .RefCount = 1}};
-    TVectorSource source(
+    NQdb::TMockSource source(
         {"k", "v"}, std::move(batches),
         {std::make_shared<TNullable>(
              std::make_shared<TIntegerType>(TIntegerType::I64)),
@@ -527,7 +489,7 @@ TEST(AggregateE2E, CompositeNullKeysTrackValidityPerPosition) {
     std::vector<TRowSet> batches = {TRowSet{
         .Columns = columns.data(), .ColumnCount = 3, .RowCount = 6,
         .Selection = nullptr, .RefCount = 1}};
-    TVectorSource source(
+    NQdb::TMockSource source(
         {"k1", "k2", "v"}, std::move(batches),
         {std::make_shared<TNullable>(std::make_shared<TIntegerType>()),
          std::make_shared<TNullable>(std::make_shared<TIntegerType>()),
@@ -596,7 +558,7 @@ TEST(AggregateE2E, MixedStringI32KeysFinalizeToSeparateColumns) {
         TRowSet{.Columns = columns[1].data(), .ColumnCount = 3, .RowCount = 3,
             .Selection = nullptr, .RefCount = 1},
     };
-    TVectorSource source(
+    NQdb::TMockSource source(
         {"id", "name", "v"}, std::move(batches),
         {std::make_shared<TIntegerType>(TIntegerType::I32),
          std::make_shared<TStringType>(),
@@ -659,7 +621,7 @@ TEST(AggregateE2E, MixedI32StringKeysPreserveReducersAcrossGrow) {
     std::vector<TRowSet> batches = {TRowSet{
         .Columns = columns.data(), .ColumnCount = 3, .RowCount = rowCount,
         .Selection = nullptr, .RefCount = 1}};
-    TVectorSource source(
+    NQdb::TMockSource source(
         {"id", "name", "v"}, std::move(batches),
         {std::make_shared<TIntegerType>(TIntegerType::I32),
          std::make_shared<TStringType>(),
@@ -702,7 +664,7 @@ TEST(AggregateE2E, TwoStringKeysFinalizeIndependentColumns) {
     std::vector<TRowSet> batches = {TRowSet{
         .Columns = columns.data(), .ColumnCount = 3, .RowCount = 5,
         .Selection = nullptr, .RefCount = 1}};
-    TVectorSource source(
+    NQdb::TMockSource source(
         {"left", "right", "v"}, std::move(batches),
         {std::make_shared<TStringType>(), std::make_shared<TStringType>(),
          std::make_shared<TIntegerType>(TIntegerType::I64)});
@@ -763,7 +725,7 @@ TEST(AggregateE2E, ScalarF64KeyCanonicalizesSignedZero) {
         .Private = nullptr,
         .RefCount = 1,
     }};
-    TVectorSource source(
+    NQdb::TMockSource source(
         {"k", "v"}, std::move(batches),
         {std::make_shared<TFloatType>(),
          std::make_shared<TIntegerType>(TIntegerType::I64)});
@@ -836,7 +798,7 @@ TEST(AggregateE2E, MixedI32F64CompositeKeyPreservesLayoutAndTypedColumns) {
             .RefCount = 1,
         });
     }
-    TVectorSource source(
+    NQdb::TMockSource source(
         {"k1", "k2", "v"}, std::move(batches),
         {std::make_shared<TIntegerType>(TIntegerType::I32),
          std::make_shared<TFloatType>(),
@@ -891,6 +853,10 @@ TEST(AggregateE2E, PlannerUsesPhysicalPrunedSchemaForKeyDescriptor) {
 
         const TSchema& Schema() const override {
             return CurrentSchema_;
+        }
+
+        const TStatsPtr Stats() const override {
+            return nullptr;
         }
 
         void RestrictColumns(const std::unordered_set<std::string>& names) override {
@@ -1001,7 +967,7 @@ TEST(AggregateE2E, NullableReducerArgumentSeparatesCountStarFromCountArg) {
     std::vector<TRowSet> batches = {TRowSet{
         .Columns = columns.data(), .ColumnCount = 2, .RowCount = 6,
         .Selection = nullptr, .RefCount = 1}};
-    TVectorSource source(
+    NQdb::TMockSource source(
         {"k", "v"}, std::move(batches),
         {std::make_shared<TIntegerType>(),
          std::make_shared<TNullable>(std::make_shared<TIntegerType>())});
@@ -1077,7 +1043,7 @@ TEST(AggregateE2E, NullableReducerArgumentHonoursSelectionMask) {
     std::vector<TRowSet> batches = {TRowSet{
         .Columns = columns.data(), .ColumnCount = 2, .RowCount = 5,
         .Selection = selection.data(), .RefCount = 1}};
-    TVectorSource source(
+    NQdb::TMockSource source(
         {"k", "v"}, std::move(batches),
         {std::make_shared<TIntegerType>(),
          std::make_shared<TNullable>(std::make_shared<TIntegerType>())});
@@ -1162,7 +1128,7 @@ TEST(AggregateE2E, NullableReducerArgumentAccumulatesAcrossBatchesAndGrow) {
             .RowCount = kPerBatch, .Selection = nullptr, .RefCount = 1});
     }
 
-    TVectorSource source(
+    NQdb::TMockSource source(
         {"k", "v"}, std::move(batches),
         {std::make_shared<TIntegerType>(),
          std::make_shared<TNullable>(std::make_shared<TIntegerType>())});
@@ -1211,7 +1177,7 @@ TEST(AggregateE2E, NonNullableReducerArgumentKeepsAggregateOutputNonNull) {
     std::vector<TRowSet> batches = {TRowSet{
         .Columns = columns.data(), .ColumnCount = 2, .RowCount = 5,
         .Selection = nullptr, .RefCount = 1}};
-    TVectorSource source(
+    NQdb::TMockSource source(
         {"k", "v"}, std::move(batches),
         {std::make_shared<TIntegerType>(),
          std::make_shared<TIntegerType>()});
@@ -1271,7 +1237,7 @@ TEST(AggregateE2E, NullableReducerArgumentWithCompositeStringKey) {
     std::vector<TRowSet> batches = {TRowSet{
         .Columns = columns.data(), .ColumnCount = 3, .RowCount = 5,
         .Selection = nullptr, .RefCount = 1}};
-    TVectorSource source(
+    NQdb::TMockSource source(
         {"id", "name", "v"}, std::move(batches),
         {std::make_shared<TIntegerType>(TIntegerType::I32),
          std::make_shared<TStringType>(),
@@ -1337,7 +1303,7 @@ TEST(AggregateE2E, NullableReducerArgumentWithNullStringKey) {
     std::vector<TRowSet> batches = {TRowSet{
         .Columns = columns.data(), .ColumnCount = 2, .RowCount = 4,
         .Selection = nullptr, .RefCount = 1}};
-    TVectorSource source(
+    NQdb::TMockSource source(
         {"k", "v"}, std::move(batches),
         {std::make_shared<TNullable>(std::make_shared<TStringType>()),
          std::make_shared<TNullable>(std::make_shared<TIntegerType>())});

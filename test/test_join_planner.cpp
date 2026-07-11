@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include "mock_source.h"
 
 #include <qumir/codegen/llvm/llvm_initializer.h>
 #include <qumir/parser/core/lexer.h>
@@ -26,32 +27,6 @@ using namespace NQumir::NAst;
 
 namespace {
 
-struct TVectorSource : ISource {
-    std::vector<std::string> Names;
-    std::vector<TColumnSchema> Cols;
-    TSchema Schema_;
-    std::vector<TRowSet> Batches;
-    size_t Index = 0;
-
-    std::vector<TTypePtr> Types;
-
-    TVectorSource(std::vector<std::string> names, std::vector<TRowSet> batches,
-        std::vector<TTypePtr> types = {})
-        : Names(std::move(names)), Batches(std::move(batches)), Types(std::move(types)) {
-        for (size_t i = 0; i < Names.size(); ++i) {
-            Cols.push_back({Names[i], i < Types.size() ? Types[i]
-                : std::make_shared<TIntegerType>(TIntegerType::I64)});
-        }
-        Schema_ = TSchema{Cols};
-    }
-
-    const TSchema& Schema() const override { return Schema_; }
-    bool Next(TRowSet& rowSet) override {
-        if (Index >= Batches.size()) return false;
-        rowSet = Batches[Index++];
-        return true;
-    }
-};
 
 TRowSet KeyValBatch(int64_t* keys, int64_t* vals, int64_t rows, std::vector<TColumn>& cols) {
     cols = {TColumn{.Data = reinterpret_cast<char*>(keys)},
@@ -92,8 +67,8 @@ TEST(JoinPlanner, InnerJoinE2E) {
     std::vector<int64_t> lk = {1, 2, 1}, lv = {10, 20, 30};
     std::vector<int64_t> rk = {1, 1, 3}, rv = {100, 200, 300};
     std::vector<TColumn> lcols, rcols;
-    TVectorSource left({"lk", "lv"}, {KeyValBatch(lk.data(), lv.data(), 3, lcols)});
-    TVectorSource right({"rk", "rv"}, {KeyValBatch(rk.data(), rv.data(), 3, rcols)});
+    NQdb::TMockSource left({"lk", "lv"}, {KeyValBatch(lk.data(), lv.data(), 3, lcols)});
+    NQdb::TMockSource right({"rk", "rv"}, {KeyValBatch(rk.data(), rv.data(), 3, rcols)});
 
     auto plan = PlanJoin(
         "(rel join (rel source \"L\") (rel source \"R\") ((lk rk)) (inner))",
@@ -126,8 +101,8 @@ TEST(JoinPlanner, CrossJoinE2E) {
     std::vector<int64_t> rk = {7, 8};
     std::vector<int64_t> rv = {70, 80};
     std::vector<TColumn> lcols, rcols;
-    TVectorSource left({"lk", "lv"}, {KeyValBatch(lk.data(), lv.data(), 2, lcols)});
-    TVectorSource right({"rk", "rv"}, {KeyValBatch(rk.data(), rv.data(), 2, rcols)});
+    NQdb::TMockSource left({"lk", "lv"}, {KeyValBatch(lk.data(), lv.data(), 2, lcols)});
+    NQdb::TMockSource right({"rk", "rv"}, {KeyValBatch(rk.data(), rv.data(), 2, rcols)});
 
     auto plan = PlanJoin(
         "(rel join (rel source \"L\") (rel source \"R\") () (inner))",
@@ -160,8 +135,8 @@ TEST(JoinPlanner, SchedulerThreadedInnerJoinE2E) {
     std::vector<int64_t> lk = {1, 2, 1, 3}, lv = {10, 20, 30, 40};
     std::vector<int64_t> rk = {1, 1, 3, 4}, rv = {100, 200, 300, 400};
     std::vector<TColumn> lcols, rcols;
-    TVectorSource left({"lk", "lv"}, {KeyValBatch(lk.data(), lv.data(), 4, lcols)});
-    TVectorSource right({"rk", "rv"}, {KeyValBatch(rk.data(), rv.data(), 4, rcols)});
+    NQdb::TMockSource left({"lk", "lv"}, {KeyValBatch(lk.data(), lv.data(), 4, lcols)});
+    NQdb::TMockSource right({"rk", "rv"}, {KeyValBatch(rk.data(), rv.data(), 4, rcols)});
     NScheduler::TSettings settings;
     settings.Scheduler.Mode = NScheduler::EExecutionMode::ThreadedScheduler;
     settings.Scheduler.WorkerCount = 2;
@@ -204,8 +179,8 @@ TEST(JoinPlanner, ProjectOnTopPrunesJoinInputs) {
     std::vector<int64_t> lk = {5, 6, 5}, lv = {10, 20, 30};
     std::vector<int64_t> rk = {5, 5, 7}, rv = {100, 200, 300};
     std::vector<TColumn> lcols, rcols;
-    TVectorSource left({"lk", "lv"}, {KeyValBatch(lk.data(), lv.data(), 3, lcols)});
-    TVectorSource right({"rk", "rv"}, {KeyValBatch(rk.data(), rv.data(), 3, rcols)});
+    NQdb::TMockSource left({"lk", "lv"}, {KeyValBatch(lk.data(), lv.data(), 3, lcols)});
+    NQdb::TMockSource right({"rk", "rv"}, {KeyValBatch(rk.data(), rv.data(), 3, rcols)});
 
     auto plan = PlanJoin(
         "(rel project (rel join (rel source \"L\") (rel source \"R\") "
@@ -250,8 +225,8 @@ TEST(JoinPlanner, Int32KeyE2E) {
     TRowSet lbatch{.Columns = lcols.data(), .ColumnCount = 2, .RowCount = 3, .RefCount = 1};
     TRowSet rbatch{.Columns = rcols.data(), .ColumnCount = 2, .RowCount = 3, .RefCount = 1};
 
-    TVectorSource left({"lk", "lv"}, {lbatch}, {I32(), I64T()});
-    TVectorSource right({"rk", "rv"}, {rbatch}, {I32(), I64T()});
+    NQdb::TMockSource left({"lk", "lv"}, {lbatch}, {I32(), I64T()});
+    NQdb::TMockSource right({"rk", "rv"}, {rbatch}, {I32(), I64T()});
 
     auto plan = PlanJoin(
         "(rel join (rel source \"L\") (rel source \"R\") ((lk rk)) (inner))", left, right);
@@ -287,8 +262,8 @@ TEST(JoinPlanner, CompositeI32KeyE2E) {
     TRowSet lbatch{.Columns = lcols.data(), .ColumnCount = 2, .RowCount = 3, .RefCount = 1};
     TRowSet rbatch{.Columns = rcols.data(), .ColumnCount = 2, .RowCount = 3, .RefCount = 1};
 
-    TVectorSource left({"la", "lb"}, {lbatch}, {I32(), I32()});
-    TVectorSource right({"ra", "rb"}, {rbatch}, {I32(), I32()});
+    NQdb::TMockSource left({"la", "lb"}, {lbatch}, {I32(), I32()});
+    NQdb::TMockSource right({"ra", "rb"}, {rbatch}, {I32(), I32()});
 
     auto plan = PlanJoin(
         "(rel join (rel source \"L\") (rel source \"R\") ((la ra) (lb rb)) (inner))",
@@ -315,8 +290,8 @@ TEST(JoinPlanner, ResidualLeftSemiMarksInKernel) {
     std::vector<int64_t> lk = {1, 1, 2}, lv = {10, 20, 30};
     std::vector<int64_t> rk = {1, 2}, rv = {10, 30};
     std::vector<TColumn> lcols, rcols;
-    TVectorSource left({"lk", "lv"}, {KeyValBatch(lk.data(), lv.data(), 3, lcols)});
-    TVectorSource right({"rk", "rv"}, {KeyValBatch(rk.data(), rv.data(), 2, rcols)});
+    NQdb::TMockSource left({"lk", "lv"}, {KeyValBatch(lk.data(), lv.data(), 3, lcols)});
+    NQdb::TMockSource right({"rk", "rv"}, {KeyValBatch(rk.data(), rv.data(), 2, rcols)});
 
     auto plan = PlanJoin(
         "(rel join (rel source \"L\") (rel source \"R\") "
@@ -347,8 +322,8 @@ TEST(JoinPlanner, ResidualLeftAntiHonorsLeftSelection) {
     lbatch.Selection = selection.data();
 
     auto leftType = std::vector<TTypePtr>{I64T(), I64T()};
-    TVectorSource left({"lk", "lv"}, {lbatch}, leftType);
-    TVectorSource right({"rk", "rv"}, {}, leftType);
+    NQdb::TMockSource left({"lk", "lv"}, {lbatch}, leftType);
+    NQdb::TMockSource right({"rk", "rv"}, {}, leftType);
 
     auto plan = PlanJoin(
         "(rel join (rel source \"L\") (rel source \"R\") "
