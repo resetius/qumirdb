@@ -106,6 +106,10 @@ public:
         return Schema_;
     }
 
+    const NQdb::TStatsPtr Stats() const override {
+        return nullptr;
+    }
+
     bool Next(NQdb::TRowSet&) override {
         return false;
     }

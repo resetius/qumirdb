@@ -1,6 +1,7 @@
 #pragma once
 
 #include <qdb/io/io.h>
+#include <qdb/plan/ops/stats.h>
 #include <qdb/scheduler/scan_split.h>
 
 #include <memory>
@@ -26,6 +27,8 @@ public:
         size_t firstRowGroup,
         size_t rowGroupCount) const;
 
+    const TStatsPtr Stats() const override { return Stats_; }
+
 private:
     TParquetSource(
         const std::string& path,
@@ -36,6 +39,8 @@ private:
     std::vector<int> EffectiveRowGroups() const;
     std::vector<int> EffectiveColumnIndices() const;
     void RefreshSchema();
+    void LoadColumnStats();
+    void LoadStandardColumnStats(TStats& stats);
 
     std::string Path_;
     std::vector<int> RowGroups_;
@@ -48,6 +53,7 @@ private:
     std::vector<std::string> Names_;
     std::vector<TColumnSchema> Columns_;
     TSchema Schema_;
+    TStatsPtr Stats_;
 };
 
 } // namespace NQdb

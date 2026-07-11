@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include "mock_source.h"
 
 #include <qdb/plan/ops/aggregate.h>
 #include <qdb/plan/ops/filter.h>
@@ -24,22 +25,6 @@ using namespace NQumir::NAst;
 
 namespace {
 
-struct TStubSource : ISource {
-    std::vector<std::string> Names;
-    std::vector<TColumnSchema> Cols;
-    TSchema Schema_;
-
-    explicit TStubSource(std::vector<std::string> colNames) {
-        Names = std::move(colNames);
-        for (auto& name : Names) {
-            Cols.push_back({name, std::make_shared<TIntegerType>(TIntegerType::I64)});
-        }
-        Schema_ = TSchema{Cols};
-    }
-
-    const TSchema& Schema() const override { return Schema_; }
-    bool Next(TRowSet&) override { return false; }
-};
 
 TPrintOptions MakePrintOpts() {
     TPrintOptions opts;
@@ -71,13 +56,13 @@ TExprPtr Parse(TParser& p, const std::string& src) {
 // --- Printer ---
 
 TEST(SexpPrinter, Source) {
-    TStubSource src({"x", "y"});
+    NQdb::TMockSource src({"x", "y"});
     auto op = std::make_shared<TSourceOperator>(src);
     EXPECT_EQ(PrintAst(op, MakePrintOpts()), "(rel source)");
 }
 
 TEST(SexpPrinter, Filter) {
-    TStubSource src({"x"});
+    NQdb::TMockSource src({"x"});
     auto source = std::make_shared<TSourceOperator>(src);
     auto filt = MakeFilter(source, "(> x 5)");
     ASSERT_TRUE(filt.has_value());
@@ -85,7 +70,7 @@ TEST(SexpPrinter, Filter) {
 }
 
 TEST(SexpPrinter, Project) {
-    TStubSource src({"x", "y"});
+    NQdb::TMockSource src({"x", "y"});
     auto source = std::make_shared<TSourceOperator>(src);
     auto proj = MakeProject(source, {{"a", "x"}, {"b", "y"}});
     ASSERT_TRUE(proj.has_value());
@@ -93,7 +78,7 @@ TEST(SexpPrinter, Project) {
 }
 
 TEST(SexpPrinter, Aggregate) {
-    TStubSource src({"x", "y"});
+    NQdb::TMockSource src({"x", "y"});
     auto source = std::make_shared<TSourceOperator>(src);
     auto agg = MakeAggregate(source, {"x"}, {{"cnt", "count", ""}, {"s", "sum", "y"}});
     ASSERT_TRUE(agg.has_value());
@@ -102,7 +87,7 @@ TEST(SexpPrinter, Aggregate) {
 }
 
 TEST(SexpPrinter, FilterOfProject) {
-    TStubSource src({"x", "y"});
+    NQdb::TMockSource src({"x", "y"});
     auto source = std::make_shared<TSourceOperator>(src);
     auto proj = MakeProject(source, {{"a", "x"}});
     ASSERT_TRUE(proj.has_value());
@@ -122,7 +107,7 @@ TEST(SexpParser, SourceNoFactory) {
 }
 
 TEST(SexpParser, Filter) {
-    TStubSource src({"x"});
+    NQdb::TMockSource src({"x"});
     auto sourceOp = std::make_shared<TSourceOperator>(src);
 
     TRelParserOptions opts;
@@ -144,7 +129,7 @@ TEST(SexpParser, Filter) {
 }
 
 TEST(SexpParser, Project) {
-    TStubSource src({"x", "y"});
+    NQdb::TMockSource src({"x", "y"});
     auto sourceOp = std::make_shared<TSourceOperator>(src);
 
     TRelParserOptions opts;
@@ -164,7 +149,7 @@ TEST(SexpParser, Project) {
 }
 
 TEST(SexpParser, FilterPrintRoundtrip) {
-    TStubSource src({"x"});
+    NQdb::TMockSource src({"x"});
     auto sourceOp = std::make_shared<TSourceOperator>(src);
 
     const std::string input = "(rel filter (rel source \"data.parquet\") (> x 5))";
@@ -184,7 +169,7 @@ TEST(SexpParser, FilterPrintRoundtrip) {
 }
 
 TEST(SexpParser, AggregatePrintRoundtrip) {
-    TStubSource src({"x", "y"});
+    NQdb::TMockSource src({"x", "y"});
     auto sourceOp = std::make_shared<TSourceOperator>(src);
 
     const std::string input = "(rel aggregate (rel source \"data.parquet\") (keys x) (agg cnt count) (agg s sum y))";
@@ -215,7 +200,7 @@ TEST(SexpParser, AggregatePrintRoundtrip) {
 }
 
 TEST(SexpParser, SortPrintRoundtrip) {
-    TStubSource src({"x", "y"});
+    NQdb::TMockSource src({"x", "y"});
     const std::string input =
         "(rel sort (rel source \"data.parquet\") (x desc nulls-default) (y asc nulls-last))";
 
@@ -239,7 +224,7 @@ TEST(SexpParser, SortPrintRoundtrip) {
 }
 
 TEST(SexpParser, TopSortPrintRoundtrip) {
-    TStubSource src({"x"});
+    NQdb::TMockSource src({"x"});
     const std::string input =
         "(rel top-sort (rel source \"data.parquet\") (x desc nulls-default) (limit 10))";
 
@@ -262,7 +247,7 @@ TEST(SexpParser, TopSortPrintRoundtrip) {
 }
 
 TEST(SexpParser, LimitPrintRoundtrip) {
-    TStubSource src({"x"});
+    NQdb::TMockSource src({"x"});
     const std::string input =
         "(rel limit (rel source \"data.parquet\") (limit 10) (offset 2))";
 
@@ -284,8 +269,8 @@ TEST(SexpParser, LimitPrintRoundtrip) {
 }
 
 TEST(SexpPrinter, Join) {
-    TStubSource leftSrc({"a", "b"});
-    TStubSource rightSrc({"c", "d"});
+    NQdb::TMockSource leftSrc({"a", "b"});
+    NQdb::TMockSource rightSrc({"c", "d"});
     auto l = std::make_shared<TSourceOperator>(leftSrc);
     auto r = std::make_shared<TSourceOperator>(rightSrc);
     auto join = MakeJoin(l, r, {{"a", "c"}}, EJoinType::Inner);
@@ -295,8 +280,8 @@ TEST(SexpPrinter, Join) {
 }
 
 TEST(SexpPrinter, JoinWithFilterAndMultipleKeys) {
-    TStubSource leftSrc({"a", "b"});
-    TStubSource rightSrc({"c", "d"});
+    NQdb::TMockSource leftSrc({"a", "b"});
+    NQdb::TMockSource rightSrc({"c", "d"});
     auto l = std::make_shared<TSourceOperator>(leftSrc);
     auto r = std::make_shared<TSourceOperator>(rightSrc);
     auto join = MakeJoin(l, r, {{"a", "c"}, {"b", "d"}}, EJoinType::Left, "(< b d)");
@@ -306,8 +291,8 @@ TEST(SexpPrinter, JoinWithFilterAndMultipleKeys) {
 }
 
 TEST(SexpParser, JoinPrintRoundtrip) {
-    TStubSource leftSrc({"a", "b"});
-    TStubSource rightSrc({"c", "d"});
+    NQdb::TMockSource leftSrc({"a", "b"});
+    NQdb::TMockSource rightSrc({"c", "d"});
 
     const std::string input =
         "(rel join (rel source \"left.parquet\") (rel source \"right.parquet\") "
@@ -337,8 +322,8 @@ TEST(SexpParser, JoinPrintRoundtrip) {
 }
 
 TEST(SexpParser, CrossJoinAcceptsEmptyKeyList) {
-    TStubSource leftSrc({"a", "b"});
-    TStubSource rightSrc({"c", "d"});
+    NQdb::TMockSource leftSrc({"a", "b"});
+    NQdb::TMockSource rightSrc({"c", "d"});
 
     TRelParserOptions opts;
     opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
@@ -357,8 +342,8 @@ TEST(SexpParser, CrossJoinAcceptsEmptyKeyList) {
 }
 
 TEST(SexpParser, JoinRejectsEmptyKeysWithNonInnerType) {
-    TStubSource leftSrc({"a", "b"});
-    TStubSource rightSrc({"c", "d"});
+    NQdb::TMockSource leftSrc({"a", "b"});
+    NQdb::TMockSource rightSrc({"c", "d"});
 
     TRelParserOptions opts;
     opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {

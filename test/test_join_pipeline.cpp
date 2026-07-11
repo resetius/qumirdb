@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include "mock_source.h"
 
 #include <qdb/plan/ops/join.h>
 #include <qdb/plan/ops/source.h>
@@ -23,22 +24,6 @@ using namespace NQumir::NAst::NCore;
 
 namespace {
 
-struct TStubSource : ISource {
-    std::vector<std::string> Names; // owns the backing strings (Name is a view)
-    std::vector<TColumnSchema> Cols;
-    TSchema Schema_;
-
-    explicit TStubSource(std::vector<std::string> names) {
-        Names = std::move(names);
-        for (auto& name : Names) {
-            Cols.push_back({name, std::make_shared<TIntegerType>(TIntegerType::I64)});
-        }
-        Schema_ = TSchema{Cols};
-    }
-
-    const TSchema& Schema() const override { return Schema_; }
-    bool Next(TRowSet&) override { return false; }
-};
 
 std::unordered_set<std::string> ColNames(const TTypePtr& type) {
     std::unordered_set<std::string> names;
@@ -78,8 +63,8 @@ TOperatorPtr ParseJoinPlan(const std::string& sexp, ISource& left, ISource& righ
 } // namespace
 
 TEST(JoinPipeline, TypingSetsTwoParamTypesAndConcatenatedOutput) {
-    TStubSource left({"a", "b", "x"});
-    TStubSource right({"c", "d", "y"});
+    NQdb::TMockSource left({"a", "b", "x"});
+    NQdb::TMockSource right({"c", "d", "y"});
     std::shared_ptr<TSourceOperator> leftOp, rightOp;
 
     auto root = ParseJoinPlan(
@@ -97,8 +82,8 @@ TEST(JoinPipeline, TypingSetsTwoParamTypesAndConcatenatedOutput) {
 }
 
 TEST(JoinPipeline, PruningNarrowsEachSideIndependently) {
-    TStubSource left({"a", "b", "x"});
-    TStubSource right({"c", "d", "y"});
+    NQdb::TMockSource left({"a", "b", "x"});
+    NQdb::TMockSource right({"c", "d", "y"});
     std::shared_ptr<TSourceOperator> leftOp, rightOp;
 
     // Downstream project selects only a and d; join key (a,c); filter uses (b,d).
@@ -122,8 +107,8 @@ TEST(JoinPipeline, PruningNarrowsEachSideIndependently) {
 }
 
 TEST(JoinPipeline, PruningKeepsKeysEvenWhenNotSelectedDownstream) {
-    TStubSource left({"a", "b"});
-    TStubSource right({"c", "d"});
+    NQdb::TMockSource left({"a", "b"});
+    NQdb::TMockSource right({"c", "d"});
     std::shared_ptr<TSourceOperator> leftOp, rightOp;
 
     // Downstream selects only b and d; keys a,c are not selected but still needed.
