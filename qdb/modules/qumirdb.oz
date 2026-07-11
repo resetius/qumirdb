@@ -82,6 +82,35 @@
       (call qdb_free ptr)
       (return new_ptr)))
 
+  ;; 128-bit multiply (compiler-rt __multi3). LLVM emits calls to this once the
+  ;; O3 autovectorizer widens decimal arithmetic; wasm has no native i128, so
+  ;; defining it here lets wasm-ld resolve it inside the module instead of
+  ;; importing a JS shim (which would cross the wasm->JS boundary per multiply).
+  ;; sret ABI: writes the low 128 bits of (a_hi:a_lo)*(b_hi:b_lo) to ret[0..1].
+  ;; Computed with 32-bit limbs (u64 shifts are logical) — no i128 needed.
+  (fun __multi3
+       ((var ret <ptr i64>) (var a_lo i64) (var a_hi i64)
+        (var b_lo i64) (var b_hi i64)) -> void (attrs used)
+    (block
+      (var mask = (: 4294967295 u64))
+      (var al = (cast a_lo u64))
+      (var bl = (cast b_lo u64))
+      (var a0 = (& al mask))
+      (var a1 = (>> al (: 32 u64)))
+      (var b0 = (& bl mask))
+      (var b1 = (>> bl (: 32 u64)))
+      (var t00 = (* a0 b0))
+      (var t01 = (* a0 b1))
+      (var t10 = (* a1 b0))
+      (var t11 = (* a1 b1))
+      (var mid = (+ (+ (>> t00 (: 32 u64)) (& t01 mask)) (& t10 mask)))
+      (var lo = (+ (& t00 mask) (<< (& mid mask) (: 32 u64))))
+      (var hi = (+ (+ (+ t11 (>> t01 (: 32 u64))) (>> t10 (: 32 u64)))
+                   (>> mid (: 32 u64))))
+      (= hi (+ hi (+ (* al (cast b_hi u64)) (* (cast a_hi u64) bl))))
+      (= ret [(: 0 i64)] (cast lo i64))
+      (= ret [(: 1 i64)] (cast hi i64))))
+
   (fun qdb_filter_string_compare
        ((var left <ptr u8>)
         (var left_size i64)
