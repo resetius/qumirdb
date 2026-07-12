@@ -4,6 +4,7 @@
 
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/ops/filter.h>
+#include <qdb/plan/ops/project.h>
 
 namespace NQdb {
 
@@ -238,6 +239,25 @@ TStatsPtr ComputeFilterStats(const std::shared_ptr<TFilterOperator>& filter) {
     return outputStats;
 }
 
+TStatsPtr ComputeProjectStats(const std::shared_ptr<TProjectOperator>& project) {
+    auto inputStats = project->Input()->Stats_;
+    if (!inputStats) {
+        return nullptr;
+    }
+    auto outputStats = std::make_shared<TStats>();
+    outputStats->RowCount = inputStats->RowCount;
+    for (const auto& proj : project->Projections()) {
+        if (auto ident = TMaybeNode<TIdentExpr>(proj.Expression)) {
+            auto colName = ident.Cast()->Name;
+            auto it = inputStats->ColumnStats.find(colName);
+            if (it != inputStats->ColumnStats.end()) {
+                outputStats->ColumnStats[proj.Name] = it->second;
+            }
+        }
+    }
+    return outputStats;
+}
+
 TStatsPtr ComputeSourceStats(const std::shared_ptr<TSourceOperator>& source) {
     auto raw = source->GetSource().Stats();
     if (!raw) {
@@ -262,6 +282,9 @@ TStatsPtr ComputeStatsFor(TOperatorPtr op) {
 
     if (auto maybeFilter = TMaybeOp<TFilterOperator>(op)) {
         return ComputeFilterStats(maybeFilter.Cast());
+    }
+    if (auto maybeProject = TMaybeOp<TProjectOperator>(op)) {
+        return ComputeProjectStats(maybeProject.Cast());
     }
 
     return nullptr; // TODO: project / join / aggregate / sort / limit
