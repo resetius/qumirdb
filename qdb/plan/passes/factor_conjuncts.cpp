@@ -1,6 +1,6 @@
 #include "factor_conjuncts.h"
 
-#include "flatten_conjucts.h"
+#include "flatten_conjuncts.h"
 #include "flatten_disjuncts.h"
 
 #include <qumir/parser/core/printer.h>

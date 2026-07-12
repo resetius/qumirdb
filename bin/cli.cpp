@@ -4,6 +4,7 @@
 #include <qdb/kernel/finalize.h>
 #include <qdb/scheduler/plan_lowerer.h>
 #include <qdb/plan/build.h>
+#include <qdb/plan/pipeline.h>
 #include <qdb/plan/ops/aggregate.h>
 #include <qdb/plan/ops/filter.h>
 #include <qdb/plan/ops/join.h>
@@ -369,18 +370,7 @@ int RunQuery(ESyntax syntax, std::istream& in, const TConfig& config) {
         return 1;
     }
 
-    NQdb::AssignSourceAliases(*plan);
-    NQdb::QualifyColumns(*plan);
-    NQdb::AnnotateTypes(*plan);
-    *plan = NQdb::ReorderJoins(*plan);
-    NQdb::AnnotateTypes(*plan); // re-annotate: reordering rebuilt the join tree
-    *plan = NQdb::ExtractEquiJoins(*plan);
-    NQdb::AnnotateTypes(*plan); // re-annotate: equi-join extraction adds/removes nodes
-    *plan = NQdb::PushDownSemiJoins(*plan);
-    NQdb::AnnotateTypes(*plan); // re-annotate: semi pushdown restructured joins
-    *plan = NQdb::ApplyTopSort(*plan);
-    NQdb::AnnotateTypes(*plan); // re-annotate: top-sort replaces limit(sort(...))
-    NQdb::ApplyColumnPruning(*plan);
+    NQdb::ApplyPlanPasses(*plan);
 
     if (config.Verbose) {
         std::cerr << "========== LOGICAL PLAN ==========\n";

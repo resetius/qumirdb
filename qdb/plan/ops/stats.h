@@ -8,6 +8,7 @@
 #include <optional>
 #include <string>
 #include <vector>
+#include <algorithm>
 
 namespace NQdb {
 
@@ -55,9 +56,40 @@ struct TStats {
             }
             return std::bit_cast<T>(Histogram[idx]);
         }
+
+        template<typename T>
+        std::optional<double> FractionBelow(T c) const {
+            if (Histogram.empty()) {
+                return std::nullopt;
+            }
+            auto val = [&](uint64_t v) {
+                return std::bit_cast<T>(v);
+            };
+            if (c < val(Histogram.front())) {
+                return 0.0;
+            }
+            if (c >= val(Histogram.back())) {
+                return 1.0;
+            }
+
+            auto it = std::upper_bound(Histogram.begin(), Histogram.end(), c, [&](T a, uint64_t b) {
+                return a < val(b);
+            });
+
+            size_t belowCount = std::distance(Histogram.begin(), it); // # < c
+            size_t bucketIdx = belowCount - 1; // bucket containing c
+            T lo = val(Histogram[bucketIdx]);
+            T hi = val(Histogram[bucketIdx + 1]);
+            double frac = 0.0;
+            if (hi != lo) {
+                frac = (double)(c - lo) / (double)(hi - lo);
+            }
+            return (bucketIdx + frac) / (double)(Histogram.size() - 1);
+        }
     };
 
-    std::map<std::string, TColumnStats> ColumnStats;
+    using TColumnStatsPtr = std::shared_ptr<TColumnStats>;
+    std::map<std::string, TColumnStatsPtr> ColumnStats;
 };
 
 using TStatsPtr = std::shared_ptr<TStats>;

@@ -1,4 +1,4 @@
-#include "flatten_conjucts.h"
+#include "flatten_conjuncts.h"
 
 namespace NQdb {
 

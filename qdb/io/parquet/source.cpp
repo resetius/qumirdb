@@ -307,17 +307,20 @@ void TParquetSource::LoadStandardColumnStats(TStats& stats)
             continue;
         }
 
-        TStats::TColumnStats& columnStats = stats.ColumnStats[descr->name()];
+        auto& columnStats = stats.ColumnStats[descr->name()];
+        if (!columnStats) {
+            columnStats = std::make_shared<TStats::TColumnStats>();
+        }
         if (haveNull) {
-            columnStats.NullCount = static_cast<uint64_t>(nullCount);
+            columnStats->NullCount = static_cast<uint64_t>(nullCount);
         }
         if (haveMinMax) {
             if (isFloat) {
-                columnStats.MinValue = std::bit_cast<uint64_t>(minD);
-                columnStats.MaxValue = std::bit_cast<uint64_t>(maxD);
+                columnStats->MinValue = std::bit_cast<uint64_t>(minD);
+                columnStats->MaxValue = std::bit_cast<uint64_t>(maxD);
             } else {
-                columnStats.MinValue = std::bit_cast<uint64_t>(minI);
-                columnStats.MaxValue = std::bit_cast<uint64_t>(maxI);
+                columnStats->MinValue = std::bit_cast<uint64_t>(minI);
+                columnStats->MaxValue = std::bit_cast<uint64_t>(maxI);
             }
         }
     }
@@ -411,34 +414,37 @@ void TParquetSource::LoadColumnStats()
         // Merge onto the standard stats already loaded for this column: the
         // blob owns NDV/histogram; min/max/null_count only fill gaps the
         // standard parquet statistics left empty.
-        TStats::TColumnStats& columnStats = stats->ColumnStats[FileNames_[idx]];
-        if (auto ndv = col->getInteger("ndv")) {
-            columnStats.Ndv = static_cast<uint64_t>(*ndv);
+        auto& columnStats = stats->ColumnStats[FileNames_[idx]];
+        if (!columnStats) {
+            columnStats = std::make_shared<TStats::TColumnStats>();
         }
-        columnStats.NdvIsExact = col->getBoolean("ndv_exact").value_or(false);
-        if (!columnStats.NullCount) {
+        if (auto ndv = col->getInteger("ndv")) {
+            columnStats->Ndv = static_cast<uint64_t>(*ndv);
+        }
+        columnStats->NdvIsExact = col->getBoolean("ndv_exact").value_or(false);
+        if (!columnStats->NullCount) {
             if (auto nullCount = col->getInteger("null_count")) {
-                columnStats.NullCount = static_cast<uint64_t>(*nullCount);
+                columnStats->NullCount = static_cast<uint64_t>(*nullCount);
             }
         }
 
         if (!isString) {
-            if (!columnStats.MinValue) {
+            if (!columnStats->MinValue) {
                 if (const auto* minValue = col->get("min")) {
-                    columnStats.MinValue = encode(*minValue);
+                    columnStats->MinValue = encode(*minValue);
                 }
             }
-            if (!columnStats.MaxValue) {
+            if (!columnStats->MaxValue) {
                 if (const auto* maxValue = col->get("max")) {
-                    columnStats.MaxValue = encode(*maxValue);
+                    columnStats->MaxValue = encode(*maxValue);
                 }
             }
             if (const llvm::json::Array* hist = col->getArray("histogram")) {
-                columnStats.Histogram.clear();
-                columnStats.Histogram.reserve(hist->size());
+                columnStats->Histogram.clear();
+                columnStats->Histogram.reserve(hist->size());
                 for (const auto& bucket : *hist) {
                     if (auto encoded = encode(bucket)) {
-                        columnStats.Histogram.push_back(*encoded);
+                        columnStats->Histogram.push_back(*encoded);
                     }
                 }
             }
