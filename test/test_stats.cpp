@@ -2,6 +2,7 @@
 
 #include <qdb/io/parquet/source.h>
 #include <qdb/plan/ops/filter.h>
+#include <qdb/plan/ops/join.h>
 #include <qdb/plan/ops/project.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/ops/stats.h>
@@ -163,27 +164,36 @@ TEST(StatsTest, ParquetStandardStats) {
 namespace {
 
 // Source with known column statistics (bare column names, like TParquetSource).
+// Each column is i64 with a uniform histogram over [0,1000); ndv is per-column.
 struct TStatsSource : NQdb::ISource {
-    std::vector<std::string> Names{"x"};
-    std::vector<NQdb::TColumnSchema> Cols;
+    std::vector<std::string> NameStore;         // owns the strings TColumnSchema views
+    std::vector<NQdb::TColumnSchema> Cols;      // span target for TSchema
     NQdb::TSchema Schema_;
     NQdb::TStatsPtr Stats_;
 
-    TStatsSource() {
+    explicit TStatsSource(
+        std::vector<std::pair<std::string, uint64_t>> cols = {{"x", 100}},
+        uint64_t rowCount = 1000)
+    {
         using NQumir::NAst::TIntegerType;
-        Cols.push_back({Names[0], std::make_shared<TIntegerType>(TIntegerType::I64)});
-        Schema_ = NQdb::TSchema{Cols};
-
         Stats_ = std::make_shared<TStats>();
-        Stats_->RowCount = 1000;
-        auto x = std::make_shared<TColumnStats>();
-        x->Ndv = 100;
-        x->MinValue = std::bit_cast<uint64_t>(int64_t{0});
-        x->MaxValue = std::bit_cast<uint64_t>(int64_t{999});
-        for (int64_t v = 0; v <= 1000; v += 10) {           // uniform, 100 buckets
-            x->Histogram.push_back(std::bit_cast<uint64_t>(v));
+        Stats_->RowCount = rowCount;
+        NameStore.reserve(cols.size());                     // no realloc: views stay valid
+        for (const auto& [name, ndv] : cols) {
+            NameStore.push_back(name);
         }
-        Stats_->ColumnStats["x"] = std::move(x);            // bare name
+        for (size_t i = 0; i < cols.size(); ++i) {
+            Cols.push_back({NameStore[i], std::make_shared<TIntegerType>(TIntegerType::I64)});
+            auto cs = std::make_shared<TColumnStats>();
+            cs->Ndv = cols[i].second;
+            cs->MinValue = std::bit_cast<uint64_t>(int64_t{0});
+            cs->MaxValue = std::bit_cast<uint64_t>(int64_t{999});
+            for (int64_t v = 0; v <= 1000; v += 10) {       // uniform, 100 buckets
+                cs->Histogram.push_back(std::bit_cast<uint64_t>(v));
+            }
+            Stats_->ColumnStats[NameStore[i]] = std::move(cs); // bare name
+        }
+        Schema_ = NQdb::TSchema{Cols};
     }
 
     const NQdb::TSchema& Schema() const override { return Schema_; }
@@ -233,6 +243,36 @@ TEST(StatsTest, ProjectStatsPropagation) {
         }
     }
     EXPECT_TRUE(carried) << "projected column lost its stats";
+}
+
+// Inner join on x=y where the two sides have different key cardinalities.
+// The equi-join key collapses to min(ndvL, ndvR), and — critically — this must
+// happen copy-on-write: the shared source column stats stay untouched.
+TEST(StatsTest, JoinKeyNdvCollapse) {
+    TStatsSource left({{"x", 100}});
+    TStatsSource right({{"y", 10}});
+    auto l = std::make_shared<NQdb::TSourceOperator>(left, "l");
+    auto r = std::make_shared<NQdb::TSourceOperator>(right, "r");
+
+    auto join = NQdb::MakeJoin(l, r, {{"x", "y"}}, NQdb::EJoinType::Inner);
+    ASSERT_TRUE(join.has_value()) << join.error().ToString();
+    NQdb::TOperatorPtr plan = *join;
+
+    NQdb::ApplyPlanPasses(plan);
+
+    ASSERT_TRUE(plan->Stats_ != nullptr) << "join got no propagated stats";
+    const auto& cols = plan->Stats_->ColumnStats;
+    auto ndv = [&](const std::string& n) -> uint64_t {
+        auto it = cols.find(n);
+        return (it != cols.end() && it->second && it->second->Ndv) ? *it->second->Ndv : 0;
+    };
+    // key collapses to min(100, 10) = 10 on both sides
+    EXPECT_EQ(ndv("l.x"), 10u);
+    EXPECT_EQ(ndv("r.y"), 10u);
+
+    // copy-on-write: the source's own (shared) stats must NOT have been mutated
+    EXPECT_EQ(left.Stats_->ColumnStats.at("x")->Ndv.value_or(0), 100u);
+    EXPECT_EQ(right.Stats_->ColumnStats.at("y")->Ndv.value_or(0), 10u);
 }
 
 int main(int argc, char** argv) {
