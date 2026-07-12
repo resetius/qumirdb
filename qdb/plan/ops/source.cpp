@@ -25,17 +25,6 @@ TSourceOperator::TSourceOperator(ISource& source, std::string path)
     Type = std::make_shared<NQumir::NAst::TFunctionType>(
         std::vector<NQumir::NAst::TTypePtr>{},
         StructTypeFromSchema(source.Schema()));
-    const std::string& alias = GetAlias();
-    Stats_ = std::make_shared<TStats>();
-    Stats_->RowCount = source.Stats()->RowCount;
-    auto sourceStats = source.Stats();
-    for (const auto& col : source.Schema().Columns) {
-        auto qualified = alias + "." + std::string(col.Name);
-        auto it = sourceStats->ColumnStats.find(std::string(col.Name));
-        if (it != sourceStats->ColumnStats.end()) {
-            Stats_->ColumnStats[qualified] = it->second;
-        }
-    }
 }
 
 const std::string TSourceOperator::ToString() const {

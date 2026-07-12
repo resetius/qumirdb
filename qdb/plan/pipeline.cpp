@@ -14,7 +14,6 @@ void ApplyPlanPasses(TOperatorPtr& plan) {
     AssignSourceAliases(plan);
     QualifyColumns(plan);
     AnnotateTypes(plan);
-    EstimateStats(plan);
     plan = ReorderJoins(plan);
     AnnotateTypes(plan); // re-annotate: reordering rebuilt the join tree
     plan = ExtractEquiJoins(plan);
@@ -24,6 +23,8 @@ void ApplyPlanPasses(TOperatorPtr& plan) {
     plan = ApplyTopSort(plan);
     AnnotateTypes(plan); // re-annotate: top-sort replaces limit(sort(...))
     ApplyColumnPruning(plan);
+
+    EstimateStats(plan);
 }
 
 } // namespace NQdb
