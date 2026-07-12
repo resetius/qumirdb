@@ -166,7 +166,12 @@ double EstimateSelectivity(const TExprPtr& atom, TStatsPtr inputStats, std::shar
             if (leftIdent && rightNumber && inputStats->ColumnStats.count(leftIdent.Cast()->Name) > 0) {
                 auto leftName = leftIdent.Cast()->Name;
                 auto number = rightNumber.Cast();
-                auto fraction = inputStats->ColumnStats[leftName]->FractionBelow(number->IsFloat() ? number->FloatValue : number->IntValue);
+                std::optional<double> fraction;
+                if (number->IsFloat()) {
+                    fraction = inputStats->ColumnStats[leftName]->FractionBelow(number->FloatValue);
+                } else {
+                    fraction = inputStats->ColumnStats[leftName]->FractionBelow(number->IntValue);
+                }
                 if (fraction) {
                     return (binary->Operator == '>' || binary->Operator == ">=")
                         ? 1.0 - *fraction
@@ -191,12 +196,16 @@ double EstimateSelectivity(const TExprPtr& atom, TStatsPtr inputStats, std::shar
 
 TStatsPtr ComputeFilterStats(const std::shared_ptr<TFilterOperator>& filter) {
     auto inputStats = filter->Input()->Stats_;
+    if (!inputStats) {
+        return nullptr;
+    }
     std::vector<TExprPtr> conjuncts;
     FlattenConjuncts(filter->Predicate(), conjuncts);
     double selectivity = 1.0;
     for (const auto& conjunct : conjuncts) {
-        selectivity *= EstimateSelectivity(conjunct, inputStats, TMaybeType<TStructType>(filter->Type).Cast());
+        selectivity *= EstimateSelectivity(conjunct, inputStats, TMaybeType<TStructType>(filter->Input()->OutputColumns()).Cast());
     }
+    selectivity = std::clamp(selectivity, 0.0, 1.0);
     auto outputStats = std::make_shared<TStats>();
     outputStats->ColumnStats = inputStats->ColumnStats;
     outputStats->RowCount = std::max<uint64_t>(1, inputStats->RowCount * selectivity);
@@ -229,7 +238,7 @@ TStatsPtr EstimateStats(TOperatorPtr op) {
         }
     }
 
-    return op->Stats_;
+    return op->Stats_ = ComputeStatsFor(op);
 }
 
 } // namespace NQdb
