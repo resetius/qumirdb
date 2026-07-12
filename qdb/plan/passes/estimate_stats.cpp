@@ -5,6 +5,9 @@
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/ops/filter.h>
 #include <qdb/plan/ops/project.h>
+#include <qdb/plan/ops/join.h>
+
+#include <limits>
 
 namespace NQdb {
 
@@ -258,6 +261,115 @@ TStatsPtr ComputeProjectStats(const std::shared_ptr<TProjectOperator>& project) 
     return outputStats;
 }
 
+TStatsPtr ComputeJoinStats(const std::shared_ptr<TJoinOperator>& join) {
+    auto leftStats = join->Left()->Stats_;
+    auto rightStats = join->Right()->Stats_;
+    if (!leftStats || !rightStats) {
+        return nullptr;
+    }
+    double ndvL = 1.0;
+    double ndvR = 1.0;
+    for (const auto& key : join->Keys()) {
+        double leftNdv = 100.0; // unknown ndv
+        double rightNdv = 100.0; // unknown ndv
+        auto leftColStatsIt = leftStats->ColumnStats.find(key.Left);
+        auto rightColStatsIt = rightStats->ColumnStats.find(key.Right);
+        if (leftColStatsIt != leftStats->ColumnStats.end() && leftColStatsIt->second->Ndv)
+        {
+            leftNdv = *leftColStatsIt->second->Ndv;
+        }
+        if (rightColStatsIt != rightStats->ColumnStats.end() && rightColStatsIt->second->Ndv)
+        {
+            rightNdv = *rightColStatsIt->second->Ndv;
+        }
+        ndvL *= leftNdv;
+        ndvR *= rightNdv;
+    }
+    ndvL = std::min(ndvL, (double)leftStats->RowCount);
+    ndvR = std::min(ndvR, (double)rightStats->RowCount);
+    double denom = std::max({ndvL, ndvR, 1.0});
+    auto outputStats = std::make_shared<TStats>();
+
+    auto jt = join->JoinType();
+    if (jt == EJoinType::Inner || jt == EJoinType::Left || jt == EJoinType::Full || jt == EJoinType::LeftSemi || jt == EJoinType::LeftAnti) {
+        for (const auto& [colName, colStats] : leftStats->ColumnStats) {
+            // assume qualification
+            outputStats->ColumnStats[colName] = colStats;
+        }
+    }
+    if (jt == EJoinType::Inner || jt == EJoinType::Right || jt == EJoinType::Full || jt == EJoinType::RightSemi || jt == EJoinType::RightAnti) {
+        for (const auto& [colName, colStats] : rightStats->ColumnStats) {
+            // assume qualification
+            outputStats->ColumnStats[colName] = colStats;
+        }
+    }
+    uint64_t rowCount = std::max<uint64_t>(1, (uint64_t)((double)leftStats->RowCount * rightStats->RowCount / denom));
+    switch (join->JoinType()) {
+        case EJoinType::LeftSemi:
+        case EJoinType::LeftAnti: {
+            double semiFrac = std::min(1.0, ndvR / std::max(ndvL, 1.0));
+            if (join->JoinType() == EJoinType::LeftAnti) {
+                semiFrac = 1.0 - semiFrac;
+            }
+            rowCount = std::max<uint64_t>(1, (uint64_t)(semiFrac * (double)leftStats->RowCount));
+            break;
+        }
+        case EJoinType::RightSemi:
+        case EJoinType::RightAnti: {
+            double semiFrac = std::min(1.0, ndvL / std::max(ndvR, 1.0));
+            if (join->JoinType() == EJoinType::RightAnti) {
+                semiFrac = 1.0 - semiFrac;
+            }
+            rowCount = std::max<uint64_t>(1, (uint64_t)(semiFrac * (double)rightStats->RowCount));
+            break;
+        }
+        case EJoinType::Left:
+            rowCount = std::max(rowCount, leftStats->RowCount);
+            break;
+        case EJoinType::Right:
+            rowCount = std::max(rowCount, rightStats->RowCount);
+            break;
+        case EJoinType::Full:
+            rowCount = std::max(rowCount, leftStats->RowCount + rightStats->RowCount);
+            break;
+        default:
+            break;
+    }
+    outputStats->RowCount = rowCount;
+
+    // Post-join ndv fixup. ColumnStats are shared_ptr aliased with the child
+    // (and ultimately the source) stats, so copy-on-write before touching Ndv —
+    // never mutate the shared objects in place.
+    auto capNdv = [](TStats::TColumnStatsPtr& slot, uint64_t cap) {
+        if (!slot || !slot->Ndv || *slot->Ndv <= cap) {
+            return; // only shrink a known, too-large ndv
+        }
+        auto copy = std::make_shared<TStats::TColumnStats>(*slot);
+        copy->Ndv = cap;
+        slot = std::move(copy);
+    };
+    // A column can't have more distinct values than the surviving rows.
+    for (auto& [name, slot] : outputStats->ColumnStats) {
+        capNdv(slot, rowCount);
+    }
+    // Equi-join keys collapse to their matched distinct count ~ min(ndvL, ndvR).
+    auto ndvOf = [](const TStatsPtr& s, const std::string& col) {
+        auto it = s->ColumnStats.find(col);
+        return (it != s->ColumnStats.end() && it->second->Ndv)
+            ? *it->second->Ndv : std::numeric_limits<uint64_t>::max();
+    };
+    for (const auto& key : join->Keys()) {
+        uint64_t keyNdv = std::min(ndvOf(leftStats, key.Left), ndvOf(rightStats, key.Right));
+        if (auto it = outputStats->ColumnStats.find(key.Left); it != outputStats->ColumnStats.end()) {
+            capNdv(it->second, keyNdv);
+        }
+        if (auto it = outputStats->ColumnStats.find(key.Right); it != outputStats->ColumnStats.end()) {
+            capNdv(it->second, keyNdv);
+        }
+    }
+    return outputStats;
+}
+
 TStatsPtr ComputeSourceStats(const std::shared_ptr<TSourceOperator>& source) {
     auto raw = source->GetSource().Stats();
     if (!raw) {
@@ -286,8 +398,11 @@ TStatsPtr ComputeStatsFor(TOperatorPtr op) {
     if (auto maybeProject = TMaybeOp<TProjectOperator>(op)) {
         return ComputeProjectStats(maybeProject.Cast());
     }
+    if (auto maybeJoin = TMaybeOp<TJoinOperator>(op)) {
+        return ComputeJoinStats(maybeJoin.Cast());
+    }
 
-    return nullptr; // TODO: project / join / aggregate / sort / limit
+    return nullptr; // TODO: aggregate / sort / limit
 }
 
 } // namespace
