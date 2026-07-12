@@ -31,7 +31,10 @@ TSourceOperator::TSourceOperator(ISource& source, std::string path)
     auto sourceStats = source.Stats();
     for (const auto& col : source.Schema().Columns) {
         auto qualified = alias + "." + std::string(col.Name);
-        Stats_->ColumnStats[qualified] = sourceStats->ColumnStats.at(std::string(col.Name));
+        auto it = sourceStats->ColumnStats.find(std::string(col.Name));
+        if (it != sourceStats->ColumnStats.end()) {
+            Stats_->ColumnStats[qualified] = it->second;
+        }
     }
 }
 
