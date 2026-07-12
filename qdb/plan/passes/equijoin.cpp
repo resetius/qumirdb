@@ -10,7 +10,7 @@
 #include <qdb/utils/union_find.h>
 
 #include "factor_conjuncts.h"
-#include "flatten_conjucts.h"
+#include "flatten_conjuncts.h"
 #include "flatten_disjuncts.h"
 
 #include <unordered_map>

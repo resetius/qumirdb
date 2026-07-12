@@ -1,6 +1,7 @@
 #include <qdb/exec/planner_helpers.h>
 #include <qdb/io/io.h>
 #include <qdb/plan/build.h>
+#include <qdb/plan/pipeline.h>
 #include <qdb/plan/ops/aggregate.h>
 #include <qdb/plan/ops/filter.h>
 #include <qdb/plan/ops/join.h>
@@ -661,21 +662,6 @@ std::expected<NQdb::TOperatorPtr, NQumir::TError> ParseSql(
     };
 
     return NQdb::BuildPlan(*parsed, sources);
-}
-
-void ApplyPlanPasses(NQdb::TOperatorPtr& plan) {
-    NQdb::AssignSourceAliases(plan);
-    NQdb::QualifyColumns(plan);
-    NQdb::AnnotateTypes(plan);
-    plan = NQdb::ReorderJoins(plan);
-    NQdb::AnnotateTypes(plan);
-    plan = NQdb::ExtractEquiJoins(plan);
-    NQdb::AnnotateTypes(plan);
-    plan = NQdb::PushDownSemiJoins(plan);
-    NQdb::AnnotateTypes(plan); // re-annotate: semi pushdown restructured joins
-    plan = NQdb::ApplyTopSort(plan);
-    NQdb::AnnotateTypes(plan);
-    NQdb::ApplyColumnPruning(plan);
 }
 
 std::string ExprLine(const NQumir::NAst::TExprPtr& expr) {
@@ -2028,7 +2014,7 @@ llvm::json::Object BuildBundle(TExportRequest& request) {
     }
 
     try {
-        ApplyPlanPasses(*plan);
+        NQdb::ApplyPlanPasses(*plan);
     } catch (const std::exception& e) {
         return ErrorObject("logical", e.what());
     }

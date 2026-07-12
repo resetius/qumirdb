@@ -26,14 +26,16 @@ add_library(qumirdb
     plan/passes/unbound_vars.cpp
     plan/passes/typing.cpp
     plan/passes/column_pruning.cpp
+    plan/passes/estimate_stats.cpp
     plan/passes/qualify_columns.cpp
     plan/passes/equijoin.cpp
     plan/passes/join_order.cpp
     plan/passes/top_sort.cpp
-    plan/passes/flatten_conjucts.cpp
+    plan/passes/flatten_conjuncts.cpp
     plan/passes/flatten_disjuncts.cpp
     plan/passes/factor_conjuncts.cpp
     plan/clone_expr.cpp
+    plan/pipeline.cpp
     plan/build.cpp
     kernel/column_value.cpp
     kernel/gen.cpp
