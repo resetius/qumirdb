@@ -2,6 +2,7 @@
 
 #include <qdb/io/parquet/source.h>
 #include <qdb/plan/ops/filter.h>
+#include <qdb/plan/ops/project.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/ops/stats.h>
 #include <qdb/plan/pipeline.h>
@@ -206,6 +207,32 @@ TEST(StatsTest, FilterSelectivityPropagation) {
     // x < 250 over uniform [0,1000) => ~25% of 1000 rows.
     EXPECT_GE(plan->Stats_->RowCount, 200u);
     EXPECT_LE(plan->Stats_->RowCount, 300u);
+}
+
+// Project renames x -> y. Projection preserves row count and carries the
+// source column's stats over to the projected (renamed) output column.
+TEST(StatsTest, ProjectStatsPropagation) {
+    TStatsSource src;
+    NQdb::TOperatorPtr plan = std::make_shared<NQdb::TSourceOperator>(src, "t");
+
+    auto project = NQdb::MakeProject(plan, {{"y", "x"}}); // SELECT x AS y
+    ASSERT_TRUE(project.has_value()) << project.error().ToString();
+    plan = *project;
+
+    NQdb::ApplyPlanPasses(plan);
+
+    ASSERT_TRUE(plan->Stats_ != nullptr) << "project got no propagated stats";
+    // Project drops no rows: output row count == input row count.
+    EXPECT_EQ(plan->Stats_->RowCount, 1000u);
+
+    // The renamed column carries x's stats (ndv=100) under the output name.
+    bool carried = false;
+    for (const auto& [name, cs] : plan->Stats_->ColumnStats) {
+        if (cs && cs->Ndv && *cs->Ndv == 100) {
+            carried = true;
+        }
+    }
+    EXPECT_TRUE(carried) << "projected column lost its stats";
 }
 
 int main(int argc, char** argv) {
