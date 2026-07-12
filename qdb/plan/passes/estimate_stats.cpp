@@ -43,8 +43,45 @@ namespace {
 double EstimateSelectivity(const TExprPtr& atom, TStatsPtr inputStats, std::shared_ptr<TStructType> operatorType) {
     // TODO: eval consts
 
+    if (!operatorType) {
+        return 0.5;
+    }
+
     auto isConstExpr = [&](const TExprPtr& expr) {
         return FindUnboundVars(expr).empty();
+    };
+
+    auto columnType = [&](const std::string& colName) -> TTypePtr {
+        for (auto& [col, type] : operatorType->Fields) {
+            if (col == colName) {
+                return type;
+            }
+        }
+        return nullptr;
+    };
+
+    auto fractionBelow = [&](
+        const std::string& colName,
+        const std::shared_ptr<TNumberExpr>& num) -> std::optional<double>
+    {
+        auto colIt = inputStats->ColumnStats.find(colName);
+        if (colIt == inputStats->ColumnStats.end()) {
+            return std::nullopt;
+        }
+        auto type = columnType(colName);
+        if (TMaybeType<TFloatType>(type)) {
+            double c = num->IsFloat()
+                ? num->FloatValue
+                : static_cast<double>(num->IntValue);
+            return colIt->second->FractionBelow(c);
+        }
+        if (TMaybeType<TIntegerType>(type)) {
+            int64_t c = num->IsFloat()
+                ? static_cast<int64_t>(num->FloatValue)
+                : num->IntValue;
+            return colIt->second->FractionBelow(c);
+        }
+        return std::nullopt;
     };
 
     auto inRange = [&](TExprPtr expr, const std::string& colName) -> std::optional<bool> {
@@ -158,34 +195,23 @@ double EstimateSelectivity(const TExprPtr& atom, TStatsPtr inputStats, std::shar
             return selectivity;
         } // ==, !=
 
-        if (binary->Operator == '<' || binary->Operator == "<=" || binary->Operator == '>' || binary->Operator == ">=") {
+        if (binary->Operator == "<" || binary->Operator == "<="
+            || binary->Operator == ">" || binary->Operator == ">=") {
+            const bool greater = binary->Operator == ">" || binary->Operator == ">=";
             auto leftIdent = TMaybeNode<TIdentExpr>(binary->Left);
             auto rightIdent = TMaybeNode<TIdentExpr>(binary->Right);
             auto leftNumber = TMaybeNode<TNumberExpr>(binary->Left);
             auto rightNumber = TMaybeNode<TNumberExpr>(binary->Right);
-            if (leftIdent && rightNumber && inputStats->ColumnStats.count(leftIdent.Cast()->Name) > 0) {
-                auto leftName = leftIdent.Cast()->Name;
-                auto number = rightNumber.Cast();
-                std::optional<double> fraction;
-                if (number->IsFloat()) {
-                    fraction = inputStats->ColumnStats[leftName]->FractionBelow(number->FloatValue);
-                } else {
-                    fraction = inputStats->ColumnStats[leftName]->FractionBelow(number->IntValue);
-                }
-                if (fraction) {
-                    return (binary->Operator == '>' || binary->Operator == ">=")
-                        ? 1.0 - *fraction
-                        : *fraction;
+            // `col OP const`
+            if (leftIdent && rightNumber) {
+                if (auto f = fractionBelow(std::string(leftIdent.Cast()->Name), rightNumber.Cast())) {
+                    return greater ? 1.0 - *f : *f;
                 }
             }
-            if (rightIdent && leftNumber && inputStats->ColumnStats.count(rightIdent.Cast()->Name) > 0) {
-                auto rightName = rightIdent.Cast()->Name;
-                auto number = leftNumber.Cast();
-                auto fraction = inputStats->ColumnStats[rightName]->FractionBelow(number->IsFloat() ? number->FloatValue : number->IntValue);
-                if (fraction) {
-                    return (binary->Operator == '<' || binary->Operator == "<=")
-                        ? 1.0 - *fraction
-                        : *fraction;
+            // `const OP col`  ==  `col (flip OP) const`
+            if (rightIdent && leftNumber) {
+                if (auto f = fractionBelow(std::string(rightIdent.Cast()->Name), leftNumber.Cast())) {
+                    return greater ? *f : 1.0 - *f;
                 }
             }
         }
@@ -212,20 +238,33 @@ TStatsPtr ComputeFilterStats(const std::shared_ptr<TFilterOperator>& filter) {
     return outputStats;
 }
 
-TStatsPtr ComputeStatsFor(TOperatorPtr op) {
-    if (op->Stats_) {
-        return op->Stats_; // do we need to recompute?
+TStatsPtr ComputeSourceStats(const std::shared_ptr<TSourceOperator>& source) {
+    auto raw = source->GetSource().Stats();
+    if (!raw) {
+        return nullptr;
     }
+    const std::string& alias = source->GetAlias();
+    auto out = std::make_shared<TStats>();
+    out->RowCount = raw->RowCount;
+    for (const auto& col : source->GetSource().Schema().Columns) {
+        auto it = raw->ColumnStats.find(std::string(col.Name));
+        if (it != raw->ColumnStats.end()) {
+            out->ColumnStats[alias + "." + std::string(col.Name)] = it->second;
+        }
+    }
+    return out;
+}
 
+TStatsPtr ComputeStatsFor(TOperatorPtr op) {
     if (auto source = TMaybeOp<TSourceOperator>(op)) {
-        return source.Cast()->Stats_;
+        return ComputeSourceStats(source.Cast());
     }
 
     if (auto maybeFilter = TMaybeOp<TFilterOperator>(op)) {
         return ComputeFilterStats(maybeFilter.Cast());
     }
 
-    return nullptr; // TODO
+    return nullptr; // TODO: project / join / aggregate / sort / limit
 }
 
 } // namespace
