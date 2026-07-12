@@ -9,7 +9,7 @@
 #include <qdb/plan/ops/source.h>
 
 #include <qdb/plan/clone_expr.h>
-#include <qdb/plan/passes/flatten_conjucts.h>
+#include <qdb/plan/passes/flatten_conjuncts.h>
 
 #include <qumir/parser/ast.h>
 #include <qumir/parser/type.h>
