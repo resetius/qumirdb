@@ -6,13 +6,16 @@
 #include <qdb/plan/ops/limit.h>
 #include <qdb/plan/ops/project.h>
 #include <qdb/plan/ops/sort.h>
+#include <qdb/plan/passes/cbo/dpccp.h>
 
 #include "factor_conjuncts.h"
 #include "unbound_vars.h"
 
+#include <algorithm>
 #include <memory>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace NQdb {
@@ -125,13 +128,34 @@ std::vector<size_t> ConnectedOrder(
     return order;
 }
 
+TOperatorPtr MakeInnerJoin(TOperatorPtr left, TOperatorPtr right) {
+    return std::make_shared<TJoinOperator>(
+        std::move(left), std::move(right), std::vector<TJoinKey>{}, EJoinType::Inner, nullptr);
+}
+
+// Left-deep heuristic order — fallback when a component exceeds MaxRelations.
+TOperatorPtr HeuristicChain(
+    const std::vector<TOperatorPtr>& leaves,
+    const std::vector<std::unordered_set<size_t>>& adjacency)
+{
+    auto order = ConnectedOrder(leaves.size(), adjacency);
+    TOperatorPtr result = leaves[order.front()];
+    for (size_t i = 1; i < order.size(); ++i) {
+        result = MakeInnerJoin(std::move(result), leaves[order[i]]);
+    }
+    return result;
+}
+
 TOperatorPtr BuildChain(
     const std::vector<TOperatorPtr>& leaves,
-    const std::vector<TEdge>& edges)
+    const std::vector<TEdge>& edges,
+    bool enableCbo)
 {
+    const size_t n = leaves.size();
+
     // Map every output column to the leaf that produces it.
     std::unordered_map<std::string, size_t> owner;
-    for (size_t i = 0; i < leaves.size(); ++i) {
+    for (size_t i = 0; i < n; ++i) {
         auto* schema = static_cast<TStructType*>(leaves[i]->OutputColumns().get());
         if (!schema) {
             continue;
@@ -141,7 +165,8 @@ TOperatorPtr BuildChain(
         }
     }
 
-    std::vector<std::unordered_set<size_t>> adjacency(leaves.size());
+    std::vector<std::unordered_set<size_t>> adjacency(n);
+    std::vector<std::pair<NCbo::TJoinEdge, size_t>> graphEdges; // edge + its left leaf
     for (const auto& edge : edges) {
         auto left = owner.find(edge.Left);
         auto right = owner.find(edge.Right);
@@ -150,15 +175,65 @@ TOperatorPtr BuildChain(
         }
         adjacency[left->second].insert(right->second);
         adjacency[right->second].insert(left->second);
+        graphEdges.push_back({{edge.Left, edge.Right}, left->second});
+    }
+    if (!enableCbo) {
+        return HeuristicChain(leaves, adjacency);
     }
 
-    auto order = ConnectedOrder(leaves.size(), adjacency);
+    // Connected components (a disconnected graph means a deliberate cross).
+    std::vector<int> comp(n, -1);
+    int components = 0;
+    for (size_t s = 0; s < n; ++s) {
+        if (comp[s] != -1) {
+            continue;
+        }
+        std::vector<size_t> stack{s};
+        comp[s] = components;
+        while (!stack.empty()) {
+            size_t u = stack.back();
+            stack.pop_back();
+            for (size_t v : adjacency[u]) {
+                if (comp[v] == -1) {
+                    comp[v] = components;
+                    stack.push_back(v);
+                }
+            }
+        }
+        ++components;
+    }
 
-    TOperatorPtr result = leaves[order.front()];
-    for (size_t i = 1; i < order.size(); ++i) {
-        result = std::make_shared<TJoinOperator>(
-            std::move(result), leaves[order[i]],
-            std::vector<TJoinKey>{}, EJoinType::Inner, nullptr);
+    std::vector<std::vector<TOperatorPtr>> compLeaves(components);
+    for (size_t i = 0; i < n; ++i) {
+        compLeaves[comp[i]].push_back(leaves[i]);
+    }
+    for (const auto& group : compLeaves) {
+        if (group.size() > NCbo::MaxRelations) {
+            return HeuristicChain(leaves, adjacency);
+        }
+    }
+    std::vector<std::vector<NCbo::TJoinEdge>> compEdges(components);
+    for (const auto& [edge, leaf] : graphEdges) {
+        compEdges[comp[leaf]].push_back(edge);
+    }
+
+    // Optimal subtree per component; cross-join components smallest-first.
+    std::vector<std::pair<size_t, TOperatorPtr>> subtrees;
+    for (int c = 0; c < components; ++c) {
+        TOperatorPtr tree = compLeaves[c].size() == 1
+            ? compLeaves[c].front()
+            : NCbo::DpccpJoinOrder(compLeaves[c], compEdges[c]);
+        if (!tree) {
+            return HeuristicChain(leaves, adjacency); // defensive
+        }
+        subtrees.push_back({compLeaves[c].size(), std::move(tree)});
+    }
+    std::stable_sort(subtrees.begin(), subtrees.end(),
+        [](const auto& a, const auto& b) { return a.first < b.first; });
+
+    TOperatorPtr result = std::move(subtrees.front().second);
+    for (size_t i = 1; i < subtrees.size(); ++i) {
+        result = MakeInnerJoin(std::move(result), std::move(subtrees[i].second));
     }
     return result;
 }
@@ -168,53 +243,53 @@ TOperatorPtr BuildChain(
 // other operators (e.g. a decorrelation LEFT JOIN). Edges are reset across
 // project/aggregate, which redefine columns; BuildChain ignores edges whose
 // endpoints aren't owned by the chain's leaves (qualified names disambiguate).
-TOperatorPtr Reorder(TOperatorPtr node, std::vector<TEdge> edges) {
+TOperatorPtr Reorder(TOperatorPtr node, std::vector<TEdge> edges, bool enableCbo) {
     if (!node) {
         return node;
     }
     if (auto maybeFilter = TMaybeOp<TFilterOperator>(node)) {
         auto filter = maybeFilter.Cast();
         CollectEquiEdges(filter->Predicate(), edges);
-        filter->MutableInput() = Reorder(filter->Input(), std::move(edges));
+        filter->MutableInput() = Reorder(filter->Input(), std::move(edges), enableCbo);
         return filter;
     }
     if (IsReorderableJoin(node)) {
         std::vector<TOperatorPtr> leaves;
         CollectChainLeaves(node, leaves);
         for (auto& leaf : leaves) {
-            leaf = Reorder(std::move(leaf), {});
+            leaf = Reorder(std::move(leaf), {}, enableCbo);
         }
-        return BuildChain(leaves, edges);
+        return BuildChain(leaves, edges, enableCbo);
     }
     if (auto maybeJoin = TMaybeOp<TJoinOperator>(node)) {
         auto join = maybeJoin.Cast();
-        join->MutableLeft() = Reorder(join->Left(), edges);
-        join->MutableRight() = Reorder(join->Right(), edges);
+        join->MutableLeft() = Reorder(join->Left(), edges, enableCbo);
+        join->MutableRight() = Reorder(join->Right(), edges, enableCbo);
         return join;
     }
     if (auto maybeProject = TMaybeOp<TProjectOperator>(node)) {
         auto project = maybeProject.Cast();
-        project->MutableInput() = Reorder(project->Input(), {});
+        project->MutableInput() = Reorder(project->Input(), {}, enableCbo);
         return project;
     }
     if (auto maybeAggregate = TMaybeOp<TAggregateOperator>(node)) {
         auto aggregate = maybeAggregate.Cast();
-        aggregate->MutableInput() = Reorder(aggregate->Input(), {});
+        aggregate->MutableInput() = Reorder(aggregate->Input(), {}, enableCbo);
         return aggregate;
     }
     if (auto maybeLimit = TMaybeOp<TLimitOperator>(node)) {
         auto limit = maybeLimit.Cast();
-        limit->MutableInput() = Reorder(limit->Input(), {});
+        limit->MutableInput() = Reorder(limit->Input(), {}, enableCbo);
         return limit;
     }
     if (auto maybeSort = TMaybeOp<TSortOperator>(node)) {
         auto sort = maybeSort.Cast();
-        sort->MutableInput() = Reorder(sort->Input(), {});
+        sort->MutableInput() = Reorder(sort->Input(), {}, enableCbo);
         return sort;
     }
     if (auto maybeTopSort = TMaybeOp<TTopSortOperator>(node)) {
         auto topSort = maybeTopSort.Cast();
-        topSort->MutableInput() = Reorder(topSort->Input(), {});
+        topSort->MutableInput() = Reorder(topSort->Input(), {}, enableCbo);
         return topSort;
     }
     return node;
@@ -331,8 +406,8 @@ TOperatorPtr PushDown(TOperatorPtr node) {
 
 } // namespace
 
-TOperatorPtr ReorderJoins(TOperatorPtr root) {
-    return Reorder(std::move(root), {});
+TOperatorPtr ReorderJoins(TOperatorPtr root, bool enableCbo) {
+    return Reorder(std::move(root), {}, enableCbo);
 }
 
 TOperatorPtr PushDownSemiJoins(TOperatorPtr root) {

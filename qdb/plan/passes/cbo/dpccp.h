@@ -19,9 +19,9 @@ struct TJoinEdge {
 
 constexpr size_t MaxRelations = 12;
 
-// Optimal bushy inner-join tree minimizing Cout; joins are key-less
-// (ExtractEquiJoins keys them later). nullptr when DP does not apply
-// (n > MaxRelations or disconnected graph). Leaves must carry Stats_.
+// Optimal bushy inner-join tree minimizing the planner cost stored in Stats_;
+// joins are key-less (ExtractEquiJoins keys them later). nullptr when DP does
+// not apply (n > MaxRelations or disconnected graph). Leaves must carry Stats_.
 TOperatorPtr DpccpJoinOrder(
     const std::vector<TOperatorPtr>& leaves,
     const std::vector<TJoinEdge>& edges);

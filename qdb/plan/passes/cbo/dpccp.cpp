@@ -1,14 +1,17 @@
 #include <qdb/plan/passes/cbo/dpccp.h>
 
 #include <qdb/plan/ops/join.h>
+#include <qdb/plan/passes/estimate_stats.h>
 
 #include <qumir/parser/type.h>
 
 #include <algorithm>
 #include <bit>
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <unordered_map>
+#include <utility>
 
 namespace NQdb {
 namespace NCbo {
@@ -20,6 +23,7 @@ struct TGraphEdge {
     size_t A;
     size_t B;
     double Sel;
+    double KeyWidth;
 };
 
 struct TDpEntry {
@@ -34,12 +38,25 @@ double Ndv(const TOperatorPtr& leaf, const std::string& col) {
     if (!stats) {
         return DefaultNdv;
     }
-    double cap = stats->RowCount > 0 ? static_cast<double>(stats->RowCount) : DefaultNdv;
     auto it = stats->ColumnStats.find(col);
     if (it == stats->ColumnStats.end() || !it->second || !it->second->Ndv) {
-        return std::min(DefaultNdv, cap);
+        return DefaultNdv;
     }
-    return std::min(static_cast<double>(*it->second->Ndv), cap);
+    return static_cast<double>(*it->second->Ndv);
+}
+
+double ColumnWidth(const TOperatorPtr& leaf, const std::string& col) {
+    auto schema = NQumir::NAst::TMaybeType<NQumir::NAst::TStructType>(
+        leaf->OutputColumns());
+    if (!schema) {
+        return 8.0;
+    }
+    for (const auto& [name, type] : schema.Cast()->Fields) {
+        if (name == col) {
+            return EstimateTypeWidth(type);
+        }
+    }
+    return 8.0;
 }
 
 // DP over subsets ordered by increasing bitmask, so every proper subset is
@@ -58,12 +75,17 @@ public:
     TOperatorPtr Solve() {
         const TSubset full = (TSubset{1} << N_) - 1;
         std::vector<double> card(full + 1, 0.0);
+        std::vector<double> width(full + 1, 0.0);
         std::vector<TDpEntry> dp(full + 1);
 
         for (size_t i = 0; i < N_; ++i) {
             const TSubset s = TSubset{1} << i;
             card[s] = Leaves_[i]->Stats_ ? static_cast<double>(Leaves_[i]->Stats_->RowCount) : 0.0;
-            dp[s] = {Leaves_[i], 0.0};
+            width[s] = EstimateTypeWidth(Leaves_[i]->OutputColumns());
+            dp[s] = {
+                Leaves_[i],
+                Leaves_[i]->Stats_ ? Leaves_[i]->Stats_->Cost : 0.0,
+            };
         }
 
         for (TSubset s = 1; s <= full; ++s) {
@@ -76,10 +98,24 @@ public:
                     continue; // a side is disconnected
                 }
                 const double jc = card[s1] * card[s2] * CrossingSel(s1, s2);
-                const double cost = dp[s1].Cost + dp[s2].Cost + jc;
+                const double jw = width[s1] + width[s2];
+                const double cost = EstimateJoinCost(
+                    dp[s1].Cost,
+                    dp[s2].Cost,
+                    card[s1],
+                    card[s2],
+                    jc,
+                    jw,
+                    CrossingKeyWidth(s1, s2));
                 if (!dp[s].Tree || cost < dp[s].Cost) {
-                    dp[s] = {MakeJoin(dp[s1].Tree, dp[s2].Tree), cost};
+                    auto tree = MakeJoin(dp[s1].Tree, dp[s2].Tree);
+                    auto stats = std::make_shared<TStats>();
+                    stats->RowCount = std::max<uint64_t>(1, static_cast<uint64_t>(jc));
+                    stats->Cost = cost;
+                    tree->Stats_ = std::move(stats);
+                    dp[s] = {std::move(tree), cost};
                     card[s] = jc;
+                    width[s] = jw;
                 }
             }
         }
@@ -87,6 +123,10 @@ public:
     }
 
 private:
+    double LeafRows(size_t i) const {
+        return Leaves_[i]->Stats_ ? static_cast<double>(Leaves_[i]->Stats_->RowCount) : 0.0;
+    }
+
     void BuildGraph(const std::vector<TJoinEdge>& edges) {
         std::unordered_map<std::string, size_t> owner;
         for (size_t i = 0; i < N_; ++i) {
@@ -94,10 +134,16 @@ private:
             if (!schema) {
                 continue;
             }
-            for (const auto& [name, _] : schema->Fields) {
+            for (const auto& [name, type] : schema->Fields) {
                 owner.emplace(name, i);
             }
         }
+        // Group keys per relation pair, then ask the estimate propagator for the
+        // pairwise join cardinality; its ratio to the cross product is the pair's
+        // fixed selectivity (keeps the DP cost split-independent, composite keys
+        // collapsed by the propagator's row-count clamp).
+        std::map<std::pair<size_t, size_t>, std::vector<std::pair<double, double>>> pairKeys;
+        std::map<std::pair<size_t, size_t>, double> pairKeyWidths;
         for (const auto& e : edges) {
             auto la = owner.find(e.LeftCol);
             auto lb = owner.find(e.RightCol);
@@ -106,11 +152,23 @@ private:
             }
             const size_t a = la->second;
             const size_t b = lb->second;
-            const double denom = std::max(
-                1.0, std::max(Ndv(Leaves_[a], e.LeftCol), Ndv(Leaves_[b], e.RightCol)));
-            Edges_.push_back({a, b, 1.0 / denom});
+            const double na = Ndv(Leaves_[a], e.LeftCol);
+            const double nb = Ndv(Leaves_[b], e.RightCol);
+            const double wa = ColumnWidth(Leaves_[a], e.LeftCol);
+            const double wb = ColumnWidth(Leaves_[b], e.RightCol);
+            const size_t i = std::min(a, b);
+            const size_t j = std::max(a, b);
+            pairKeys[{i, j}].emplace_back(a == i ? na : nb, a == i ? nb : na);
+            pairKeyWidths[{i, j}] += std::max(wa, wb);
             Neighbors_[a] |= TSubset{1} << b;
             Neighbors_[b] |= TSubset{1} << a;
+        }
+        for (const auto& [key, keys] : pairKeys) {
+            const double ri = LeafRows(key.first);
+            const double rj = LeafRows(key.second);
+            const double rows = EstimateEquiJoin(ri, rj, keys).Rows;
+            const double sel = ri * rj > 0.0 ? rows / (ri * rj) : 1.0;
+            Edges_.push_back({key.first, key.second, sel, pairKeyWidths[key]});
         }
     }
 
@@ -139,6 +197,18 @@ private:
             }
         }
         return sel;
+    }
+
+    double CrossingKeyWidth(TSubset s1, TSubset s2) const {
+        double width = 0.0;
+        for (const auto& e : Edges_) {
+            const TSubset a = TSubset{1} << e.A;
+            const TSubset b = TSubset{1} << e.B;
+            if (((a & s1) && (b & s2)) || ((a & s2) && (b & s1))) {
+                width += e.KeyWidth;
+            }
+        }
+        return width;
     }
 
     static TOperatorPtr MakeJoin(const TOperatorPtr& l, const TOperatorPtr& r) {

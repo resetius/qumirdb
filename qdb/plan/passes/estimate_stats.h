@@ -2,8 +2,46 @@
 
 #include <qdb/plan/ops/operator.h>
 
+#include <qumir/parser/type.h>
+
+#include <utility>
+#include <vector>
+
 namespace NQdb {
 
 TStatsPtr EstimateStats(TOperatorPtr op);
+
+// Width estimate used by the CBO cost model. Strings are costed as the
+// materialized StringView (ptr + size), not as their payload bytes.
+double EstimateTypeWidth(const NQumir::NAst::TTypePtr& type);
+
+// Browser/native neutral join work model. Units are abstract byte-ish work:
+// child costs + key scan work + materialized output width + per-output-batch
+// overhead. The batch overhead intentionally mirrors the browser join
+// materialization granularity so bushy plans that create many wide rowsets are
+// visible to CBO.
+double EstimateJoinCost(
+    double leftCost,
+    double rightCost,
+    double leftRows,
+    double rightRows,
+    double outputRows,
+    double outputRowWidth,
+    double keyWidth);
+
+struct TJoinCardinality {
+    double Rows = 0.0;
+    double NdvL = 1.0; // \prod ndv over left key columns, clamped to leftRows
+    double NdvR = 1.0;
+};
+
+// Inner equi-join cardinality: rows = leftRows*rightRows / max(NdvL, NdvR),
+// where each side's ndv product is clamped to that side's row count (so a
+// composite key does not multiply correlated selectivities below the row count).
+// keyNdvs holds per key pair the (leftNdv, rightNdv).
+TJoinCardinality EstimateEquiJoin(
+    double leftRows,
+    double rightRows,
+    const std::vector<std::pair<double, double>>& keyNdvs);
 
 } // namespace NQdb

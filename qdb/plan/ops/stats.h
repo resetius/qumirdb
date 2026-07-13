@@ -17,6 +17,9 @@ namespace NQdb {
 // column's own type via GetMinValue<T>() etc.; only 8-byte T is valid.
 struct TStats {
     uint64_t RowCount = 0;
+    // Planner cost in abstract work units. It is not wall-clock time; the
+    // optimizer uses it to compare alternative plans with the same statistics.
+    double Cost = 0.0;
 
     struct TColumnStats {
         std::optional<uint64_t> MinValue;

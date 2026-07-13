@@ -12,7 +12,7 @@ namespace NQdb {
 //
 // Runs after QualifyColumns and AnnotateTypes (it needs leaf output schemas to
 // map columns to relations) and before ExtractEquiJoins. Returns the new root.
-TOperatorPtr ReorderJoins(TOperatorPtr root);
+TOperatorPtr ReorderJoins(TOperatorPtr root, bool enableCbo = true);
 
 // Heuristic semi/anti-join pushdown. A LeftSemi/LeftAnti join filters its build
 // (left) side by existence in the probe side, so keeping it above a
