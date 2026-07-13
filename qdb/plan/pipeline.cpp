@@ -16,6 +16,7 @@ void ApplyPlanPasses(TOperatorPtr& plan) {
     AnnotateTypes(plan);
     plan = PushDownPredicates(plan);
     AnnotateTypes(plan); // re-annotate: pushdown moved filters onto leaves
+    EstimateStats(plan); // leaf cardinalities for cost-based ReorderJoins
     plan = ReorderJoins(plan);
     AnnotateTypes(plan); // re-annotate: reordering rebuilt the join tree
     plan = ExtractEquiJoins(plan);
