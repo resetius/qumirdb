@@ -4,6 +4,10 @@
 
 namespace NQdb {
 
-void ApplyPlanPasses(TOperatorPtr& plan);
+struct TPlanPassOptions {
+    bool EnableCbo = true;
+};
+
+void ApplyPlanPasses(TOperatorPtr& plan, TPlanPassOptions options = {});
 
 } // namespace NQdb

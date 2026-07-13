@@ -149,6 +149,7 @@ struct TConfig {
     std::string DataDir = ".";
     TFormatSpec Format;
     bool Verbose = false;
+    bool EnableCbo = true;
     NQdb::NScheduler::TSettings Scheduler;
 };
 
@@ -275,7 +276,7 @@ int RunQuery(ESyntax syntax, std::istream& in, const TConfig& config) {
         return 1;
     }
 
-    NQdb::ApplyPlanPasses(*plan);
+    NQdb::ApplyPlanPasses(*plan, {.EnableCbo = config.EnableCbo});
 
     if (config.Verbose) {
         std::cerr << "========== LOGICAL PLAN ==========\n";
@@ -510,6 +511,7 @@ void PrintHelp() {
         "  --shuffle-target-rows <n>    Target rows per materialized shuffle batch\n"
         "  --shuffle-max-rows <n>       Maximum rows per materialized shuffle batch\n"
         "  --shuffle-target-bytes <n>   Target bytes per materialized shuffle batch\n"
+        "  --nocbo                      Disable cost-based join reordering\n"
         "  --verbose                    Print the logical and runtime plans\n"
         "  --help|-h                    Show this help message\n"
         "\n"
@@ -663,6 +665,8 @@ int main(int argc, char** argv) {
             }
             config.Scheduler.HashShuffle.TargetOutputBatchBytes =
                 static_cast<size_t>(bytes);
+        } else if (!std::strcmp(argv[i], "--nocbo")) {
+            config.EnableCbo = false;
         } else if (!std::strcmp(argv[i], "--verbose")) {
             config.Verbose = true;
         } else if (!std::strcmp(argv[i], "--help") || !std::strcmp(argv[i], "-h")) {

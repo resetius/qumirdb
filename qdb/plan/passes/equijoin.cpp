@@ -142,6 +142,25 @@ bool Covers(
     return true;
 }
 
+// True when every column shares the same qualifier (alias) prefix, i.e. the
+// conjunct constrains a single relation. Only these are pushed to leaves in
+// PushOnly mode; multi-relation conjuncts (join edges) stay in the top filter.
+bool SingleRelation(const TConjuct& conj) {
+    std::string prefix;
+    bool first = true;
+    for (const auto& col : ColumnsOf(conj)) {
+        auto dot = col.find('.');
+        std::string rel = dot == std::string::npos ? col : col.substr(0, dot);
+        if (first) {
+            prefix = rel;
+            first = false;
+        } else if (rel != prefix) {
+            return false;
+        }
+    }
+    return !first;
+}
+
 TExprPtr Combine(const std::vector<TExprPtr>& parts, TOperator op) {
     TExprPtr result;
     for (const auto& part : parts) {
@@ -430,6 +449,22 @@ TOperatorPtr ProcessOuterJoin(std::shared_ptr<TJoinOperator> join, TContext ctx)
 TOperatorPtr Process(TOperatorPtr node, TContext ctx) {
     if (auto maybeFilter = TMaybeOp<TFilterOperator>(node)) {
         auto filter = maybeFilter.Cast();
+        if (ctx.Mode == EMode::PushOnly) {
+            // Push only single-relation predicates down; keep the rest (join
+            // edges) materialized here so the join chain stays intact.
+            std::vector<TConjuct> all;
+            ExtractConjucts(all, filter->Predicate());
+            std::vector<TConjuct> kept;
+            for (auto& conj : all) {
+                if (SingleRelation(conj)) {
+                    ctx.Conjucts.push_back(std::move(conj));
+                } else {
+                    kept.push_back(std::move(conj));
+                }
+            }
+            auto inner = Process(filter->Input(), std::move(ctx));
+            return Materialize(inner, kept);
+        }
         ExtractConjucts(ctx.Conjucts, filter->Predicate());
         // drop the filter: its conjuncts move down into keys / lower nodes
         return Process(filter->Input(), std::move(ctx));

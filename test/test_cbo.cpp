@@ -6,6 +6,7 @@
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/ops/stats.h>
 #include <qdb/plan/passes/cbo/dpccp.h>
+#include <qdb/plan/passes/estimate_stats.h>
 
 #include <qumir/parser/type.h>
 
@@ -74,13 +75,24 @@ struct TModel {
                 owner[name] = i;
             }
         }
+        std::map<std::pair<size_t, size_t>, std::vector<std::pair<double, double>>> pairKeys;
         for (const auto& e : edges) {
             size_t a = owner.at(e.LeftCol);
             size_t b = owner.at(e.RightCol);
-            double sel = 1.0 / std::max({1.0, Ndv(a, e.LeftCol), Ndv(b, e.RightCol)});
-            Edges.emplace_back(a, b, sel);
+            double na = Ndv(a, e.LeftCol);
+            double nb = Ndv(b, e.RightCol);
+            size_t i = std::min(a, b);
+            size_t j = std::max(a, b);
+            pairKeys[{i, j}].emplace_back(a == i ? na : nb, a == i ? nb : na);
             Neighbors[a] |= TSubset{1} << b;
             Neighbors[b] |= TSubset{1} << a;
+        }
+        for (const auto& [key, keys] : pairKeys) {
+            double ri = LeafRows(key.first);
+            double rj = LeafRows(key.second);
+            double rows = EstimateEquiJoin(ri, rj, keys).Rows;
+            double sel = ri * rj > 0.0 ? rows / (ri * rj) : 1.0;
+            Edges.emplace_back(key.first, key.second, sel);
         }
     }
 

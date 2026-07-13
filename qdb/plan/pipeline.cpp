@@ -10,14 +10,14 @@
 
 namespace NQdb {
 
-void ApplyPlanPasses(TOperatorPtr& plan) {
+void ApplyPlanPasses(TOperatorPtr& plan, TPlanPassOptions options) {
     AssignSourceAliases(plan);
     QualifyColumns(plan);
     AnnotateTypes(plan);
     plan = PushDownPredicates(plan);
     AnnotateTypes(plan); // re-annotate: pushdown moved filters onto leaves
     EstimateStats(plan); // leaf cardinalities for cost-based ReorderJoins
-    plan = ReorderJoins(plan);
+    plan = ReorderJoins(plan, options.EnableCbo);
     AnnotateTypes(plan); // re-annotate: reordering rebuilt the join tree
     plan = ExtractEquiJoins(plan);
     AnnotateTypes(plan); // re-annotate: equi-join extraction adds/removes nodes

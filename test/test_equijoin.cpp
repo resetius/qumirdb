@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <map>
 #include <memory>
+#include <set>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -104,6 +105,20 @@ const TSortOperator* AsSort(const TOperatorPtr& op) {
 
 const TLimitOperator* AsLimit(const TOperatorPtr& op) {
     return dynamic_cast<const TLimitOperator*>(op.get());
+}
+
+std::set<std::string> LeafAliases(const TOperatorPtr& op) {
+    std::set<std::string> out;
+    if (auto* source = AsSource(op)) {
+        out.insert(std::string(source->GetAlias()));
+        return out;
+    }
+    for (const auto& child : op->Children()) {
+        if (auto childOp = TMaybeNode<IOperator>(child)) {
+            out.merge(LeafAliases(childOp.Cast()));
+        }
+    }
+    return out;
 }
 
 } // namespace
@@ -228,15 +243,15 @@ TEST(JoinOrder, ReordersThroughLimitAndSort) {
     ASSERT_NE(filter, nullptr);
     auto topJoin = AsJoin(filter->Input());
     ASSERT_NE(topJoin, nullptr);
-    auto firstJoin = AsJoin(topJoin->Left());
-    ASSERT_NE(firstJoin, nullptr);
 
-    ASSERT_NE(AsSource(firstJoin->Left()), nullptr);
-    ASSERT_NE(AsSource(firstJoin->Right()), nullptr);
-    ASSERT_NE(AsSource(topJoin->Right()), nullptr);
-    EXPECT_EQ(AsSource(firstJoin->Left())->GetAlias(), "a");
-    EXPECT_EQ(AsSource(firstJoin->Right())->GetAlias(), "b");
-    EXPECT_EQ(AsSource(topJoin->Right())->GetAlias(), "c");
+    // Only aid=bid connects the graph, so {a,b} is one component joined together
+    // and {c} is cross-joined against it (orientation is not fixed).
+    auto left = LeafAliases(topJoin->Left());
+    auto right = LeafAliases(topJoin->Right());
+    const std::set<std::string> connected{"a", "b"};
+    const std::set<std::string> crossed{"c"};
+    EXPECT_TRUE((left == connected && right == crossed)
+        || (left == crossed && right == connected)) << "unexpected join partition";
 }
 
 // PushDownPredicates moves the single-table predicate onto A's leaf, leaves the
