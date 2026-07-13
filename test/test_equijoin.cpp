@@ -35,7 +35,7 @@ using namespace NQumir::NAst;
 
 namespace {
 
-TOperatorPtr Optimize(const std::string& sexp, const std::map<std::string, ISource*>& tables) {
+TOperatorPtr BuildAnnotated(const std::string& sexp, const std::map<std::string, ISource*>& tables) {
     TRelParserOptions opts;
     opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
         return std::make_shared<TSourceOperator>(*tables.at(std::string(path)), std::string(path));
@@ -57,7 +57,11 @@ TOperatorPtr Optimize(const std::string& sexp, const std::map<std::string, ISour
     AssignSourceAliases(root);
     QualifyColumns(root);
     AnnotateTypes(root);
-    return ExtractEquiJoins(root);
+    return root;
+}
+
+TOperatorPtr Optimize(const std::string& sexp, const std::map<std::string, ISource*>& tables) {
+    return ExtractEquiJoins(BuildAnnotated(sexp, tables));
 }
 
 void CollectKeys(const TOperatorPtr& op, std::vector<std::pair<std::string, std::string>>& out) {
@@ -233,6 +237,38 @@ TEST(JoinOrder, ReordersThroughLimitAndSort) {
     EXPECT_EQ(AsSource(firstJoin->Left())->GetAlias(), "a");
     EXPECT_EQ(AsSource(firstJoin->Right())->GetAlias(), "b");
     EXPECT_EQ(AsSource(topJoin->Right())->GetAlias(), "c");
+}
+
+// PushDownPredicates moves the single-table predicate onto A's leaf, leaves the
+// cross-table equality above the join, and keeps the join empty-key (reorderable).
+TEST(PushDown, SingleTableToLeafEqualityStaysAbove) {
+    NQdb::TMockSource a({"aid", "aval"});
+    NQdb::TMockSource b({"bid", "bval"});
+    std::map<std::string, ISource*> tables = {{"A", &a}, {"B", &b}};
+
+    auto root = PushDownPredicates(BuildAnnotated(
+        "(rel filter"
+        "  (rel join (rel source \"A\" \"a\") (rel source \"B\" \"b\") () (inner))"
+        "  (&& (== aid bid) (< aval 5)))",
+        tables));
+
+    // equality stays materialized above the join (edge source for ReorderJoins)
+    auto topFilter = AsFilter(root);
+    ASSERT_NE(topFilter, nullptr);
+
+    // join is still an empty-key, residual-free inner join -> reorderable
+    auto join = AsJoin(topFilter->Input());
+    ASSERT_NE(join, nullptr);
+    EXPECT_TRUE(join->Keys().empty());
+    EXPECT_EQ(join->Filter(), nullptr);
+
+    // aval<5 landed on A's leaf; B is left a bare source
+    auto leftFilter = AsFilter(join->Left());
+    ASSERT_NE(leftFilter, nullptr);
+    ASSERT_NE(AsSource(leftFilter->Input()), nullptr);
+    EXPECT_EQ(AsSource(leftFilter->Input())->GetAlias(), "a");
+    ASSERT_NE(AsSource(join->Right()), nullptr);
+    EXPECT_EQ(AsSource(join->Right())->GetAlias(), "b");
 }
 
 int main(int argc, char** argv) {
