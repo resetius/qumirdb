@@ -10,4 +10,6 @@ namespace NQdb {
 // (the top filter may be consumed).
 TOperatorPtr ExtractEquiJoins(TOperatorPtr root);
 
+TOperatorPtr PushDownPredicates(TOperatorPtr root);
+
 } // namespace NQdb
