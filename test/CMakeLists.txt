@@ -12,6 +12,7 @@ endmacro()
 
 ut(test_io test_io.cpp)
 ut(test_stats test_stats.cpp)
+ut(test_cbo test_cbo.cpp)
 ut(test_sexp test_sexp.cpp)
 ut(test_aggregate test_aggregate.cpp)
 ut(test_aggregate_f64 test_aggregate_f64.cpp)
