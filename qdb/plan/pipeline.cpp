@@ -14,6 +14,8 @@ void ApplyPlanPasses(TOperatorPtr& plan) {
     AssignSourceAliases(plan);
     QualifyColumns(plan);
     AnnotateTypes(plan);
+    plan = PushDownPredicates(plan);
+    AnnotateTypes(plan); // re-annotate: pushdown moved filters onto leaves
     plan = ReorderJoins(plan);
     AnnotateTypes(plan); // re-annotate: reordering rebuilt the join tree
     plan = ExtractEquiJoins(plan);

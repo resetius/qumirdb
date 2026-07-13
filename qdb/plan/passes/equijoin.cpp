@@ -22,6 +22,10 @@ using namespace NQumir::NAst;
 
 namespace {
 
+// PushOnly pushes single-side predicates to leaves but leaves joins empty-key;
+// ExtractKeys additionally lifts equalities into join keys.
+enum class EMode { PushOnly, ExtractKeys };
+
 struct TConjuct {
     TExprPtr Expr = nullptr;
     bool equiv = false;
@@ -179,32 +183,33 @@ TExprPtr DeriveSideFilter(const TExprPtr& expr, const std::unordered_set<std::st
 
 struct TContext {
     std::vector<TConjuct> Conjucts;
+    EMode Mode = EMode::ExtractKeys;
 };
 
 TOperatorPtr Process(TOperatorPtr node, TContext ctx);
 
 TOperatorPtr ProcessAggregate(std::shared_ptr<TAggregateOperator> aggregate, TContext ctx) {
-    aggregate->MutableInput() = Process(aggregate->Input(), {});
+    aggregate->MutableInput() = Process(aggregate->Input(), {{}, ctx.Mode});
     return Materialize(aggregate, ctx.Conjucts);
 }
 
 TOperatorPtr ProcessLimit(std::shared_ptr<TLimitOperator> limit, TContext ctx) {
-    limit->MutableInput() = Process(limit->Input(), {});
+    limit->MutableInput() = Process(limit->Input(), {{}, ctx.Mode});
     return Materialize(limit, ctx.Conjucts);
 }
 
 TOperatorPtr ProcessProject(std::shared_ptr<TProjectOperator> project, TContext ctx) {
-    project->MutableInput() = Process(project->Input(), {});
+    project->MutableInput() = Process(project->Input(), {{}, ctx.Mode});
     return Materialize(project, ctx.Conjucts);
 }
 
 TOperatorPtr ProcessSort(std::shared_ptr<TSortOperator> sort, TContext ctx) {
-    sort->MutableInput() = Process(sort->Input(), {});
+    sort->MutableInput() = Process(sort->Input(), {{}, ctx.Mode});
     return Materialize(sort, ctx.Conjucts);
 }
 
 TOperatorPtr ProcessTopSort(std::shared_ptr<TTopSortOperator> topSort, TContext ctx) {
-    topSort->MutableInput() = Process(topSort->Input(), {});
+    topSort->MutableInput() = Process(topSort->Input(), {{}, ctx.Mode});
     return Materialize(topSort, ctx.Conjucts);
 }
 
@@ -217,6 +222,27 @@ bool IsRedistributable(EJoinType type) {
 
 TOperatorPtr ProcessJoin(std::shared_ptr<TJoinOperator> join, TContext ctx)
 {
+    if (ctx.Mode == EMode::PushOnly) {
+        auto leftCols = JoinColumns(0, join);
+        auto rightCols = JoinColumns(1, join);
+        std::vector<TConjuct> leftConjucts;
+        std::vector<TConjuct> rightConjucts;
+        std::vector<TConjuct> keep;
+        for (const auto& conj : ctx.Conjucts) {
+            auto cols = ColumnsOf(conj);
+            if (Covers(cols, leftCols)) {
+                leftConjucts.emplace_back(conj);
+            } else if (Covers(cols, rightCols)) {
+                rightConjucts.emplace_back(conj);
+            } else {
+                keep.emplace_back(conj);
+            }
+        }
+        join->MutableLeft() = Process(join->Left(), {std::move(leftConjucts), ctx.Mode});
+        join->MutableRight() = Process(join->Right(), {std::move(rightConjucts), ctx.Mode});
+        return Materialize(join, keep);
+    }
+
     // Fold the join's own residual into the pool so explicit JOIN ON and
     // decorrelated semi/anti correlations feed key extraction too.
     std::vector<TConjuct>& pool = ctx.Conjucts;
@@ -328,8 +354,8 @@ TOperatorPtr ProcessJoin(std::shared_ptr<TJoinOperator> join, TContext ctx)
         join->MutableFilter() = Conjoin(residualConjucts);
     }
 
-    join->MutableLeft() = Process(join->Left(), TContext{std::move(leftConjucts)});
-    join->MutableRight() = Process(join->Right(), TContext{std::move(rightConjucts)});
+    join->MutableLeft() = Process(join->Left(), {std::move(leftConjucts), ctx.Mode});
+    join->MutableRight() = Process(join->Right(), {std::move(rightConjucts), ctx.Mode});
     return join;
 }
 
@@ -348,7 +374,7 @@ TOperatorPtr ProcessOuterJoin(std::shared_ptr<TJoinOperator> join, TContext ctx)
 
     // Pull equi keys out of the ON residual (keys + residual together stay equal
     // to the original ON); push the null-extended side's own conjuncts down to it.
-    if (join->Filter()) {
+    if (ctx.Mode == EMode::ExtractKeys && join->Filter()) {
         std::vector<TConjuct> on;
         ExtractConjucts(on, join->Filter());
 
@@ -396,8 +422,8 @@ TOperatorPtr ProcessOuterJoin(std::shared_ptr<TJoinOperator> join, TContext ctx)
         }
     }
 
-    join->MutableLeft() = Process(join->Left(), TContext{std::move(leftConjucts)});
-    join->MutableRight() = Process(join->Right(), TContext{std::move(rightConjucts)});
+    join->MutableLeft() = Process(join->Left(), {std::move(leftConjucts), ctx.Mode});
+    join->MutableRight() = Process(join->Right(), {std::move(rightConjucts), ctx.Mode});
     return Materialize(join, keep);
 }
 
@@ -434,8 +460,12 @@ TOperatorPtr Process(TOperatorPtr node, TContext ctx) {
 
 } // namespace
 
+TOperatorPtr PushDownPredicates(TOperatorPtr root) {
+    return Process(root, {{}, EMode::PushOnly});
+}
+
 TOperatorPtr ExtractEquiJoins(TOperatorPtr root) {
-    return Process(root, {});
+    return Process(root, {{}, EMode::ExtractKeys});
 }
 
 } // namespace NQdb
