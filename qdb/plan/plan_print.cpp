@@ -6,7 +6,10 @@
 
 #include <qumir/parser/core/printer.h>
 
+#include <cmath>
+#include <iomanip>
 #include <ostream>
+#include <sstream>
 
 namespace NQdb {
 
@@ -54,6 +57,37 @@ std::string AggregatePlanLabel(const TAggregateOperator& aggregate) {
 }
 
 namespace {
+
+std::string FormatEstimate(double value) {
+    if (!std::isfinite(value)) {
+        return "inf";
+    }
+    const double abs = std::fabs(value);
+    const char* suffix = "";
+    double scaled = value;
+    if (abs >= 1e12) {
+        scaled = value / 1e12;
+        suffix = "T";
+    } else if (abs >= 1e9) {
+        scaled = value / 1e9;
+        suffix = "B";
+    } else if (abs >= 1e6) {
+        scaled = value / 1e6;
+        suffix = "M";
+    } else if (abs >= 1e3) {
+        scaled = value / 1e3;
+        suffix = "K";
+    }
+
+    std::ostringstream s;
+    if (std::fabs(scaled) >= 100.0 || std::fabs(scaled - std::round(scaled)) < 0.05) {
+        s << std::fixed << std::setprecision(0) << scaled;
+    } else {
+        s << std::fixed << std::setprecision(1) << scaled;
+    }
+    s << suffix;
+    return s.str();
+}
 
 std::string SortKeyLabel(const TSortKey& key) {
     std::string label = key.Column;
@@ -142,7 +176,8 @@ void PrintPlanTree(
     }
     out << PlanLabel(op);
     if (op->Stats_) {
-        out << " (rows≈" << op->Stats_->RowCount << ")";
+        out << " (rows≈" << op->Stats_->RowCount
+            << " cost≈" << FormatEstimate(op->Stats_->Cost) << ")";
     }
     out << "\n";
 

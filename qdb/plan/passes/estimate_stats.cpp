@@ -6,12 +6,65 @@
 #include <qdb/plan/ops/filter.h>
 #include <qdb/plan/ops/project.h>
 #include <qdb/plan/ops/join.h>
+#include <qdb/plan/types/nullable.h>
 
+#include <algorithm>
+#include <cmath>
 #include <limits>
 
 namespace NQdb {
 
 using namespace NQumir::NAst;
+
+double EstimateTypeWidth(const TTypePtr& type) {
+    auto inner = UnwrapNamedType(UnwrapNullableType(type));
+    if (auto integer = TMaybeType<TIntegerType>(inner)) {
+        return std::max(1, integer.Cast()->BitWidth() / 8);
+    }
+    if (TMaybeType<TFloatType>(inner)) {
+        return 8.0;
+    }
+    if (TMaybeType<TBoolType>(inner)) {
+        return 1.0;
+    }
+    if (TMaybeType<TStringType>(inner)) {
+        return 16.0;
+    }
+    if (auto structure = TMaybeType<TStructType>(inner)) {
+        double total = 0.0;
+        for (const auto& [_, fieldType] : structure.Cast()->Fields) {
+            total += EstimateTypeWidth(fieldType);
+        }
+        return total;
+    }
+    return 8.0;
+}
+
+double EstimateJoinCost(
+    double leftCost,
+    double rightCost,
+    double leftRows,
+    double rightRows,
+    double outputRows,
+    double outputRowWidth,
+    double keyWidth)
+{
+    constexpr double JoinOutputBatchRows = 1024.0;
+    constexpr double JoinOutputBatchPenalty = 4096.0;
+
+    const double safeLeftRows = std::max(leftRows, 0.0);
+    const double safeRightRows = std::max(rightRows, 0.0);
+    const double safeOutputRows = std::max(outputRows, 0.0);
+    const double safeOutputWidth = std::max(outputRowWidth, 1.0);
+    const double safeKeyWidth = std::max(keyWidth, 0.0);
+    const double batches = std::ceil(safeOutputRows / JoinOutputBatchRows);
+
+    return std::max(leftCost, 0.0)
+        + std::max(rightCost, 0.0)
+        + (safeLeftRows + safeRightRows) * safeKeyWidth
+        + safeOutputRows * safeOutputWidth
+        + batches * JoinOutputBatchPenalty;
+}
 
 /*
 
@@ -43,6 +96,38 @@ using namespace NQumir::NAst;
 */
 
 namespace {
+
+double OutputRowWidth(const TOperatorPtr& op) {
+    return op ? EstimateTypeWidth(op->OutputColumns()) : 1.0;
+}
+
+double ColumnWidth(const TOperatorPtr& op, const std::string& name) {
+    if (!op) {
+        return 8.0;
+    }
+    auto structure = TMaybeType<TStructType>(op->OutputColumns());
+    if (!structure) {
+        return 8.0;
+    }
+    for (const auto& [fieldName, fieldType] : structure.Cast()->Fields) {
+        if (fieldName == name) {
+            return EstimateTypeWidth(fieldType);
+        }
+    }
+    return 8.0;
+}
+
+double JoinKeyWidth(const TOperatorPtr& left, const TOperatorPtr& right,
+    const std::vector<TJoinKey>& keys)
+{
+    double total = 0.0;
+    for (const auto& key : keys) {
+        total += std::max(
+            ColumnWidth(left, key.Left),
+            ColumnWidth(right, key.Right));
+    }
+    return total;
+}
 
 double EstimateSelectivity(const TExprPtr& atom, TStatsPtr inputStats, std::shared_ptr<TStructType> operatorType) {
     // TODO: eval consts
@@ -239,6 +324,9 @@ TStatsPtr ComputeFilterStats(const std::shared_ptr<TFilterOperator>& filter) {
     auto outputStats = std::make_shared<TStats>();
     outputStats->ColumnStats = inputStats->ColumnStats;
     outputStats->RowCount = std::max<uint64_t>(1, inputStats->RowCount * selectivity);
+    outputStats->Cost = inputStats->Cost
+        + static_cast<double>(inputStats->RowCount)
+            * std::max(OutputRowWidth(filter->Input()), 1.0);
     return outputStats;
 }
 
@@ -249,6 +337,9 @@ TStatsPtr ComputeProjectStats(const std::shared_ptr<TProjectOperator>& project) 
     }
     auto outputStats = std::make_shared<TStats>();
     outputStats->RowCount = inputStats->RowCount;
+    outputStats->Cost = inputStats->Cost
+        + static_cast<double>(outputStats->RowCount)
+            * std::max(OutputRowWidth(project), 1.0);
     for (const auto& proj : project->Projections()) {
         if (auto ident = TMaybeNode<TIdentExpr>(proj.Expression)) {
             auto colName = ident.Cast()->Name;
@@ -267,27 +358,23 @@ TStatsPtr ComputeJoinStats(const std::shared_ptr<TJoinOperator>& join) {
     if (!leftStats || !rightStats) {
         return nullptr;
     }
-    double ndvL = 1.0;
-    double ndvR = 1.0;
+    std::vector<std::pair<double, double>> keyNdvs;
     for (const auto& key : join->Keys()) {
         double leftNdv = 100.0; // unknown ndv
         double rightNdv = 100.0; // unknown ndv
         auto leftColStatsIt = leftStats->ColumnStats.find(key.Left);
         auto rightColStatsIt = rightStats->ColumnStats.find(key.Right);
-        if (leftColStatsIt != leftStats->ColumnStats.end() && leftColStatsIt->second->Ndv)
-        {
+        if (leftColStatsIt != leftStats->ColumnStats.end() && leftColStatsIt->second->Ndv) {
             leftNdv = *leftColStatsIt->second->Ndv;
         }
-        if (rightColStatsIt != rightStats->ColumnStats.end() && rightColStatsIt->second->Ndv)
-        {
+        if (rightColStatsIt != rightStats->ColumnStats.end() && rightColStatsIt->second->Ndv) {
             rightNdv = *rightColStatsIt->second->Ndv;
         }
-        ndvL *= leftNdv;
-        ndvR *= rightNdv;
+        keyNdvs.emplace_back(leftNdv, rightNdv);
     }
-    ndvL = std::min(ndvL, (double)leftStats->RowCount);
-    ndvR = std::min(ndvR, (double)rightStats->RowCount);
-    double denom = std::max({ndvL, ndvR, 1.0});
+    auto card = EstimateEquiJoin(leftStats->RowCount, rightStats->RowCount, keyNdvs);
+    double ndvL = card.NdvL;
+    double ndvR = card.NdvR;
     auto outputStats = std::make_shared<TStats>();
 
     auto jt = join->JoinType();
@@ -303,7 +390,7 @@ TStatsPtr ComputeJoinStats(const std::shared_ptr<TJoinOperator>& join) {
             outputStats->ColumnStats[colName] = colStats;
         }
     }
-    uint64_t rowCount = std::max<uint64_t>(1, (uint64_t)((double)leftStats->RowCount * rightStats->RowCount / denom));
+    uint64_t rowCount = std::max<uint64_t>(1, (uint64_t)card.Rows);
     switch (join->JoinType()) {
         case EJoinType::LeftSemi:
         case EJoinType::LeftAnti: {
@@ -336,6 +423,14 @@ TStatsPtr ComputeJoinStats(const std::shared_ptr<TJoinOperator>& join) {
             break;
     }
     outputStats->RowCount = rowCount;
+    outputStats->Cost = EstimateJoinCost(
+        leftStats->Cost,
+        rightStats->Cost,
+        static_cast<double>(leftStats->RowCount),
+        static_cast<double>(rightStats->RowCount),
+        static_cast<double>(rowCount),
+        OutputRowWidth(join),
+        JoinKeyWidth(join->Left(), join->Right(), join->Keys()));
 
     // Post-join ndv fixup. ColumnStats are shared_ptr aliased with the child
     // (and ultimately the source) stats, so copy-on-write before touching Ndv —
@@ -378,6 +473,8 @@ TStatsPtr ComputeSourceStats(const std::shared_ptr<TSourceOperator>& source) {
     const std::string& alias = source->GetAlias();
     auto out = std::make_shared<TStats>();
     out->RowCount = raw->RowCount;
+    out->Cost = static_cast<double>(out->RowCount)
+        * std::max(OutputRowWidth(source), 1.0);
     for (const auto& col : source->GetSource().Schema().Columns) {
         auto it = raw->ColumnStats.find(std::string(col.Name));
         if (it != raw->ColumnStats.end()) {
@@ -406,6 +503,38 @@ TStatsPtr ComputeStatsFor(TOperatorPtr op) {
 }
 
 } // namespace
+
+TJoinCardinality EstimateEquiJoin(
+    double leftRows,
+    double rightRows,
+    const std::vector<std::pair<double, double>>& keyNdvs)
+{
+    double ndvL = 1.0;
+    double ndvR = 1.0;
+    for (const auto& [leftNdv, rightNdv] : keyNdvs) {
+        ndvL *= leftNdv;
+        ndvR *= rightNdv;
+    }
+    ndvL = std::min(ndvL, leftRows);
+    ndvR = std::min(ndvR, rightRows);
+    double denom = std::max({ndvL, ndvR, 1.0});
+    double rows = leftRows * rightRows / denom;
+    if (keyNdvs.size() > 1) {
+        bool sameCompositeDomain = true;
+        for (const auto& [leftNdv, rightNdv] : keyNdvs) {
+            const double lo = std::max(1.0, std::min(leftNdv, rightNdv));
+            const double hi = std::max(leftNdv, rightNdv);
+            if (hi / lo > 4.0) {
+                sameCompositeDomain = false;
+                break;
+            }
+        }
+        if (sameCompositeDomain) {
+            rows = std::max(rows, std::max(leftRows, rightRows));
+        }
+    }
+    return {rows, ndvL, ndvR};
+}
 
 TStatsPtr EstimateStats(TOperatorPtr op) {
     for (auto& child : op->Children()) {
