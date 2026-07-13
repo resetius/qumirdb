@@ -5,6 +5,7 @@
 #include <qdb/scheduler/plan_lowerer.h>
 #include <qdb/plan/build.h>
 #include <qdb/plan/pipeline.h>
+#include <qdb/plan/plan_print.h>
 #include <qdb/plan/ops/aggregate.h>
 #include <qdb/plan/ops/filter.h>
 #include <qdb/plan/ops/join.h>
@@ -197,102 +198,6 @@ std::expected<NQdb::TOperatorPtr, NQumir::TError> ParseSql(
     return NQdb::BuildPlan(*parsed, sources);
 }
 
-std::string ExprLine(const NQumir::NAst::TExprPtr& expr) {
-    if (!expr) {
-        return "";
-    }
-    return NQumir::NAst::NCore::PrintAst(expr, NQumir::NAst::NCore::TPrintOptions{ .Pretty = false });
-}
-
-std::string PlanLabel(const NQdb::TOperatorPtr& op) {
-    using namespace NQdb;
-
-    if (auto source = TMaybeOp<TSourceOperator>(op)) {
-        auto src = source.Cast();
-        std::string label = "source " + src->SourcePath();
-        if (!src->GetAlias().empty()) {
-            label += " AS " + src->GetAlias();
-        }
-        return label;
-    }
-    if (auto filter = TMaybeOp<TFilterOperator>(op)) {
-        return "filter " + ExprLine(filter.Cast()->Predicate());
-    }
-    if (auto project = TMaybeOp<TProjectOperator>(op)) {
-        std::string label = "project (";
-        const auto& specs = project.Cast()->Projections();
-        for (size_t i = 0; i < specs.size(); ++i) {
-            label += (i ? ", " : "") + specs[i].Name;
-        }
-        return label + ")";
-    }
-    if (auto aggregate = TMaybeOp<TAggregateOperator>(op)) {
-        auto agg = aggregate.Cast();
-        std::string label = "aggregate";
-        const auto& keys = agg->GroupKeys();
-        for (size_t i = 0; i < keys.size(); ++i) {
-            label += (i ? ", " : " keys=[") + keys[i];
-        }
-        if (!keys.empty()) {
-            label += "]";
-        }
-        const auto& aggs = agg->Aggs();
-        for (size_t i = 0; i < aggs.size(); ++i) {
-            label += (i ? ", " : " aggs=[") + aggs[i].Name + "=" + aggs[i].Func;
-        }
-        if (!aggs.empty()) {
-            label += "]";
-        }
-        return label;
-    }
-    if (auto join = TMaybeOp<TJoinOperator>(op)) {
-        auto j = join.Cast();
-        std::string label = "join " + std::string(JoinTypeName(j->JoinType()));
-        const auto& keys = j->Keys();
-        for (size_t i = 0; i < keys.size(); ++i) {
-            label += (i ? ", " : " [") + keys[i].Left + " = " + keys[i].Right;
-        }
-        if (!keys.empty()) {
-            label += "]";
-        }
-        if (j->Filter()) {
-            label += " residual " + ExprLine(j->Filter());
-        }
-        return label;
-    }
-    return std::string(op->RelName());
-}
-
-std::vector<NQdb::TOperatorPtr> ChildOps(const NQdb::TOperatorPtr& op) {
-    std::vector<NQdb::TOperatorPtr> out;
-    for (const auto& child : op->Children()) {
-        if (auto childOp = NQumir::NAst::TMaybeNode<NQdb::IOperator>(child)) {
-            out.push_back(childOp.Cast());
-        }
-    }
-    return out;
-}
-
-// Box-drawing tree of the plan.
-void PrintPlanTree(
-    std::ostream& out,
-    const NQdb::TOperatorPtr& op,
-    const std::string& prefix = "",
-    bool isLast = true,
-    bool isRoot = true)
-{
-    out << prefix;
-    if (!isRoot) {
-        out << (isLast ? "└─ " : "├─ ");
-    }
-    out << PlanLabel(op) << "\n";
-
-    auto children = ChildOps(op);
-    std::string childPrefix = isRoot ? prefix : prefix + (isLast ? "   " : "│  ");
-    for (size_t i = 0; i < children.size(); ++i) {
-        PrintPlanTree(out, children[i], childPrefix, i + 1 == children.size(), false);
-    }
-}
 
 // If `text` begins with the word "explain" (case-insensitive), strip it and
 // return true.
