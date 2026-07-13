@@ -36,6 +36,7 @@ add_library(qumirdb
     plan/passes/factor_conjuncts.cpp
     plan/clone_expr.cpp
     plan/pipeline.cpp
+    plan/plan_print.cpp
     plan/build.cpp
     kernel/column_value.cpp
     kernel/gen.cpp
