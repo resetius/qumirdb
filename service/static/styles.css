@@ -457,6 +457,7 @@ button:hover {
 
 .drawer-left {
   left: 0;
+  grid-template-rows: 48px 1fr;
 }
 
 .drawer.open {
@@ -477,6 +478,12 @@ button:hover {
   font-size: 14px;
 }
 
+.drawer-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .drawer-list {
   overflow: auto;
   padding: 8px;
@@ -493,6 +500,82 @@ button:hover {
 .list-item.active {
   border-color: var(--accent);
   background: #1d2b3b;
+}
+
+.query-folder {
+  margin-bottom: 8px;
+}
+
+.query-folder-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+.query-folder-toggle {
+  flex: none;
+  width: 28px;
+  height: 32px;
+}
+
+.query-folder-select {
+  flex: 1;
+  min-width: 0;
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px;
+  text-align: left;
+  border-radius: 0;
+}
+
+.query-folder-select.active {
+  border-color: var(--accent);
+  background: #1d2b3b;
+}
+
+.query-folder-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.query-folder-count {
+  flex: none;
+  min-width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.query-folder-action {
+  flex: none;
+  width: 28px;
+  height: 32px;
+  color: var(--muted);
+}
+
+.query-folder-action:hover {
+  color: #ff6b6b;
+  background: rgba(255, 107, 107, 0.12);
+}
+
+.query-folder-children {
+  padding-left: 20px;
+}
+
+.query-folder-children[hidden] {
+  display: none;
 }
 
 .query-item {
@@ -533,6 +616,34 @@ button:hover {
   color: var(--muted);
   font-size: 11px;
   font-variant-numeric: tabular-nums;
+}
+
+.query-action {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 3px;
+  color: var(--muted);
+  opacity: 0.65;
+  transition: opacity 0.12s ease, color 0.12s ease, background 0.12s ease;
+}
+
+.query-action svg {
+  width: 14px;
+  height: 14px;
+}
+
+.query-item:hover .query-action,
+.query-action:focus-visible {
+  opacity: 1;
+}
+
+.query-action:hover {
+  color: var(--accent);
+  background: rgba(77, 163, 255, 0.12);
 }
 
 .query-stop {
