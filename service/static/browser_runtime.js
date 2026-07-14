@@ -1687,6 +1687,8 @@ const JoinStreamMode = Object.freeze({
   STREAM_RIGHT_AGAINST_LEFT: 'stream-right-against-left',
 });
 
+const BROWSER_JOIN_OUTPUT_BATCH_ROWS = 4096;
+
 const CrossJoinOp = Object.freeze({
   EMIT: 0n,
   DESTROY: 1n,
@@ -1784,7 +1786,7 @@ function streamJoinBatch(state, side, rowSet, asWasm = false) {
     const streamRightPtr = isLeft ? state.rightStore.dataPtr() : rowsetPtr;
     while (state.materializeCursor < count) {
       results.push(drainMaterializedBatch(
-        state, 1024, streamLeftPtr, streamRightPtr, asWasm));
+        state, BROWSER_JOIN_OUTPUT_BATCH_ROWS, streamLeftPtr, streamRightPtr, asWasm));
     }
     arena.view().setBigInt64(state.pairBuffer + pairLayout.count, 0n, true);
     state.materializeCursor = 0;
@@ -1917,7 +1919,7 @@ function finalizeOuterJoinState(state) {
   state.outerFinalized = true;
 }
 
-function drainJoinPairs(state, maxRows = 1024, asWasm = false) {
+function drainJoinPairs(state, maxRows = BROWSER_JOIN_OUTPUT_BATCH_ROWS, asWasm = false) {
   const pairLayout = state.layout.pairBuffer;
   const dv = state.arena.view();
   const count = Number(dv.getBigInt64(state.pairBuffer + pairLayout.count, true));
@@ -2041,7 +2043,7 @@ function updateCrossLeftState(state, rowSet) {
   }
 }
 
-function drainCrossJoinPairs(state, maxRows = 1024, asWasm = false) {
+function drainCrossJoinPairs(state, maxRows = BROWSER_JOIN_OUTPUT_BATCH_ROWS, asWasm = false) {
   const pairLayout = state.layout.pairBuffer;
   const dv = state.arena.view();
   const count = Number(dv.getBigInt64(state.pairBuffer + pairLayout.count, true));
@@ -2747,7 +2749,7 @@ class JoinTask {
       this.state = createJoinState(this.kernel, this.layout, this.stage);
     }
 
-    const drained = drainJoinPairs(this.state, 1024, asWasm);
+    const drained = drainJoinPairs(this.state, BROWSER_JOIN_OUTPUT_BATCH_ROWS, asWasm);
     if (drained.length > 0) {
       this.ready.push(...drained);
       return this.execute();
@@ -2756,14 +2758,14 @@ class JoinTask {
     if (this.bothDone || (this.leftDone && this.rightDone)) {
       if (isLeftSemiAntiJoin(this.stage) && !this.state.semiAntiFinalized) {
         finalizeSemiAntiJoinState(this.state);
-        this.ready.push(...drainJoinPairs(this.state, 1024, asWasm));
+        this.ready.push(...drainJoinPairs(this.state, BROWSER_JOIN_OUTPUT_BATCH_ROWS, asWasm));
         if (this.ready.length > 0) {
           return this.execute();
         }
       }
       if (isOuterJoin(this.stage) && !this.state.outerFinalized) {
         finalizeOuterJoinState(this.state);
-        this.ready.push(...drainJoinPairs(this.state, 1024, asWasm));
+        this.ready.push(...drainJoinPairs(this.state, BROWSER_JOIN_OUTPUT_BATCH_ROWS, asWasm));
         if (this.ready.length > 0) {
           return this.execute();
         }
@@ -2776,7 +2778,7 @@ class JoinTask {
 
     const progressed = this.pullOneInputBatch();
     if (progressed) {
-      this.ready.push(...drainJoinPairs(this.state, 1024, asWasm));
+      this.ready.push(...drainJoinPairs(this.state, BROWSER_JOIN_OUTPUT_BATCH_ROWS, asWasm));
       if (this.ready.length > 0) {
         return this.execute();
       }
@@ -2982,7 +2984,7 @@ class CrossJoinTask {
       this.state = createCrossJoinState(this.kernel, this.layout, this.stage);
     }
 
-    const drained = drainCrossJoinPairs(this.state, 1024, asWasm);
+    const drained = drainCrossJoinPairs(this.state, BROWSER_JOIN_OUTPUT_BATCH_ROWS, asWasm);
     if (drained.length > 0) {
       this.ready.push(...drained);
       return this.execute();
@@ -3006,7 +3008,7 @@ class CrossJoinTask {
       if (fetched.result === FetchResult.NO_DATA) return TaskResult.NEED_DATA;
       if (fetched.result === FetchResult.OK) {
         updateCrossLeftState(this.state, fetched.rowSet);
-        this.ready.push(...drainCrossJoinPairs(this.state, 1024, asWasm));
+        this.ready.push(...drainCrossJoinPairs(this.state, BROWSER_JOIN_OUTPUT_BATCH_ROWS, asWasm));
         if (this.ready.length > 0) {
           return this.execute();
         }

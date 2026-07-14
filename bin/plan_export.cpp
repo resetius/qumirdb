@@ -3,6 +3,7 @@
 #include <qdb/plan/build.h>
 #include <qdb/plan/pipeline.h>
 #include <qdb/plan/plan_print.h>
+#include <qdb/plan/stats_codec.h>
 #include <qdb/plan/ops/aggregate.h>
 #include <qdb/plan/ops/filter.h>
 #include <qdb/plan/ops/join.h>
@@ -46,6 +47,7 @@
 #include <llvm/Support/raw_ostream.h>
 
 #include <algorithm>
+#include <bit>
 #include <cstdlib>
 #include <cstring>
 #include <cstdio>
@@ -77,10 +79,53 @@ constexpr int64_t WasmStackSize = 262144;
 constexpr int64_t WasmInitialSlackPages = 256;
 
 struct TTableStats {
+    struct TScalar {
+        enum class EKind {
+            Integer,
+            Number,
+        };
+
+        EKind Kind = EKind::Integer;
+        int64_t Integer = 0;
+        double Number = 0.0;
+    };
+
+    struct TColumn {
+        std::string Name;
+        std::optional<uint64_t> Ndv;
+        bool NdvIsExact = false;
+        std::optional<uint64_t> NullCount;
+        std::optional<TScalar> Min;
+        std::optional<TScalar> Max;
+        std::vector<TScalar> Histogram;
+    };
+
     int64_t Rows = 0;
     int64_t Bytes = 0;
     size_t RowGroups = 0;
+    std::vector<TColumn> Columns;
 };
+
+std::optional<uint64_t> EncodeStatsScalar(
+    const TTableStats::TScalar& value,
+    const NQumir::NAst::TTypePtr& type)
+{
+    switch (NQdb::StatsScalarKind(type)) {
+        case NQdb::EStatsScalarKind::None:
+            return std::nullopt;
+        case NQdb::EStatsScalarKind::Float:
+            return std::bit_cast<uint64_t>(
+                value.Kind == TTableStats::TScalar::EKind::Number
+                    ? value.Number
+                    : static_cast<double>(value.Integer));
+        case NQdb::EStatsScalarKind::Int:
+            return std::bit_cast<uint64_t>(
+                value.Kind == TTableStats::TScalar::EKind::Integer
+                    ? value.Integer
+                    : static_cast<int64_t>(value.Number));
+    }
+    return std::nullopt;
+}
 
 class TSchemaOnlySource final
     : public NQdb::ISource
@@ -111,7 +156,56 @@ public:
     }
 
     const NQdb::TStatsPtr Stats() const override {
-        return nullptr;
+        if (Stats_.Rows <= 0) {
+            return nullptr;
+        }
+        auto stats = std::make_shared<NQdb::TStats>();
+        stats->RowCount = static_cast<uint64_t>(Stats_.Rows);
+        for (const auto& column : Stats_.Columns) {
+            auto schemaIt = std::find_if(
+                AllColumns_.begin(),
+                AllColumns_.end(),
+                [&](const NQdb::TColumnSchema& schemaColumn) {
+                    return schemaColumn.Name == column.Name;
+                });
+            if (schemaIt == AllColumns_.end()) {
+                continue;
+            }
+
+            auto columnStats = std::make_shared<NQdb::TStats::TColumnStats>();
+            bool hasStats = false;
+            if (column.Ndv) {
+                columnStats->Ndv = *column.Ndv;
+                hasStats = true;
+            }
+            columnStats->NdvIsExact = column.NdvIsExact;
+            if (column.NullCount) {
+                columnStats->NullCount = *column.NullCount;
+                hasStats = true;
+            }
+            if (column.Min) {
+                if (auto encoded = EncodeStatsScalar(*column.Min, schemaIt->Type)) {
+                    columnStats->MinValue = *encoded;
+                    hasStats = true;
+                }
+            }
+            if (column.Max) {
+                if (auto encoded = EncodeStatsScalar(*column.Max, schemaIt->Type)) {
+                    columnStats->MaxValue = *encoded;
+                    hasStats = true;
+                }
+            }
+            for (const auto& bucket : column.Histogram) {
+                if (auto encoded = EncodeStatsScalar(bucket, schemaIt->Type)) {
+                    columnStats->Histogram.push_back(*encoded);
+                }
+            }
+            hasStats = hasStats || !columnStats->Histogram.empty();
+            if (hasStats) {
+                stats->ColumnStats[column.Name] = std::move(columnStats);
+            }
+        }
+        return stats;
     }
 
     bool Next(NQdb::TRowSet&) override {
@@ -468,6 +562,67 @@ NQumir::NAst::TTypePtr ParseType(std::string_view typeName) {
     throw std::runtime_error("unsupported schema type: " + std::string(typeName));
 }
 
+std::optional<uint64_t> ParseUnsignedStatsInteger(
+    const llvm::json::Object& object,
+    const char* key)
+{
+    auto value = object.getInteger(key);
+    if (!value || *value < 0) {
+        return std::nullopt;
+    }
+    return static_cast<uint64_t>(*value);
+}
+
+std::optional<TTableStats::TScalar> ParseStatsScalar(const llvm::json::Value& value) {
+    if (auto integer = value.getAsInteger()) {
+        return TTableStats::TScalar{
+            .Kind = TTableStats::TScalar::EKind::Integer,
+            .Integer = *integer,
+        };
+    }
+    if (auto number = value.getAsNumber()) {
+        return TTableStats::TScalar{
+            .Kind = TTableStats::TScalar::EKind::Number,
+            .Number = *number,
+        };
+    }
+    if (auto boolean = value.getAsBoolean()) {
+        return TTableStats::TScalar{
+            .Kind = TTableStats::TScalar::EKind::Integer,
+            .Integer = *boolean ? 1 : 0,
+        };
+    }
+    return std::nullopt;
+}
+
+std::optional<TTableStats::TColumn> ParseColumnStats(const llvm::json::Object& object) {
+    auto name = object.getString("name");
+    if (!name) {
+        return std::nullopt;
+    }
+
+    TTableStats::TColumn out;
+    out.Name = std::string(*name);
+    out.Ndv = ParseUnsignedStatsInteger(object, "ndv");
+    out.NdvIsExact = object.getBoolean("ndv_exact").value_or(false);
+    out.NullCount = ParseUnsignedStatsInteger(object, "null_count");
+    if (const auto* minValue = object.get("min")) {
+        out.Min = ParseStatsScalar(*minValue);
+    }
+    if (const auto* maxValue = object.get("max")) {
+        out.Max = ParseStatsScalar(*maxValue);
+    }
+    if (const auto* histogram = object.getArray("histogram")) {
+        out.Histogram.reserve(histogram->size());
+        for (const auto& bucket : *histogram) {
+            if (auto scalar = ParseStatsScalar(bucket)) {
+                out.Histogram.push_back(*scalar);
+            }
+        }
+    }
+    return out;
+}
+
 std::vector<std::pair<std::string, NQumir::NAst::TTypePtr>> ParseTableColumns(
     const llvm::json::Object& table)
 {
@@ -510,6 +665,18 @@ TTableStats ParseTableStats(const llvm::json::Object& table) {
     if (auto rowGroups = object->getInteger("rowGroups")) {
         if (*rowGroups > 0) {
             stats.RowGroups = static_cast<size_t>(*rowGroups);
+        }
+    }
+    if (const auto* columns = object->getArray("columns")) {
+        stats.Columns.reserve(columns->size());
+        for (const auto& columnValue : *columns) {
+            const auto* column = columnValue.getAsObject();
+            if (!column) {
+                continue;
+            }
+            if (auto parsed = ParseColumnStats(*column)) {
+                stats.Columns.push_back(std::move(*parsed));
+            }
         }
     }
     if (stats.Bytes == 0 && stats.Rows > 0) {
@@ -682,6 +849,35 @@ std::string LogicalPlanAstText(const NQdb::TOperatorPtr& plan) {
             .NodePrinters = NQdb::NSexp::MakeRelPrinters(),
         });
     return out.str();
+}
+
+llvm::json::Object JoinReorderDiagnosticsJson(
+    const NQdb::TJoinReorderDiagnostics& diagnostics)
+{
+    llvm::json::Array chains;
+    for (const auto& chain : diagnostics.Chains) {
+        chains.push_back(llvm::json::Object{
+            {"leafCount", static_cast<int64_t>(chain.LeafCount)},
+            {"edgeCount", static_cast<int64_t>(chain.EdgeCount)},
+            {"enableCbo", chain.EnableCbo},
+            {"usedCbo", chain.UsedCbo},
+            {"strategy", chain.Strategy},
+            {"reason", chain.Reason},
+        });
+    }
+    return llvm::json::Object{
+        {"enableCbo", diagnostics.EnableCbo},
+        {"usedCbo", diagnostics.UsedCbo},
+        {"chains", std::move(chains)},
+    };
+}
+
+llvm::json::Object PlanPassDiagnosticsJson(
+    const NQdb::TPlanPassDiagnostics& diagnostics)
+{
+    return llvm::json::Object{
+        {"joinReorder", JoinReorderDiagnosticsJson(diagnostics.JoinReorder)},
+    };
 }
 
 std::string LogicalNodeAstText(const NQdb::TOperatorPtr& op) {
@@ -1869,8 +2065,9 @@ llvm::json::Object BuildBundle(TExportRequest& request) {
         return ErrorObject("parse", plan.error().ToString());
     }
 
+    NQdb::TPlanPassDiagnostics planDiagnostics;
     try {
-        NQdb::ApplyPlanPasses(*plan);
+        NQdb::ApplyPlanPasses(*plan, {.Diagnostics = &planDiagnostics});
     } catch (const std::exception& e) {
         return ErrorObject("logical", e.what());
     }
@@ -1934,6 +2131,7 @@ llvm::json::Object BuildBundle(TExportRequest& request) {
             {"dataset", llvm::json::Object{
                 {"source", "browser"},
             }},
+            {"planner", PlanPassDiagnosticsJson(planDiagnostics)},
             {"exec", std::move(execPlan)},
             {"plans", llvm::json::Object{
                 {"logicalText", LogicalPlanTreeText(*plan)},

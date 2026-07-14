@@ -156,11 +156,117 @@ function rowGroupStats(metadata) {
   const bytes = rowGroups.reduce((sum, group) => {
     return sum + Number(group.total_byte_size ?? group.totalByteSize ?? 0);
   }, 0);
-  return {
+  const stats = {
     rows,
     rowGroups: rowGroups.length || 1,
     bytes
   };
+  const columns = customColumnStats(metadata);
+  if (columns.length) {
+    stats.columns = columns;
+  }
+  return stats;
+}
+
+function metadataEntries(metadata) {
+  const candidates = [
+    metadata.key_value_metadata,
+    metadata.keyValueMetadata,
+    metadata.keyValueMetadata?.key_value,
+    metadata.fileMetaData?.key_value_metadata,
+    metadata.fileMetaData?.keyValueMetadata,
+  ].filter(Boolean);
+
+  for (const value of candidates) {
+    if (Array.isArray(value)) {
+      return value;
+    }
+    if (value instanceof Map) {
+      return Array.from(value.entries()).map(([key, entryValue]) => ({ key, value: entryValue }));
+    }
+    if (typeof value === 'object') {
+      return Object.entries(value).map(([key, entryValue]) => ({ key, value: entryValue }));
+    }
+  }
+  return [];
+}
+
+function decodeMetadataValue(value) {
+  if (typeof value === 'string') {
+    return value;
+  }
+  if (value instanceof Uint8Array) {
+    return new TextDecoder().decode(value);
+  }
+  if (value instanceof ArrayBuffer) {
+    return new TextDecoder().decode(new Uint8Array(value));
+  }
+  if (ArrayBuffer.isView(value)) {
+    return new TextDecoder().decode(new Uint8Array(
+      value.buffer, value.byteOffset, value.byteLength));
+  }
+  if (value && typeof value === 'object') {
+    return decodeMetadataValue(value.value ?? value.bytes ?? value.data);
+  }
+  return null;
+}
+
+function metadataValue(metadata, key) {
+  for (const entry of metadataEntries(metadata)) {
+    if (Array.isArray(entry) && entry[0] === key) {
+      return decodeMetadataValue(entry[1]);
+    }
+    const entryKey = entry.key ?? entry.Key ?? entry.name;
+    if (entryKey !== key) {
+      continue;
+    }
+    return decodeMetadataValue(entry.value ?? entry.Value);
+  }
+  return null;
+}
+
+function copyJsonStatsValue(out, input, outputName, ...inputNames) {
+  for (const name of inputNames) {
+    if (!Object.prototype.hasOwnProperty.call(input, name)) {
+      continue;
+    }
+    const value = input[name];
+    if (typeof value === 'number' || typeof value === 'string' || typeof value === 'boolean') {
+      out[outputName] = value;
+      return;
+    }
+  }
+}
+
+function normalizeColumnStats(column) {
+  if (!column || typeof column !== 'object' || typeof column.name !== 'string') {
+    return null;
+  }
+  const out = { name: column.name };
+  copyJsonStatsValue(out, column, 'ndv', 'ndv');
+  copyJsonStatsValue(out, column, 'ndv_exact', 'ndv_exact', 'ndvExact');
+  copyJsonStatsValue(out, column, 'null_count', 'null_count', 'nullCount');
+  copyJsonStatsValue(out, column, 'min', 'min');
+  copyJsonStatsValue(out, column, 'max', 'max');
+  if (Array.isArray(column.histogram)) {
+    out.histogram = column.histogram.filter(value =>
+      typeof value === 'number' || typeof value === 'string' || typeof value === 'boolean');
+  }
+  return Object.keys(out).length > 1 ? out : null;
+}
+
+function customColumnStats(metadata) {
+  const rawStats = metadataValue(metadata, 'stats');
+  if (!rawStats) {
+    return [];
+  }
+  try {
+    const parsed = JSON.parse(rawStats);
+    const columns = Array.isArray(parsed?.columns) ? parsed.columns : [];
+    return columns.map(normalizeColumnStats).filter(Boolean);
+  } catch {
+    return [];
+  }
 }
 
 export async function readParquetTable(file) {

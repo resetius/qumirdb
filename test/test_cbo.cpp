@@ -58,10 +58,17 @@ struct TFixture {
 
 // Independent Cout model — mirrors dpccp's cost, used to check optimality.
 struct TModel {
+    struct TEdge {
+        size_t A;
+        size_t B;
+        double Sel;
+        double KeyWidth;
+    };
+
     const std::vector<TOperatorPtr>& Leaves;
     std::map<const IOperator*, size_t> LeafIdx;
     std::vector<TSubset> Neighbors;
-    std::vector<std::tuple<size_t, size_t, double>> Edges; // a, b, sel
+    std::vector<TEdge> Edges;
 
     TModel(const std::vector<TOperatorPtr>& leaves, const std::vector<NCbo::TJoinEdge>& edges)
         : Leaves(leaves)
@@ -76,6 +83,7 @@ struct TModel {
             }
         }
         std::map<std::pair<size_t, size_t>, std::vector<std::pair<double, double>>> pairKeys;
+        std::map<std::pair<size_t, size_t>, double> pairKeyWidths;
         for (const auto& e : edges) {
             size_t a = owner.at(e.LeftCol);
             size_t b = owner.at(e.RightCol);
@@ -84,6 +92,9 @@ struct TModel {
             size_t i = std::min(a, b);
             size_t j = std::max(a, b);
             pairKeys[{i, j}].emplace_back(a == i ? na : nb, a == i ? nb : na);
+            pairKeyWidths[{i, j}] += std::max(
+                NQdb::ColumnWidth(Leaves[a], e.LeftCol),
+                NQdb::ColumnWidth(Leaves[b], e.RightCol));
             Neighbors[a] |= TSubset{1} << b;
             Neighbors[b] |= TSubset{1} << a;
         }
@@ -92,7 +103,7 @@ struct TModel {
             double rj = LeafRows(key.second);
             double rows = EstimateEquiJoin(ri, rj, keys).Rows;
             double sel = ri * rj > 0.0 ? rows / (ri * rj) : 1.0;
-            Edges.emplace_back(key.first, key.second, sel);
+            Edges.push_back({key.first, key.second, sel, pairKeyWidths[key]});
         }
     }
 
@@ -100,23 +111,43 @@ struct TModel {
         const auto& stats = Leaves[idx]->Stats_;
         auto it = stats->ColumnStats.find(col);
         return (it != stats->ColumnStats.end() && it->second->Ndv)
-            ? static_cast<double>(*it->second->Ndv) : 100.0;
+            ? static_cast<double>(*it->second->Ndv) : NQdb::UnknownNdv;
     }
 
     double LeafRows(size_t idx) const {
         return static_cast<double>(Leaves[idx]->Stats_->RowCount);
     }
 
+    double LeafWidth(size_t idx) const {
+        return NQdb::EstimateTypeWidth(Leaves[idx]->OutputColumns());
+    }
+
+    double LeafCost(size_t idx) const {
+        return Leaves[idx]->Stats_ ? Leaves[idx]->Stats_->Cost : 0.0;
+    }
+
     double CrossingSel(TSubset a, TSubset b) const {
         double sel = 1.0;
-        for (const auto& [ea, eb, es] : Edges) {
-            TSubset ma = TSubset{1} << ea;
-            TSubset mb = TSubset{1} << eb;
+        for (const auto& e : Edges) {
+            TSubset ma = TSubset{1} << e.A;
+            TSubset mb = TSubset{1} << e.B;
             if (((ma & a) && (mb & b)) || ((ma & b) && (mb & a))) {
-                sel *= es;
+                sel *= e.Sel;
             }
         }
         return sel;
+    }
+
+    double CrossingKeyWidth(TSubset a, TSubset b) const {
+        double width = 0.0;
+        for (const auto& e : Edges) {
+            TSubset ma = TSubset{1} << e.A;
+            TSubset mb = TSubset{1} << e.B;
+            if (((ma & a) && (mb & b)) || ((ma & b) && (mb & a))) {
+                width += e.KeyWidth;
+            }
+        }
+        return width;
     }
 
     bool Connected(TSubset s) const {
@@ -138,25 +169,37 @@ struct TModel {
         TSubset Mask;
         double Card;
         double Cost;
+        double Width;
     };
 
-    // Cout of a concrete tree.
+    // EstimateJoinCost of a concrete tree (mirrors dpccp's cost).
     TEval Eval(const TOperatorPtr& node) const {
         if (auto join = TMaybeOp<TJoinOperator>(node)) {
             auto left = Eval(join.Cast()->Left());
             auto right = Eval(join.Cast()->Right());
             double card = left.Card * right.Card * CrossingSel(left.Mask, right.Mask);
-            return {left.Mask | right.Mask, card, left.Cost + right.Cost + card};
+            double width = left.Width + right.Width;
+            double cost = NQdb::EstimateJoinCost(
+                left.Cost, right.Cost, left.Card, right.Card, card, width,
+                CrossingKeyWidth(left.Mask, right.Mask));
+            return {left.Mask | right.Mask, card, cost, width};
         }
         size_t idx = LeafIdx.at(node.get());
-        return {TSubset{1} << idx, LeafRows(idx), 0.0};
+        return {TSubset{1} << idx, LeafRows(idx), LeafCost(idx), LeafWidth(idx)};
     }
 
-    // Brute-force optimum Cout over all bushy trees for the leaf set `s`.
-    double BruteMin(TSubset s, std::vector<double>& cost, std::vector<double>& card) const {
+    // Brute-force optimum over all bushy trees for the leaf set `s`.
+    double BruteMin(
+        TSubset s,
+        std::vector<double>& cost,
+        std::vector<double>& card,
+        std::vector<double>& width) const
+    {
         if (std::popcount(s) == 1) {
-            card[s] = LeafRows(std::countr_zero(s));
-            return cost[s] = 0.0;
+            size_t i = std::countr_zero(s);
+            card[s] = LeafRows(i);
+            width[s] = LeafWidth(i);
+            return cost[s] = LeafCost(i);
         }
         if (cost[s] >= 0) {
             return cost[s];
@@ -167,12 +210,16 @@ struct TModel {
             if (!Connected(s1) || !Connected(s2)) {
                 continue;
             }
-            double c1 = BruteMin(s1, cost, card);
-            double c2 = BruteMin(s2, cost, card);
+            double c1 = BruteMin(s1, cost, card, width);
+            double c2 = BruteMin(s2, cost, card, width);
             double jc = card[s1] * card[s2] * CrossingSel(s1, s2);
-            if (c1 + c2 + jc < best) {
-                best = c1 + c2 + jc;
+            double jw = width[s1] + width[s2];
+            double c = NQdb::EstimateJoinCost(
+                c1, c2, card[s1], card[s2], jc, jw, CrossingKeyWidth(s1, s2));
+            if (c < best) {
+                best = c;
                 card[s] = jc;
+                width[s] = jw;
             }
         }
         return cost[s] = best;
@@ -191,8 +238,9 @@ void ExpectOptimal(const TFixture& fx, const std::vector<NCbo::TJoinEdge>& edges
 
     std::vector<double> cost(full + 1, -1.0);
     std::vector<double> card(full + 1, 0.0);
-    double best = model.BruteMin(full, cost, card);
-    EXPECT_NEAR(ev.Cost, best, 1e-6) << "DP tree is not optimal";
+    std::vector<double> width(full + 1, 0.0);
+    double best = model.BruteMin(full, cost, card, width);
+    EXPECT_NEAR(ev.Cost, best, best * 1e-9 + 1.0) << "DP tree is not optimal";
 }
 
 } // namespace

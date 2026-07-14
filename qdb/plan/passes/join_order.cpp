@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <memory>
+#include <optional>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -27,6 +28,17 @@ namespace {
 struct TEdge {
     std::string Left;
     std::string Right;
+};
+
+struct TOwnedEdge {
+    NCbo::TJoinEdge Edge;
+    size_t LeftLeaf;
+    size_t RightLeaf;
+};
+
+struct TContext {
+    bool EnableCbo = true;
+    TJoinReorderDiagnostics* Diagnostics = nullptr;
 };
 
 void CollectEquiEdges(const TExprPtr& predicate, std::vector<TEdge>& out) {
@@ -146,10 +158,68 @@ TOperatorPtr HeuristicChain(
     return result;
 }
 
+bool HasRowStats(const TOperatorPtr& leaf) {
+    return leaf && leaf->Stats_ && leaf->Stats_->RowCount > 0;
+}
+
+bool HasColumnNdv(const TOperatorPtr& leaf, const std::string& col) {
+    if (!HasRowStats(leaf)) {
+        return false;
+    }
+    auto it = leaf->Stats_->ColumnStats.find(col);
+    return it != leaf->Stats_->ColumnStats.end()
+        && it->second
+        && it->second->Ndv
+        && *it->second->Ndv > 0;
+}
+
+std::optional<std::string> CboStatsFallbackReason(
+    const std::vector<TOperatorPtr>& leaves,
+    const std::vector<TOwnedEdge>& edges)
+{
+    if (edges.empty()) {
+        return "no equi-join edges";
+    }
+    for (const auto& leaf : leaves) {
+        if (!HasRowStats(leaf)) {
+            return "missing row stats";
+        }
+    }
+    for (const auto& edge : edges) {
+        if (!HasColumnNdv(leaves[edge.LeftLeaf], edge.Edge.LeftCol) ||
+            !HasColumnNdv(leaves[edge.RightLeaf], edge.Edge.RightCol)) {
+            return "missing column NDV stats";
+        }
+    }
+    return std::nullopt;
+}
+
+void RecordJoinReorderChain(
+    TContext& ctx,
+    size_t leafCount,
+    size_t edgeCount,
+    bool usedCbo,
+    std::string strategy,
+    std::string reason = {})
+{
+    if (!ctx.Diagnostics) {
+        return;
+    }
+    ctx.Diagnostics->UsedCbo = ctx.Diagnostics->UsedCbo || usedCbo;
+    ctx.Diagnostics->Chains.push_back({
+        .LeafCount = leafCount,
+        .EdgeCount = edgeCount,
+        .EnableCbo = ctx.EnableCbo,
+        .UsedCbo = usedCbo,
+        .Strategy = std::move(strategy),
+        .Reason = std::move(reason),
+    });
+}
+
 TOperatorPtr BuildChain(
     const std::vector<TOperatorPtr>& leaves,
     const std::vector<TEdge>& edges,
-    bool enableCbo)
+    TContext& ctx)
 {
     const size_t n = leaves.size();
 
@@ -166,7 +236,7 @@ TOperatorPtr BuildChain(
     }
 
     std::vector<std::unordered_set<size_t>> adjacency(n);
-    std::vector<std::pair<NCbo::TJoinEdge, size_t>> graphEdges; // edge + its left leaf
+    std::vector<TOwnedEdge> graphEdges;
     for (const auto& edge : edges) {
         auto left = owner.find(edge.Left);
         auto right = owner.find(edge.Right);
@@ -175,9 +245,20 @@ TOperatorPtr BuildChain(
         }
         adjacency[left->second].insert(right->second);
         adjacency[right->second].insert(left->second);
-        graphEdges.push_back({{edge.Left, edge.Right}, left->second});
+        graphEdges.push_back({
+            .Edge = {edge.Left, edge.Right},
+            .LeftLeaf = left->second,
+            .RightLeaf = right->second,
+        });
     }
-    if (!enableCbo) {
+    if (!ctx.EnableCbo) {
+        RecordJoinReorderChain(
+            ctx, leaves.size(), graphEdges.size(), false, "heuristic", "cbo disabled");
+        return HeuristicChain(leaves, adjacency);
+    }
+    if (auto reason = CboStatsFallbackReason(leaves, graphEdges)) {
+        RecordJoinReorderChain(
+            ctx, leaves.size(), graphEdges.size(), false, "heuristic", *reason);
         return HeuristicChain(leaves, adjacency);
     }
 
@@ -209,12 +290,15 @@ TOperatorPtr BuildChain(
     }
     for (const auto& group : compLeaves) {
         if (group.size() > NCbo::MaxRelations) {
+            RecordJoinReorderChain(
+                ctx, leaves.size(), graphEdges.size(), false, "heuristic",
+                "too many relations for cbo");
             return HeuristicChain(leaves, adjacency);
         }
     }
     std::vector<std::vector<NCbo::TJoinEdge>> compEdges(components);
-    for (const auto& [edge, leaf] : graphEdges) {
-        compEdges[comp[leaf]].push_back(edge);
+    for (const auto& edge : graphEdges) {
+        compEdges[comp[edge.LeftLeaf]].push_back(edge.Edge);
     }
 
     // Optimal subtree per component; cross-join components smallest-first.
@@ -224,10 +308,15 @@ TOperatorPtr BuildChain(
             ? compLeaves[c].front()
             : NCbo::DpccpJoinOrder(compLeaves[c], compEdges[c]);
         if (!tree) {
+            RecordJoinReorderChain(
+                ctx, leaves.size(), graphEdges.size(), false, "heuristic",
+                "cbo returned no plan");
             return HeuristicChain(leaves, adjacency); // defensive
         }
         subtrees.push_back({compLeaves[c].size(), std::move(tree)});
     }
+    RecordJoinReorderChain(
+        ctx, leaves.size(), graphEdges.size(), true, "cbo");
     std::stable_sort(subtrees.begin(), subtrees.end(),
         [](const auto& a, const auto& b) { return a.first < b.first; });
 
@@ -243,53 +332,58 @@ TOperatorPtr BuildChain(
 // other operators (e.g. a decorrelation LEFT JOIN). Edges are reset across
 // project/aggregate, which redefine columns; BuildChain ignores edges whose
 // endpoints aren't owned by the chain's leaves (qualified names disambiguate).
-TOperatorPtr Reorder(TOperatorPtr node, std::vector<TEdge> edges, bool enableCbo) {
+TOperatorPtr Reorder(
+    TOperatorPtr node,
+    std::vector<TEdge> edges,
+    TContext& ctx)
+{
     if (!node) {
         return node;
     }
     if (auto maybeFilter = TMaybeOp<TFilterOperator>(node)) {
         auto filter = maybeFilter.Cast();
         CollectEquiEdges(filter->Predicate(), edges);
-        filter->MutableInput() = Reorder(filter->Input(), std::move(edges), enableCbo);
+        filter->MutableInput() = Reorder(
+            filter->Input(), std::move(edges), ctx);
         return filter;
     }
     if (IsReorderableJoin(node)) {
         std::vector<TOperatorPtr> leaves;
         CollectChainLeaves(node, leaves);
         for (auto& leaf : leaves) {
-            leaf = Reorder(std::move(leaf), {}, enableCbo);
+            leaf = Reorder(std::move(leaf), {}, ctx);
         }
-        return BuildChain(leaves, edges, enableCbo);
+        return BuildChain(leaves, edges, ctx);
     }
     if (auto maybeJoin = TMaybeOp<TJoinOperator>(node)) {
         auto join = maybeJoin.Cast();
-        join->MutableLeft() = Reorder(join->Left(), edges, enableCbo);
-        join->MutableRight() = Reorder(join->Right(), edges, enableCbo);
+        join->MutableLeft() = Reorder(join->Left(), edges, ctx);
+        join->MutableRight() = Reorder(join->Right(), edges, ctx);
         return join;
     }
     if (auto maybeProject = TMaybeOp<TProjectOperator>(node)) {
         auto project = maybeProject.Cast();
-        project->MutableInput() = Reorder(project->Input(), {}, enableCbo);
+        project->MutableInput() = Reorder(project->Input(), {}, ctx);
         return project;
     }
     if (auto maybeAggregate = TMaybeOp<TAggregateOperator>(node)) {
         auto aggregate = maybeAggregate.Cast();
-        aggregate->MutableInput() = Reorder(aggregate->Input(), {}, enableCbo);
+        aggregate->MutableInput() = Reorder(aggregate->Input(), {}, ctx);
         return aggregate;
     }
     if (auto maybeLimit = TMaybeOp<TLimitOperator>(node)) {
         auto limit = maybeLimit.Cast();
-        limit->MutableInput() = Reorder(limit->Input(), {}, enableCbo);
+        limit->MutableInput() = Reorder(limit->Input(), {}, ctx);
         return limit;
     }
     if (auto maybeSort = TMaybeOp<TSortOperator>(node)) {
         auto sort = maybeSort.Cast();
-        sort->MutableInput() = Reorder(sort->Input(), {}, enableCbo);
+        sort->MutableInput() = Reorder(sort->Input(), {}, ctx);
         return sort;
     }
     if (auto maybeTopSort = TMaybeOp<TTopSortOperator>(node)) {
         auto topSort = maybeTopSort.Cast();
-        topSort->MutableInput() = Reorder(topSort->Input(), {}, enableCbo);
+        topSort->MutableInput() = Reorder(topSort->Input(), {}, ctx);
         return topSort;
     }
     return node;
@@ -406,8 +500,20 @@ TOperatorPtr PushDown(TOperatorPtr node) {
 
 } // namespace
 
-TOperatorPtr ReorderJoins(TOperatorPtr root, bool enableCbo) {
-    return Reorder(std::move(root), {}, enableCbo);
+TOperatorPtr ReorderJoins(
+    TOperatorPtr root,
+    bool enableCbo,
+    TJoinReorderDiagnostics* diagnostics)
+{
+    if (diagnostics) {
+        *diagnostics = {};
+        diagnostics->EnableCbo = enableCbo;
+    }
+    TContext ctx{
+        .EnableCbo = enableCbo,
+        .Diagnostics = diagnostics,
+    };
+    return Reorder(std::move(root), {}, ctx);
 }
 
 TOperatorPtr PushDownSemiJoins(TOperatorPtr root) {
