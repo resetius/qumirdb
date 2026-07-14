@@ -2,7 +2,25 @@
 
 #include <qdb/plan/ops/operator.h>
 
+#include <string>
+#include <vector>
+
 namespace NQdb {
+
+struct TJoinReorderChainDiagnostics {
+    size_t LeafCount = 0;
+    size_t EdgeCount = 0;
+    bool EnableCbo = true;
+    bool UsedCbo = false;
+    std::string Strategy;
+    std::string Reason;
+};
+
+struct TJoinReorderDiagnostics {
+    bool EnableCbo = true;
+    bool UsedCbo = false;
+    std::vector<TJoinReorderChainDiagnostics> Chains;
+};
 
 // Reorders inner-join chains (comma joins) into a connected left-deep order
 // using the equalities of the governing WHERE filter, so that only genuinely
@@ -12,7 +30,10 @@ namespace NQdb {
 //
 // Runs after QualifyColumns and AnnotateTypes (it needs leaf output schemas to
 // map columns to relations) and before ExtractEquiJoins. Returns the new root.
-TOperatorPtr ReorderJoins(TOperatorPtr root, bool enableCbo = true);
+TOperatorPtr ReorderJoins(
+    TOperatorPtr root,
+    bool enableCbo = true,
+    TJoinReorderDiagnostics* diagnostics = nullptr);
 
 // Heuristic semi/anti-join pushdown. A LeftSemi/LeftAnti join filters its build
 // (left) side by existence in the probe side, so keeping it above a

@@ -1244,6 +1244,7 @@ async function executeBrowserJob(job) {
     const elapsedMs = performance.now() - started;
     const details = {
       mode: 'browser',
+      planner: bundle.planner || null,
       rows: result.rows.length,
       elapsedMs,
       timings: result.timings || [],
@@ -1860,6 +1861,7 @@ function compactBundleForStorage(bundle) {
     format: bundle.format,
     version: bundle.version,
     mode: bundle.mode,
+    planner: bundle.planner || null,
     graph: bundle.graph || null,
     graphs: bundle.graphs || null,
     plan: bundle.plan || null,
@@ -1920,6 +1922,7 @@ function bundleSummary(bundle) {
     format: bundle.format,
     version: bundle.version,
     mode: bundle.mode,
+    planner: bundle.planner || null,
     nodes: (graph.nodes || []).length,
     connections: (graph.connections || []).length,
     edges: (graph.edges || []).length

@@ -31,32 +31,16 @@ struct TDpEntry {
     double Cost = 0.0;
 };
 
-constexpr double DefaultNdv = 100.0;
-
 double Ndv(const TOperatorPtr& leaf, const std::string& col) {
     const auto& stats = leaf->Stats_;
     if (!stats) {
-        return DefaultNdv;
+        return UnknownNdv;
     }
     auto it = stats->ColumnStats.find(col);
     if (it == stats->ColumnStats.end() || !it->second || !it->second->Ndv) {
-        return DefaultNdv;
+        return UnknownNdv;
     }
     return static_cast<double>(*it->second->Ndv);
-}
-
-double ColumnWidth(const TOperatorPtr& leaf, const std::string& col) {
-    auto schema = NQumir::NAst::TMaybeType<NQumir::NAst::TStructType>(
-        leaf->OutputColumns());
-    if (!schema) {
-        return 8.0;
-    }
-    for (const auto& [name, type] : schema.Cast()->Fields) {
-        if (name == col) {
-            return EstimateTypeWidth(type);
-        }
-    }
-    return 8.0;
 }
 
 // DP over subsets ordered by increasing bitmask, so every proper subset is

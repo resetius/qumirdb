@@ -17,7 +17,10 @@ void ApplyPlanPasses(TOperatorPtr& plan, TPlanPassOptions options) {
     plan = PushDownPredicates(plan);
     AnnotateTypes(plan); // re-annotate: pushdown moved filters onto leaves
     EstimateStats(plan); // leaf cardinalities for cost-based ReorderJoins
-    plan = ReorderJoins(plan, options.EnableCbo);
+    plan = ReorderJoins(
+        plan,
+        options.EnableCbo,
+        options.Diagnostics ? &options.Diagnostics->JoinReorder : nullptr);
     AnnotateTypes(plan); // re-annotate: reordering rebuilt the join tree
     plan = ExtractEquiJoins(plan);
     AnnotateTypes(plan); // re-annotate: equi-join extraction adds/removes nodes
