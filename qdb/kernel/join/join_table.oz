@@ -35,7 +35,7 @@
       (call aht_destroy ht)))
 
   ;; Appends row_id to the dense RowId bucket at dense slot `slot`
-  ;; (amortized O(1), x2 growth from capacity 4). The slot's three columns must
+  ;; (amortized O(1), 1.5x growth from capacity 4). The slot's three columns must
   ;; already be zeroed (aht_init does this; new slots after rehash are zeroed by
   ;; jt_emit_and_insert before the first append).
   (fun jb_append ((var ht <ref HashTable>) (var slot i64) (var row_id i64)) -> bool
