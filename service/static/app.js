@@ -20,16 +20,23 @@ import { readParquetTable } from './browser_parquet.js';
 const $ = selector => document.querySelector(selector);
 
 const QUERIES_KEY = 'qdb.web.queries';
+const QUERY_FOLDERS_KEY = 'qdb.web.queryFolders';
 const ACTIVE_QUERY_KEY = 'qdb.web.activeQuery';
+const ACTIVE_FOLDER_KEY = 'qdb.web.activeQueryFolder';
+const EXPANDED_QUERY_FOLDERS_KEY = 'qdb.web.expandedQueryFolders';
 const ACTIVE_DATASET_KEY = 'qdb.web.activeDataset';
 const LAST_RUN_KEY = 'qdb.web.lastRun';
 const LOCAL_DATA_DOWNLOAD_CONCURRENCY = 4;
 const MAX_PERSISTED_RESULT_ROWS = 1000;
+const TPCH_QUERY_FOLDER_ID = 'tpch';
+const DEFAULT_QUERY_FOLDER_ID = 'default';
 
 let editor = null;
 let activeQueryId = localStorage.getItem(ACTIVE_QUERY_KEY) || '';
+let activeFolderId = localStorage.getItem(ACTIVE_FOLDER_KEY) || '';
 let suppressEditorSave = false;
 let activeDatasetId = localStorage.getItem(ACTIVE_DATASET_KEY) || '';
+let expandedQueryFolderIds = loadExpandedQueryFolders();
 let serverDatasets = [];
 let browserDatasets = [];
 let lastBundle = null;
@@ -194,21 +201,39 @@ async function copyText(text) {
 }
 
 function initQueries() {
-  let queries = ensureTpchQueries(loadQueries());
-  if (!activeQueryId) {
-    activeQueryId = 'tpch-q21';
-  }
-  if (!queries.some(query => query.id === activeQueryId)) {
-    activeQueryId = queries[0]?.id || '';
-  }
+  saveQueryFolders(ensureQueryFolders(loadQueryFolders()));
+
+  let queries = normalizeQueries(ensureTpchQueries(loadQueries()));
   saveQueries(queries);
-  localStorage.setItem(ACTIVE_QUERY_KEY, activeQueryId);
+
+  if (!queries.some(query => query.id === activeQueryId)) {
+    activeQueryId = '';
+  }
+  if (!loadQueryFolders().some(folder => folder.id === activeFolderId)) {
+    activeFolderId = '';
+  }
+  if (activeQueryId) {
+    activeFolderId = '';
+  }
+  if (!activeQueryId && !activeFolderId) {
+    activeQueryId = queries.find(query => query.id === 'tpch-q21')?.id ||
+      queries[0]?.id ||
+      '';
+  }
 
   const activeQuery = queries.find(query => query.id === activeQueryId);
   if (activeQuery) {
+    rememberActiveQuery(activeQuery.id);
+    expandQueryFolder(activeQuery.folderId);
     setSql(activeQuery.sql || '');
+  } else {
+    const folderId = activeFolderId || DEFAULT_QUERY_FOLDER_ID;
+    rememberActiveFolder(folderId);
+    expandQueryFolder(folderId);
+    setSql('');
   }
 
+  $('#folder-new').addEventListener('click', createQueryFolder);
   $('#query-new').addEventListener('click', async () => {
     saveActiveQuerySql();
     saveWorkspaceState();
@@ -216,22 +241,22 @@ function initQueries() {
     const query = {
       id: crypto.randomUUID(),
       name: `Query ${queries.length + 1}`,
+      folderId: DEFAULT_QUERY_FOLDER_ID,
       sql: ''
     };
     queries.unshift(query);
-    activeQueryId = query.id;
-    localStorage.setItem(ACTIVE_QUERY_KEY, activeQueryId);
     saveQueries(queries);
-    setSql('');
-    renderQueries();
-    await restoreWorkspaceState();
+    expandQueryFolder(DEFAULT_QUERY_FOLDER_ID);
+    await selectQuery(query.id);
   });
   renderQueries();
 }
 
 function ensureTpchQueries(queries) {
   const existing = new Set(queries.map(query => query.id));
-  const missing = tpchQueries.filter(query => !existing.has(query.id));
+  const missing = tpchQueries
+    .filter(query => !existing.has(query.id))
+    .map(query => ({ ...query, folderId: TPCH_QUERY_FOLDER_ID }));
   if (!missing.length) {
     return queries;
   }
@@ -241,9 +266,26 @@ function ensureTpchQueries(queries) {
   ];
 }
 
+function normalizeQueries(queries) {
+  const folderIds = new Set(loadQueryFolders().map(folder => folder.id));
+  const tpchIds = new Set(tpchQueries.map(query => query.id));
+  return (Array.isArray(queries) ? queries : [])
+    .filter(query => query && query.id && query.name)
+    .map(query => {
+      const fallbackFolderId = tpchIds.has(query.id)
+        ? TPCH_QUERY_FOLDER_ID
+        : DEFAULT_QUERY_FOLDER_ID;
+      const folderId = folderIds.has(query.folderId)
+        ? query.folderId
+        : fallbackFolderId;
+      return { ...query, folderId };
+    });
+}
+
 function loadQueries() {
   try {
-    return JSON.parse(localStorage.getItem(QUERIES_KEY) || '[]');
+    const queries = JSON.parse(localStorage.getItem(QUERIES_KEY) || '[]');
+    return Array.isArray(queries) ? queries : [];
   } catch {
     return [];
   }
@@ -251,6 +293,103 @@ function loadQueries() {
 
 function saveQueries(queries) {
   localStorage.setItem(QUERIES_KEY, JSON.stringify(queries));
+}
+
+function defaultQueryFolders() {
+  return [
+    { id: TPCH_QUERY_FOLDER_ID, name: 'TPC-H' },
+    { id: DEFAULT_QUERY_FOLDER_ID, name: 'Queries' }
+  ];
+}
+
+function ensureQueryFolders(folders) {
+  const result = [];
+  const seen = new Set();
+  const add = folder => {
+    const id = String(folder?.id || '').trim();
+    const name = String(folder?.name || '').trim();
+    if (!id || !name || seen.has(id)) {
+      return;
+    }
+    seen.add(id);
+    result.push({ id, name });
+  };
+  for (const folder of defaultQueryFolders()) {
+    add(folder);
+  }
+  for (const folder of folders || []) {
+    add(folder);
+  }
+  return result;
+}
+
+function loadQueryFolders() {
+  try {
+    const folders = JSON.parse(localStorage.getItem(QUERY_FOLDERS_KEY) || '[]');
+    return ensureQueryFolders(Array.isArray(folders) ? folders : []);
+  } catch {
+    return defaultQueryFolders();
+  }
+}
+
+function saveQueryFolders(folders) {
+  localStorage.setItem(QUERY_FOLDERS_KEY, JSON.stringify(ensureQueryFolders(folders)));
+}
+
+function loadExpandedQueryFolders() {
+  try {
+    const folderIds = JSON.parse(
+      localStorage.getItem(EXPANDED_QUERY_FOLDERS_KEY) || '[]');
+    return new Set(Array.isArray(folderIds) ? folderIds : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function saveExpandedQueryFolders() {
+  localStorage.setItem(
+    EXPANDED_QUERY_FOLDERS_KEY,
+    JSON.stringify([...expandedQueryFolderIds]));
+}
+
+function expandQueryFolder(folderId) {
+  if (!folderId) {
+    return;
+  }
+  expandedQueryFolderIds.add(folderId);
+  saveExpandedQueryFolders();
+}
+
+function toggleQueryFolder(folderId) {
+  if (expandedQueryFolderIds.has(folderId)) {
+    expandedQueryFolderIds.delete(folderId);
+  } else {
+    expandedQueryFolderIds.add(folderId);
+  }
+  saveExpandedQueryFolders();
+  renderQueries();
+}
+
+function rememberActiveQuery(queryId) {
+  activeQueryId = queryId || '';
+  activeFolderId = '';
+  if (activeQueryId) {
+    localStorage.setItem(ACTIVE_QUERY_KEY, activeQueryId);
+  } else {
+    localStorage.removeItem(ACTIVE_QUERY_KEY);
+  }
+  localStorage.removeItem(ACTIVE_FOLDER_KEY);
+}
+
+function rememberActiveFolder(folderId) {
+  activeFolderId = folderId || '';
+  activeQueryId = '';
+  if (activeFolderId) {
+    localStorage.setItem(ACTIVE_FOLDER_KEY, activeFolderId);
+  } else {
+    localStorage.removeItem(ACTIVE_FOLDER_KEY);
+  }
+  localStorage.removeItem(ACTIVE_QUERY_KEY);
 }
 
 function saveActiveQuerySql() {
@@ -272,68 +411,273 @@ function saveActiveQuerySql() {
 function renderQueries() {
   const root = $('#queries-list');
   root.replaceChildren();
-  for (const query of loadQueries()) {
-    const button = document.createElement('button');
-    button.className = `list-item query-item${query.id === activeQueryId ? ' active' : ''}`;
-    button.type = 'button';
-    const label = document.createElement('span');
-    label.className = 'query-name';
-    label.textContent = query.name;
-    button.appendChild(label);
-
-    const lastRun = loadLastRun(query.id);
-    if (lastRun) {
-      const meta = document.createElement('span');
-      meta.className = 'query-meta';
-      meta.textContent = formatDuration(lastRun.processingMs ?? lastRun.elapsedMs);
-      meta.title = `Last run ${formatRelativeTime(lastRun.at)}`;
-      button.appendChild(meta);
-    }
-
-    const state = queryRunState(query.id);
-    if (state) {
-      const indicator = document.createElement('span');
-      indicator.className = state === 'running' ? 'query-spinner' : 'query-queued';
-      indicator.title = state === 'running' ? 'Running' : 'Queued';
-      button.appendChild(indicator);
-
-      const stop = document.createElement('span');
-      stop.className = 'query-stop';
-      stop.setAttribute('role', 'button');
-      stop.setAttribute('aria-label', state === 'running' ? 'Stop' : 'Remove from queue');
-      stop.title = state === 'running' ? 'Stop' : 'Remove from queue';
-      stop.textContent = '✕';
-      stop.addEventListener('click', event => {
-        event.stopPropagation();
-        stopQuery(query.id);
-      });
-      button.appendChild(stop);
-    }
-
-    button.addEventListener('click', async () => {
-      if (query.id === activeQueryId) {
-        return;
-      }
-      saveActiveQuerySql();
-      saveWorkspaceState();
-      activeQueryId = query.id;
-      localStorage.setItem(ACTIVE_QUERY_KEY, activeQueryId);
-      const freshQuery = loadQueries().find(item => item.id === activeQueryId);
-      setSql(freshQuery?.sql || '');
-      // The status label reflects live activity, not the selected query, so a
-      // run still in flight for the previous query must not read as this one's.
-      setStatus('idle');
-      renderQueries();
-      await restoreWorkspaceState();
-    });
-    root.appendChild(button);
+  const folders = loadQueryFolders();
+  const queries = loadQueries();
+  for (const folder of folders) {
+    const section = renderQueryFolder(folder, queriesInFolder(folder.id, queries), folders);
+    root.appendChild(section);
   }
+  window.lucide?.createIcons();
+}
+
+function renderQueryFolder(folder, queries, folders) {
+  const section = document.createElement('div');
+  section.className = 'query-folder';
+
+  const expanded = expandedQueryFolderIds.has(folder.id);
+  const row = document.createElement('div');
+  row.className = 'query-folder-row';
+
+  const toggle = document.createElement('button');
+  toggle.className = 'icon-button query-folder-toggle';
+  toggle.type = 'button';
+  toggle.title = expanded ? 'Collapse folder' : 'Expand folder';
+  toggle.setAttribute('aria-label', expanded ? 'Collapse folder' : 'Expand folder');
+  toggle.innerHTML = `<i data-lucide="${expanded ? 'minus' : 'plus'}"></i>`;
+  toggle.addEventListener('click', () => toggleQueryFolder(folder.id));
+  row.appendChild(toggle);
+
+  const button = document.createElement('button');
+  button.className = `query-folder-select${folder.id === activeFolderId ? ' active' : ''}`;
+  button.type = 'button';
+
+  const label = document.createElement('span');
+  label.className = 'query-folder-name';
+  label.textContent = folder.name;
+  button.appendChild(label);
+
+  const count = document.createElement('span');
+  count.className = 'query-folder-count';
+  count.textContent = String(queries.length);
+  button.appendChild(count);
+
+  const folderLastRun = loadFolderLastRun(queries);
+  if (folderLastRun) {
+    const meta = document.createElement('span');
+    meta.className = 'query-meta';
+    meta.textContent = formatDuration(folderLastRun.processingMs);
+    meta.title = `All queries last run ${formatRelativeTime(folderLastRun.at)}`;
+    button.appendChild(meta);
+  }
+
+  const state = folderRunState(queries);
+  if (state) {
+    const indicator = document.createElement('span');
+    indicator.className = state === 'running' ? 'query-spinner' : 'query-queued';
+    indicator.title = state === 'running' ? 'Running' : 'Queued';
+    button.appendChild(indicator);
+  }
+
+  button.addEventListener('click', () => selectQueryFolder(folder.id));
+  row.appendChild(button);
+
+  if (state) {
+    const stop = document.createElement('button');
+    stop.className = 'icon-button query-folder-action';
+    stop.type = 'button';
+    stop.title = state === 'running' ? 'Stop folder' : 'Remove folder from queue';
+    stop.setAttribute('aria-label', stop.title);
+    stop.textContent = '✕';
+    stop.addEventListener('click', () => stopFolder(folder.id));
+    row.appendChild(stop);
+  }
+
+  section.appendChild(row);
+
+  const children = document.createElement('div');
+  children.className = 'query-folder-children';
+  children.hidden = !expanded;
+  for (const query of queries) {
+    children.appendChild(renderQueryItem(query, folders));
+  }
+  section.appendChild(children);
+  return section;
+}
+
+function renderQueryItem(query, folders) {
+  const button = document.createElement('button');
+  button.className = `list-item query-item${query.id === activeQueryId ? ' active' : ''}`;
+  button.type = 'button';
+  const label = document.createElement('span');
+  label.className = 'query-name';
+  label.textContent = query.name;
+  button.appendChild(label);
+
+  const lastRun = loadLastRun(query.id, activeDatasetId);
+  if (lastRun) {
+    const meta = document.createElement('span');
+    meta.className = 'query-meta';
+    meta.textContent = formatDuration(lastRun.processingMs ?? lastRun.elapsedMs);
+    meta.title = `Last run ${formatRelativeTime(lastRun.at)}`;
+    button.appendChild(meta);
+  }
+
+  if (folders.length > 1) {
+    const move = document.createElement('span');
+    move.className = 'query-action';
+    move.setAttribute('role', 'button');
+    move.setAttribute('aria-label', 'Move to folder');
+    move.title = 'Move to folder';
+    move.innerHTML = '<i data-lucide="folder-input"></i>';
+    move.addEventListener('click', event => {
+      event.stopPropagation();
+      moveQueryToFolder(query.id);
+    });
+    button.appendChild(move);
+  }
+
+  const state = queryRunState(query.id);
+  if (state) {
+    const indicator = document.createElement('span');
+    indicator.className = state === 'running' ? 'query-spinner' : 'query-queued';
+    indicator.title = state === 'running' ? 'Running' : 'Queued';
+    button.appendChild(indicator);
+
+    const stop = document.createElement('span');
+    stop.className = 'query-stop';
+    stop.setAttribute('role', 'button');
+    stop.setAttribute('aria-label', state === 'running' ? 'Stop' : 'Remove from queue');
+    stop.title = state === 'running' ? 'Stop' : 'Remove from queue';
+    stop.textContent = '✕';
+    stop.addEventListener('click', event => {
+      event.stopPropagation();
+      stopQuery(query.id);
+    });
+    button.appendChild(stop);
+  }
+
+  button.addEventListener('click', async () => selectQuery(query.id));
+  return button;
+}
+
+async function selectQuery(queryId) {
+  if (queryId === activeQueryId && !activeFolderId) {
+    return;
+  }
+  const freshQuery = loadQueries().find(item => item.id === queryId);
+  if (!freshQuery) {
+    return;
+  }
+  saveActiveQuerySql();
+  saveWorkspaceState();
+  rememberActiveQuery(queryId);
+  expandQueryFolder(freshQuery.folderId);
+  setSql(freshQuery.sql || '');
+  // The status label reflects live activity, not the selected query, so a
+  // run still in flight for the previous query must not read as this one's.
+  setStatus('idle');
+  renderQueries();
+  await restoreWorkspaceState();
+}
+
+function selectQueryFolder(folderId) {
+  if (folderId === activeFolderId && !activeQueryId) {
+    return;
+  }
+  saveActiveQuerySql();
+  saveWorkspaceState();
+  rememberActiveFolder(folderId);
+  expandQueryFolder(folderId);
+  setSql('');
+  setStatus('idle');
+  clearWorkspaceStateView();
+  renderQueries();
+}
+
+function createQueryFolder() {
+  const folders = loadQueryFolders();
+  const name = window.prompt('Folder name', `Folder ${folders.length + 1}`);
+  const trimmed = name?.trim();
+  if (!trimmed) {
+    return;
+  }
+  const folder = {
+    id: `folder-${crypto.randomUUID?.() ||
+      `${Date.now()}-${Math.random().toString(16).slice(2)}`}`,
+    name: trimmed
+  };
+  folders.push(folder);
+  saveQueryFolders(folders);
+  selectQueryFolder(folder.id);
+}
+
+function moveQueryToFolder(queryId) {
+  const folders = loadQueryFolders();
+  const queries = loadQueries();
+  const query = queries.find(item => item.id === queryId);
+  if (!query) {
+    return;
+  }
+  const currentIndex = Math.max(
+    folders.findIndex(folder => folder.id === query.folderId),
+    0);
+  const options = folders
+    .map((folder, index) => `${index + 1}. ${folder.name}`)
+    .join('\n');
+  const choice = window.prompt(`Move to folder:\n${options}`, String(currentIndex + 1));
+  if (choice === null) {
+    return;
+  }
+  const trimmed = choice.trim();
+  const numeric = Number(trimmed);
+  const target = Number.isInteger(numeric)
+    ? folders[numeric - 1]
+    : folders.find(folder => folder.name.toLowerCase() === trimmed.toLowerCase());
+  if (!target || target.id === query.folderId) {
+    return;
+  }
+  saveActiveQuerySql();
+  const updatedQueries = loadQueries();
+  const updatedQuery = updatedQueries.find(item => item.id === queryId);
+  if (!updatedQuery) {
+    return;
+  }
+  updatedQuery.folderId = target.id;
+  saveQueries(updatedQueries);
+  expandQueryFolder(target.id);
+  renderQueries();
+}
+
+function queriesInFolder(folderId, queries = loadQueries()) {
+  return queries.filter(query => query.folderId === folderId);
+}
+
+function loadFolderLastRun(queries) {
+  if (!queries.length) {
+    return null;
+  }
+  let processingMs = 0;
+  let at = 0;
+  for (const query of queries) {
+    const lastRun = loadLastRun(query.id, activeDatasetId);
+    if (!lastRun) {
+      return null;
+    }
+    const duration = Number(lastRun.processingMs ?? lastRun.elapsedMs);
+    if (!Number.isFinite(duration)) {
+      return null;
+    }
+    processingMs += duration;
+    at = Math.max(at, Number(lastRun.at) || 0);
+  }
+  return { processingMs, at };
+}
+
+function folderRunState(queries) {
+  if (queries.some(query => queryRunState(query.id) === 'running')) {
+    return 'running';
+  }
+  if (queries.some(query => queryRunState(query.id) === 'queued')) {
+    return 'queued';
+  }
+  return null;
 }
 
 async function initDatasets() {
   serverDatasets = await loadServerDatasets();
   browserDatasets = await loadBrowserDatasets();
   ensureActiveDataset();
+  renderQueries();
 
   $('#dataset-create').addEventListener('click', createEmptyBrowserDataset);
   $('#dataset-files').addEventListener('change', async event => {
@@ -421,6 +765,7 @@ function switchActiveDataset(datasetId) {
   } else {
     localStorage.removeItem(ACTIVE_DATASET_KEY);
   }
+  renderQueries();
   restoreWorkspaceState();
 }
 
@@ -744,6 +1089,7 @@ function renderDatasets() {
         const previousDatasetId = activeDatasetId;
         ensureActiveDataset();
         if (removedActive || activeDatasetId !== previousDatasetId) {
+          renderQueries();
           restoreWorkspaceState();
         }
         renderDatasets();
@@ -867,10 +1213,19 @@ async function removeBrowserDatasetFile(dataset, fileName) {
 
 function initActions() {
   $('#run-button').addEventListener('click', () => {
+    if (activeFolderId && !activeQueryId) {
+      enqueueFolderRun(activeFolderId, activeDataset());
+      return;
+    }
     enqueueRun(getSql(), activeDataset());
   });
 
   $('#explain-button').addEventListener('click', async () => {
+    if (!activeQueryId) {
+      showDetails({ ok: false, error: { message: 'Select a query to explain.' } });
+      selectTab('details');
+      return;
+    }
     await explainCurrent(getSql(), activeDataset(), true);
   });
 
@@ -901,10 +1256,49 @@ function queryRunState(queryId) {
 //  - running a query that is already queued is ignored (no duplicates);
 //  - otherwise it joins the queue; the in-flight run keeps going.
 function enqueueRun(sql, dataset) {
+  if (!activeQueryId) {
+    showDetails({ ok: false, error: { message: 'Select a query first.' } });
+    selectTab('details');
+    return;
+  }
+  if (!validateRunnableDataset(dataset)) {
+    return;
+  }
+
+  enqueueQueryRun(activeQueryId, sql, dataset, { restartRunning: true });
+  renderQueries();
+  pumpQueue();
+}
+
+function enqueueFolderRun(folderId, dataset) {
+  if (!validateRunnableDataset(dataset)) {
+    return;
+  }
+  const queries = queriesInFolder(folderId);
+  if (!queries.length) {
+    showDetails({ ok: false, error: { message: 'Folder has no queries.' } });
+    selectTab('details');
+    return;
+  }
+
+  let enqueued = 0;
+  for (const query of queries) {
+    if (enqueueQueryRun(query.id, query.sql || '', dataset, { restartRunning: false })) {
+      ++enqueued;
+    }
+  }
+  renderQueries();
+  pumpQueue();
+  showToast(enqueued
+    ? `${enqueued} queries queued`
+    : 'Folder is already queued');
+}
+
+function validateRunnableDataset(dataset) {
   if (!dataset) {
     showDetails({ ok: false, error: { message: 'Select a dataset first.' } });
     selectTab('details');
-    return;
+    return false;
   }
   if (dataset.source?.kind === 'local') {
     showDetails({
@@ -914,11 +1308,14 @@ function enqueueRun(sql, dataset) {
       }
     });
     selectTab('details');
-    return;
+    return false;
   }
+  return true;
+}
 
-  const queryId = activeQueryId;
-  const datasetId = activeDatasetId;
+function enqueueQueryRun(queryId, sql, dataset, options = {}) {
+  const datasetId = dataset?.id || activeDatasetId;
+  const restartRunning = options.restartRunning !== false;
   const sameRunning = runningJob &&
     runningJob.queryId === queryId &&
     runningJob.datasetId === datasetId;
@@ -926,12 +1323,15 @@ function enqueueRun(sql, dataset) {
     job.queryId === queryId && job.datasetId === datasetId);
 
   if (sameRunning) {
+    if (!restartRunning) {
+      return false;
+    }
     cancelJob(runningJob);
     if (alreadyQueued) {
-      return;
+      return false;
     }
   } else if (alreadyQueued) {
-    return;
+    return false;
   }
 
   runQueue.push({
@@ -946,8 +1346,7 @@ function enqueueRun(sql, dataset) {
     cancelled: false,
     cancel: null
   });
-  renderQueries();
-  pumpQueue();
+  return true;
 }
 
 function cancelJob(job) {
@@ -971,6 +1370,22 @@ function stopQuery(queryId) {
     }
   }
   if (runningJob && runningJob.queryId === queryId) {
+    if (isActiveWorkspace(runningJob.queryId, runningJob.datasetId)) {
+      setStatus('idle');
+    }
+    cancelJob(runningJob);
+  }
+  renderQueries();
+}
+
+function stopFolder(folderId) {
+  const queryIds = new Set(queriesInFolder(folderId).map(query => query.id));
+  for (let i = runQueue.length - 1; i >= 0; i--) {
+    if (queryIds.has(runQueue[i].queryId)) {
+      runQueue.splice(i, 1);
+    }
+  }
+  if (runningJob && queryIds.has(runningJob.queryId)) {
     if (isActiveWorkspace(runningJob.queryId, runningJob.datasetId)) {
       setStatus('idle');
     }
@@ -1968,18 +2383,18 @@ function formatDuration(ms) {
   return `${value.toFixed(0)} ms`;
 }
 
-function lastRunKey(queryId) {
-  return `${LAST_RUN_KEY}:${queryId}`;
+function lastRunKey(queryId, datasetId) {
+  return `${LAST_RUN_KEY}:${queryId}:${datasetId}`;
 }
 
 // Records when a query last finished running (and how long it took), so the
-// query list can show it. Keyed by query id.
+// query list can show it. Keyed by query id + dataset id.
 function recordLastRun(queryId, datasetId, meta) {
-  if (!queryId) {
+  if (!queryId || !datasetId) {
     return;
   }
   try {
-    localStorage.setItem(lastRunKey(queryId), JSON.stringify({
+    localStorage.setItem(lastRunKey(queryId, datasetId), JSON.stringify({
       at: Date.now(),
       datasetId,
       processingMs: meta.processingMs,
@@ -1991,9 +2406,12 @@ function recordLastRun(queryId, datasetId, meta) {
   }
 }
 
-function loadLastRun(queryId) {
+function loadLastRun(queryId, datasetId) {
+  if (!queryId || !datasetId) {
+    return null;
+  }
   try {
-    return JSON.parse(localStorage.getItem(lastRunKey(queryId)) || 'null');
+    return JSON.parse(localStorage.getItem(lastRunKey(queryId, datasetId)) || 'null');
   } catch {
     return null;
   }
