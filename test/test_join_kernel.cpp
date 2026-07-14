@@ -166,7 +166,7 @@ TEST(JoinKernel, BucketAppendGrowsAndStoresRowIds) {
         ASSERT_TRUE(jbAppend(&ht, slot, 1000 + i));
     }
     EXPECT_EQ(ht.AggBuffers[0][slot], 10);
-    EXPECT_EQ(ht.AggBuffers[1][slot], 16); // 4 -> 8 -> 16
+    EXPECT_EQ(ht.AggBuffers[1][slot], 13); // 4 -> 6 -> 9 -> 13 (1.5x growth)
     auto* bucket = reinterpret_cast<int64_t*>(ht.AggBuffers[2][slot]);
     ASSERT_NE(bucket, nullptr);
     for (int64_t i = 0; i < 10; ++i) {
