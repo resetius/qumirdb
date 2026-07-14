@@ -13,6 +13,9 @@
 
 namespace NQdb {
 
+// Disambiguates the column-schema constructor from the plain name list one.
+struct TMockColumns {};
+
 struct TMockSource : ISource {
     std::vector<std::string> Names; // owns backing strings (TColumnSchema::Name is a view)
     std::vector<TColumnSchema> Cols;
@@ -47,6 +50,7 @@ struct TMockSource : ISource {
     // Explicit column schema (+ optional batches); names are copied into Names so
     // the schema stays valid after the caller's columns go away.
     explicit TMockSource(
+        TMockColumns,
         std::vector<TColumnSchema> columns,
         std::vector<TRowSet> batches = {})
         : Batches(std::move(batches))
