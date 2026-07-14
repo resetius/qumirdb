@@ -95,12 +95,6 @@ double EstimateJoinCost(
   └─────────────┴─────────────────────────────────────────────────┴───────────────────────────────────────────────────────────────────────────────────────────────────────┘
 */
 
-namespace {
-
-double OutputRowWidth(const TOperatorPtr& op) {
-    return op ? EstimateTypeWidth(op->OutputColumns()) : 1.0;
-}
-
 double ColumnWidth(const TOperatorPtr& op, const std::string& name) {
     if (!op) {
         return 8.0;
@@ -115,6 +109,12 @@ double ColumnWidth(const TOperatorPtr& op, const std::string& name) {
         }
     }
     return 8.0;
+}
+
+namespace {
+
+double OutputRowWidth(const TOperatorPtr& op) {
+    return op ? EstimateTypeWidth(op->OutputColumns()) : 1.0;
 }
 
 double JoinKeyWidth(const TOperatorPtr& left, const TOperatorPtr& right,
@@ -360,8 +360,8 @@ TStatsPtr ComputeJoinStats(const std::shared_ptr<TJoinOperator>& join) {
     }
     std::vector<std::pair<double, double>> keyNdvs;
     for (const auto& key : join->Keys()) {
-        double leftNdv = 100.0; // unknown ndv
-        double rightNdv = 100.0; // unknown ndv
+        double leftNdv = UnknownNdv;
+        double rightNdv = UnknownNdv;
         auto leftColStatsIt = leftStats->ColumnStats.find(key.Left);
         auto rightColStatsIt = rightStats->ColumnStats.find(key.Right);
         if (leftColStatsIt != leftStats->ColumnStats.end() && leftColStatsIt->second->Ndv) {

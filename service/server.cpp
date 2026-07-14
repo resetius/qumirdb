@@ -3,6 +3,8 @@
 #include <coroio/pipe/pipe.hpp>
 
 #include <qdb/io/parquet/source.h>
+#include <qdb/plan/types/nullable.h>
+#include <qdb/plan/stats_codec.h>
 
 #include <qumir/parser/core/printer.h>
 
@@ -11,6 +13,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -18,6 +21,7 @@
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -151,6 +155,82 @@ std::string TableNameFromPath(const std::filesystem::path& path) {
         name.resize(name.size() - suffix.size());
     }
     return name;
+}
+
+std::optional<llvm::json::Value> DecodeJsonStatsScalar(
+    uint64_t value,
+    const NQumir::NAst::TTypePtr& type)
+{
+    switch (NQdb::StatsScalarKind(type)) {
+        case NQdb::EStatsScalarKind::None:
+            return std::nullopt;
+        case NQdb::EStatsScalarKind::Float:
+            return llvm::json::Value(std::bit_cast<double>(value));
+        case NQdb::EStatsScalarKind::Int:
+            return llvm::json::Value(std::bit_cast<int64_t>(value));
+    }
+    return std::nullopt;
+}
+
+llvm::json::Array ColumnHistogramJson(
+    const std::vector<uint64_t>& histogram,
+    const NQumir::NAst::TTypePtr& type)
+{
+    llvm::json::Array out;
+    out.reserve(histogram.size());
+    for (uint64_t bucket : histogram) {
+        if (auto decoded = DecodeJsonStatsScalar(bucket, type)) {
+            out.push_back(std::move(*decoded));
+        }
+    }
+    return out;
+}
+
+llvm::json::Array ColumnStatsJson(const NQdb::TParquetSource& source) {
+    llvm::json::Array columns;
+    auto stats = source.Stats();
+    if (!stats) {
+        return columns;
+    }
+
+    for (const auto& column : source.Schema().Columns) {
+        const auto name = std::string(column.Name);
+        auto it = stats->ColumnStats.find(name);
+        if (it == stats->ColumnStats.end() || !it->second) {
+            continue;
+        }
+        const auto& columnStats = *it->second;
+        llvm::json::Object out{
+            {"name", name},
+        };
+        if (columnStats.Ndv) {
+            out["ndv"] = static_cast<int64_t>(*columnStats.Ndv);
+            out["ndv_exact"] = columnStats.NdvIsExact;
+        }
+        if (columnStats.NullCount) {
+            out["null_count"] = static_cast<int64_t>(*columnStats.NullCount);
+        }
+        if (columnStats.MinValue) {
+            if (auto decoded = DecodeJsonStatsScalar(*columnStats.MinValue, column.Type)) {
+                out["min"] = std::move(*decoded);
+            }
+        }
+        if (columnStats.MaxValue) {
+            if (auto decoded = DecodeJsonStatsScalar(*columnStats.MaxValue, column.Type)) {
+                out["max"] = std::move(*decoded);
+            }
+        }
+        if (!columnStats.Histogram.empty()) {
+            auto histogram = ColumnHistogramJson(columnStats.Histogram, column.Type);
+            if (!histogram.empty()) {
+                out["histogram"] = std::move(histogram);
+            }
+        }
+        if (out.size() > 1) {
+            columns.push_back(std::move(out));
+        }
+    }
+    return columns;
 }
 
 std::string UrlEncode(std::string_view value) {
@@ -539,16 +619,21 @@ private:
                     rows += rowGroup.RowCount;
                     bytes += rowGroup.ByteSize;
                 }
+                llvm::json::Object stats{
+                    {"rows", rows},
+                    {"bytes", bytes},
+                    {"rowGroups", static_cast<int64_t>(rowGroups.size())},
+                };
+                auto columnStats = ColumnStatsJson(source);
+                if (!columnStats.empty()) {
+                    stats["columns"] = std::move(columnStats);
+                }
 
                 tables.push_back(llvm::json::Object{
                     {"name", tableName},
                     {"sourceFile", sourceFile},
                     {"columns", std::move(columns)},
-                    {"stats", llvm::json::Object{
-                        {"rows", rows},
-                        {"bytes", bytes},
-                        {"rowGroups", static_cast<int64_t>(rowGroups.size())},
-                    }},
+                    {"stats", std::move(stats)},
                 });
             } catch (const std::exception& e) {
                 std::cerr << "[QumirDB Web] failed to read schema for "

@@ -15,6 +15,9 @@ TStatsPtr EstimateStats(TOperatorPtr op);
 // materialized StringView (ptr + size), not as their payload bytes.
 double EstimateTypeWidth(const NQumir::NAst::TTypePtr& type);
 
+// Width of a named output column of `op` (8.0 when unknown).
+double ColumnWidth(const TOperatorPtr& op, const std::string& name);
+
 // Browser/native neutral join work model. Units are abstract byte-ish work:
 // child costs + key scan work + materialized output width + per-output-batch
 // overhead. The batch overhead intentionally mirrors the browser join
@@ -28,6 +31,9 @@ double EstimateJoinCost(
     double outputRows,
     double outputRowWidth,
     double keyWidth);
+
+// Fallback NDV for a join key column that has no statistics.
+constexpr double UnknownNdv = 100.0;
 
 struct TJoinCardinality {
     double Rows = 0.0;
