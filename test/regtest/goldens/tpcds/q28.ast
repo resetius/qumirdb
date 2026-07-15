@@ -1,0 +1,168 @@
+(query
+  (select
+    (select-list
+      (star *)
+    )
+    (from
+      (subquery-table as B1
+        (query
+          (select
+            (select-list
+              (item as B1_LP
+                (call avg ss_list_price)
+              )
+              (item as B1_CNT
+                (call count ss_list_price)
+              )
+              (item as B1_CNTD
+                (call count (call distinct ss_list_price))
+              )
+            )
+            (from
+              (table store_sales)
+            )
+            (where
+              (&& (&& (<= 0 ss_quantity) (<= ss_quantity 5))
+                (|| (|| (&& (<= 11 ss_list_price) (<= ss_list_price (+ 11 10)))
+                    (&& (<= 460 ss_coupon_amt) (<= ss_coupon_amt (+ 460 1000))))
+                  (&& (<= 14 ss_wholesale_cost) (<= ss_wholesale_cost (+ 14 20)))))
+            )
+          )
+        )
+      )
+      (subquery-table as B2
+        (query
+          (select
+            (select-list
+              (item as B2_LP
+                (call avg ss_list_price)
+              )
+              (item as B2_CNT
+                (call count ss_list_price)
+              )
+              (item as B2_CNTD
+                (call count (call distinct ss_list_price))
+              )
+            )
+            (from
+              (table store_sales)
+            )
+            (where
+              (&& (&& (<= 6 ss_quantity) (<= ss_quantity 10))
+                (|| (|| (&& (<= 91 ss_list_price) (<= ss_list_price (+ 91 10)))
+                    (&& (<= 1430 ss_coupon_amt) (<= ss_coupon_amt (+ 1430 1000))))
+                  (&& (<= 32 ss_wholesale_cost) (<= ss_wholesale_cost (+ 32 20)))))
+            )
+          )
+        )
+      )
+      (subquery-table as B3
+        (query
+          (select
+            (select-list
+              (item as B3_LP
+                (call avg ss_list_price)
+              )
+              (item as B3_CNT
+                (call count ss_list_price)
+              )
+              (item as B3_CNTD
+                (call count (call distinct ss_list_price))
+              )
+            )
+            (from
+              (table store_sales)
+            )
+            (where
+              (&& (&& (<= 11 ss_quantity) (<= ss_quantity 15))
+                (|| (|| (&& (<= 66 ss_list_price) (<= ss_list_price (+ 66 10)))
+                    (&& (<= 920 ss_coupon_amt) (<= ss_coupon_amt (+ 920 1000))))
+                  (&& (<= 4 ss_wholesale_cost) (<= ss_wholesale_cost (+ 4 20)))))
+            )
+          )
+        )
+      )
+      (subquery-table as B4
+        (query
+          (select
+            (select-list
+              (item as B4_LP
+                (call avg ss_list_price)
+              )
+              (item as B4_CNT
+                (call count ss_list_price)
+              )
+              (item as B4_CNTD
+                (call count (call distinct ss_list_price))
+              )
+            )
+            (from
+              (table store_sales)
+            )
+            (where
+              (&& (&& (<= 16 ss_quantity) (<= ss_quantity 20))
+                (|| (|| (&& (<= 142 ss_list_price) (<= ss_list_price (+ 142 10)))
+                    (&& (<= 3054 ss_coupon_amt) (<= ss_coupon_amt (+ 3054 1000))))
+                  (&& (<= 80 ss_wholesale_cost) (<= ss_wholesale_cost (+ 80 20)))))
+            )
+          )
+        )
+      )
+      (subquery-table as B5
+        (query
+          (select
+            (select-list
+              (item as B5_LP
+                (call avg ss_list_price)
+              )
+              (item as B5_CNT
+                (call count ss_list_price)
+              )
+              (item as B5_CNTD
+                (call count (call distinct ss_list_price))
+              )
+            )
+            (from
+              (table store_sales)
+            )
+            (where
+              (&& (&& (<= 21 ss_quantity) (<= ss_quantity 25))
+                (|| (|| (&& (<= 135 ss_list_price) (<= ss_list_price (+ 135 10)))
+                    (&& (<= 14180 ss_coupon_amt) (<= ss_coupon_amt (+ 14180 1000))))
+                  (&& (<= 38 ss_wholesale_cost) (<= ss_wholesale_cost (+ 38 20)))))
+            )
+          )
+        )
+      )
+      (subquery-table as B6
+        (query
+          (select
+            (select-list
+              (item as B6_LP
+                (call avg ss_list_price)
+              )
+              (item as B6_CNT
+                (call count ss_list_price)
+              )
+              (item as B6_CNTD
+                (call count (call distinct ss_list_price))
+              )
+            )
+            (from
+              (table store_sales)
+            )
+            (where
+              (&& (&& (<= 26 ss_quantity) (<= ss_quantity 30))
+                (|| (|| (&& (<= 28 ss_list_price) (<= ss_list_price (+ 28 10)))
+                    (&& (<= 2513 ss_coupon_amt) (<= ss_coupon_amt (+ 2513 1000))))
+                  (&& (<= 42 ss_wholesale_cost) (<= ss_wholesale_cost (+ 42 20)))))
+            )
+          )
+        )
+      )
+    )
+  )
+  (limit
+    100
+  )
+)

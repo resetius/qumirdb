@@ -203,7 +203,7 @@ async function copyText(text) {
 function initQueries() {
   saveQueryFolders(ensureQueryFolders(loadQueryFolders()));
 
-  let queries = normalizeQueries(ensureTpchQueries(loadQueries()));
+  let queries = normalizeQueries(ensureBenchmarkQueries(loadQueries()));
   saveQueries(queries);
 
   if (!queries.some(query => query.id === activeQueryId)) {
@@ -252,11 +252,22 @@ function initQueries() {
   renderQueries();
 }
 
-function ensureTpchQueries(queries) {
+function benchmarkQuerySets() {
+  return [
+    { folderId: TPCH_QUERY_FOLDER_ID, queries: tpchQueries }
+  ];
+}
+
+function ensureBenchmarkQueries(queries) {
   const existing = new Set(queries.map(query => query.id));
-  const missing = tpchQueries
-    .filter(query => !existing.has(query.id))
-    .map(query => ({ ...query, folderId: TPCH_QUERY_FOLDER_ID }));
+  const missing = [];
+  for (const set of benchmarkQuerySets()) {
+    for (const query of set.queries) {
+      if (!existing.has(query.id)) {
+        missing.push({ ...query, folderId: set.folderId });
+      }
+    }
+  }
   if (!missing.length) {
     return queries;
   }
@@ -268,13 +279,17 @@ function ensureTpchQueries(queries) {
 
 function normalizeQueries(queries) {
   const folderIds = new Set(loadQueryFolders().map(folder => folder.id));
-  const tpchIds = new Set(tpchQueries.map(query => query.id));
+  const benchmarkFolderByQueryId = new Map();
+  for (const set of benchmarkQuerySets()) {
+    for (const query of set.queries) {
+      benchmarkFolderByQueryId.set(query.id, set.folderId);
+    }
+  }
   return (Array.isArray(queries) ? queries : [])
     .filter(query => query && query.id && query.name)
     .map(query => {
-      const fallbackFolderId = tpchIds.has(query.id)
-        ? TPCH_QUERY_FOLDER_ID
-        : DEFAULT_QUERY_FOLDER_ID;
+      const fallbackFolderId = benchmarkFolderByQueryId.get(query.id) ||
+        DEFAULT_QUERY_FOLDER_ID;
       const folderId = folderIds.has(query.folderId)
         ? query.folderId
         : fallbackFolderId;

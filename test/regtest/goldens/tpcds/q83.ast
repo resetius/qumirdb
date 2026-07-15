@@ -1,0 +1,222 @@
+(query
+  (with
+    (cte sr_items
+      (query
+        (select
+          (select-list
+            (item as item_id
+              i_item_id
+            )
+            (item as sr_item_qty
+              (call sum sr_return_quantity)
+            )
+          )
+          (from
+            (table store_returns)
+            (table item)
+            (table date_dim)
+          )
+          (where
+            (&& (&& (== sr_item_sk i_item_sk)
+                (subquery in d_date (query
+              (select
+                (select-list
+                  (item
+                    d_date
+                  )
+                )
+                (from
+                  (table date_dim)
+                )
+                (where
+                  (subquery in d_week_seq (query
+                    (select
+                      (select-list
+                        (item
+                          d_week_seq
+                        )
+                      )
+                      (from
+                        (table date_dim)
+                      )
+                      (where
+                        (|| (|| (== d_date "1998-01-02") (== d_date "1998-10-15")) (== d_date "1998-11-10"))
+                      )
+                    )
+                  )
+                  )
+                )
+              )
+            )
+            ))
+              (== sr_returned_date_sk d_date_sk))
+          )
+          (group-by
+            i_item_id
+          )
+        )
+      )
+    )
+    (cte cr_items
+      (query
+        (select
+          (select-list
+            (item as item_id
+              i_item_id
+            )
+            (item as cr_item_qty
+              (call sum cr_return_quantity)
+            )
+          )
+          (from
+            (table catalog_returns)
+            (table item)
+            (table date_dim)
+          )
+          (where
+            (&& (&& (== cr_item_sk i_item_sk)
+                (subquery in d_date (query
+              (select
+                (select-list
+                  (item
+                    d_date
+                  )
+                )
+                (from
+                  (table date_dim)
+                )
+                (where
+                  (subquery in d_week_seq (query
+                    (select
+                      (select-list
+                        (item
+                          d_week_seq
+                        )
+                      )
+                      (from
+                        (table date_dim)
+                      )
+                      (where
+                        (|| (|| (== d_date "1998-01-02") (== d_date "1998-10-15")) (== d_date "1998-11-10"))
+                      )
+                    )
+                  )
+                  )
+                )
+              )
+            )
+            ))
+              (== cr_returned_date_sk d_date_sk))
+          )
+          (group-by
+            i_item_id
+          )
+        )
+      )
+    )
+    (cte wr_items
+      (query
+        (select
+          (select-list
+            (item as item_id
+              i_item_id
+            )
+            (item as wr_item_qty
+              (call sum wr_return_quantity)
+            )
+          )
+          (from
+            (table web_returns)
+            (table item)
+            (table date_dim)
+          )
+          (where
+            (&& (&& (== wr_item_sk i_item_sk)
+                (subquery in d_date (query
+              (select
+                (select-list
+                  (item
+                    d_date
+                  )
+                )
+                (from
+                  (table date_dim)
+                )
+                (where
+                  (subquery in d_week_seq (query
+                    (select
+                      (select-list
+                        (item
+                          d_week_seq
+                        )
+                      )
+                      (from
+                        (table date_dim)
+                      )
+                      (where
+                        (|| (|| (== d_date "1998-01-02") (== d_date "1998-10-15")) (== d_date "1998-11-10"))
+                      )
+                    )
+                  )
+                  )
+                )
+              )
+            )
+            ))
+              (== wr_returned_date_sk d_date_sk))
+          )
+          (group-by
+            i_item_id
+          )
+        )
+      )
+    )
+  )
+  (select
+    (select-list
+      (item
+        |sr_items.item_id|
+      )
+      (item
+        sr_item_qty
+      )
+      (item as sr_dev
+        (* (/ (/ sr_item_qty (+ (+ sr_item_qty cr_item_qty) wr_item_qty)) 3) 100)
+      )
+      (item
+        cr_item_qty
+      )
+      (item as cr_dev
+        (* (/ (/ cr_item_qty (+ (+ sr_item_qty cr_item_qty) wr_item_qty)) 3) 100)
+      )
+      (item
+        wr_item_qty
+      )
+      (item as wr_dev
+        (* (/ (/ wr_item_qty (+ (+ sr_item_qty cr_item_qty) wr_item_qty)) 3) 100)
+      )
+      (item as average
+        (/ (+ (+ sr_item_qty cr_item_qty) wr_item_qty) 3)
+      )
+    )
+    (from
+      (table sr_items)
+      (table cr_items)
+      (table wr_items)
+    )
+    (where
+      (&& (== |sr_items.item_id| |cr_items.item_id|) (== |sr_items.item_id| |wr_items.item_id|))
+    )
+  )
+  (order-by
+    (order asc
+      |sr_items.item_id|
+    )
+    (order asc
+      sr_item_qty
+    )
+  )
+  (limit
+    100
+  )
+)

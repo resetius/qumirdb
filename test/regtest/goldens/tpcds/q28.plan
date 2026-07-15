@@ -1,0 +1,2 @@
+Error: mixing DISTINCT and non-DISTINCT aggregates is not supported
+

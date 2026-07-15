@@ -1,0 +1,64 @@
+(query
+  (select
+    (select-list
+      (item
+        ss_customer_sk
+      )
+      (item as sumsales
+        (call sum act_sales)
+      )
+    )
+    (from
+      (subquery-table as t
+        (query
+          (select
+            (select-list
+              (item
+                ss_item_sk
+              )
+              (item
+                ss_ticket_number
+              )
+              (item
+                ss_customer_sk
+              )
+              (item as act_sales
+                (if
+                  (! (call qdb_sql_is_null sr_return_quantity))
+                  (* (- ss_quantity sr_return_quantity) ss_sales_price)
+                  (* ss_quantity ss_sales_price))
+              )
+            )
+            (from
+              (join left
+                (table store_sales)
+                (table store_returns)
+                (on
+                  (&& (== sr_item_sk ss_item_sk) (== sr_ticket_number ss_ticket_number))
+                )
+              )
+              (table reason)
+            )
+            (where
+              (&& (== sr_reason_sk r_reason_sk) (== r_reason_desc "Did not like the warranty"))
+            )
+          )
+        )
+      )
+    )
+    (group-by
+      ss_customer_sk
+    )
+  )
+  (order-by
+    (order asc
+      sumsales
+    )
+    (order asc
+      ss_customer_sk
+    )
+  )
+  (limit
+    100
+  )
+)

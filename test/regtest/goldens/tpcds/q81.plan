@@ -1,0 +1,91 @@
+(rel limit
+  (rel sort
+    (rel project
+      (rel filter
+        (rel join
+          (rel join
+            (rel join
+              (rel project
+                (rel aggregate
+                  (rel filter
+                    (rel join
+                      (rel join (rel source "catalog_returns") (rel source "date_dim") () (inner))
+                      (rel source "customer_address")
+                      ()
+                      (inner))
+                    (&& (&& (== cr_returned_date_sk d_date_sk) (== d_year 1998))
+                      (== cr_returning_addr_sk ca_address_sk)))
+                  (keys cr_returning_customer_sk ca_state)
+                  (agg sum_0 sum cr_return_amt_inc_tax))
+                (ctr_customer_sk cr_returning_customer_sk)
+                (ctr_state ca_state)
+                (ctr_total_return sum_0))
+              (rel source "customer_address")
+              ()
+              (inner))
+            (rel source "customer")
+            ()
+            (inner))
+          (rel project
+            (rel aggregate
+              (rel project
+                (rel filter
+                  (rel project
+                    (rel aggregate
+                      (rel filter
+                        (rel join
+                          (rel join (rel source "catalog_returns") (rel source "date_dim") () (inner))
+                          (rel source "customer_address")
+                          ()
+                          (inner))
+                        (&& (&& (== cr_returned_date_sk d_date_sk) (== d_year 1998))
+                          (== cr_returning_addr_sk ca_address_sk)))
+                      (keys cr_returning_customer_sk ca_state)
+                      (agg sum_0 sum cr_return_amt_inc_tax))
+                    (ctr_customer_sk cr_returning_customer_sk)
+                    (ctr_state ca_state)
+                    (ctr_total_return sum_0))
+                  (== |ctr1.ctr_state| |ctr2.ctr_state|))
+                (ctr_total_return ctr_total_return)
+                (__group__ 1))
+              (keys __group__)
+              (agg sum_0 sum ctr_total_return)
+              (agg count_1 count))
+            (__scalar_0__ (* (/ sum_0 (cast count_1 f64)) 1.2)))
+          ()
+          (inner))
+        (&& (&& (&& (> |ctr1.ctr_total_return| __scalar_0__) (== ca_address_sk c_current_addr_sk)) (== ca_state "IL"))
+          (== |ctr1.ctr_customer_sk| c_customer_sk)))
+      (c_customer_id c_customer_id)
+      (c_salutation c_salutation)
+      (c_first_name c_first_name)
+      (c_last_name c_last_name)
+      (ca_street_number ca_street_number)
+      (ca_street_name ca_street_name)
+      (ca_street_type ca_street_type)
+      (ca_suite_number ca_suite_number)
+      (ca_city ca_city)
+      (ca_county ca_county)
+      (ca_state ca_state)
+      (ca_zip ca_zip)
+      (ca_country ca_country)
+      (ca_gmt_offset ca_gmt_offset)
+      (ca_location_type ca_location_type)
+      (ctr_total_return ctr_total_return))
+    (c_customer_id asc nulls-default)
+    (c_salutation asc nulls-default)
+    (c_first_name asc nulls-default)
+    (c_last_name asc nulls-default)
+    (ca_street_number asc nulls-default)
+    (ca_street_name asc nulls-default)
+    (ca_street_type asc nulls-default)
+    (ca_suite_number asc nulls-default)
+    (ca_city asc nulls-default)
+    (ca_county asc nulls-default)
+    (ca_state asc nulls-default)
+    (ca_zip asc nulls-default)
+    (ca_country asc nulls-default)
+    (ca_gmt_offset asc nulls-default)
+    (ca_location_type asc nulls-default)
+    (ctr_total_return asc nulls-default))
+  (limit 100))

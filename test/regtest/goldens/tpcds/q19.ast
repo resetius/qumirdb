@@ -1,0 +1,63 @@
+(query
+  (select
+    (select-list
+      (item as brand_id
+        i_brand_id
+      )
+      (item as brand
+        i_brand
+      )
+      (item
+        i_manufact_id
+      )
+      (item
+        i_manufact
+      )
+      (item as ext_price
+        (call sum ss_ext_sales_price)
+      )
+    )
+    (from
+      (table date_dim)
+      (table store_sales)
+      (table item)
+      (table customer)
+      (table customer_address)
+      (table store)
+    )
+    (where
+      (&& (&& (&& (&& (&& (&& (&& (&& (== d_date_sk ss_sold_date_sk) (== ss_item_sk i_item_sk)) (== i_manager_id 7)) (== d_moy 11))
+                (== d_year 1999))
+              (== ss_customer_sk c_customer_sk))
+            (== c_current_addr_sk ca_address_sk))
+          (!= (call substr ca_zip 1 5) (call substr s_zip 1 5)))
+        (== ss_store_sk s_store_sk))
+    )
+    (group-by
+      i_brand
+      i_brand_id
+      i_manufact_id
+      i_manufact
+    )
+  )
+  (order-by
+    (order desc
+      ext_price
+    )
+    (order asc
+      i_brand
+    )
+    (order asc
+      i_brand_id
+    )
+    (order asc
+      i_manufact_id
+    )
+    (order asc
+      i_manufact
+    )
+  )
+  (limit
+    100
+  )
+)

@@ -1,0 +1,129 @@
+(query
+  (with
+    (cte ssales
+      (query
+        (select
+          (select-list
+            (item
+              c_last_name
+            )
+            (item
+              c_first_name
+            )
+            (item
+              s_store_name
+            )
+            (item
+              ca_state
+            )
+            (item
+              s_state
+            )
+            (item
+              i_color
+            )
+            (item
+              i_current_price
+            )
+            (item
+              i_manager_id
+            )
+            (item
+              i_units
+            )
+            (item
+              i_size
+            )
+            (item as netpaid
+              (call sum ss_sales_price)
+            )
+          )
+          (from
+            (table store_sales)
+            (table store_returns)
+            (table store)
+            (table item)
+            (table customer)
+            (table customer_address)
+          )
+          (where
+            (&& (&& (&& (&& (&& (&& (&& (&& (== ss_ticket_number sr_ticket_number) (== ss_item_sk sr_item_sk))
+                          (== ss_customer_sk c_customer_sk))
+                        (== ss_item_sk i_item_sk))
+                      (== ss_store_sk s_store_sk))
+                    (== c_current_addr_sk ca_address_sk))
+                  (!= c_birth_country (call upper ca_country)))
+                (== s_zip ca_zip))
+              (== s_market_id 7))
+          )
+          (group-by
+            c_last_name
+            c_first_name
+            s_store_name
+            ca_state
+            s_state
+            i_color
+            i_current_price
+            i_manager_id
+            i_units
+            i_size
+          )
+        )
+      )
+    )
+  )
+  (select
+    (select-list
+      (item
+        c_last_name
+      )
+      (item
+        c_first_name
+      )
+      (item
+        s_store_name
+      )
+      (item as paid
+        (call sum netpaid)
+      )
+    )
+    (from
+      (table ssales)
+    )
+    (where
+      (== i_color "orchid")
+    )
+    (group-by
+      c_last_name
+      c_first_name
+      s_store_name
+    )
+    (having
+      (> (call sum netpaid)
+        (subquery scalar (query
+        (select
+          (select-list
+            (item
+              (* 0.050000000000000003 (call avg netpaid))
+            )
+          )
+          (from
+            (table ssales)
+          )
+        )
+      )
+      ))
+    )
+  )
+  (order-by
+    (order asc
+      c_last_name
+    )
+    (order asc
+      c_first_name
+    )
+    (order asc
+      s_store_name
+    )
+  )
+)

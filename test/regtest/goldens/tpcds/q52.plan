@@ -1,0 +1,24 @@
+(rel limit
+  (rel sort
+    (rel project
+      (rel aggregate
+        (rel filter
+          (rel join
+            (rel join (rel source "date_dim" "dt") (rel source "store_sales") () (inner))
+            (rel source "item")
+            ()
+            (inner))
+          (&& (&& (&& (&& (== |dt.d_date_sk| |store_sales.ss_sold_date_sk|) (== |store_sales.ss_item_sk| |item.i_item_sk|))
+                (== |item.i_manager_id| 1))
+              (== |dt.d_moy| 12))
+            (== |dt.d_year| 1998)))
+        (keys |dt.d_year| |item.i_brand| |item.i_brand_id|)
+        (agg sum_0 sum ss_ext_sales_price))
+      (|dt.d_year| |dt.d_year|)
+      (brand_id |item.i_brand_id|)
+      (brand |item.i_brand|)
+      (ext_price sum_0))
+    (|dt.d_year| asc nulls-default)
+    (ext_price desc nulls-default)
+    (brand_id asc nulls-default))
+  (limit 100))

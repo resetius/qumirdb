@@ -1,0 +1,113 @@
+(query
+  (select
+    (select-list
+      (item
+        s_store_name
+      )
+      (item
+        s_company_id
+      )
+      (item
+        s_street_number
+      )
+      (item
+        s_street_name
+      )
+      (item
+        s_street_type
+      )
+      (item
+        s_suite_number
+      )
+      (item
+        s_city
+      )
+      (item
+        s_county
+      )
+      (item
+        s_state
+      )
+      (item
+        s_zip
+      )
+      (item as 30 days
+        (call sum (if (<= (- sr_returned_date_sk ss_sold_date_sk) 30) 1 0))
+      )
+      (item as 31-60 days
+        (call sum (if (&& (> (- sr_returned_date_sk ss_sold_date_sk) 30) (<= (- sr_returned_date_sk ss_sold_date_sk) 60)) 1 0))
+      )
+      (item as 61-90 days
+        (call sum (if (&& (> (- sr_returned_date_sk ss_sold_date_sk) 60) (<= (- sr_returned_date_sk ss_sold_date_sk) 90)) 1 0))
+      )
+      (item as 91-120 days
+        (call sum (if (&& (> (- sr_returned_date_sk ss_sold_date_sk) 90) (<= (- sr_returned_date_sk ss_sold_date_sk) 120)) 1 0))
+      )
+      (item as >120 days
+        (call sum (if (> (- sr_returned_date_sk ss_sold_date_sk) 120) 1 0))
+      )
+    )
+    (from
+      (table store_sales)
+      (table store_returns)
+      (table store)
+      (table date_dim as d1)
+      (table date_dim as d2)
+    )
+    (where
+      (&& (&& (&& (&& (&& (&& (&& (== |d2.d_year| 2000) (== |d2.d_moy| 9)) (== ss_ticket_number sr_ticket_number))
+                (== ss_item_sk sr_item_sk))
+              (== ss_sold_date_sk |d1.d_date_sk|))
+            (== sr_returned_date_sk |d2.d_date_sk|))
+          (== ss_customer_sk sr_customer_sk))
+        (== ss_store_sk s_store_sk))
+    )
+    (group-by
+      s_store_name
+      s_company_id
+      s_street_number
+      s_street_name
+      s_street_type
+      s_suite_number
+      s_city
+      s_county
+      s_state
+      s_zip
+    )
+  )
+  (order-by
+    (order asc
+      s_store_name
+    )
+    (order asc
+      s_company_id
+    )
+    (order asc
+      s_street_number
+    )
+    (order asc
+      s_street_name
+    )
+    (order asc
+      s_street_type
+    )
+    (order asc
+      s_suite_number
+    )
+    (order asc
+      s_city
+    )
+    (order asc
+      s_county
+    )
+    (order asc
+      s_state
+    )
+    (order asc
+      s_zip
+    )
+  )
+  (limit
+    100
+  )
+)

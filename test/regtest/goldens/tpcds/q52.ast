@@ -1,0 +1,48 @@
+(query
+  (select
+    (select-list
+      (item
+        |dt.d_year|
+      )
+      (item as brand_id
+        |item.i_brand_id|
+      )
+      (item as brand
+        |item.i_brand|
+      )
+      (item as ext_price
+        (call sum ss_ext_sales_price)
+      )
+    )
+    (from
+      (table date_dim as dt)
+      (table store_sales)
+      (table item)
+    )
+    (where
+      (&& (&& (&& (&& (== |dt.d_date_sk| |store_sales.ss_sold_date_sk|) (== |store_sales.ss_item_sk| |item.i_item_sk|))
+            (== |item.i_manager_id| 1))
+          (== |dt.d_moy| 12))
+        (== |dt.d_year| 1998))
+    )
+    (group-by
+      |dt.d_year|
+      |item.i_brand|
+      |item.i_brand_id|
+    )
+  )
+  (order-by
+    (order asc
+      |dt.d_year|
+    )
+    (order desc
+      ext_price
+    )
+    (order asc
+      brand_id
+    )
+  )
+  (limit
+    100
+  )
+)

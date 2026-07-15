@@ -1,0 +1,126 @@
+(query
+  (with
+    (cte ss
+      (query
+        (select
+          (select-list
+            (item
+              ca_county
+            )
+            (item
+              d_qoy
+            )
+            (item
+              d_year
+            )
+            (item as store_sales
+              (call sum ss_ext_sales_price)
+            )
+          )
+          (from
+            (table store_sales)
+            (table date_dim)
+            (table customer_address)
+          )
+          (where
+            (&& (== ss_sold_date_sk d_date_sk) (== ss_addr_sk ca_address_sk))
+          )
+          (group-by
+            ca_county
+            d_qoy
+            d_year
+          )
+        )
+      )
+    )
+    (cte ws
+      (query
+        (select
+          (select-list
+            (item
+              ca_county
+            )
+            (item
+              d_qoy
+            )
+            (item
+              d_year
+            )
+            (item as web_sales
+              (call sum ws_ext_sales_price)
+            )
+          )
+          (from
+            (table web_sales)
+            (table date_dim)
+            (table customer_address)
+          )
+          (where
+            (&& (== ws_sold_date_sk d_date_sk) (== ws_bill_addr_sk ca_address_sk))
+          )
+          (group-by
+            ca_county
+            d_qoy
+            d_year
+          )
+        )
+      )
+    )
+  )
+  (select
+    (select-list
+      (item
+        |ss1.ca_county|
+      )
+      (item
+        |ss1.d_year|
+      )
+      (item as web_q1_q2_increase
+        (/ |ws2.web_sales| |ws1.web_sales|)
+      )
+      (item as store_q1_q2_increase
+        (/ |ss2.store_sales| |ss1.store_sales|)
+      )
+      (item as web_q2_q3_increase
+        (/ |ws3.web_sales| |ws2.web_sales|)
+      )
+      (item as store_q2_q3_increase
+        (/ |ss3.store_sales| |ss2.store_sales|)
+      )
+    )
+    (from
+      (table ss as ss1)
+      (table ss as ss2)
+      (table ss as ss3)
+      (table ws as ws1)
+      (table ws as ws2)
+      (table ws as ws3)
+    )
+    (where
+      (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (== |ss1.d_qoy| 1) (== |ss1.d_year| 2000)) (== |ss1.ca_county| |ss2.ca_county|))
+                                      (== |ss2.d_qoy| 2))
+                                    (== |ss2.d_year| 2000))
+                                  (== |ss2.ca_county| |ss3.ca_county|))
+                                (== |ss3.d_qoy| 3))
+                              (== |ss3.d_year| 2000))
+                            (== |ss1.ca_county| |ws1.ca_county|))
+                          (== |ws1.d_qoy| 1))
+                        (== |ws1.d_year| 2000))
+                      (== |ws1.ca_county| |ws2.ca_county|))
+                    (== |ws2.d_qoy| 2))
+                  (== |ws2.d_year| 2000))
+                (== |ws1.ca_county| |ws3.ca_county|))
+              (== |ws3.d_qoy| 3))
+            (== |ws3.d_year| 2000))
+          (> (if (> |ws1.web_sales| 0) (/ |ws2.web_sales| |ws1.web_sales|) (call qdb_sql_null))
+            (if (> |ss1.store_sales| 0) (/ |ss2.store_sales| |ss1.store_sales|) (call qdb_sql_null))))
+        (> (if (> |ws2.web_sales| 0) (/ |ws3.web_sales| |ws2.web_sales|) (call qdb_sql_null))
+          (if (> |ss2.store_sales| 0) (/ |ss3.store_sales| |ss2.store_sales|) (call qdb_sql_null))))
+    )
+  )
+  (order-by
+    (order asc
+      |ss1.d_year|
+    )
+  )
+)

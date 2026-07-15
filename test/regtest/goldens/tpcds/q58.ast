@@ -1,0 +1,232 @@
+(query
+  (with
+    (cte ss_items
+      (query
+        (select
+          (select-list
+            (item as item_id
+              i_item_id
+            )
+            (item as ss_item_rev
+              (call sum ss_ext_sales_price)
+            )
+          )
+          (from
+            (table store_sales)
+            (table item)
+            (table date_dim)
+          )
+          (where
+            (&& (&& (== ss_item_sk i_item_sk)
+                (subquery in d_date (query
+              (select
+                (select-list
+                  (item
+                    d_date
+                  )
+                )
+                (from
+                  (table date_dim)
+                )
+                (where
+                  (== d_week_seq
+                    (subquery scalar (query
+                    (select
+                      (select-list
+                        (item
+                          d_week_seq
+                        )
+                      )
+                      (from
+                        (table date_dim)
+                      )
+                      (where
+                        (== d_date "1998-02-19")
+                      )
+                    )
+                  )
+                  ))
+                )
+              )
+            )
+            ))
+              (== ss_sold_date_sk d_date_sk))
+          )
+          (group-by
+            i_item_id
+          )
+        )
+      )
+    )
+    (cte cs_items
+      (query
+        (select
+          (select-list
+            (item as item_id
+              i_item_id
+            )
+            (item as cs_item_rev
+              (call sum cs_ext_sales_price)
+            )
+          )
+          (from
+            (table catalog_sales)
+            (table item)
+            (table date_dim)
+          )
+          (where
+            (&& (&& (== cs_item_sk i_item_sk)
+                (subquery in d_date (query
+              (select
+                (select-list
+                  (item
+                    d_date
+                  )
+                )
+                (from
+                  (table date_dim)
+                )
+                (where
+                  (== d_week_seq
+                    (subquery scalar (query
+                    (select
+                      (select-list
+                        (item
+                          d_week_seq
+                        )
+                      )
+                      (from
+                        (table date_dim)
+                      )
+                      (where
+                        (== d_date "1998-02-19")
+                      )
+                    )
+                  )
+                  ))
+                )
+              )
+            )
+            ))
+              (== cs_sold_date_sk d_date_sk))
+          )
+          (group-by
+            i_item_id
+          )
+        )
+      )
+    )
+    (cte ws_items
+      (query
+        (select
+          (select-list
+            (item as item_id
+              i_item_id
+            )
+            (item as ws_item_rev
+              (call sum ws_ext_sales_price)
+            )
+          )
+          (from
+            (table web_sales)
+            (table item)
+            (table date_dim)
+          )
+          (where
+            (&& (&& (== ws_item_sk i_item_sk)
+                (subquery in d_date (query
+              (select
+                (select-list
+                  (item
+                    d_date
+                  )
+                )
+                (from
+                  (table date_dim)
+                )
+                (where
+                  (== d_week_seq
+                    (subquery scalar (query
+                    (select
+                      (select-list
+                        (item
+                          d_week_seq
+                        )
+                      )
+                      (from
+                        (table date_dim)
+                      )
+                      (where
+                        (== d_date "1998-02-19")
+                      )
+                    )
+                  )
+                  ))
+                )
+              )
+            )
+            ))
+              (== ws_sold_date_sk d_date_sk))
+          )
+          (group-by
+            i_item_id
+          )
+        )
+      )
+    )
+  )
+  (select
+    (select-list
+      (item
+        |ss_items.item_id|
+      )
+      (item
+        ss_item_rev
+      )
+      (item as ss_dev
+        (* (/ ss_item_rev (/ (+ (+ ss_item_rev cs_item_rev) ws_item_rev) 3)) 100)
+      )
+      (item
+        cs_item_rev
+      )
+      (item as cs_dev
+        (* (/ cs_item_rev (/ (+ (+ ss_item_rev cs_item_rev) ws_item_rev) 3)) 100)
+      )
+      (item
+        ws_item_rev
+      )
+      (item as ws_dev
+        (* (/ ws_item_rev (/ (+ (+ ss_item_rev cs_item_rev) ws_item_rev) 3)) 100)
+      )
+      (item as average
+        (/ (+ (+ ss_item_rev cs_item_rev) ws_item_rev) 3)
+      )
+    )
+    (from
+      (table ss_items)
+      (table cs_items)
+      (table ws_items)
+    )
+    (where
+      (&& (&& (&& (&& (&& (&& (&& (== |ss_items.item_id| |cs_items.item_id|) (== |ss_items.item_id| |ws_items.item_id|))
+                  (&& (<= (* 0.90000000000000002 cs_item_rev) ss_item_rev)
+                    (<= ss_item_rev (* 1.1000000000000001 cs_item_rev))))
+                (&& (<= (* 0.90000000000000002 ws_item_rev) ss_item_rev) (<= ss_item_rev (* 1.1000000000000001 ws_item_rev))))
+              (&& (<= (* 0.90000000000000002 ss_item_rev) cs_item_rev) (<= cs_item_rev (* 1.1000000000000001 ss_item_rev))))
+            (&& (<= (* 0.90000000000000002 ws_item_rev) cs_item_rev) (<= cs_item_rev (* 1.1000000000000001 ws_item_rev))))
+          (&& (<= (* 0.90000000000000002 ss_item_rev) ws_item_rev) (<= ws_item_rev (* 1.1000000000000001 ss_item_rev))))
+        (&& (<= (* 0.90000000000000002 cs_item_rev) ws_item_rev) (<= ws_item_rev (* 1.1000000000000001 cs_item_rev))))
+    )
+  )
+  (order-by
+    (order asc
+      item_id
+    )
+    (order asc
+      ss_item_rev
+    )
+  )
+  (limit
+    100
+  )
+)

@@ -1,0 +1,50 @@
+(query
+  (select
+    (select-list
+      (item
+        (call avg ss_quantity)
+      )
+      (item
+        (call avg ss_ext_sales_price)
+      )
+      (item
+        (call avg ss_ext_wholesale_cost)
+      )
+      (item
+        (call sum ss_ext_wholesale_cost)
+      )
+    )
+    (from
+      (table store_sales)
+      (table store)
+      (table customer_demographics)
+      (table household_demographics)
+      (table customer_address)
+      (table date_dim)
+    )
+    (where
+      (&& (&& (&& (&& (== s_store_sk ss_store_sk) (== ss_sold_date_sk d_date_sk)) (== d_year 2001))
+          (|| (|| (&& (&& (&& (&& (&& (== ss_hdemo_sk hd_demo_sk) (== cd_demo_sk ss_cdemo_sk)) (== cd_marital_status "D"))
+                    (== cd_education_status "2 yr Degree"))
+                  (&& (<= 100 ss_sales_price) (<= ss_sales_price 150)))
+                (== hd_dep_count 3))
+              (&& (&& (&& (&& (&& (== ss_hdemo_sk hd_demo_sk) (== cd_demo_sk ss_cdemo_sk)) (== cd_marital_status "S"))
+                    (== cd_education_status "Secondary"))
+                  (&& (<= 50 ss_sales_price) (<= ss_sales_price 100)))
+                (== hd_dep_count 1)))
+            (&& (&& (&& (&& (&& (== ss_hdemo_sk hd_demo_sk) (== cd_demo_sk ss_cdemo_sk)) (== cd_marital_status "W"))
+                  (== cd_education_status "Advanced Degree"))
+                (&& (<= 150 ss_sales_price) (<= ss_sales_price 200)))
+              (== hd_dep_count 1))))
+        (|| (|| (&& (&& (&& (== ss_addr_sk ca_address_sk) (== ca_country "United States"))
+                (|| (|| (== ca_state "CO") (== ca_state "IL")) (== ca_state "MN")))
+              (&& (<= 100 ss_net_profit) (<= ss_net_profit 200)))
+            (&& (&& (&& (== ss_addr_sk ca_address_sk) (== ca_country "United States"))
+                (|| (|| (== ca_state "OH") (== ca_state "MT")) (== ca_state "NM")))
+              (&& (<= 150 ss_net_profit) (<= ss_net_profit 300))))
+          (&& (&& (&& (== ss_addr_sk ca_address_sk) (== ca_country "United States"))
+              (|| (|| (== ca_state "TX") (== ca_state "MO")) (== ca_state "MI")))
+            (&& (<= 50 ss_net_profit) (<= ss_net_profit 250)))))
+    )
+  )
+)

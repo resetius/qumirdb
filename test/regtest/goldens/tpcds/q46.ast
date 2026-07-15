@@ -1,0 +1,103 @@
+(query
+  (select
+    (select-list
+      (item
+        c_last_name
+      )
+      (item
+        c_first_name
+      )
+      (item
+        ca_city
+      )
+      (item
+        bought_city
+      )
+      (item
+        ss_ticket_number
+      )
+      (item
+        amt
+      )
+      (item
+        profit
+      )
+    )
+    (from
+      (subquery-table as dn
+        (query
+          (select
+            (select-list
+              (item
+                ss_ticket_number
+              )
+              (item
+                ss_customer_sk
+              )
+              (item as bought_city
+                ca_city
+              )
+              (item as amt
+                (call sum ss_coupon_amt)
+              )
+              (item as profit
+                (call sum ss_net_profit)
+              )
+            )
+            (from
+              (table store_sales)
+              (table date_dim)
+              (table store)
+              (table household_demographics)
+              (table customer_address)
+            )
+            (where
+              (&& (&& (&& (&& (&& (&& (&& (== |store_sales.ss_sold_date_sk| |date_dim.d_date_sk|)
+                            (== |store_sales.ss_store_sk| |store.s_store_sk|))
+                          (== |store_sales.ss_hdemo_sk| |household_demographics.hd_demo_sk|))
+                        (== |store_sales.ss_addr_sk| |customer_address.ca_address_sk|))
+                      (|| (== |household_demographics.hd_dep_count| 5) (== |household_demographics.hd_vehicle_count| 3)))
+                    (|| (== |date_dim.d_dow| 6) (== |date_dim.d_dow| 0)))
+                  (|| (|| (== |date_dim.d_year| 1999) (== |date_dim.d_year| (+ 1999 1))) (== |date_dim.d_year| (+ 1999 2))))
+                (|| (|| (|| (|| (== |store.s_city| "Midway") (== |store.s_city| "Fairview")) (== |store.s_city| "Fairview"))
+                    (== |store.s_city| "Fairview"))
+                  (== |store.s_city| "Fairview")))
+            )
+            (group-by
+              ss_ticket_number
+              ss_customer_sk
+              ss_addr_sk
+              ca_city
+            )
+          )
+        )
+      )
+      (table customer)
+      (table customer_address as current_addr)
+    )
+    (where
+      (&& (&& (== ss_customer_sk c_customer_sk) (== |customer.c_current_addr_sk| |current_addr.ca_address_sk|))
+        (!= |current_addr.ca_city| bought_city))
+    )
+  )
+  (order-by
+    (order asc
+      c_last_name
+    )
+    (order asc
+      c_first_name
+    )
+    (order asc
+      ca_city
+    )
+    (order asc
+      bought_city
+    )
+    (order asc
+      ss_ticket_number
+    )
+  )
+  (limit
+    100
+  )
+)

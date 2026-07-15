@@ -1,0 +1,119 @@
+(query
+  (select
+    (select-list
+      (item
+        s_store_name
+      )
+      (item
+        i_item_desc
+      )
+      (item
+        |sc.revenue|
+      )
+      (item
+        i_current_price
+      )
+      (item
+        i_wholesale_cost
+      )
+      (item
+        i_brand
+      )
+    )
+    (from
+      (table store)
+      (table item)
+      (subquery-table as sb
+        (query
+          (select
+            (select-list
+              (item
+                ss_store_sk
+              )
+              (item as ave
+                (call avg revenue)
+              )
+            )
+            (from
+              (subquery-table as sa
+                (query
+                  (select
+                    (select-list
+                      (item
+                        ss_store_sk
+                      )
+                      (item
+                        ss_item_sk
+                      )
+                      (item as revenue
+                        (call sum ss_sales_price)
+                      )
+                    )
+                    (from
+                      (table store_sales)
+                      (table date_dim)
+                    )
+                    (where
+                      (&& (== ss_sold_date_sk d_date_sk) (&& (<= 1212 d_month_seq) (<= d_month_seq (+ 1212 11))))
+                    )
+                    (group-by
+                      ss_store_sk
+                      ss_item_sk
+                    )
+                  )
+                )
+              )
+            )
+            (group-by
+              ss_store_sk
+            )
+          )
+        )
+      )
+      (subquery-table as sc
+        (query
+          (select
+            (select-list
+              (item
+                ss_store_sk
+              )
+              (item
+                ss_item_sk
+              )
+              (item as revenue
+                (call sum ss_sales_price)
+              )
+            )
+            (from
+              (table store_sales)
+              (table date_dim)
+            )
+            (where
+              (&& (== ss_sold_date_sk d_date_sk) (&& (<= 1212 d_month_seq) (<= d_month_seq (+ 1212 11))))
+            )
+            (group-by
+              ss_store_sk
+              ss_item_sk
+            )
+          )
+        )
+      )
+    )
+    (where
+      (&& (&& (&& (== |sb.ss_store_sk| |sc.ss_store_sk|) (<= |sc.revenue| (* 0.10000000000000001 |sb.ave|)))
+          (== s_store_sk |sc.ss_store_sk|))
+        (== i_item_sk |sc.ss_item_sk|))
+    )
+  )
+  (order-by
+    (order asc
+      s_store_name
+    )
+    (order asc
+      i_item_desc
+    )
+  )
+  (limit
+    100
+  )
+)

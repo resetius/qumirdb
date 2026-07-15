@@ -1,0 +1,31 @@
+(rel limit
+  (rel sort
+    (rel project
+      (rel aggregate
+        (rel project
+          (rel filter
+            (rel join
+              (rel join
+                (rel source "store_sales")
+                (rel source "store_returns")
+                ()
+                (left)
+                (&& (== sr_item_sk ss_item_sk) (== sr_ticket_number ss_ticket_number)))
+              (rel source "reason")
+              ()
+              (inner))
+            (&& (== sr_reason_sk r_reason_sk) (== r_reason_desc "Did not like the warranty")))
+          (ss_item_sk ss_item_sk)
+          (ss_ticket_number ss_ticket_number)
+          (ss_customer_sk ss_customer_sk)
+          (act_sales (if
+              (! (call qdb_sql_is_null sr_return_quantity))
+              (* (- ss_quantity sr_return_quantity) ss_sales_price)
+              (* ss_quantity ss_sales_price))))
+        (keys ss_customer_sk)
+        (agg sum_0 sum act_sales))
+      (ss_customer_sk ss_customer_sk)
+      (sumsales sum_0))
+    (sumsales asc nulls-default)
+    (ss_customer_sk asc nulls-default))
+  (limit 100))

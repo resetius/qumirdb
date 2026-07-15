@@ -1,0 +1,255 @@
+(query
+  (with
+    (cte cs_ui
+      (query
+        (select
+          (select-list
+            (item
+              cs_item_sk
+            )
+            (item as sale
+              (call sum cs_ext_list_price)
+            )
+            (item as refund
+              (call sum (+ (+ cr_refunded_cash cr_reversed_charge) cr_store_credit))
+            )
+          )
+          (from
+            (table catalog_sales)
+            (table catalog_returns)
+          )
+          (where
+            (&& (== cs_item_sk cr_item_sk) (== cs_order_number cr_order_number))
+          )
+          (group-by
+            cs_item_sk
+          )
+          (having
+            (> (call sum cs_ext_list_price) (* 2 (call sum (+ (+ cr_refunded_cash cr_reversed_charge) cr_store_credit))))
+          )
+        )
+      )
+    )
+    (cte cross_sales
+      (query
+        (select
+          (select-list
+            (item as product_name
+              i_product_name
+            )
+            (item as item_sk
+              i_item_sk
+            )
+            (item as store_name
+              s_store_name
+            )
+            (item as store_zip
+              s_zip
+            )
+            (item as b_street_number
+              |ad1.ca_street_number|
+            )
+            (item as b_street_name
+              |ad1.ca_street_name|
+            )
+            (item as b_city
+              |ad1.ca_city|
+            )
+            (item as b_zip
+              |ad1.ca_zip|
+            )
+            (item as c_street_number
+              |ad2.ca_street_number|
+            )
+            (item as c_street_name
+              |ad2.ca_street_name|
+            )
+            (item as c_city
+              |ad2.ca_city|
+            )
+            (item as c_zip
+              |ad2.ca_zip|
+            )
+            (item as syear
+              |d1.d_year|
+            )
+            (item as fsyear
+              |d2.d_year|
+            )
+            (item as s2year
+              |d3.d_year|
+            )
+            (item as cnt
+              (call count *)
+            )
+            (item as s1
+              (call sum ss_wholesale_cost)
+            )
+            (item as s2
+              (call sum ss_list_price)
+            )
+            (item as s3
+              (call sum ss_coupon_amt)
+            )
+          )
+          (from
+            (table store_sales)
+            (table store_returns)
+            (table cs_ui)
+            (table date_dim as d1)
+            (table date_dim as d2)
+            (table date_dim as d3)
+            (table store)
+            (table customer)
+            (table customer_demographics as cd1)
+            (table customer_demographics as cd2)
+            (table promotion)
+            (table household_demographics as hd1)
+            (table household_demographics as hd2)
+            (table customer_address as ad1)
+            (table customer_address as ad2)
+            (table income_band as ib1)
+            (table income_band as ib2)
+            (table item)
+          )
+          (where
+            (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (== ss_store_sk s_store_sk) (== ss_sold_date_sk |d1.d_date_sk|))
+                                                    (== ss_customer_sk c_customer_sk))
+                                                  (== ss_cdemo_sk |cd1.cd_demo_sk|))
+                                                (== ss_hdemo_sk |hd1.hd_demo_sk|))
+                                              (== ss_addr_sk |ad1.ca_address_sk|))
+                                            (== ss_item_sk i_item_sk))
+                                          (== ss_item_sk sr_item_sk))
+                                        (== ss_ticket_number sr_ticket_number))
+                                      (== ss_item_sk |cs_ui.cs_item_sk|))
+                                    (== c_current_cdemo_sk |cd2.cd_demo_sk|))
+                                  (== c_current_hdemo_sk |hd2.hd_demo_sk|))
+                                (== c_current_addr_sk |ad2.ca_address_sk|))
+                              (== c_first_sales_date_sk |d2.d_date_sk|))
+                            (== c_first_shipto_date_sk |d3.d_date_sk|))
+                          (== ss_promo_sk p_promo_sk))
+                        (== |hd1.hd_income_band_sk| |ib1.ib_income_band_sk|))
+                      (== |hd2.hd_income_band_sk| |ib2.ib_income_band_sk|))
+                    (!= |cd1.cd_marital_status| |cd2.cd_marital_status|))
+                  (|| (|| (|| (|| (|| (== i_color "maroon") (== i_color "burnished")) (== i_color "dim")) (== i_color "steel"))
+                      (== i_color "navajo"))
+                    (== i_color "chocolate")))
+                (&& (<= 35 i_current_price) (<= i_current_price (+ 35 10))))
+              (&& (<= (+ 35 1) i_current_price) (<= i_current_price (+ 35 15))))
+          )
+          (group-by
+            i_product_name
+            i_item_sk
+            s_store_name
+            s_zip
+            |ad1.ca_street_number|
+            |ad1.ca_street_name|
+            |ad1.ca_city|
+            |ad1.ca_zip|
+            |ad2.ca_street_number|
+            |ad2.ca_street_name|
+            |ad2.ca_city|
+            |ad2.ca_zip|
+            |d1.d_year|
+            |d2.d_year|
+            |d3.d_year|
+          )
+        )
+      )
+    )
+  )
+  (select
+    (select-list
+      (item
+        |cs1.product_name|
+      )
+      (item
+        |cs1.store_name|
+      )
+      (item
+        |cs1.store_zip|
+      )
+      (item
+        |cs1.b_street_number|
+      )
+      (item
+        |cs1.b_street_name|
+      )
+      (item
+        |cs1.b_city|
+      )
+      (item
+        |cs1.b_zip|
+      )
+      (item
+        |cs1.c_street_number|
+      )
+      (item
+        |cs1.c_street_name|
+      )
+      (item
+        |cs1.c_city|
+      )
+      (item
+        |cs1.c_zip|
+      )
+      (item
+        |cs1.syear|
+      )
+      (item
+        |cs1.cnt|
+      )
+      (item as s11
+        |cs1.s1|
+      )
+      (item as s21
+        |cs1.s2|
+      )
+      (item as s31
+        |cs1.s3|
+      )
+      (item as s12
+        |cs2.s1|
+      )
+      (item as s22
+        |cs2.s2|
+      )
+      (item as s32
+        |cs2.s3|
+      )
+      (item
+        |cs2.syear|
+      )
+      (item
+        |cs2.cnt|
+      )
+    )
+    (from
+      (table cross_sales as cs1)
+      (table cross_sales as cs2)
+    )
+    (where
+      (&& (&& (&& (&& (&& (== |cs1.item_sk| |cs2.item_sk|) (== |cs1.syear| 2000)) (== |cs2.syear| (+ 2000 1)))
+            (<= |cs2.cnt| |cs1.cnt|))
+          (== |cs1.store_name| |cs2.store_name|))
+        (== |cs1.store_zip| |cs2.store_zip|))
+    )
+  )
+  (order-by
+    (order asc
+      |cs1.product_name|
+    )
+    (order asc
+      |cs1.store_name|
+    )
+    (order asc
+      |cs2.cnt|
+    )
+    (order asc
+      |cs1.s1|
+    )
+    (order asc
+      |cs2.s1|
+    )
+  )
+)

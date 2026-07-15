@@ -1,0 +1,79 @@
+(query
+  (with
+    (cte ssci
+      (query
+        (select
+          (select-list
+            (item as customer_sk
+              ss_customer_sk
+            )
+            (item as item_sk
+              ss_item_sk
+            )
+          )
+          (from
+            (table store_sales)
+            (table date_dim)
+          )
+          (where
+            (&& (== ss_sold_date_sk d_date_sk) (&& (<= 1212 d_month_seq) (<= d_month_seq (+ 1212 11))))
+          )
+          (group-by
+            ss_customer_sk
+            ss_item_sk
+          )
+        )
+      )
+    )
+    (cte csci
+      (query
+        (select
+          (select-list
+            (item as customer_sk
+              cs_bill_customer_sk
+            )
+            (item as item_sk
+              cs_item_sk
+            )
+          )
+          (from
+            (table catalog_sales)
+            (table date_dim)
+          )
+          (where
+            (&& (== cs_sold_date_sk d_date_sk) (&& (<= 1212 d_month_seq) (<= d_month_seq (+ 1212 11))))
+          )
+          (group-by
+            cs_bill_customer_sk
+            cs_item_sk
+          )
+        )
+      )
+    )
+  )
+  (select
+    (select-list
+      (item as store_only
+        (call sum (if (&& (! (call qdb_sql_is_null |ssci.customer_sk|)) (call qdb_sql_is_null |csci.customer_sk|)) 1 0))
+      )
+      (item as catalog_only
+        (call sum (if (&& (call qdb_sql_is_null |ssci.customer_sk|) (! (call qdb_sql_is_null |csci.customer_sk|))) 1 0))
+      )
+      (item as store_and_catalog
+        (call sum (if (&& (! (call qdb_sql_is_null |ssci.customer_sk|)) (! (call qdb_sql_is_null |csci.customer_sk|))) 1 0))
+      )
+    )
+    (from
+      (join full
+        (table ssci)
+        (table csci)
+        (on
+          (&& (== |ssci.customer_sk| |csci.customer_sk|) (== |ssci.item_sk| |csci.item_sk|))
+        )
+      )
+    )
+  )
+  (limit
+    100
+  )
+)
