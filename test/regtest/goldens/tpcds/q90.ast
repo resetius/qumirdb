@@ -1,0 +1,67 @@
+(query
+  (select
+    (select-list
+      (item as am_pm_ratio
+        (/ (: (cast amc <named DECIMAL>) <named DECIMAL>) (: (cast pmc <named DECIMAL>) <named DECIMAL>))
+      )
+    )
+    (from
+      (subquery-table as at
+        (query
+          (select
+            (select-list
+              (item as amc
+                (call count *)
+              )
+            )
+            (from
+              (table web_sales)
+              (table household_demographics)
+              (table time_dim)
+              (table web_page)
+            )
+            (where
+              (&& (&& (&& (&& (&& (== ws_sold_time_sk |time_dim.t_time_sk|) (== ws_ship_hdemo_sk |household_demographics.hd_demo_sk|))
+                      (== ws_web_page_sk |web_page.wp_web_page_sk|))
+                    (&& (<= 6 |time_dim.t_hour|) (<= |time_dim.t_hour| (+ 6 1))))
+                  (== |household_demographics.hd_dep_count| 8))
+                (&& (<= 5000 |web_page.wp_char_count|) (<= |web_page.wp_char_count| 5200)))
+            )
+          )
+        )
+      )
+      (subquery-table as pt
+        (query
+          (select
+            (select-list
+              (item as pmc
+                (call count *)
+              )
+            )
+            (from
+              (table web_sales)
+              (table household_demographics)
+              (table time_dim)
+              (table web_page)
+            )
+            (where
+              (&& (&& (&& (&& (&& (== ws_sold_time_sk |time_dim.t_time_sk|) (== ws_ship_hdemo_sk |household_demographics.hd_demo_sk|))
+                      (== ws_web_page_sk |web_page.wp_web_page_sk|))
+                    (&& (<= 14 |time_dim.t_hour|) (<= |time_dim.t_hour| (+ 14 1))))
+                  (== |household_demographics.hd_dep_count| 8))
+                (&& (<= 5000 |web_page.wp_char_count|) (<= |web_page.wp_char_count| 5200)))
+            )
+          )
+        )
+      )
+    )
+  )
+  (order-by
+    (order asc
+      am_pm_ratio
+    )
+  )
+  (limit
+    100
+  )
+)

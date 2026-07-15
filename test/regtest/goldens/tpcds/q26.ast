@@ -1,0 +1,48 @@
+(query
+  (select
+    (select-list
+      (item
+        i_item_id
+      )
+      (item as agg1
+        (call avg cs_quantity)
+      )
+      (item as agg2
+        (call avg cs_list_price)
+      )
+      (item as agg3
+        (call avg cs_coupon_amt)
+      )
+      (item as agg4
+        (call avg cs_sales_price)
+      )
+    )
+    (from
+      (table catalog_sales)
+      (table customer_demographics)
+      (table date_dim)
+      (table item)
+      (table promotion)
+    )
+    (where
+      (&& (&& (&& (&& (&& (&& (&& (&& (== cs_sold_date_sk d_date_sk) (== cs_item_sk i_item_sk)) (== cs_bill_cdemo_sk cd_demo_sk))
+                  (== cs_promo_sk p_promo_sk))
+                (== cd_gender "F"))
+              (== cd_marital_status "W"))
+            (== cd_education_status "Primary"))
+          (|| (== p_channel_email "N") (== p_channel_event "N")))
+        (== d_year 1998))
+    )
+    (group-by
+      i_item_id
+    )
+  )
+  (order-by
+    (order asc
+      i_item_id
+    )
+  )
+  (limit
+    100
+  )
+)

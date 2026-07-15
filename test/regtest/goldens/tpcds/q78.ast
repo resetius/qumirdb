@@ -1,0 +1,238 @@
+(query
+  (with
+    (cte ws
+      (query
+        (select
+          (select-list
+            (item as ws_sold_year
+              d_year
+            )
+            (item
+              ws_item_sk
+            )
+            (item as ws_customer_sk
+              ws_bill_customer_sk
+            )
+            (item as ws_qty
+              (call sum ws_quantity)
+            )
+            (item as ws_wc
+              (call sum ws_wholesale_cost)
+            )
+            (item as ws_sp
+              (call sum ws_sales_price)
+            )
+          )
+          (from
+            (join inner
+              (join left
+                (table web_sales)
+                (table web_returns)
+                (on
+                  (&& (== wr_order_number ws_order_number) (== ws_item_sk wr_item_sk))
+                )
+              )
+              (table date_dim)
+              (on
+                (== ws_sold_date_sk d_date_sk)
+              )
+            )
+          )
+          (where
+            (call qdb_sql_is_null wr_order_number)
+          )
+          (group-by
+            d_year
+            ws_item_sk
+            ws_bill_customer_sk
+          )
+        )
+      )
+    )
+    (cte cs
+      (query
+        (select
+          (select-list
+            (item as cs_sold_year
+              d_year
+            )
+            (item
+              cs_item_sk
+            )
+            (item as cs_customer_sk
+              cs_bill_customer_sk
+            )
+            (item as cs_qty
+              (call sum cs_quantity)
+            )
+            (item as cs_wc
+              (call sum cs_wholesale_cost)
+            )
+            (item as cs_sp
+              (call sum cs_sales_price)
+            )
+          )
+          (from
+            (join inner
+              (join left
+                (table catalog_sales)
+                (table catalog_returns)
+                (on
+                  (&& (== cr_order_number cs_order_number) (== cs_item_sk cr_item_sk))
+                )
+              )
+              (table date_dim)
+              (on
+                (== cs_sold_date_sk d_date_sk)
+              )
+            )
+          )
+          (where
+            (call qdb_sql_is_null cr_order_number)
+          )
+          (group-by
+            d_year
+            cs_item_sk
+            cs_bill_customer_sk
+          )
+        )
+      )
+    )
+    (cte ss
+      (query
+        (select
+          (select-list
+            (item as ss_sold_year
+              d_year
+            )
+            (item
+              ss_item_sk
+            )
+            (item
+              ss_customer_sk
+            )
+            (item as ss_qty
+              (call sum ss_quantity)
+            )
+            (item as ss_wc
+              (call sum ss_wholesale_cost)
+            )
+            (item as ss_sp
+              (call sum ss_sales_price)
+            )
+          )
+          (from
+            (join inner
+              (join left
+                (table store_sales)
+                (table store_returns)
+                (on
+                  (&& (== sr_ticket_number ss_ticket_number) (== ss_item_sk sr_item_sk))
+                )
+              )
+              (table date_dim)
+              (on
+                (== ss_sold_date_sk d_date_sk)
+              )
+            )
+          )
+          (where
+            (call qdb_sql_is_null sr_ticket_number)
+          )
+          (group-by
+            d_year
+            ss_item_sk
+            ss_customer_sk
+          )
+        )
+      )
+    )
+  )
+  (select
+    (select-list
+      (item
+        ss_sold_year
+      )
+      (item
+        ss_item_sk
+      )
+      (item
+        ss_customer_sk
+      )
+      (item as ratio
+        (call round (/ ss_qty (+ (call coalesce ws_qty 0) (call coalesce cs_qty 0))) 2)
+      )
+      (item as store_qty
+        ss_qty
+      )
+      (item as store_wholesale_cost
+        ss_wc
+      )
+      (item as store_sales_price
+        ss_sp
+      )
+      (item as other_chan_qty
+        (+ (call coalesce ws_qty 0) (call coalesce cs_qty 0))
+      )
+      (item as other_chan_wholesale_cost
+        (+ (call coalesce ws_wc 0) (call coalesce cs_wc 0))
+      )
+      (item as other_chan_sales_price
+        (+ (call coalesce ws_sp 0) (call coalesce cs_sp 0))
+      )
+    )
+    (from
+      (join left
+        (join left
+          (table ss)
+          (table ws)
+          (on
+            (&& (&& (== ws_sold_year ss_sold_year) (== ws_item_sk ss_item_sk)) (== ws_customer_sk ss_customer_sk))
+          )
+        )
+        (table cs)
+        (on
+          (&& (&& (== cs_sold_year ss_sold_year) (== cs_item_sk ss_item_sk)) (== cs_customer_sk ss_customer_sk))
+        )
+      )
+    )
+    (where
+      (&& (|| (> (call coalesce ws_qty 0) 0) (> (call coalesce cs_qty 0) 0)) (== ss_sold_year 2000))
+    )
+  )
+  (order-by
+    (order asc
+      ss_sold_year
+    )
+    (order asc
+      ss_item_sk
+    )
+    (order asc
+      ss_customer_sk
+    )
+    (order desc
+      ss_qty
+    )
+    (order desc
+      ss_wc
+    )
+    (order desc
+      ss_sp
+    )
+    (order asc
+      other_chan_qty
+    )
+    (order asc
+      other_chan_wholesale_cost
+    )
+    (order asc
+      other_chan_sales_price
+    )
+    (order asc
+      ratio
+    )
+  )
+  (limit
+    100
+  )
+)

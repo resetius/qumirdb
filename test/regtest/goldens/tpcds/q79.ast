@@ -1,0 +1,90 @@
+(query
+  (select
+    (select-list
+      (item
+        c_last_name
+      )
+      (item
+        c_first_name
+      )
+      (item
+        (call substr s_city 1 30)
+      )
+      (item
+        ss_ticket_number
+      )
+      (item
+        amt
+      )
+      (item
+        profit
+      )
+    )
+    (from
+      (subquery-table as ms
+        (query
+          (select
+            (select-list
+              (item
+                ss_ticket_number
+              )
+              (item
+                ss_customer_sk
+              )
+              (item
+                |store.s_city|
+              )
+              (item as amt
+                (call sum ss_coupon_amt)
+              )
+              (item as profit
+                (call sum ss_net_profit)
+              )
+            )
+            (from
+              (table store_sales)
+              (table date_dim)
+              (table store)
+              (table household_demographics)
+            )
+            (where
+              (&& (&& (&& (&& (&& (&& (== |store_sales.ss_sold_date_sk| |date_dim.d_date_sk|) (== |store_sales.ss_store_sk| |store.s_store_sk|))
+                        (== |store_sales.ss_hdemo_sk| |household_demographics.hd_demo_sk|))
+                      (|| (== |household_demographics.hd_dep_count| 8) (> |household_demographics.hd_vehicle_count| 0)))
+                    (== |date_dim.d_dow| 1))
+                  (|| (|| (== |date_dim.d_year| 1998) (== |date_dim.d_year| (+ 1998 1))) (== |date_dim.d_year| (+ 1998 2))))
+                (&& (<= 200 |store.s_number_employees|) (<= |store.s_number_employees| 295)))
+            )
+            (group-by
+              ss_ticket_number
+              ss_customer_sk
+              ss_addr_sk
+              |store.s_city|
+            )
+          )
+        )
+      )
+      (table customer)
+    )
+    (where
+      (== ss_customer_sk c_customer_sk)
+    )
+  )
+  (order-by
+    (order asc
+      c_last_name
+    )
+    (order asc
+      c_first_name
+    )
+    (order asc
+      (call substr s_city 1 30)
+    )
+    (order asc
+      profit
+    )
+  )
+  (limit
+    100
+  )
+)

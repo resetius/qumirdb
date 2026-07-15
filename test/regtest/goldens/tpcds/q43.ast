@@ -1,0 +1,77 @@
+(query
+  (select
+    (select-list
+      (item
+        s_store_name
+      )
+      (item
+        s_store_id
+      )
+      (item as sun_sales
+        (call sum (if (== d_day_name "Sunday") ss_sales_price (call qdb_sql_null)))
+      )
+      (item as mon_sales
+        (call sum (if (== d_day_name "Monday") ss_sales_price (call qdb_sql_null)))
+      )
+      (item as tue_sales
+        (call sum (if (== d_day_name "Tuesday") ss_sales_price (call qdb_sql_null)))
+      )
+      (item as wed_sales
+        (call sum (if (== d_day_name "Wednesday") ss_sales_price (call qdb_sql_null)))
+      )
+      (item as thu_sales
+        (call sum (if (== d_day_name "Thursday") ss_sales_price (call qdb_sql_null)))
+      )
+      (item as fri_sales
+        (call sum (if (== d_day_name "Friday") ss_sales_price (call qdb_sql_null)))
+      )
+      (item as sat_sales
+        (call sum (if (== d_day_name "Saturday") ss_sales_price (call qdb_sql_null)))
+      )
+    )
+    (from
+      (table date_dim)
+      (table store_sales)
+      (table store)
+    )
+    (where
+      (&& (&& (&& (== d_date_sk ss_sold_date_sk) (== s_store_sk ss_store_sk)) (== s_gmt_offset (- 5))) (== d_year 1998))
+    )
+    (group-by
+      s_store_name
+      s_store_id
+    )
+  )
+  (order-by
+    (order asc
+      s_store_name
+    )
+    (order asc
+      s_store_id
+    )
+    (order asc
+      sun_sales
+    )
+    (order asc
+      mon_sales
+    )
+    (order asc
+      tue_sales
+    )
+    (order asc
+      wed_sales
+    )
+    (order asc
+      thu_sales
+    )
+    (order asc
+      fri_sales
+    )
+    (order asc
+      sat_sales
+    )
+  )
+  (limit
+    100
+  )
+)

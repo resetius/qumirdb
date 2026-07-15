@@ -1,0 +1,34 @@
+(query
+  (select
+    (select-list
+      (item
+        (call sum ss_quantity)
+      )
+    )
+    (from
+      (table store_sales)
+      (table store)
+      (table customer_demographics)
+      (table customer_address)
+      (table date_dim)
+    )
+    (where
+      (&& (&& (&& (&& (== s_store_sk ss_store_sk) (== ss_sold_date_sk d_date_sk)) (== d_year 1998))
+          (|| (|| (&& (&& (&& (== cd_demo_sk ss_cdemo_sk) (== cd_marital_status "M")) (== cd_education_status "4 yr Degree"))
+                (&& (<= 100 ss_sales_price) (<= ss_sales_price 150)))
+              (&& (&& (&& (== cd_demo_sk ss_cdemo_sk) (== cd_marital_status "D")) (== cd_education_status "Primary"))
+                (&& (<= 50 ss_sales_price) (<= ss_sales_price 100))))
+            (&& (&& (&& (== cd_demo_sk ss_cdemo_sk) (== cd_marital_status "U")) (== cd_education_status "Advanced Degree"))
+              (&& (<= 150 ss_sales_price) (<= ss_sales_price 200)))))
+        (|| (|| (&& (&& (&& (== ss_addr_sk ca_address_sk) (== ca_country "United States"))
+                (|| (|| (== ca_state "KY") (== ca_state "GA")) (== ca_state "NM")))
+              (&& (<= 0 ss_net_profit) (<= ss_net_profit 2000)))
+            (&& (&& (&& (== ss_addr_sk ca_address_sk) (== ca_country "United States"))
+                (|| (|| (== ca_state "MT") (== ca_state "OR")) (== ca_state "IN")))
+              (&& (<= 150 ss_net_profit) (<= ss_net_profit 3000))))
+          (&& (&& (&& (== ss_addr_sk ca_address_sk) (== ca_country "United States"))
+              (|| (|| (== ca_state "WI") (== ca_state "MO")) (== ca_state "WV")))
+            (&& (<= 50 ss_net_profit) (<= ss_net_profit 25000)))))
+    )
+  )
+)

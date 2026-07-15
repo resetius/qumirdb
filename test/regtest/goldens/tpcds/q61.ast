@@ -1,0 +1,89 @@
+(query
+  (select
+    (select-list
+      (item
+        promotions
+      )
+      (item
+        total
+      )
+      (item
+        (* (/ (: (cast promotions <named DECIMAL>) <named DECIMAL>) (: (cast total <named DECIMAL>) <named DECIMAL>)) 100)
+      )
+    )
+    (from
+      (subquery-table as promotional_sales
+        (query
+          (select
+            (select-list
+              (item as promotions
+                (call sum ss_ext_sales_price)
+              )
+            )
+            (from
+              (table store_sales)
+              (table store)
+              (table promotion)
+              (table date_dim)
+              (table customer)
+              (table customer_address)
+              (table item)
+            )
+            (where
+              (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (== ss_sold_date_sk d_date_sk) (== ss_store_sk s_store_sk)) (== ss_promo_sk p_promo_sk))
+                                (== ss_customer_sk c_customer_sk))
+                              (== ca_address_sk c_current_addr_sk))
+                            (== ss_item_sk i_item_sk))
+                          (== ca_gmt_offset (- 7)))
+                        (== i_category "Books"))
+                      (|| (|| (== p_channel_dmail "Y") (== p_channel_email "Y")) (== p_channel_tv "Y")))
+                    (== s_gmt_offset (- 7)))
+                  (== d_year 1999))
+                (== d_moy 11))
+            )
+          )
+        )
+      )
+      (subquery-table as all_sales
+        (query
+          (select
+            (select-list
+              (item as total
+                (call sum ss_ext_sales_price)
+              )
+            )
+            (from
+              (table store_sales)
+              (table store)
+              (table date_dim)
+              (table customer)
+              (table customer_address)
+              (table item)
+            )
+            (where
+              (&& (&& (&& (&& (&& (&& (&& (&& (&& (== ss_sold_date_sk d_date_sk) (== ss_store_sk s_store_sk)) (== ss_customer_sk c_customer_sk))
+                            (== ca_address_sk c_current_addr_sk))
+                          (== ss_item_sk i_item_sk))
+                        (== ca_gmt_offset (- 7)))
+                      (== i_category "Books"))
+                    (== s_gmt_offset (- 7)))
+                  (== d_year 1999))
+                (== d_moy 11))
+            )
+          )
+        )
+      )
+    )
+  )
+  (order-by
+    (order asc
+      promotions
+    )
+    (order asc
+      total
+    )
+  )
+  (limit
+    100
+  )
+)

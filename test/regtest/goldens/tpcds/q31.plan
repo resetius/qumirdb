@@ -1,0 +1,2 @@
+Error: unknown ORDER BY output column: ss1.d_year @ Line: 50, Byte: 10, Column: 10
+

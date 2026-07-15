@@ -1,0 +1,272 @@
+(query
+  (select
+    (select-list
+      (item as bucket1
+        (if
+          (> (subquery scalar (query
+          (select
+            (select-list
+              (item
+                (call count *)
+              )
+            )
+            (from
+              (table store_sales)
+            )
+            (where
+              (&& (<= 1 ss_quantity) (<= ss_quantity 20))
+            )
+          )
+        )
+        )
+            25437)
+          (subquery scalar (query
+          (select
+            (select-list
+              (item
+                (call avg ss_ext_discount_amt)
+              )
+            )
+            (from
+              (table store_sales)
+            )
+            (where
+              (&& (<= 1 ss_quantity) (<= ss_quantity 20))
+            )
+          )
+        )
+        )
+          (subquery scalar (query
+          (select
+            (select-list
+              (item
+                (call avg ss_net_profit)
+              )
+            )
+            (from
+              (table store_sales)
+            )
+            (where
+              (&& (<= 1 ss_quantity) (<= ss_quantity 20))
+            )
+          )
+        )
+        ))
+      )
+      (item as bucket2
+        (if
+          (> (subquery scalar (query
+          (select
+            (select-list
+              (item
+                (call count *)
+              )
+            )
+            (from
+              (table store_sales)
+            )
+            (where
+              (&& (<= 21 ss_quantity) (<= ss_quantity 40))
+            )
+          )
+        )
+        )
+            22746)
+          (subquery scalar (query
+          (select
+            (select-list
+              (item
+                (call avg ss_ext_discount_amt)
+              )
+            )
+            (from
+              (table store_sales)
+            )
+            (where
+              (&& (<= 21 ss_quantity) (<= ss_quantity 40))
+            )
+          )
+        )
+        )
+          (subquery scalar (query
+          (select
+            (select-list
+              (item
+                (call avg ss_net_profit)
+              )
+            )
+            (from
+              (table store_sales)
+            )
+            (where
+              (&& (<= 21 ss_quantity) (<= ss_quantity 40))
+            )
+          )
+        )
+        ))
+      )
+      (item as bucket3
+        (if
+          (> (subquery scalar (query
+          (select
+            (select-list
+              (item
+                (call count *)
+              )
+            )
+            (from
+              (table store_sales)
+            )
+            (where
+              (&& (<= 41 ss_quantity) (<= ss_quantity 60))
+            )
+          )
+        )
+        )
+            9387)
+          (subquery scalar (query
+          (select
+            (select-list
+              (item
+                (call avg ss_ext_discount_amt)
+              )
+            )
+            (from
+              (table store_sales)
+            )
+            (where
+              (&& (<= 41 ss_quantity) (<= ss_quantity 60))
+            )
+          )
+        )
+        )
+          (subquery scalar (query
+          (select
+            (select-list
+              (item
+                (call avg ss_net_profit)
+              )
+            )
+            (from
+              (table store_sales)
+            )
+            (where
+              (&& (<= 41 ss_quantity) (<= ss_quantity 60))
+            )
+          )
+        )
+        ))
+      )
+      (item as bucket4
+        (if
+          (> (subquery scalar (query
+          (select
+            (select-list
+              (item
+                (call count *)
+              )
+            )
+            (from
+              (table store_sales)
+            )
+            (where
+              (&& (<= 61 ss_quantity) (<= ss_quantity 80))
+            )
+          )
+        )
+        )
+            10098)
+          (subquery scalar (query
+          (select
+            (select-list
+              (item
+                (call avg ss_ext_discount_amt)
+              )
+            )
+            (from
+              (table store_sales)
+            )
+            (where
+              (&& (<= 61 ss_quantity) (<= ss_quantity 80))
+            )
+          )
+        )
+        )
+          (subquery scalar (query
+          (select
+            (select-list
+              (item
+                (call avg ss_net_profit)
+              )
+            )
+            (from
+              (table store_sales)
+            )
+            (where
+              (&& (<= 61 ss_quantity) (<= ss_quantity 80))
+            )
+          )
+        )
+        ))
+      )
+      (item as bucket5
+        (if
+          (> (subquery scalar (query
+          (select
+            (select-list
+              (item
+                (call count *)
+              )
+            )
+            (from
+              (table store_sales)
+            )
+            (where
+              (&& (<= 81 ss_quantity) (<= ss_quantity 100))
+            )
+          )
+        )
+        )
+            18213)
+          (subquery scalar (query
+          (select
+            (select-list
+              (item
+                (call avg ss_ext_discount_amt)
+              )
+            )
+            (from
+              (table store_sales)
+            )
+            (where
+              (&& (<= 81 ss_quantity) (<= ss_quantity 100))
+            )
+          )
+        )
+        )
+          (subquery scalar (query
+          (select
+            (select-list
+              (item
+                (call avg ss_net_profit)
+              )
+            )
+            (from
+              (table store_sales)
+            )
+            (where
+              (&& (<= 81 ss_quantity) (<= ss_quantity 100))
+            )
+          )
+        )
+        ))
+      )
+    )
+    (from
+      (table reason)
+    )
+    (where
+      (== r_reason_sk 1)
+    )
+  )
+)

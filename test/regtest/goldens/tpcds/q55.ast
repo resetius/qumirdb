@@ -1,0 +1,39 @@
+(query
+  (select
+    (select-list
+      (item as brand_id
+        i_brand_id
+      )
+      (item as brand
+        i_brand
+      )
+      (item as ext_price
+        (call sum ss_ext_sales_price)
+      )
+    )
+    (from
+      (table date_dim)
+      (table store_sales)
+      (table item)
+    )
+    (where
+      (&& (&& (&& (&& (== d_date_sk ss_sold_date_sk) (== ss_item_sk i_item_sk)) (== i_manager_id 36)) (== d_moy 12))
+        (== d_year 2001))
+    )
+    (group-by
+      i_brand
+      i_brand_id
+    )
+  )
+  (order-by
+    (order desc
+      ext_price
+    )
+    (order asc
+      i_brand_id
+    )
+  )
+  (limit
+    100
+  )
+)

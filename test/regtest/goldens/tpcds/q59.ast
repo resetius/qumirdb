@@ -1,0 +1,197 @@
+(query
+  (with
+    (cte wss
+      (query
+        (select
+          (select-list
+            (item
+              d_week_seq
+            )
+            (item
+              ss_store_sk
+            )
+            (item as sun_sales
+              (call sum (if (== d_day_name "Sunday") ss_sales_price (call qdb_sql_null)))
+            )
+            (item as mon_sales
+              (call sum (if (== d_day_name "Monday") ss_sales_price (call qdb_sql_null)))
+            )
+            (item as tue_sales
+              (call sum (if (== d_day_name "Tuesday") ss_sales_price (call qdb_sql_null)))
+            )
+            (item as wed_sales
+              (call sum (if (== d_day_name "Wednesday") ss_sales_price (call qdb_sql_null)))
+            )
+            (item as thu_sales
+              (call sum (if (== d_day_name "Thursday") ss_sales_price (call qdb_sql_null)))
+            )
+            (item as fri_sales
+              (call sum (if (== d_day_name "Friday") ss_sales_price (call qdb_sql_null)))
+            )
+            (item as sat_sales
+              (call sum (if (== d_day_name "Saturday") ss_sales_price (call qdb_sql_null)))
+            )
+          )
+          (from
+            (table store_sales)
+            (table date_dim)
+          )
+          (where
+            (== d_date_sk ss_sold_date_sk)
+          )
+          (group-by
+            d_week_seq
+            ss_store_sk
+          )
+        )
+      )
+    )
+  )
+  (select
+    (select-list
+      (item
+        s_store_name1
+      )
+      (item
+        s_store_id1
+      )
+      (item
+        d_week_seq1
+      )
+      (item
+        (/ sun_sales1 sun_sales2)
+      )
+      (item
+        (/ mon_sales1 mon_sales2)
+      )
+      (item
+        (/ tue_sales1 tue_sales2)
+      )
+      (item
+        (/ wed_sales1 wed_sales2)
+      )
+      (item
+        (/ thu_sales1 thu_sales2)
+      )
+      (item
+        (/ fri_sales1 fri_sales2)
+      )
+      (item
+        (/ sat_sales1 sat_sales2)
+      )
+    )
+    (from
+      (subquery-table as y
+        (query
+          (select
+            (select-list
+              (item as s_store_name1
+                s_store_name
+              )
+              (item as d_week_seq1
+                |wss.d_week_seq|
+              )
+              (item as s_store_id1
+                s_store_id
+              )
+              (item as sun_sales1
+                sun_sales
+              )
+              (item as mon_sales1
+                mon_sales
+              )
+              (item as tue_sales1
+                tue_sales
+              )
+              (item as wed_sales1
+                wed_sales
+              )
+              (item as thu_sales1
+                thu_sales
+              )
+              (item as fri_sales1
+                fri_sales
+              )
+              (item as sat_sales1
+                sat_sales
+              )
+            )
+            (from
+              (table wss)
+              (table store)
+              (table date_dim as d)
+            )
+            (where
+              (&& (&& (== |d.d_week_seq| |wss.d_week_seq|) (== ss_store_sk s_store_sk))
+                (&& (<= 1185 d_month_seq) (<= d_month_seq (+ 1185 11))))
+            )
+          )
+        )
+      )
+      (subquery-table as x
+        (query
+          (select
+            (select-list
+              (item as s_store_name2
+                s_store_name
+              )
+              (item as d_week_seq2
+                |wss.d_week_seq|
+              )
+              (item as s_store_id2
+                s_store_id
+              )
+              (item as sun_sales2
+                sun_sales
+              )
+              (item as mon_sales2
+                mon_sales
+              )
+              (item as tue_sales2
+                tue_sales
+              )
+              (item as wed_sales2
+                wed_sales
+              )
+              (item as thu_sales2
+                thu_sales
+              )
+              (item as fri_sales2
+                fri_sales
+              )
+              (item as sat_sales2
+                sat_sales
+              )
+            )
+            (from
+              (table wss)
+              (table store)
+              (table date_dim as d)
+            )
+            (where
+              (&& (&& (== |d.d_week_seq| |wss.d_week_seq|) (== ss_store_sk s_store_sk))
+                (&& (<= (+ 1185 12) d_month_seq) (<= d_month_seq (+ 1185 23))))
+            )
+          )
+        )
+      )
+    )
+    (where
+      (&& (== s_store_id1 s_store_id2) (== d_week_seq1 (- d_week_seq2 52)))
+    )
+  )
+  (order-by
+    (order asc
+      s_store_name1
+    )
+    (order asc
+      s_store_id1
+    )
+    (order asc
+      d_week_seq1
+    )
+  )
+  (limit
+    100
+  )
+)

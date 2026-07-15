@@ -1,0 +1,111 @@
+(rel sort
+  (rel project
+    (rel filter
+      (rel join
+        (rel aggregate
+          (rel filter
+            (rel project
+              (rel aggregate
+                (rel filter
+                  (rel join
+                    (rel join
+                      (rel join
+                        (rel join
+                          (rel join (rel source "store_sales") (rel source "store_returns") () (inner))
+                          (rel source "store")
+                          ()
+                          (inner))
+                        (rel source "item")
+                        ()
+                        (inner))
+                      (rel source "customer")
+                      ()
+                      (inner))
+                    (rel source "customer_address")
+                    ()
+                    (inner))
+                  (&& (&& (&& (&& (&& (&& (&& (&& (== ss_ticket_number sr_ticket_number) (== ss_item_sk sr_item_sk))
+                                (== ss_customer_sk c_customer_sk))
+                              (== ss_item_sk i_item_sk))
+                            (== ss_store_sk s_store_sk))
+                          (== c_current_addr_sk ca_address_sk))
+                        (!= c_birth_country (call upper ca_country)))
+                      (== s_zip ca_zip))
+                    (== s_market_id 7)))
+                (keys c_last_name c_first_name s_store_name ca_state s_state i_color i_current_price i_manager_id i_units i_size)
+                (agg sum_0 sum ss_sales_price))
+              (c_last_name c_last_name)
+              (c_first_name c_first_name)
+              (s_store_name s_store_name)
+              (ca_state ca_state)
+              (s_state s_state)
+              (i_color i_color)
+              (i_current_price i_current_price)
+              (i_manager_id i_manager_id)
+              (i_units i_units)
+              (i_size i_size)
+              (netpaid sum_0))
+            (== i_color "orchid"))
+          (keys c_last_name c_first_name s_store_name)
+          (agg sum_0 sum netpaid)
+          (agg sum_1 sum netpaid))
+        (rel project
+          (rel aggregate
+            (rel project
+              (rel project
+                (rel aggregate
+                  (rel filter
+                    (rel join
+                      (rel join
+                        (rel join
+                          (rel join
+                            (rel join (rel source "store_sales") (rel source "store_returns") () (inner))
+                            (rel source "store")
+                            ()
+                            (inner))
+                          (rel source "item")
+                          ()
+                          (inner))
+                        (rel source "customer")
+                        ()
+                        (inner))
+                      (rel source "customer_address")
+                      ()
+                      (inner))
+                    (&& (&& (&& (&& (&& (&& (&& (&& (== ss_ticket_number sr_ticket_number) (== ss_item_sk sr_item_sk))
+                                  (== ss_customer_sk c_customer_sk))
+                                (== ss_item_sk i_item_sk))
+                              (== ss_store_sk s_store_sk))
+                            (== c_current_addr_sk ca_address_sk))
+                          (!= c_birth_country (call upper ca_country)))
+                        (== s_zip ca_zip))
+                      (== s_market_id 7)))
+                  (keys c_last_name c_first_name s_store_name ca_state s_state i_color i_current_price i_manager_id i_units i_size)
+                  (agg sum_0 sum ss_sales_price))
+                (c_last_name c_last_name)
+                (c_first_name c_first_name)
+                (s_store_name s_store_name)
+                (ca_state ca_state)
+                (s_state s_state)
+                (i_color i_color)
+                (i_current_price i_current_price)
+                (i_manager_id i_manager_id)
+                (i_units i_units)
+                (i_size i_size)
+                (netpaid sum_0))
+              (netpaid netpaid)
+              (__group__ 1))
+            (keys __group__)
+            (agg sum_0 sum netpaid)
+            (agg count_1 count))
+          (__scalar_0__ (* 0.050000000000000003 (/ sum_0 (cast count_1 f64)))))
+        ()
+        (inner))
+      (> sum_1 __scalar_0__))
+    (c_last_name c_last_name)
+    (c_first_name c_first_name)
+    (s_store_name s_store_name)
+    (paid sum_0))
+  (c_last_name asc nulls-default)
+  (c_first_name asc nulls-default)
+  (s_store_name asc nulls-default))

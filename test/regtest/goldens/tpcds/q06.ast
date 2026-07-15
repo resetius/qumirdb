@@ -1,0 +1,76 @@
+(query
+  (select
+    (select-list
+      (item as state
+        |a.ca_state|
+      )
+      (item as cnt
+        (call count *)
+      )
+    )
+    (from
+      (table customer_address as a)
+      (table customer as c)
+      (table store_sales as s)
+      (table date_dim as d)
+      (table item as i)
+    )
+    (where
+      (&& (&& (&& (&& (&& (== |a.ca_address_sk| |c.c_current_addr_sk|) (== |c.c_customer_sk| |s.ss_customer_sk|))
+              (== |s.ss_sold_date_sk| |d.d_date_sk|))
+            (== |s.ss_item_sk| |i.i_item_sk|))
+          (== |d.d_month_seq|
+            (subquery scalar (query
+        (select distinct
+          (select-list
+            (item
+              d_month_seq
+            )
+          )
+          (from
+            (table date_dim)
+          )
+          (where
+            (&& (== d_year 2000) (== d_moy 2))
+          )
+        )
+      )
+      )))
+        (> |i.i_current_price|
+          (* 1.2
+            (subquery scalar (query
+        (select
+          (select-list
+            (item
+              (call avg |j.i_current_price|)
+            )
+          )
+          (from
+            (table item as j)
+          )
+          (where
+            (== |j.i_category| |i.i_category|)
+          )
+        )
+      )
+      ))))
+    )
+    (group-by
+      |a.ca_state|
+    )
+    (having
+      (>= (call count *) 10)
+    )
+  )
+  (order-by
+    (order asc
+      cnt
+    )
+    (order asc
+      |a.ca_state|
+    )
+  )
+  (limit
+    100
+  )
+)

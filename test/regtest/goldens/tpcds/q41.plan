@@ -1,0 +1,47 @@
+(rel limit
+  (rel sort
+    (rel project
+      (rel filter
+        (rel join
+          (rel source "item" "i1")
+          (rel project
+            (rel aggregate
+              (rel project
+                (rel filter
+                  (rel source "item")
+                  (|| (&& (== i_manufact |i1.i_manufact|)
+                      (|| (|| (|| (&& (&& (&& (== i_category "Women") (|| (== i_color "orchid") (== i_color "papaya")))
+                                (|| (== i_units "Pound") (== i_units "Lb")))
+                              (|| (== i_size "petite") (== i_size "medium")))
+                            (&& (&& (&& (== i_category "Women") (|| (== i_color "burlywood") (== i_color "navy")))
+                                (|| (== i_units "Bundle") (== i_units "Each")))
+                              (|| (== i_size "N/A") (== i_size "extra large"))))
+                          (&& (&& (&& (== i_category "Men") (|| (== i_color "bisque") (== i_color "azure")))
+                              (|| (== i_units "N/A") (== i_units "Tsp")))
+                            (|| (== i_size "small") (== i_size "large"))))
+                        (&& (&& (&& (== i_category "Men") (|| (== i_color "chocolate") (== i_color "cornflower")))
+                            (|| (== i_units "Bunch") (== i_units "Gross")))
+                          (|| (== i_size "petite") (== i_size "medium")))))
+                    (&& (== i_manufact |i1.i_manufact|)
+                      (|| (|| (|| (&& (&& (&& (== i_category "Women") (|| (== i_color "salmon") (== i_color "midnight")))
+                                (|| (== i_units "Oz") (== i_units "Box")))
+                              (|| (== i_size "petite") (== i_size "medium")))
+                            (&& (&& (&& (== i_category "Women") (|| (== i_color "snow") (== i_color "steel")))
+                                (|| (== i_units "Carton") (== i_units "Tbl")))
+                              (|| (== i_size "N/A") (== i_size "extra large"))))
+                          (&& (&& (&& (== i_category "Men") (|| (== i_color "purple") (== i_color "gainsboro")))
+                              (|| (== i_units "Dram") (== i_units "Unknown")))
+                            (|| (== i_size "small") (== i_size "large"))))
+                        (&& (&& (&& (== i_category "Men") (|| (== i_color "metallic") (== i_color "forest")))
+                            (|| (== i_units "Gram") (== i_units "Ounce")))
+                          (|| (== i_size "petite") (== i_size "medium")))))))
+                (__group__ 1))
+              (keys __group__)
+              (agg count_0 count))
+            (__scalar_0__ count_0))
+          ()
+          (inner))
+        (&& (&& (<= 742 i_manufact_id) (<= i_manufact_id (+ 742 40))) (> __scalar_0__ 0)))
+      (i_product_name i_product_name))
+    (i_product_name asc nulls-default))
+  (limit 100))
