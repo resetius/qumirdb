@@ -226,16 +226,51 @@ std::string TableName(const std::vector<std::string>& parts) {
     return name;
 }
 
-std::expected<std::vector<std::string>, TError> GroupKeys(const NSql::TSqlGroupBy& groupBy) {
-    std::vector<std::string> keys;
+// A plain column keeps its name; an expression is materialized into a synthetic
+// `gb_<n>` column below the aggregate, and references to it are rewritten to that.
+struct TGroupKey {
+    std::string Name;
+    NAst::TExprPtr Expression; // Ident(Name) for a plain column
+    bool Computed = false;
+};
+
+std::expected<std::vector<TGroupKey>, TError> GroupKeys(const NSql::TSqlGroupBy& groupBy) {
+    std::vector<TGroupKey> keys;
+    int counter = 0;
     for (const auto& item : groupBy.Items) {
-        auto ident = NAst::TMaybeNode<NAst::TIdentExpr>(item);
-        if (!ident) {
-            return std::unexpected(TError("GROUP BY on an expression is not supported yet"));
+        if (auto ident = NAst::TMaybeNode<NAst::TIdentExpr>(item)) {
+            const auto& name = ident.Cast()->Name;
+            keys.push_back({ .Name = name, .Expression = Ident(item->Location, name) });
+        } else if (HasSubquery(item)) {
+            return std::unexpected(TError(item->Location,
+                "GROUP BY on a subquery is not supported"));
+        } else {
+            keys.push_back({
+                .Name = "gb_" + std::to_string(counter++),
+                .Expression = item,
+                .Computed = true,
+            });
         }
-        keys.push_back(ident.Cast()->Name);
     }
     return keys;
+}
+
+// Rewrites subtrees equal to a computed group key into a reference to its column:
+// the base columns no longer exist above the aggregate. Matched top-down.
+NAst::TExprPtr SubstituteGroupKeys(
+    NAst::TExprPtr expr,
+    const std::unordered_map<std::string, std::string>& byExpr)
+{
+    if (!expr) {
+        return expr;
+    }
+    if (auto it = byExpr.find(NAst::NCore::PrintAst(expr)); it != byExpr.end()) {
+        return Ident(expr->Location, it->second);
+    }
+    for (auto* child : expr->MutableChildren()) {
+        *child = SubstituteGroupKeys(*child, byExpr);
+    }
+    return expr;
 }
 
 EJoinType MapJoinType(NSql::ESqlJoinType type) {
@@ -696,13 +731,32 @@ std::expected<TOperatorPtr, TError> BuildSelect(
         return std::make_shared<TProjectOperator>(std::move(node), std::move(projections));
     }
 
-    std::vector<std::string> keys;
+    std::vector<TGroupKey> groupKeys;
     if (select.GroupBy) {
-        auto groupKeys = GroupKeys(*select.GroupBy);
-        if (!groupKeys) {
-            return std::unexpected(groupKeys.error());
+        auto parsed = GroupKeys(*select.GroupBy);
+        if (!parsed) {
+            return std::unexpected(parsed.error());
         }
-        keys = std::move(*groupKeys);
+        groupKeys = std::move(*parsed);
+    }
+
+    std::unordered_map<std::string, std::string> computedKeys; // PrintAst -> name
+    for (const auto& key : groupKeys) {
+        if (key.Computed) {
+            computedKeys.emplace(NAst::NCore::PrintAst(key.Expression), key.Name);
+        }
+    }
+    if (!computedKeys.empty()) {
+        for (auto& projection : projections) {
+            projection.Expression = SubstituteGroupKeys(projection.Expression, computedKeys);
+        }
+        having = SubstituteGroupKeys(having, computedKeys);
+    }
+
+    std::vector<std::string> keys;
+    keys.reserve(groupKeys.size());
+    for (const auto& key : groupKeys) {
+        keys.push_back(key.Name);
     }
 
     auto specs = collector.TakeSpecs();
@@ -714,6 +768,10 @@ std::expected<TOperatorPtr, TError> BuildSelect(
         if (collector.HasNonDistinct()) {
             return std::unexpected(
                 TError("mixing DISTINCT and non-DISTINCT aggregates is not supported"));
+        }
+        if (!computedKeys.empty()) {
+            return std::unexpected(
+                TError("GROUP BY on an expression with COUNT(DISTINCT) is not supported yet"));
         }
         std::vector<std::string> dedupKeys = keys;
         if (std::find(dedupKeys.begin(), dedupKeys.end(), *distinctColumn) == dedupKeys.end()) {
@@ -729,7 +787,7 @@ std::expected<TOperatorPtr, TError> BuildSelect(
 
     // The aggregate executor requires column-reference arguments, so materialize
     // computed arguments (and pass the group keys through) in a project below.
-    bool needsArgProject = global;
+    bool needsArgProject = global || !computedKeys.empty();
     for (const auto& spec : specs) {
         if (spec.Arg && !NAst::TMaybeNode<NAst::TIdentExpr>(spec.Arg)) {
             needsArgProject = true;
@@ -744,8 +802,10 @@ std::expected<TOperatorPtr, TError> BuildSelect(
                 argProjections.push_back({ .Name = name, .Expression = Ident({}, name) });
             }
         };
-        for (const auto& key : keys) {
-            passthrough(key);
+        for (const auto& key : groupKeys) {
+            if (projected.insert(key.Name).second) {
+                argProjections.push_back({ .Name = key.Name, .Expression = key.Expression });
+            }
         }
         int counter = 0;
         for (auto& spec : specs) {
