@@ -1,2 +1,50 @@
-Error: unknown ORDER BY output column: s_store_name @ Line: 26, Byte: 10, Column: 10
-
+(rel limit
+  (rel sort
+    (rel project
+      (rel filter
+        (rel join
+          (rel join
+            (rel join (rel source "store") (rel source "item") () (inner))
+            (rel project
+              (rel aggregate
+                (rel project
+                  (rel aggregate
+                    (rel filter
+                      (rel join (rel source "store_sales") (rel source "date_dim") () (inner))
+                      (&& (&& (== ss_sold_date_sk d_date_sk) (<= 1212 d_month_seq)) (<= d_month_seq (+ 1212 11))))
+                    (keys ss_store_sk ss_item_sk)
+                    (agg sum_0 sum ss_sales_price))
+                  (ss_store_sk ss_store_sk)
+                  (ss_item_sk ss_item_sk)
+                  (revenue sum_0))
+                (keys ss_store_sk)
+                (agg sum_0 sum revenue)
+                (agg count_1 count))
+              (ss_store_sk ss_store_sk)
+              (ave (/ sum_0 (cast count_1 f64))))
+            ()
+            (inner))
+          (rel project
+            (rel aggregate
+              (rel filter
+                (rel join (rel source "store_sales") (rel source "date_dim") () (inner))
+                (&& (&& (== ss_sold_date_sk d_date_sk) (<= 1212 d_month_seq)) (<= d_month_seq (+ 1212 11))))
+              (keys ss_store_sk ss_item_sk)
+              (agg sum_0 sum ss_sales_price))
+            (ss_store_sk ss_store_sk)
+            (ss_item_sk ss_item_sk)
+            (revenue sum_0))
+          ()
+          (inner))
+        (&& (&& (&& (== |sb.ss_store_sk| |sc.ss_store_sk|) (<= |sc.revenue| (* 0.10000000000000001 |sb.ave|)))
+            (== s_store_sk |sc.ss_store_sk|))
+          (== i_item_sk |sc.ss_item_sk|)))
+      (s_store_name s_store_name)
+      (i_item_desc i_item_desc)
+      (|sc.revenue| |sc.revenue|)
+      (i_current_price i_current_price)
+      (i_wholesale_cost i_wholesale_cost)
+      (i_brand i_brand))
+    (s_store_name asc nulls-default)
+    (i_item_desc asc nulls-default))
+  (limit 100))

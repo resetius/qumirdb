@@ -1,2 +1,90 @@
-Error: unknown ORDER BY output column: d_week_seq @ Line: 26, Byte: 56, Column: 56
-
+(rel limit
+  (rel project
+    (rel sort
+      (rel project
+        (rel aggregate
+          (rel project
+            (rel filter
+              (rel join
+                (rel join
+                  (rel join
+                    (rel join
+                      (rel join
+                        (rel join
+                          (rel join
+                            (rel join
+                              (rel join
+                                (rel join
+                                  (rel source "catalog_sales")
+                                  (rel source "inventory")
+                                  ()
+                                  (inner)
+                                  (== cs_item_sk inv_item_sk))
+                                (rel source "warehouse")
+                                ()
+                                (inner)
+                                (== w_warehouse_sk inv_warehouse_sk))
+                              (rel source "item")
+                              ()
+                              (inner)
+                              (== i_item_sk cs_item_sk))
+                            (rel source "customer_demographics")
+                            ()
+                            (inner)
+                            (== cs_bill_cdemo_sk cd_demo_sk))
+                          (rel source "household_demographics")
+                          ()
+                          (inner)
+                          (== cs_bill_hdemo_sk hd_demo_sk))
+                        (rel source "date_dim" "d1")
+                        ()
+                        (inner)
+                        (== cs_sold_date_sk |d1.d_date_sk|))
+                      (rel source "date_dim" "d2")
+                      ()
+                      (inner)
+                      (== inv_date_sk |d2.d_date_sk|))
+                    (rel source "date_dim" "d3")
+                    ()
+                    (inner)
+                    (== cs_ship_date_sk |d3.d_date_sk|))
+                  (rel source "promotion")
+                  ()
+                  (left)
+                  (== cs_promo_sk p_promo_sk))
+                (rel source "catalog_returns")
+                ()
+                (left)
+                (&& (== cr_item_sk cs_item_sk) (== cr_order_number cs_order_number)))
+              (&& (&& (&& (&& (&& (== |d1.d_week_seq| |d2.d_week_seq|) (< inv_quantity_on_hand cs_quantity))
+                      (> |d3.d_date| (+ |d1.d_date| 5)))
+                    (== hd_buy_potential "1001-5000"))
+                  (== |d1.d_year| 2001))
+                (== cd_marital_status "M")))
+            (i_item_desc i_item_desc)
+            (w_warehouse_name w_warehouse_name)
+            (|d1.d_week_seq| |d1.d_week_seq|)
+            (arg_0 (if (call qdb_sql_is_null p_promo_sk) 1 0))
+            (arg_1 (if (! (call qdb_sql_is_null p_promo_sk)) 1 0)))
+          (keys i_item_desc w_warehouse_name |d1.d_week_seq|)
+          (agg sum_0 sum arg_0)
+          (agg sum_1 sum arg_1)
+          (agg count_2 count))
+        (i_item_desc i_item_desc)
+        (w_warehouse_name w_warehouse_name)
+        (|d1.d_week_seq| |d1.d_week_seq|)
+        (no_promo sum_0)
+        (promo sum_1)
+        (total_cnt count_2)
+        (__sort_0 d_week_seq))
+      (total_cnt desc nulls-default)
+      (i_item_desc asc nulls-default)
+      (w_warehouse_name asc nulls-default)
+      (__sort_0 asc nulls-default))
+    (i_item_desc i_item_desc)
+    (w_warehouse_name w_warehouse_name)
+    (|d1.d_week_seq| |d1.d_week_seq|)
+    (no_promo no_promo)
+    (promo promo)
+    (total_cnt total_cnt))
+  (limit 100))

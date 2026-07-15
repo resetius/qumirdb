@@ -1,2 +1,25 @@
-Error: ORDER BY currently supports only output column identifiers @ Line: 17, Byte: 16, Column: 16
-
+(rel limit
+  (rel sort
+    (rel project
+      (rel aggregate
+        (rel filter
+          (rel join
+            (rel join (rel source "date_dim" "dt") (rel source "store_sales") () (inner))
+            (rel source "item")
+            ()
+            (inner))
+          (&& (&& (&& (&& (== |dt.d_date_sk| |store_sales.ss_sold_date_sk|) (== |store_sales.ss_item_sk| |item.i_item_sk|))
+                (== |item.i_manager_id| 1))
+              (== |dt.d_moy| 12))
+            (== |dt.d_year| 1998)))
+        (keys |dt.d_year| |item.i_category_id| |item.i_category|)
+        (agg sum_0 sum ss_ext_sales_price))
+      (|dt.d_year| |dt.d_year|)
+      (|item.i_category_id| |item.i_category_id|)
+      (|item.i_category| |item.i_category|)
+      (col3 sum_0))
+    (col3 desc nulls-default)
+    (|dt.d_year| asc nulls-default)
+    (|item.i_category_id| asc nulls-default)
+    (|item.i_category| asc nulls-default))
+  (limit 100))
