@@ -5,6 +5,7 @@
 #include "plan_runner.h"
 #include <qdb/plan/build.h>
 #include <qdb/plan/ops/aggregate.h>
+#include <qdb/plan/ops/filter.h>
 #include <qdb/plan/ops/limit.h>
 #include <qdb/plan/ops/project.h>
 #include <qdb/plan/ops/source.h>
@@ -12,6 +13,7 @@
 #include <qdb/plan/passes/column_pruning.h>
 #include <qdb/plan/passes/qualify_columns.h>
 #include <qdb/plan/passes/top_sort.h>
+#include <qdb/plan/passes/typing.h>
 #include <qdb/plan/types/nullable.h>
 #include <qdb/sql/parser.h>
 
@@ -235,6 +237,37 @@ TEST(SortPlan, QualifyResolvesHiddenSortColumnToGroupKey) {
     const auto& hidden = project.Cast()->Projections().back();
     EXPECT_EQ(hidden.Name, "__sort_0");
     EXPECT_EQ(NQumir::NAst::NCore::PrintAst(hidden.Expression), "|d1.a|");
+}
+
+TEST(SortPlan, GroupByExpressionMaterializesKeyAndSubstitutesRefs) {
+    auto i64 = std::make_shared<NQumir::NAst::TIntegerType>();
+    NQdb::TMockSource source(TMockColumns{}, {{"a", i64}, {"b", i64}});
+    auto plan = BuildSqlPlan(
+        "SELECT a + b AS k, count(*) AS c FROM t GROUP BY a + b HAVING a + b > 5", source);
+    ASSERT_TRUE(plan.has_value()) << (plan ? "" : plan.error().ToString());
+
+    // project -> filter(having) -> aggregate -> project(materialized key)
+    auto topProject = TMaybeOp<TProjectOperator>(*plan);
+    ASSERT_TRUE(topProject);
+    EXPECT_EQ(NQumir::NAst::NCore::PrintAst(topProject.Cast()->Projections()[0].Expression), "gb_0");
+
+    auto having = TMaybeOp<TFilterOperator>(topProject.Cast()->Input());
+    ASSERT_TRUE(having);
+    EXPECT_EQ(NQumir::NAst::NCore::PrintAst(having.Cast()->Predicate()), "(> gb_0 5)");
+
+    auto aggregate = TMaybeOp<TAggregateOperator>(having.Cast()->Input());
+    ASSERT_TRUE(aggregate);
+    EXPECT_EQ(aggregate.Cast()->GroupKeys(), (std::vector<std::string>{"gb_0"}));
+
+    auto keyProject = TMaybeOp<TProjectOperator>(aggregate.Cast()->Input());
+    ASSERT_TRUE(keyProject);
+    EXPECT_EQ(keyProject.Cast()->Projections()[0].Name, "gb_0");
+    EXPECT_EQ(NQumir::NAst::NCore::PrintAst(keyProject.Cast()->Projections()[0].Expression), "(+ a b)");
+
+    // full name/type resolution succeeds: no dangling base columns above the aggregate
+    AssignSourceAliases(*plan);
+    QualifyColumns(*plan);
+    EXPECT_NO_THROW(AnnotateTypes(*plan));
 }
 
 TEST(SortPlan, ColumnPruningKeepsSortKeyColumns) {
