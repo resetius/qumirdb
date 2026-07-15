@@ -1,0 +1,1 @@
+(rel project (rel sort (rel project (rel source "t") (a a) (__sort_0 (+ a b))) (__sort_0 desc nulls-default)) (a a))

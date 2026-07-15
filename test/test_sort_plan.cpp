@@ -17,6 +17,7 @@
 
 #include <qumir/codegen/llvm/llvm_initializer.h>
 #include <qumir/parser/ast.h>
+#include <qumir/parser/core/printer.h>
 #include <qumir/parser/type.h>
 
 #include <expected>
@@ -187,13 +188,53 @@ TEST(SortPlan, QualifyColumnsUpdatesTopSortKeys) {
     EXPECT_EQ(topSort->Keys()[1].Column, "supplier.s_name");
 }
 
-TEST(SortPlan, BuildPlanRejectsOrderByExpressionForMvp) {
+TEST(SortPlan, BuildPlanSortsOrderByExpressionViaHiddenColumn) {
     auto i64 = std::make_shared<NQumir::NAst::TIntegerType>();
     NQdb::TMockSource source(TMockColumns{}, {{"a", i64}, {"b", i64}});
-    auto plan = BuildSqlPlan("SELECT a FROM t ORDER BY a + 1", source);
-    ASSERT_FALSE(plan.has_value());
-    EXPECT_NE(plan.error().ToString().find("ORDER BY currently supports only output column identifiers"),
-        std::string::npos);
+    auto plan = BuildSqlPlan("SELECT a FROM t ORDER BY a + b", source);
+    ASSERT_TRUE(plan.has_value()) << (plan ? "" : plan.error().ToString());
+
+    // strip projection restores the user-visible output (just "a")
+    auto strip = TMaybeOp<TProjectOperator>(*plan);
+    ASSERT_TRUE(strip);
+    ASSERT_EQ(strip.Cast()->Projections().size(), 1u);
+    EXPECT_EQ(strip.Cast()->Projections()[0].Name, "a");
+
+    // sort keys on the synthesized hidden column
+    auto sort = TMaybeOp<TSortOperator>(strip.Cast()->Input());
+    ASSERT_TRUE(sort);
+    ASSERT_EQ(sort.Cast()->Keys().size(), 1u);
+    EXPECT_EQ(sort.Cast()->Keys()[0].Column, "__sort_0");
+
+    // the expression lives in the projection below the sort as __sort_0
+    auto project = TMaybeOp<TProjectOperator>(sort.Cast()->Input());
+    ASSERT_TRUE(project);
+    ASSERT_EQ(project.Cast()->Projections().size(), 2u);
+    EXPECT_EQ(project.Cast()->Projections()[1].Name, "__sort_0");
+}
+
+TEST(SortPlan, QualifyResolvesHiddenSortColumnToGroupKey) {
+    // ORDER BY on an unqualified name that matches a qualified group key: the
+    // hidden sort column carries the raw ident and QualifyColumns resolves it to
+    // the aggregate's group key, so it lands on an available column.
+    auto i64 = std::make_shared<NQumir::NAst::TIntegerType>();
+    NQdb::TMockSource source(TMockColumns{}, {{"a", i64}, {"b", i64}});
+    auto plan = BuildSqlPlan(
+        "SELECT d1.a AS x, count(*) AS c FROM t d1 GROUP BY d1.a ORDER BY a", source);
+    ASSERT_TRUE(plan.has_value()) << (plan ? "" : plan.error().ToString());
+
+    AssignSourceAliases(*plan);
+    QualifyColumns(*plan);
+
+    auto strip = TMaybeOp<TProjectOperator>(*plan);
+    ASSERT_TRUE(strip);
+    auto sort = TMaybeOp<TSortOperator>(strip.Cast()->Input());
+    ASSERT_TRUE(sort);
+    auto project = TMaybeOp<TProjectOperator>(sort.Cast()->Input());
+    ASSERT_TRUE(project);
+    const auto& hidden = project.Cast()->Projections().back();
+    EXPECT_EQ(hidden.Name, "__sort_0");
+    EXPECT_EQ(NQumir::NAst::NCore::PrintAst(hidden.Expression), "|d1.a|");
 }
 
 TEST(SortPlan, ColumnPruningKeepsSortKeyColumns) {

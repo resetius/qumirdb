@@ -1,2 +1,42 @@
-Error: unknown ORDER BY output column: i_brand @ Line: 19, Byte: 10, Column: 10
-
+(rel limit
+  (rel sort
+    (rel project
+      (rel aggregate
+        (rel filter
+          (rel join
+            (rel join
+              (rel join
+                (rel join
+                  (rel join (rel source "date_dim") (rel source "store_sales") () (inner))
+                  (rel source "item")
+                  ()
+                  (inner))
+                (rel source "customer")
+                ()
+                (inner))
+              (rel source "customer_address")
+              ()
+              (inner))
+            (rel source "store")
+            ()
+            (inner))
+          (&& (&& (&& (&& (&& (&& (&& (&& (== d_date_sk ss_sold_date_sk) (== ss_item_sk i_item_sk)) (== i_manager_id 7))
+                      (== d_moy 11))
+                    (== d_year 1999))
+                  (== ss_customer_sk c_customer_sk))
+                (== c_current_addr_sk ca_address_sk))
+              (!= (call substr ca_zip 1 5) (call substr s_zip 1 5)))
+            (== ss_store_sk s_store_sk)))
+        (keys i_brand i_brand_id i_manufact_id i_manufact)
+        (agg sum_0 sum ss_ext_sales_price))
+      (brand_id i_brand_id)
+      (brand i_brand)
+      (i_manufact_id i_manufact_id)
+      (i_manufact i_manufact)
+      (ext_price sum_0))
+    (ext_price desc nulls-default)
+    (brand asc nulls-default)
+    (brand_id asc nulls-default)
+    (i_manufact_id asc nulls-default)
+    (i_manufact asc nulls-default))
+  (limit 100))

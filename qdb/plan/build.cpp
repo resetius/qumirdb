@@ -12,6 +12,7 @@
 #include <qdb/plan/passes/flatten_conjuncts.h>
 
 #include <qumir/parser/ast.h>
+#include <qumir/parser/core/printer.h>
 #include <qumir/parser/type.h>
 
 #include <algorithm>
@@ -22,6 +23,7 @@
 #include <set>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -844,19 +846,66 @@ std::expected<TOperatorPtr, TError> ApplyOrderBy(
         return plan;
     }
 
+    // BuildSelect always tops the plan with a projection. An ORDER BY item is
+    // resolved in order of preference:
+    //   1. a plain output-column identifier -> sort on it directly;
+    //   2. an expression already computed in the select list (matched
+    //      structurally) -> sort on that output column, so aggregates and other
+    //      computed columns are reused rather than re-evaluated;
+    //   3. a pure-scalar expression over the projection's input -> materialized
+    //      as a hidden column, sorted on, then stripped by a final projection so
+    //      the output schema is unchanged.
+    // An aggregate not present in the select list cannot be sorted on (it would
+    // be re-applied as a scalar over already-grouped rows), so it is rejected.
+    auto topProject = TMaybeOp<TProjectOperator>(plan);
+
+    // Index the original (pre-lowering) select-list expressions by structure, so
+    // ORDER BY can match one and reuse its output column. The plan's projection
+    // expressions are unusable here: the aggregate collector has already
+    // rewritten e.g. sum(x) into a reference to a synthetic column.
+    std::unordered_map<std::string, std::string> outputByExpr; // PrintAst -> name
+    if (auto select = NSql::TMaybeNode<NSql::TSqlSelect>(query.Body);
+        select && select.Cast()->SelectList) {
+        const auto& items = select.Cast()->SelectList->Items;
+        for (size_t i = 0; i < items.size(); ++i) {
+            if (!items[i]->Star) {
+                outputByExpr.emplace(NAst::NCore::PrintAst(items[i]->Expr), ItemName(*items[i], i));
+            }
+        }
+    }
+
     std::vector<TSortKey> keys;
     keys.reserve(query.OrderBy->Items.size());
-    for (const auto& item : query.OrderBy->Items) {
-        auto ident = NAst::TMaybeNode<NAst::TIdentExpr>(item->Expr);
-        if (!ident) {
-            return std::unexpected(TError(item->Expr->Location,
-                "ORDER BY currently supports only output column identifiers"));
-        }
+    std::vector<TProjectionSpec> hidden;
+    int sortCounter = 0;
 
-        const auto& column = ident.Cast()->Name;
-        if (!HasOutputColumn(plan, column)) {
-            return std::unexpected(TError(item->Expr->Location,
-                "unknown ORDER BY output column: " + column));
+    for (const auto& item : query.OrderBy->Items) {
+        std::string column;
+        auto ident = NAst::TMaybeNode<NAst::TIdentExpr>(item->Expr);
+        if (ident && HasOutputColumn(plan, ident.Cast()->Name)) {
+            column = ident.Cast()->Name;
+        } else if (auto it = outputByExpr.find(NAst::NCore::PrintAst(item->Expr));
+                   it != outputByExpr.end()) {
+            column = it->second;
+        } else {
+            if (!topProject) {
+                return std::unexpected(TError(item->Expr->Location,
+                    "ORDER BY on an expression is not supported here"));
+            }
+            // Reuse the aggregate collector purely to detect aggregate calls:
+            // a non-empty result means the expression aggregates but is not in
+            // the select list, which cannot be materialized in a scalar project.
+            TAggCollector probe;
+            auto scalar = probe.Rewrite(item->Expr);
+            if (!scalar) {
+                return std::unexpected(scalar.error());
+            }
+            if (!probe.Empty()) {
+                return std::unexpected(TError(item->Expr->Location,
+                    "ORDER BY on an aggregate not in the select list is not supported"));
+            }
+            column = "__sort_" + std::to_string(sortCounter++);
+            hidden.push_back({ .Name = column, .Expression = item->Expr });
         }
 
         keys.push_back({
@@ -866,7 +915,25 @@ std::expected<TOperatorPtr, TError> ApplyOrderBy(
         });
     }
 
-    return std::make_shared<TSortOperator>(std::move(plan), std::move(keys));
+    if (hidden.empty()) {
+        return std::make_shared<TSortOperator>(std::move(plan), std::move(keys));
+    }
+
+    // Pass-through projection over the original outputs, captured before the
+    // hidden columns are appended; it becomes the strip projection above the sort.
+    std::vector<TProjectionSpec> outputProjections;
+    outputProjections.reserve(topProject.Cast()->Projections().size());
+    for (const auto& p : topProject.Cast()->Projections()) {
+        outputProjections.push_back({ .Name = p.Name, .Expression = Ident({}, p.Name) });
+    }
+
+    auto& projections = topProject.Cast()->MutableProjections();
+    for (auto& h : hidden) {
+        projections.push_back(std::move(h));
+    }
+
+    TOperatorPtr sorted = std::make_shared<TSortOperator>(std::move(plan), std::move(keys));
+    return std::make_shared<TProjectOperator>(std::move(sorted), std::move(outputProjections));
 }
 
 std::expected<int64_t, TError> ConstNonNegativeI64(

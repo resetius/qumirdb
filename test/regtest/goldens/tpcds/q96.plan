@@ -1,2 +1,28 @@
-Error: ORDER BY currently supports only output column identifiers @ Line: 13, Byte: 9, Column: 9
-
+(rel limit
+  (rel sort
+    (rel project
+      (rel aggregate
+        (rel project
+          (rel filter
+            (rel join
+              (rel join
+                (rel join (rel source "store_sales") (rel source "household_demographics") () (inner))
+                (rel source "time_dim")
+                ()
+                (inner))
+              (rel source "store")
+              ()
+              (inner))
+            (&& (&& (&& (&& (&& (&& (== ss_sold_time_sk |time_dim.t_time_sk|)
+                        (== ss_hdemo_sk |household_demographics.hd_demo_sk|))
+                      (== ss_store_sk s_store_sk))
+                    (== |time_dim.t_hour| 8))
+                  (>= |time_dim.t_minute| 30))
+                (== |household_demographics.hd_dep_count| 5))
+              (== |store.s_store_name| "ese")))
+          (__group__ 1))
+        (keys __group__)
+        (agg count_0 count))
+      (col0 count_0))
+    (col0 asc nulls-default))
+  (limit 100))
