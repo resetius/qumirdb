@@ -3,6 +3,7 @@
 
   (type StringView <struct (Data <ptr u8>) (Size i64)>)
   (type OwnedString <struct (Data <ptr u8>) (Size i64)>)
+  (type DATE i32)
 
   (type TColumn <struct
     (Data <ptr i8>)
@@ -183,5 +184,14 @@
   (fun qdb_sql_bool_not ((var value i64)) -> i64 (attrs extern) (block))
 
   (fun qdb_date_year ((var days i32)) -> i32 (attrs extern) (block))
-  (fun qdb_sql_date ((var date string)) -> i32 (attrs extern) (block))
-  (fun qdb_sql_interval ((var amount string) (var unit string)) -> i32 (attrs extern) (block)))
+  (fun qdb_sql_date ((var date string)) -> DATE (attrs extern (operator "cast")) (block))
+  (fun qdb_sql_interval ((var amount string) (var unit string)) -> i32 (attrs extern) (block))
+
+  (fun qdb_date_to_i32 ((var d DATE)) -> i32 (attrs (operator "cast"))
+    (block (return (bitcast d i32))))
+  (fun qdb_i32_to_date ((var n i32)) -> DATE (attrs (operator "cast"))
+    (block (return (bitcast n DATE))))
+  (fun qdb_date_add ((var d DATE) (var n i32)) -> DATE (attrs (operator "+"))
+    (block (return (bitcast (+ (bitcast d i32) n) DATE))))
+  (fun qdb_date_sub ((var d DATE) (var n i32)) -> DATE (attrs (operator "-"))
+    (block (return (bitcast (- (bitcast d i32) n) DATE)))))
