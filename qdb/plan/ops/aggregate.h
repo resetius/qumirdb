@@ -55,10 +55,12 @@ private:
 // Output schema = group key columns (types from inputSchema) followed by one
 // column per aggregate (type derived from Func/Arg). Used both by the
 // constructor and by AnnotateTypes (after column pruning narrows inputSchema).
+// nullableKeys: GROUPING SETS make key columns nullable (NULL in sets that omit them).
 NQumir::NAst::TTypePtr ComputeAggregateOutputType(
     const NQumir::NAst::TTypePtr& inputSchema,
     const std::vector<std::string>& groupKeys,
-    const std::vector<TAggregateSpec>& aggs);
+    const std::vector<TAggregateSpec>& aggs,
+    bool nullableKeys = false);
 
 // aggs: (output_name, func, arg_expr_string) triples; arg_expr_string empty for count(*)
 std::expected<TOperatorPtr, NQumir::TError>
