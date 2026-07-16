@@ -2,133 +2,140 @@
   (rel sort
     (rel project
       (rel aggregate
-        (rel union-all
-          (rel project
-            (rel join
-              (rel project
-                (rel aggregate
-                  (rel filter
-                    (rel join
-                      (rel join (rel source "store_sales") (rel source "date_dim") () (inner))
-                      (rel source "store")
-                      ()
-                      (inner))
-                    (&& (&& (&& (== ss_sold_date_sk d_date_sk)
+        (rel project
+          (rel union-all
+            (rel project
+              (rel join
+                (rel project
+                  (rel aggregate
+                    (rel filter
+                      (rel join
+                        (rel join (rel source "store_sales") (rel source "date_dim") () (inner))
+                        (rel source "store")
+                        ()
+                        (inner))
+                      (&& (&& (&& (== ss_sold_date_sk d_date_sk)
+                            (<= (: (cast "1998-08-04" <named DATE>) <named DATE>) d_date))
+                          (<= d_date (+ (: (cast "1998-08-04" <named DATE>) <named DATE>) (: 30 i32))))
+                        (== ss_store_sk s_store_sk)))
+                    (keys s_store_sk)
+                    (agg sum_0 sum ss_ext_sales_price)
+                    (agg sum_1 sum ss_net_profit))
+                  (s_store_sk s_store_sk)
+                  (sales sum_0)
+                  (profit sum_1))
+                (rel project
+                  (rel aggregate
+                    (rel filter
+                      (rel join
+                        (rel join (rel source "store_returns") (rel source "date_dim") () (inner))
+                        (rel source "store")
+                        ()
+                        (inner))
+                      (&& (&& (&& (== sr_returned_date_sk d_date_sk)
+                            (<= (: (cast "1998-08-04" <named DATE>) <named DATE>) d_date))
+                          (<= d_date (+ (: (cast "1998-08-04" <named DATE>) <named DATE>) (: 30 i32))))
+                        (== sr_store_sk s_store_sk)))
+                    (keys s_store_sk)
+                    (agg sum_0 sum sr_return_amt)
+                    (agg sum_1 sum sr_net_loss))
+                  (s_store_sk s_store_sk)
+                  (returns sum_0)
+                  (profit_loss sum_1))
+                ()
+                (left)
+                (== |ss.s_store_sk| |sr.s_store_sk|))
+              (channel "store channel")
+              (id |ss.s_store_sk|)
+              (sales sales)
+              (returns (call coalesce returns 0))
+              (profit (- profit (call coalesce profit_loss 0))))
+            (rel project
+              (rel join
+                (rel project
+                  (rel aggregate
+                    (rel filter
+                      (rel join (rel source "catalog_sales") (rel source "date_dim") () (inner))
+                      (&& (&& (== cs_sold_date_sk d_date_sk)
                           (<= (: (cast "1998-08-04" <named DATE>) <named DATE>) d_date))
-                        (<= d_date (+ (: (cast "1998-08-04" <named DATE>) <named DATE>) (: 30 i32))))
-                      (== ss_store_sk s_store_sk)))
-                  (keys s_store_sk)
-                  (agg sum_0 sum ss_ext_sales_price)
-                  (agg sum_1 sum ss_net_profit))
-                (s_store_sk s_store_sk)
-                (sales sum_0)
-                (profit sum_1))
-              (rel project
-                (rel aggregate
-                  (rel filter
-                    (rel join
-                      (rel join (rel source "store_returns") (rel source "date_dim") () (inner))
-                      (rel source "store")
-                      ()
-                      (inner))
-                    (&& (&& (&& (== sr_returned_date_sk d_date_sk)
+                        (<= d_date (+ (: (cast "1998-08-04" <named DATE>) <named DATE>) (: 30 i32)))))
+                    (keys cs_call_center_sk)
+                    (agg sum_0 sum cs_ext_sales_price)
+                    (agg sum_1 sum cs_net_profit))
+                  (cs_call_center_sk cs_call_center_sk)
+                  (sales sum_0)
+                  (profit sum_1))
+                (rel project
+                  (rel aggregate
+                    (rel filter
+                      (rel join (rel source "catalog_returns") (rel source "date_dim") () (inner))
+                      (&& (&& (== cr_returned_date_sk d_date_sk)
                           (<= (: (cast "1998-08-04" <named DATE>) <named DATE>) d_date))
-                        (<= d_date (+ (: (cast "1998-08-04" <named DATE>) <named DATE>) (: 30 i32))))
-                      (== sr_store_sk s_store_sk)))
-                  (keys s_store_sk)
-                  (agg sum_0 sum sr_return_amt)
-                  (agg sum_1 sum sr_net_loss))
-                (s_store_sk s_store_sk)
-                (returns sum_0)
-                (profit_loss sum_1))
-              ()
-              (left)
-              (== |ss.s_store_sk| |sr.s_store_sk|))
-            (channel "store channel")
-            (id |ss.s_store_sk|)
-            (sales sales)
-            (returns (call coalesce returns 0))
-            (profit (- profit (call coalesce profit_loss 0))))
-          (rel project
-            (rel join
-              (rel project
-                (rel aggregate
-                  (rel filter
-                    (rel join (rel source "catalog_sales") (rel source "date_dim") () (inner))
-                    (&& (&& (== cs_sold_date_sk d_date_sk) (<= (: (cast "1998-08-04" <named DATE>) <named DATE>) d_date))
-                      (<= d_date (+ (: (cast "1998-08-04" <named DATE>) <named DATE>) (: 30 i32)))))
-                  (keys cs_call_center_sk)
-                  (agg sum_0 sum cs_ext_sales_price)
-                  (agg sum_1 sum cs_net_profit))
-                (cs_call_center_sk cs_call_center_sk)
-                (sales sum_0)
-                (profit sum_1))
-              (rel project
-                (rel aggregate
-                  (rel filter
-                    (rel join (rel source "catalog_returns") (rel source "date_dim") () (inner))
-                    (&& (&& (== cr_returned_date_sk d_date_sk)
-                        (<= (: (cast "1998-08-04" <named DATE>) <named DATE>) d_date))
-                      (<= d_date (+ (: (cast "1998-08-04" <named DATE>) <named DATE>) (: 30 i32)))))
-                  (keys cr_call_center_sk)
-                  (agg sum_0 sum cr_return_amount)
-                  (agg sum_1 sum cr_net_loss))
-                (cr_call_center_sk cr_call_center_sk)
-                (returns sum_0)
-                (profit_loss sum_1))
-              ()
-              (inner))
-            (channel "catalog channel")
-            (id cs_call_center_sk)
-            (sales sales)
-            (returns returns)
-            (profit (- profit profit_loss)))
-          (rel project
-            (rel join
-              (rel project
-                (rel aggregate
-                  (rel filter
-                    (rel join
-                      (rel join (rel source "web_sales") (rel source "date_dim") () (inner))
-                      (rel source "web_page")
-                      ()
-                      (inner))
-                    (&& (&& (&& (== ws_sold_date_sk d_date_sk)
-                          (<= (: (cast "1998-08-04" <named DATE>) <named DATE>) d_date))
-                        (<= d_date (+ (: (cast "1998-08-04" <named DATE>) <named DATE>) (: 30 i32))))
-                      (== ws_web_page_sk wp_web_page_sk)))
-                  (keys wp_web_page_sk)
-                  (agg sum_0 sum ws_ext_sales_price)
-                  (agg sum_1 sum ws_net_profit))
-                (wp_web_page_sk wp_web_page_sk)
-                (sales sum_0)
-                (profit sum_1))
-              (rel project
-                (rel aggregate
-                  (rel filter
-                    (rel join
-                      (rel join (rel source "web_returns") (rel source "date_dim") () (inner))
-                      (rel source "web_page")
-                      ()
-                      (inner))
-                    (&& (&& (&& (== wr_returned_date_sk d_date_sk)
-                          (<= (: (cast "1998-08-04" <named DATE>) <named DATE>) d_date))
-                        (<= d_date (+ (: (cast "1998-08-04" <named DATE>) <named DATE>) (: 30 i32))))
-                      (== wr_web_page_sk wp_web_page_sk)))
-                  (keys wp_web_page_sk)
-                  (agg sum_0 sum wr_return_amt)
-                  (agg sum_1 sum wr_net_loss))
-                (wp_web_page_sk wp_web_page_sk)
-                (returns sum_0)
-                (profit_loss sum_1))
-              ()
-              (left)
-              (== |ws.wp_web_page_sk| |wr.wp_web_page_sk|))
-            (channel "web channel")
-            (id |ws.wp_web_page_sk|)
-            (sales sales)
-            (returns (call coalesce returns 0))
-            (profit (- profit (call coalesce profit_loss 0)))))
+                        (<= d_date (+ (: (cast "1998-08-04" <named DATE>) <named DATE>) (: 30 i32)))))
+                    (keys cr_call_center_sk)
+                    (agg sum_0 sum cr_return_amount)
+                    (agg sum_1 sum cr_net_loss))
+                  (cr_call_center_sk cr_call_center_sk)
+                  (returns sum_0)
+                  (profit_loss sum_1))
+                ()
+                (inner))
+              (channel "catalog channel")
+              (id cs_call_center_sk)
+              (sales sales)
+              (returns returns)
+              (profit (- profit profit_loss)))
+            (rel project
+              (rel join
+                (rel project
+                  (rel aggregate
+                    (rel filter
+                      (rel join
+                        (rel join (rel source "web_sales") (rel source "date_dim") () (inner))
+                        (rel source "web_page")
+                        ()
+                        (inner))
+                      (&& (&& (&& (== ws_sold_date_sk d_date_sk)
+                            (<= (: (cast "1998-08-04" <named DATE>) <named DATE>) d_date))
+                          (<= d_date (+ (: (cast "1998-08-04" <named DATE>) <named DATE>) (: 30 i32))))
+                        (== ws_web_page_sk wp_web_page_sk)))
+                    (keys wp_web_page_sk)
+                    (agg sum_0 sum ws_ext_sales_price)
+                    (agg sum_1 sum ws_net_profit))
+                  (wp_web_page_sk wp_web_page_sk)
+                  (sales sum_0)
+                  (profit sum_1))
+                (rel project
+                  (rel aggregate
+                    (rel filter
+                      (rel join
+                        (rel join (rel source "web_returns") (rel source "date_dim") () (inner))
+                        (rel source "web_page")
+                        ()
+                        (inner))
+                      (&& (&& (&& (== wr_returned_date_sk d_date_sk)
+                            (<= (: (cast "1998-08-04" <named DATE>) <named DATE>) d_date))
+                          (<= d_date (+ (: (cast "1998-08-04" <named DATE>) <named DATE>) (: 30 i32))))
+                        (== wr_web_page_sk wp_web_page_sk)))
+                    (keys wp_web_page_sk)
+                    (agg sum_0 sum wr_return_amt)
+                    (agg sum_1 sum wr_net_loss))
+                  (wp_web_page_sk wp_web_page_sk)
+                  (returns sum_0)
+                  (profit_loss sum_1))
+                ()
+                (left)
+                (== |ws.wp_web_page_sk| |wr.wp_web_page_sk|))
+              (channel "web channel")
+              (id |ws.wp_web_page_sk|)
+              (sales sales)
+              (returns (call coalesce returns 0))
+              (profit (- profit (call coalesce profit_loss 0)))))
+          (channel channel)
+          (id id)
+          (sales sales)
+          (returns returns)
+          (profit profit))
         (keys channel id)
         (set channel id)
         (set channel)
