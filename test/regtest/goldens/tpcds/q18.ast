@@ -61,7 +61,13 @@
           (== ca_state "TN")))
     )
     (group-by
-      (call rollup i_item_id ca_country ca_state ca_county)
+      (rollup
+        (block
+          i_item_id
+          ca_country
+          ca_state
+          ca_county)
+      )
     )
   )
   (order-by

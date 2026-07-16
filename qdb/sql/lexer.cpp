@@ -97,6 +97,11 @@ static const std::unordered_set<std::string> Keywords = {
 
     "DATE",
     "INTERVAL",
+
+    "ROLLUP",
+    "CUBE",
+    "GROUPING",
+    "SETS",
 };
 
 } // namespace

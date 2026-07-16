@@ -239,19 +239,38 @@ struct TGroupKey {
 std::expected<std::vector<TGroupKey>, TError> GroupKeys(const NSql::TSqlGroupBy& groupBy) {
     std::vector<TGroupKey> keys;
     int counter = 0;
-    for (const auto& item : groupBy.Items) {
-        if (auto ident = NAst::TMaybeNode<NAst::TIdentExpr>(item)) {
+    auto addKey = [&](const NAst::TExprPtr& expr) -> std::expected<void, TError> {
+        if (auto ident = NAst::TMaybeNode<NAst::TIdentExpr>(expr)) {
             const auto& name = ident.Cast()->Name;
-            keys.push_back({ .Name = name, .Expression = Ident(item->Location, name) });
-        } else if (HasSubquery(item)) {
-            return std::unexpected(TError(item->Location,
+            keys.push_back({ .Name = name, .Expression = Ident(expr->Location, name) });
+        } else if (HasSubquery(expr)) {
+            return std::unexpected(TError(expr->Location,
                 "GROUP BY on a subquery is not supported"));
         } else {
             keys.push_back({
                 .Name = "gb_" + std::to_string(counter++),
-                .Expression = item,
+                .Expression = expr,
                 .Computed = true,
             });
+        }
+        return {};
+    };
+    for (const auto& item : groupBy.Items) {
+        auto exprOrList = NSql::TMaybeNode<NSql::TSqlGroupingExprOrList>(item);
+        if (!exprOrList) {
+            return std::unexpected(TError(
+                "GROUP BY ROLLUP/CUBE/GROUPING SETS is not supported yet"));
+        }
+        const auto& exprs = exprOrList.Cast()->Exprs;
+        // A parenthesized list is a TBlockExpr of several keys; otherwise one key.
+        if (auto block = NAst::TMaybeNode<NAst::TBlockExpr>(exprs)) {
+            for (const auto& child : block.Cast()->Stmts) {
+                if (auto r = addKey(child); !r) {
+                    return std::unexpected(r.error());
+                }
+            }
+        } else if (auto r = addKey(exprs); !r) {
+            return std::unexpected(r.error());
         }
     }
     return keys;
@@ -597,7 +616,8 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
                     item->Expr = Ident({}, localCol);
                     item->Alias = corrName;
                     prepend.push_back(std::move(item));
-                    sel->GroupBy->Items.push_back(Ident({}, localCol));
+                    sel->GroupBy->Items.push_back(
+                        std::make_shared<NSql::TSqlGroupingExprOrList>(Ident({}, localCol)));
                     joinKeys.push_back({ .Left = outerCol, .Right = corrName });
                 }
                 sel->SelectList->Items.insert(
