@@ -1536,7 +1536,10 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
             materialize.insert(materialize.end(),
                 std::make_move_iterator(ac.Mat->Setup.begin()),
                 std::make_move_iterator(ac.Mat->Setup.end()));
-            valExpr = cast(ac.Mat->Value, i64Type); // nullable f64 disallowed upstream
+            // Float values are carried as i64 bits (bitcast), integers converted.
+            valExpr = ac.Float
+                ? bitcast(ac.Mat->Value, i64Type)
+                : cast(ac.Mat->Value, i64Type);
         } else {
             auto cell = std::make_shared<TIndexExpr>(loc,
                 ident("values_" + std::to_string(idx)), ident("i"));
