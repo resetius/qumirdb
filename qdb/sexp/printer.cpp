@@ -132,6 +132,15 @@ static void PrintRel(NQumir::NAst::TExpr& expr, TPrinter& printer, TPrintFrame f
             printer.PrintIdentifier(key);
         }
         out << ')';
+        for (const auto& set : agg.GroupingSets()) {
+            printer.Separator(frame.Level + 1);
+            out << "(set";
+            for (size_t idx : set) {
+                printer.Space();
+                printer.PrintIdentifier(agg.GroupKeys()[idx]);
+            }
+            out << ')';
+        }
         for (const auto& spec : agg.Aggs()) {
             printer.Separator(frame.Level + 1);
             out << "(agg ";

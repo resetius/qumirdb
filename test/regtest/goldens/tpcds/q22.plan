@@ -1,2 +1,31 @@
-Error: GROUP BY ROLLUP/CUBE/GROUPING SETS is not supported yet
-
+(rel limit
+  (rel sort
+    (rel project
+      (rel aggregate
+        (rel filter
+          (rel join
+            (rel join (rel source "inventory") (rel source "date_dim") () (inner))
+            (rel source "item")
+            ()
+            (inner))
+          (&& (&& (&& (== inv_date_sk d_date_sk) (== inv_item_sk i_item_sk)) (<= 1212 d_month_seq))
+            (<= d_month_seq (+ 1212 11))))
+        (keys i_product_name i_brand i_class i_category)
+        (set i_product_name i_brand i_class i_category)
+        (set i_product_name i_brand i_class)
+        (set i_product_name i_brand)
+        (set i_product_name)
+        (set)
+        (agg sum_0 sum inv_quantity_on_hand)
+        (agg count_1 count))
+      (i_product_name i_product_name)
+      (i_brand i_brand)
+      (i_class i_class)
+      (i_category i_category)
+      (qoh (/ sum_0 (cast count_1 f64))))
+    (qoh asc nulls-default)
+    (i_product_name asc nulls-default)
+    (i_brand asc nulls-default)
+    (i_class asc nulls-default)
+    (i_category asc nulls-default))
+  (limit 100))

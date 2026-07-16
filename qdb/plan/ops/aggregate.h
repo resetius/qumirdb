@@ -40,10 +40,16 @@ public:
     const std::vector<TAggregateSpec>& Aggs() const { return Aggs_; }
     std::vector<TAggregateSpec>& MutableAggs() { return Aggs_; }
 
+    // Each set holds indices into GroupKeys_; keys outside a set are NULL in its
+    // output. Empty = plain single-set aggregate over all keys (non-nullable).
+    const std::vector<std::vector<size_t>>& GroupingSets() const { return GroupingSets_; }
+    std::vector<std::vector<size_t>>& MutableGroupingSets() { return GroupingSets_; }
+
 private:
     TOperatorPtr Input_;
     std::vector<std::string> GroupKeys_;
     std::vector<TAggregateSpec> Aggs_;
+    std::vector<std::vector<size_t>> GroupingSets_;
 };
 
 // Output schema = group key columns (types from inputSchema) followed by one
