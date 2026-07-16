@@ -7,20 +7,48 @@
             (rel join
               (rel join
                 (rel project
-                  (rel aggregate
-                    (rel filter
-                      (rel join
-                        (rel join (rel source "store_sales") (rel source "date_dim") () (inner))
-                        (rel source "customer_address")
-                        ()
-                        (inner))
-                      (&& (== ss_sold_date_sk d_date_sk) (== ss_addr_sk ca_address_sk)))
-                    (keys ca_county d_qoy d_year)
-                    (agg sum_0 sum ss_ext_sales_price))
-                  (ca_county ca_county)
-                  (d_qoy d_qoy)
-                  (d_year d_year)
-                  (store_sales sum_0))
+                  (rel project
+                    (rel aggregate
+                      (rel filter
+                        (rel join
+                          (rel join (rel source "store_sales") (rel source "date_dim") () (inner))
+                          (rel source "customer_address")
+                          ()
+                          (inner))
+                        (&& (== ss_sold_date_sk d_date_sk) (== ss_addr_sk ca_address_sk)))
+                      (keys ca_county d_qoy d_year)
+                      (agg sum_0 sum ss_ext_sales_price))
+                    (ca_county ca_county)
+                    (d_qoy d_qoy)
+                    (d_year d_year)
+                    (store_sales sum_0))
+                  (|ss1.ca_county| ca_county)
+                  (|ss1.d_qoy| d_qoy)
+                  (|ss1.d_year| d_year)
+                  (|ss1.store_sales| store_sales))
+                (rel project
+                  (rel project
+                    (rel aggregate
+                      (rel filter
+                        (rel join
+                          (rel join (rel source "store_sales") (rel source "date_dim") () (inner))
+                          (rel source "customer_address")
+                          ()
+                          (inner))
+                        (&& (== ss_sold_date_sk d_date_sk) (== ss_addr_sk ca_address_sk)))
+                      (keys ca_county d_qoy d_year)
+                      (agg sum_0 sum ss_ext_sales_price))
+                    (ca_county ca_county)
+                    (d_qoy d_qoy)
+                    (d_year d_year)
+                    (store_sales sum_0))
+                  (|ss2.ca_county| ca_county)
+                  (|ss2.d_qoy| d_qoy)
+                  (|ss2.d_year| d_year)
+                  (|ss2.store_sales| store_sales))
+                ()
+                (inner))
+              (rel project
                 (rel project
                   (rel aggregate
                     (rel filter
@@ -36,25 +64,35 @@
                   (d_qoy d_qoy)
                   (d_year d_year)
                   (store_sales sum_0))
-                ()
-                (inner))
+                (|ss3.ca_county| ca_county)
+                (|ss3.d_qoy| d_qoy)
+                (|ss3.d_year| d_year)
+                (|ss3.store_sales| store_sales))
+              ()
+              (inner))
+            (rel project
               (rel project
                 (rel aggregate
                   (rel filter
                     (rel join
-                      (rel join (rel source "store_sales") (rel source "date_dim") () (inner))
+                      (rel join (rel source "web_sales") (rel source "date_dim") () (inner))
                       (rel source "customer_address")
                       ()
                       (inner))
-                    (&& (== ss_sold_date_sk d_date_sk) (== ss_addr_sk ca_address_sk)))
+                    (&& (== ws_sold_date_sk d_date_sk) (== ws_bill_addr_sk ca_address_sk)))
                   (keys ca_county d_qoy d_year)
-                  (agg sum_0 sum ss_ext_sales_price))
+                  (agg sum_0 sum ws_ext_sales_price))
                 (ca_county ca_county)
                 (d_qoy d_qoy)
                 (d_year d_year)
-                (store_sales sum_0))
-              ()
-              (inner))
+                (web_sales sum_0))
+              (|ws1.ca_county| ca_county)
+              (|ws1.d_qoy| d_qoy)
+              (|ws1.d_year| d_year)
+              (|ws1.web_sales| web_sales))
+            ()
+            (inner))
+          (rel project
             (rel project
               (rel aggregate
                 (rel filter
@@ -70,8 +108,13 @@
               (d_qoy d_qoy)
               (d_year d_year)
               (web_sales sum_0))
-            ()
-            (inner))
+            (|ws2.ca_county| ca_county)
+            (|ws2.d_qoy| d_qoy)
+            (|ws2.d_year| d_year)
+            (|ws2.web_sales| web_sales))
+          ()
+          (inner))
+        (rel project
           (rel project
             (rel aggregate
               (rel filter
@@ -87,23 +130,10 @@
             (d_qoy d_qoy)
             (d_year d_year)
             (web_sales sum_0))
-          ()
-          (inner))
-        (rel project
-          (rel aggregate
-            (rel filter
-              (rel join
-                (rel join (rel source "web_sales") (rel source "date_dim") () (inner))
-                (rel source "customer_address")
-                ()
-                (inner))
-              (&& (== ws_sold_date_sk d_date_sk) (== ws_bill_addr_sk ca_address_sk)))
-            (keys ca_county d_qoy d_year)
-            (agg sum_0 sum ws_ext_sales_price))
-          (ca_county ca_county)
-          (d_qoy d_qoy)
-          (d_year d_year)
-          (web_sales sum_0))
+          (|ws3.ca_county| ca_county)
+          (|ws3.d_qoy| d_qoy)
+          (|ws3.d_year| d_year)
+          (|ws3.web_sales| web_sales))
         ()
         (inner))
       (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (== |ss1.d_qoy| 1) (== |ss1.d_year| 2000))

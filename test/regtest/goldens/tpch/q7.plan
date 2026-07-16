@@ -2,35 +2,40 @@
   (rel project
     (rel aggregate
       (rel project
-        (rel filter
-          (rel join
+        (rel project
+          (rel filter
             (rel join
               (rel join
                 (rel join
-                  (rel join (rel source "supplier") (rel source "lineitem") () (inner))
-                  (rel source "orders")
+                  (rel join
+                    (rel join (rel source "supplier") (rel source "lineitem") () (inner))
+                    (rel source "orders")
+                    ()
+                    (inner))
+                  (rel source "customer")
                   ()
                   (inner))
-                (rel source "customer")
+                (rel source "nation" "n1")
                 ()
                 (inner))
-              (rel source "nation" "n1")
+              (rel source "nation" "n2")
               ()
               (inner))
-            (rel source "nation" "n2")
-            ()
-            (inner))
-          (&& (&& (&& (&& (&& (&& (&& (== s_suppkey l_suppkey) (== o_orderkey l_orderkey)) (== c_custkey o_custkey))
-                    (== s_nationkey |n1.n_nationkey|))
-                  (== c_nationkey |n2.n_nationkey|))
-                (|| (&& (== |n1.n_name| "FRANCE") (== |n2.n_name| "UNITED KINGDOM"))
-                  (&& (== |n1.n_name| "UNITED KINGDOM") (== |n2.n_name| "FRANCE"))))
-              (<= (: 9131 i32) l_shipdate))
-            (<= l_shipdate (: 9861 i32))))
-        (supp_nation |n1.n_name|)
-        (cust_nation |n2.n_name|)
-        (l_year (call qdb_date_year l_shipdate))
-        (volume (* l_extendedprice (- 1 l_discount))))
+            (&& (&& (&& (&& (&& (&& (&& (== s_suppkey l_suppkey) (== o_orderkey l_orderkey)) (== c_custkey o_custkey))
+                      (== s_nationkey |n1.n_nationkey|))
+                    (== c_nationkey |n2.n_nationkey|))
+                  (|| (&& (== |n1.n_name| "FRANCE") (== |n2.n_name| "UNITED KINGDOM"))
+                    (&& (== |n1.n_name| "UNITED KINGDOM") (== |n2.n_name| "FRANCE"))))
+                (<= (: 9131 i32) l_shipdate))
+              (<= l_shipdate (: 9861 i32))))
+          (supp_nation |n1.n_name|)
+          (cust_nation |n2.n_name|)
+          (l_year (call qdb_date_year l_shipdate))
+          (volume (* l_extendedprice (- 1 l_discount))))
+        (|shipping.supp_nation| supp_nation)
+        (|shipping.cust_nation| cust_nation)
+        (|shipping.l_year| l_year)
+        (|shipping.volume| volume))
       (keys supp_nation cust_nation l_year)
       (agg sum_0 sum volume))
     (supp_nation supp_nation)

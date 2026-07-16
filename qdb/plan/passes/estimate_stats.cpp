@@ -6,6 +6,7 @@
 #include <qdb/plan/ops/filter.h>
 #include <qdb/plan/ops/project.h>
 #include <qdb/plan/ops/join.h>
+#include <qdb/plan/ops/union.h>
 #include <qdb/plan/types/nullable.h>
 
 #include <algorithm>
@@ -484,9 +485,68 @@ TStatsPtr ComputeSourceStats(const std::shared_ptr<TSourceOperator>& source) {
     return out;
 }
 
+TStatsPtr ComputeUnionStats(const std::shared_ptr<TUnionAllOperator>& un) {
+    auto* outStruct = static_cast<TStructType*>(un->OutputColumns().get());
+    if (!outStruct) {
+        return nullptr;
+    }
+    const size_t numCols = outStruct->Fields.size();
+
+    uint64_t rows = 0;
+    double cost = 0.0;
+    // Per output column: summed ndv / null count, dropped to unknown as soon as any
+    // branch lacks it. min/max are left unknown (raw-bit ranges don't merge safely).
+    std::vector<uint64_t> ndv(numCols, 0);
+    std::vector<uint64_t> nulls(numCols, 0);
+    std::vector<bool> ndvLive(numCols, true);
+    std::vector<bool> nullLive(numCols, true);
+
+    for (const auto& branch : un->Inputs()) {
+        auto bs = branch->Stats_;
+        auto* bStruct = static_cast<TStructType*>(branch->OutputColumns().get());
+        if (!bs || !bStruct || bStruct->Fields.size() != numCols) {
+            return nullptr;
+        }
+        rows += bs->RowCount;
+        cost += bs->Cost;
+        for (size_t j = 0; j < numCols; ++j) {
+            auto it = bs->ColumnStats.find(bStruct->Fields[j].first);
+            auto src = it != bs->ColumnStats.end() ? it->second : nullptr;
+            if (src && src->Ndv) {
+                ndv[j] += *src->Ndv;
+            } else {
+                ndvLive[j] = false;
+            }
+            if (src && src->NullCount) {
+                nulls[j] += *src->NullCount;
+            } else {
+                nullLive[j] = false;
+            }
+        }
+    }
+
+    auto out = std::make_shared<TStats>();
+    out->RowCount = std::max<uint64_t>(1, rows);
+    out->Cost = cost;
+    for (size_t j = 0; j < numCols; ++j) {
+        auto col = std::make_shared<TStats::TColumnStats>();
+        if (ndvLive[j]) {
+            col->Ndv = std::min(ndv[j], out->RowCount); // upper bound: branches may overlap
+        }
+        if (nullLive[j]) {
+            col->NullCount = nulls[j];
+        }
+        out->ColumnStats[outStruct->Fields[j].first] = std::move(col);
+    }
+    return out;
+}
+
 TStatsPtr ComputeStatsFor(TOperatorPtr op) {
     if (auto source = TMaybeOp<TSourceOperator>(op)) {
         return ComputeSourceStats(source.Cast());
+    }
+    if (auto maybeUnion = TMaybeOp<TUnionAllOperator>(op)) {
+        return ComputeUnionStats(maybeUnion.Cast());
     }
 
     if (auto maybeFilter = TMaybeOp<TFilterOperator>(op)) {

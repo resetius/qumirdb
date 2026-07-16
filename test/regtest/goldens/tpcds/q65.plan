@@ -6,34 +6,45 @@
           (rel join
             (rel join (rel source "store") (rel source "item") () (inner))
             (rel project
-              (rel aggregate
-                (rel project
-                  (rel aggregate
-                    (rel filter
-                      (rel join (rel source "store_sales") (rel source "date_dim") () (inner))
-                      (&& (&& (== ss_sold_date_sk d_date_sk) (<= 1212 d_month_seq)) (<= d_month_seq (+ 1212 11))))
-                    (keys ss_store_sk ss_item_sk)
-                    (agg sum_0 sum ss_sales_price))
-                  (ss_store_sk ss_store_sk)
-                  (ss_item_sk ss_item_sk)
-                  (revenue sum_0))
-                (keys ss_store_sk)
-                (agg sum_0 sum revenue)
-                (agg count_1 count))
-              (ss_store_sk ss_store_sk)
-              (ave (/ sum_0 (cast count_1 f64))))
+              (rel project
+                (rel aggregate
+                  (rel project
+                    (rel project
+                      (rel aggregate
+                        (rel filter
+                          (rel join (rel source "store_sales") (rel source "date_dim") () (inner))
+                          (&& (&& (== ss_sold_date_sk d_date_sk) (<= 1212 d_month_seq)) (<= d_month_seq (+ 1212 11))))
+                        (keys ss_store_sk ss_item_sk)
+                        (agg sum_0 sum ss_sales_price))
+                      (ss_store_sk ss_store_sk)
+                      (ss_item_sk ss_item_sk)
+                      (revenue sum_0))
+                    (|sa.ss_store_sk| ss_store_sk)
+                    (|sa.ss_item_sk| ss_item_sk)
+                    (|sa.revenue| revenue))
+                  (keys ss_store_sk)
+                  (agg sum_0 sum revenue)
+                  (agg count_1 count))
+                (ss_store_sk ss_store_sk)
+                (ave (/ sum_0 (cast count_1 f64))))
+              (|sb.ss_store_sk| ss_store_sk)
+              (|sb.ave| ave))
             ()
             (inner))
           (rel project
-            (rel aggregate
-              (rel filter
-                (rel join (rel source "store_sales") (rel source "date_dim") () (inner))
-                (&& (&& (== ss_sold_date_sk d_date_sk) (<= 1212 d_month_seq)) (<= d_month_seq (+ 1212 11))))
-              (keys ss_store_sk ss_item_sk)
-              (agg sum_0 sum ss_sales_price))
-            (ss_store_sk ss_store_sk)
-            (ss_item_sk ss_item_sk)
-            (revenue sum_0))
+            (rel project
+              (rel aggregate
+                (rel filter
+                  (rel join (rel source "store_sales") (rel source "date_dim") () (inner))
+                  (&& (&& (== ss_sold_date_sk d_date_sk) (<= 1212 d_month_seq)) (<= d_month_seq (+ 1212 11))))
+                (keys ss_store_sk ss_item_sk)
+                (agg sum_0 sum ss_sales_price))
+              (ss_store_sk ss_store_sk)
+              (ss_item_sk ss_item_sk)
+              (revenue sum_0))
+            (|sc.ss_store_sk| ss_store_sk)
+            (|sc.ss_item_sk| ss_item_sk)
+            (|sc.revenue| revenue))
           ()
           (inner))
         (&& (&& (&& (== |sb.ss_store_sk| |sc.ss_store_sk|) (<= |sc.revenue| (* 0.10000000000000001 |sb.ave|)))

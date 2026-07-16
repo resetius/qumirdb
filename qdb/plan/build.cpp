@@ -397,6 +397,24 @@ std::expected<TOperatorPtr, TError> ApplyColumnAliases(
     return plan;
 }
 
+// Qualifies a subplan's output columns as `alias.col`. Source tables get this from
+// AssignSourceAliases, but subqueries/CTEs used with an alias need it here so the
+// outer query can reference `alias.col` (and equi-join keys on them are extracted).
+TOperatorPtr AliasSubplan(TOperatorPtr plan, const std::string& alias) {
+    auto* schema = static_cast<NAst::TStructType*>(plan->OutputColumns().get());
+    if (!schema) {
+        return plan;
+    }
+    std::vector<TProjectionSpec> projections;
+    projections.reserve(schema->Fields.size());
+    for (const auto& [name, _] : schema->Fields) {
+        auto dot = name.rfind('.');
+        std::string bare = dot != std::string::npos ? name.substr(dot + 1) : name;
+        projections.push_back({ .Name = alias + "." + bare, .Expression = Ident({}, name) });
+    }
+    return std::make_shared<TProjectOperator>(std::move(plan), std::move(projections));
+}
+
 std::expected<TOperatorPtr, TError> BuildTableRef(
     const NSql::TSqlPtr<NSql::TSqlTableRef>& ref,
     const TTableSourceFactory& sources)
@@ -410,6 +428,9 @@ std::expected<TOperatorPtr, TError> BuildTableRef(
         if (node->Alias) {
             if (auto sourceOp = TMaybeOp<TSourceOperator>(*source)) {
                 sourceOp.Cast()->SetAlias(*node->Alias);
+            } else {
+                // A CTE inlined as a subplan: qualify its columns by the alias.
+                return AliasSubplan(std::move(*source), *node->Alias);
             }
         }
         return *source;
@@ -422,7 +443,13 @@ std::expected<TOperatorPtr, TError> BuildTableRef(
             return plan;
         }
         if (node->ColumnAliases) {
-            return ApplyColumnAliases(std::move(*plan), node->ColumnAliases->Items);
+            plan = ApplyColumnAliases(std::move(*plan), node->ColumnAliases->Items);
+            if (!plan) {
+                return plan;
+            }
+        }
+        if (node->Alias) {
+            return AliasSubplan(std::move(*plan), *node->Alias);
         }
         return plan;
     }
