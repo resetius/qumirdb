@@ -236,44 +236,114 @@ struct TGroupKey {
     bool Computed = false;
 };
 
-std::expected<std::vector<TGroupKey>, TError> GroupKeys(const NSql::TSqlGroupBy& groupBy) {
-    std::vector<TGroupKey> keys;
-    int counter = 0;
-    auto addKey = [&](const NAst::TExprPtr& expr) -> std::expected<void, TError> {
-        if (auto ident = NAst::TMaybeNode<NAst::TIdentExpr>(expr)) {
-            const auto& name = ident.Cast()->Name;
-            keys.push_back({ .Name = name, .Expression = Ident(expr->Location, name) });
-        } else if (HasSubquery(expr)) {
-            return std::unexpected(TError(expr->Location,
-                "GROUP BY on a subquery is not supported"));
-        } else {
-            keys.push_back({
-                .Name = "gb_" + std::to_string(counter++),
-                .Expression = expr,
-                .Computed = true,
-            });
-        }
-        return {};
-    };
-    for (const auto& item : groupBy.Items) {
-        auto exprOrList = NSql::TMaybeNode<NSql::TSqlGroupingExprOrList>(item);
-        if (!exprOrList) {
-            return std::unexpected(TError(
-                "GROUP BY ROLLUP/CUBE/GROUPING SETS is not supported yet"));
-        }
-        const auto& exprs = exprOrList.Cast()->Exprs;
-        // A parenthesized list is a TBlockExpr of several keys; otherwise one key.
-        if (auto block = NAst::TMaybeNode<NAst::TBlockExpr>(exprs)) {
-            for (const auto& child : block.Cast()->Stmts) {
-                if (auto r = addKey(child); !r) {
-                    return std::unexpected(r.error());
-                }
-            }
-        } else if (auto r = addKey(exprs); !r) {
-            return std::unexpected(r.error());
-        }
+// All distinct group keys (G) plus the grouping sets as index lists into them.
+struct TGroupingParse {
+    std::vector<TGroupKey> Keys;
+    std::vector<std::vector<size_t>> Sets;
+};
+
+std::vector<NAst::TExprPtr> UnpackExprs(const NAst::TExprPtr& exprs) {
+    std::vector<NAst::TExprPtr> out;
+    if (auto block = NAst::TMaybeNode<NAst::TBlockExpr>(exprs)) {
+        out = block.Cast()->Stmts;
+    } else if (exprs) {
+        out.push_back(exprs);
     }
-    return keys;
+    return out;
+}
+
+// One grouping element expands to a list of column-sets (a set = list of exprs).
+std::expected<std::vector<std::vector<NAst::TExprPtr>>, TError>
+ExpandGroupingElement(const NSql::TSqlNodePtr& element) {
+    if (auto e = NSql::TMaybeNode<NSql::TSqlGroupingExprOrList>(element)) {
+        return std::vector<std::vector<NAst::TExprPtr>>{ UnpackExprs(e.Cast()->Exprs) };
+    }
+    if (auto r = NSql::TMaybeNode<NSql::TSqlRollUp>(element)) {
+        auto cols = UnpackExprs(r.Cast()->Exprs);
+        std::vector<std::vector<NAst::TExprPtr>> sets;
+        for (size_t k = cols.size() + 1; k-- > 0;) {
+            sets.emplace_back(cols.begin(), cols.begin() + k);
+        }
+        return sets;
+    }
+    if (auto c = NSql::TMaybeNode<NSql::TSqlCube>(element)) {
+        auto cols = UnpackExprs(c.Cast()->Exprs);
+        if (cols.size() > 12) {
+            return std::unexpected(TError("CUBE with more than 12 columns is not supported"));
+        }
+        std::vector<std::vector<NAst::TExprPtr>> sets;
+        for (size_t mask = (size_t{1} << cols.size()); mask-- > 0;) {
+            std::vector<NAst::TExprPtr> s;
+            for (size_t i = 0; i < cols.size(); ++i) {
+                if (mask & (size_t{1} << i)) s.push_back(cols[i]);
+            }
+            sets.push_back(std::move(s));
+        }
+        return sets;
+    }
+    if (auto gs = NSql::TMaybeNode<NSql::TSqlGroupingSet>(element)) {
+        std::vector<std::vector<NAst::TExprPtr>> sets;
+        for (const auto& item : gs.Cast()->Items) {
+            auto sub = ExpandGroupingElement(item);
+            if (!sub) return std::unexpected(sub.error());
+            for (auto& s : *sub) sets.push_back(std::move(s));
+        }
+        return sets;
+    }
+    return std::unexpected(TError("unsupported grouping element"));
+}
+
+std::expected<TGroupingParse, TError> ParseGrouping(const NSql::TSqlGroupBy& groupBy) {
+    // Multiple grouping elements combine as a cross product of their set-lists.
+    std::vector<std::vector<NAst::TExprPtr>> combos = {{}};
+    for (const auto& item : groupBy.Items) {
+        auto elementSets = ExpandGroupingElement(item);
+        if (!elementSets) {
+            return std::unexpected(elementSets.error());
+        }
+        std::vector<std::vector<NAst::TExprPtr>> next;
+        for (const auto& base : combos) {
+            for (const auto& choice : *elementSets) {
+                auto merged = base;
+                merged.insert(merged.end(), choice.begin(), choice.end());
+                next.push_back(std::move(merged));
+            }
+        }
+        combos = std::move(next);
+    }
+
+    TGroupingParse result;
+    std::unordered_map<std::string, size_t> keyIndex; // PrintAst -> index in Keys
+    auto keyFor = [&](const NAst::TExprPtr& expr) -> std::expected<size_t, TError> {
+        std::string k = NAst::NCore::PrintAst(expr);
+        if (auto it = keyIndex.find(k); it != keyIndex.end()) {
+            return it->second;
+        }
+        TGroupKey gk;
+        if (auto ident = NAst::TMaybeNode<NAst::TIdentExpr>(expr)) {
+            gk = { .Name = ident.Cast()->Name, .Expression = Ident(expr->Location, ident.Cast()->Name) };
+        } else if (HasSubquery(expr)) {
+            return std::unexpected(TError(expr->Location, "GROUP BY on a subquery is not supported"));
+        } else {
+            gk = { .Name = "gb_" + std::to_string(result.Keys.size()), .Expression = expr, .Computed = true };
+        }
+        size_t idx = result.Keys.size();
+        result.Keys.push_back(std::move(gk));
+        keyIndex[k] = idx;
+        return idx;
+    };
+    for (const auto& combo : combos) {
+        std::vector<size_t> set;
+        for (const auto& expr : combo) {
+            auto idx = keyFor(expr);
+            if (!idx) return std::unexpected(idx.error());
+            if (std::find(set.begin(), set.end(), *idx) == set.end()) {
+                set.push_back(*idx);
+            }
+        }
+        result.Sets.push_back(std::move(set));
+    }
+    return result;
 }
 
 // Rewrites subtrees equal to a computed group key into a reference to its column:
@@ -754,13 +824,18 @@ std::expected<TOperatorPtr, TError> BuildSelect(
     }
 
     std::vector<TGroupKey> groupKeys;
+    std::vector<std::vector<size_t>> groupingSets;
     if (select.GroupBy) {
-        auto parsed = GroupKeys(*select.GroupBy);
+        auto parsed = ParseGrouping(*select.GroupBy);
         if (!parsed) {
             return std::unexpected(parsed.error());
         }
-        groupKeys = std::move(*parsed);
+        groupKeys = std::move(parsed->Keys);
+        groupingSets = std::move(parsed->Sets);
     }
+    // A single set over all keys is a plain aggregate; >1 set needs the kernel's
+    // grouping-sets machinery (keys become nullable, masked per set).
+    bool multiSet = groupingSets.size() > 1;
 
     std::unordered_map<std::string, std::string> computedKeys; // PrintAst -> name
     for (const auto& key : groupKeys) {
@@ -786,6 +861,11 @@ std::expected<TOperatorPtr, TError> BuildSelect(
     // count(distinct col): dedup with an inner aggregate on (group keys ∪ col),
     // then count over the deduped rows above — the double aggregation the hand
     // plans use.
+    if (multiSet && collector.DistinctColumn()) {
+        return std::unexpected(
+            TError("GROUPING SETS with COUNT(DISTINCT) is not supported yet"));
+    }
+
     if (auto distinctColumn = collector.DistinctColumn()) {
         if (collector.HasNonDistinct()) {
             return std::unexpected(
@@ -852,8 +932,12 @@ std::expected<TOperatorPtr, TError> BuildSelect(
         node = std::make_shared<TProjectOperator>(std::move(node), std::move(argProjections));
     }
 
-    node = std::make_shared<TAggregateOperator>(
+    auto aggregate = std::make_shared<TAggregateOperator>(
         std::move(node), std::move(keys), std::move(specs));
+    if (multiSet) {
+        aggregate->MutableGroupingSets() = std::move(groupingSets);
+    }
+    node = aggregate;
     if (having) {
         auto rewritten = ExtractScalarSubqueries(having, node, sources, scalarCounter);
         if (!rewritten) {
