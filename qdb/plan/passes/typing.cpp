@@ -95,7 +95,8 @@ void AnnotateTypes(const TOperatorPtr& root) {
         auto inputSchema = agg->Input()->OutputColumns();
         root->Type = std::make_shared<TFunctionType>(
             std::vector<TTypePtr>{inputSchema},
-            ComputeAggregateOutputType(inputSchema, agg->GroupKeys(), agg->Aggs()));
+            ComputeAggregateOutputType(inputSchema, agg->GroupKeys(), agg->Aggs(),
+                !agg->GroupingSets().empty()));
         return;
     }
 
