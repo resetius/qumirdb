@@ -3,55 +3,59 @@
     (rel project
       (rel join
         (rel project
-          (rel aggregate
-            (rel project
-              (rel filter
-                (rel join
+          (rel project
+            (rel aggregate
+              (rel project
+                (rel filter
                   (rel join
-                    (rel join (rel source "web_sales") (rel source "household_demographics") () (inner))
-                    (rel source "time_dim")
+                    (rel join
+                      (rel join (rel source "web_sales") (rel source "household_demographics") () (inner))
+                      (rel source "time_dim")
+                      ()
+                      (inner))
+                    (rel source "web_page")
                     ()
                     (inner))
-                  (rel source "web_page")
-                  ()
-                  (inner))
-                (&& (&& (&& (&& (&& (&& (&& (== ws_sold_time_sk |time_dim.t_time_sk|)
-                              (== ws_ship_hdemo_sk |household_demographics.hd_demo_sk|))
-                            (== ws_web_page_sk |web_page.wp_web_page_sk|))
-                          (<= 6 |time_dim.t_hour|))
-                        (<= |time_dim.t_hour| (+ 6 1)))
-                      (== |household_demographics.hd_dep_count| 8))
-                    (<= 5000 |web_page.wp_char_count|))
-                  (<= |web_page.wp_char_count| 5200)))
-              (__group__ 1))
-            (keys __group__)
-            (agg count_0 count))
-          (amc count_0))
+                  (&& (&& (&& (&& (&& (&& (&& (== ws_sold_time_sk |time_dim.t_time_sk|)
+                                (== ws_ship_hdemo_sk |household_demographics.hd_demo_sk|))
+                              (== ws_web_page_sk |web_page.wp_web_page_sk|))
+                            (<= 6 |time_dim.t_hour|))
+                          (<= |time_dim.t_hour| (+ 6 1)))
+                        (== |household_demographics.hd_dep_count| 8))
+                      (<= 5000 |web_page.wp_char_count|))
+                    (<= |web_page.wp_char_count| 5200)))
+                (__group__ 1))
+              (keys __group__)
+              (agg count_0 count))
+            (amc count_0))
+          (|at.amc| amc))
         (rel project
-          (rel aggregate
-            (rel project
-              (rel filter
-                (rel join
+          (rel project
+            (rel aggregate
+              (rel project
+                (rel filter
                   (rel join
-                    (rel join (rel source "web_sales") (rel source "household_demographics") () (inner))
-                    (rel source "time_dim")
+                    (rel join
+                      (rel join (rel source "web_sales") (rel source "household_demographics") () (inner))
+                      (rel source "time_dim")
+                      ()
+                      (inner))
+                    (rel source "web_page")
                     ()
                     (inner))
-                  (rel source "web_page")
-                  ()
-                  (inner))
-                (&& (&& (&& (&& (&& (&& (&& (== ws_sold_time_sk |time_dim.t_time_sk|)
-                              (== ws_ship_hdemo_sk |household_demographics.hd_demo_sk|))
-                            (== ws_web_page_sk |web_page.wp_web_page_sk|))
-                          (<= 14 |time_dim.t_hour|))
-                        (<= |time_dim.t_hour| (+ 14 1)))
-                      (== |household_demographics.hd_dep_count| 8))
-                    (<= 5000 |web_page.wp_char_count|))
-                  (<= |web_page.wp_char_count| 5200)))
-              (__group__ 1))
-            (keys __group__)
-            (agg count_0 count))
-          (pmc count_0))
+                  (&& (&& (&& (&& (&& (&& (&& (== ws_sold_time_sk |time_dim.t_time_sk|)
+                                (== ws_ship_hdemo_sk |household_demographics.hd_demo_sk|))
+                              (== ws_web_page_sk |web_page.wp_web_page_sk|))
+                            (<= 14 |time_dim.t_hour|))
+                          (<= |time_dim.t_hour| (+ 14 1)))
+                        (== |household_demographics.hd_dep_count| 8))
+                      (<= 5000 |web_page.wp_char_count|))
+                    (<= |web_page.wp_char_count| 5200)))
+                (__group__ 1))
+              (keys __group__)
+              (agg count_0 count))
+            (pmc count_0))
+          (|pt.pmc| pmc))
         ()
         (inner))
       (am_pm_ratio (/ (: (cast amc <named DECIMAL>) <named DECIMAL>) (: (cast pmc <named DECIMAL>) <named DECIMAL>))))

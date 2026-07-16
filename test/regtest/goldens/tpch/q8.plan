@@ -3,44 +3,48 @@
     (rel aggregate
       (rel project
         (rel project
-          (rel filter
-            (rel join
+          (rel project
+            (rel filter
               (rel join
                 (rel join
                   (rel join
                     (rel join
                       (rel join
-                        (rel join (rel source "part") (rel source "supplier") () (inner))
-                        (rel source "lineitem")
+                        (rel join
+                          (rel join (rel source "part") (rel source "supplier") () (inner))
+                          (rel source "lineitem")
+                          ()
+                          (inner))
+                        (rel source "orders")
                         ()
                         (inner))
-                      (rel source "orders")
+                      (rel source "customer")
                       ()
                       (inner))
-                    (rel source "customer")
+                    (rel source "nation" "n1")
                     ()
                     (inner))
-                  (rel source "nation" "n1")
+                  (rel source "nation" "n2")
                   ()
                   (inner))
-                (rel source "nation" "n2")
+                (rel source "region")
                 ()
                 (inner))
-              (rel source "region")
-              ()
-              (inner))
-            (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (== p_partkey l_partkey) (== s_suppkey l_suppkey)) (== l_orderkey o_orderkey))
-                            (== o_custkey c_custkey))
-                          (== c_nationkey |n1.n_nationkey|))
-                        (== |n1.n_regionkey| r_regionkey))
-                      (== r_name "EUROPE"))
-                    (== s_nationkey |n2.n_nationkey|))
-                  (<= (: 9131 i32) o_orderdate))
-                (<= o_orderdate (: 9861 i32)))
-              (== p_type "PROMO POLISHED BRASS")))
-          (o_year (call qdb_date_year o_orderdate))
-          (volume (* l_extendedprice (- 1 l_discount)))
-          (nation |n2.n_name|))
+              (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (== p_partkey l_partkey) (== s_suppkey l_suppkey)) (== l_orderkey o_orderkey))
+                              (== o_custkey c_custkey))
+                            (== c_nationkey |n1.n_nationkey|))
+                          (== |n1.n_regionkey| r_regionkey))
+                        (== r_name "EUROPE"))
+                      (== s_nationkey |n2.n_nationkey|))
+                    (<= (: 9131 i32) o_orderdate))
+                  (<= o_orderdate (: 9861 i32)))
+                (== p_type "PROMO POLISHED BRASS")))
+            (o_year (call qdb_date_year o_orderdate))
+            (volume (* l_extendedprice (- 1 l_discount)))
+            (nation |n2.n_name|))
+          (|all_nations.o_year| o_year)
+          (|all_nations.volume| volume)
+          (|all_nations.nation| nation))
         (o_year o_year)
         (arg_0 (if (== nation "FRANCE") volume 0))
         (volume volume))
