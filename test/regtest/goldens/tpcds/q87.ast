@@ -1,2 +1,2 @@
-Error: identifier expected @ Line: 9, Byte: 7, Column: 7
+Error: expected ')' after table reference @ Line: 8, Byte: 7, Column: 7
 

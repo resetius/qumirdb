@@ -15,10 +15,32 @@
 
 <select_stmt> ::=
     [ <with_clause> ]
-    <select_core>
+    <query_expr>
     [ <order_by_clause> ]
     [ <limit_clause> ]
     [ <offset_clause> ]
+
+<query_expr> ::=
+    <query_term>
+    {
+        ( "UNION" | "EXCEPT" )
+        [ <set_quantifier> ]
+        <query_term>
+    }
+
+<query_term> ::=
+    <query_primary>
+    {
+        "INTERSECT"
+        [ <set_quantifier> ]
+        <query_primary>
+    }
+
+<query_primary> ::=
+      <select_core>
+    | "(" <select_stmt> ")"
+
+<set_quantifier> ::= "ALL" | "DISTINCT"
 
 <with_clause> ::=
     "WITH" [ "RECURSIVE" ] <cte_def> { "," <cte_def> }
@@ -378,6 +400,10 @@ TTask<T> TryKeywords(T&& lambda, TParserContext& ctx, const std::vector<std::str
     co_return co_await lambda(ctx);
 }
 
+TAstTask<TSqlNode> query_expr(TParserContext& ctx);
+TAstTask<TSqlNode> query_term(TParserContext& ctx);
+TAstTask<TSqlNode> query_primary(TParserContext& ctx);
+
 TAstTask<TSqlQuery> select_stmt(TParserContext& ctx);
 TAstTask<TSqlNode> select_core(TParserContext& ctx);
 TAstTask<TSqlSelectList> select_list(TParserContext& ctx);
@@ -434,13 +460,84 @@ TAstTask<TSqlQuery> select_stmt(TParserContext& ctx) {
 
     q->WithClause = co_await TryKeywords(with_clause, ctx, {"WITH"});
 
-    q->Body = co_await select_core(ctx);
+    q->Body = co_await query_expr(ctx);
 
     q->OrderBy = co_await TryKeywords(order_by_clause, ctx, {"ORDER", "BY"});
     q->Limit = co_await TryKeywords(limit_clause, ctx, {"LIMIT"});
     q->Offset = co_await TryKeywords(offset_clause, ctx, {"OFFSET"});
 
     co_return q;
+}
+
+TAstTask<TSqlNode> query_expr(TParserContext& ctx) {
+    auto node = co_await query_term(ctx);
+    while (true) {
+        auto token = ctx.Stream.Next();
+        if (IsKeyword(token, "UNION") || IsKeyword(token, "EXCEPT")) {
+            auto op = token.Name == "UNION"
+                ? TSqlSetOp::EOp::Union
+                : TSqlSetOp::EOp::Except;
+
+            auto quantifierTok = ctx.Stream.Next();
+            ESetQuantifier quantifier = ESetQuantifier::All;
+            if (IsKeyword(quantifierTok, "ALL")) {
+                quantifier = ESetQuantifier::All;
+            } else if (IsKeyword(quantifierTok, "DISTINCT")) {
+                quantifier = ESetQuantifier::Distinct;
+            } else {
+                ctx.Stream.Unget(quantifierTok);
+            }
+            auto right = co_await query_term(ctx);
+            node = std::make_shared<TSqlSetOp>(std::move(node), std::move(right), op, quantifier);
+        } else {
+            ctx.Stream.Unget(token);
+            break;
+        }
+    }
+
+    co_return node;
+}
+
+TAstTask<TSqlNode> query_term(TParserContext& ctx) {
+    auto node = co_await query_primary(ctx);
+    while (true) {
+        auto token = ctx.Stream.Next();
+        if (IsKeyword(token, "INTERSECT")) {
+            auto quantifierTok = ctx.Stream.Next();
+            ESetQuantifier quantifier = ESetQuantifier::All;
+            if (IsKeyword(quantifierTok, "ALL")) {
+                quantifier = ESetQuantifier::All;
+            } else if (IsKeyword(quantifierTok, "DISTINCT")) {
+                quantifier = ESetQuantifier::Distinct;
+            } else {
+                ctx.Stream.Unget(quantifierTok);
+            }
+            auto right = co_await query_primary(ctx);
+            node = std::make_shared<TSqlSetOp>(std::move(node), std::move(right), TSqlSetOp::EOp::Intersect, quantifier);
+        } else {
+            ctx.Stream.Unget(token);
+            break;
+        }
+    }
+
+    co_return node;
+}
+
+TAstTask<TSqlNode> query_primary(TParserContext& ctx) {
+    auto token = ctx.Stream.Next();
+    if (IsKeyword(token, "SELECT")) {
+        ctx.Stream.Unget(token);
+        co_return co_await select_core(ctx);
+    }
+    if (IsOp(token, '(')) {
+        auto inner = co_await select_stmt(ctx);
+        auto close = ctx.Stream.Next();
+        if (!IsOp(close, ')')) {
+            co_return Error(close, "')' expected");
+        }
+        co_return inner;
+    }
+    co_return Error(token, "expected SELECT or '('");
 }
 
 TAstTask<TSqlWithClause> with_clause(TParserContext& ctx) {

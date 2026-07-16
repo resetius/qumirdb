@@ -1,2 +1,19 @@
-Error: expected ')' after subquery @ Line: 8, Byte: 2, Column: 2
-
+(query
+  (select
+    (select-list
+      (item
+        (call count *)
+      )
+    )
+    (from
+      (subquery-table as hot_cust
+        (query
+          (unknown-body)
+        )
+      )
+    )
+  )
+  (limit
+    100
+  )
+)

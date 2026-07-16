@@ -1,2 +1,176 @@
-Error: expected ')' after subquery @ Line: 60, Byte: 8, Column: 8
-
+(query
+  (with
+    (cte ss
+      (query
+        (select
+          (select-list
+            (item
+              i_item_id
+            )
+            (item as total_sales
+              (call sum ss_ext_sales_price)
+            )
+          )
+          (from
+            (table store_sales)
+            (table date_dim)
+            (table customer_address)
+            (table item)
+          )
+          (where
+            (&& (&& (&& (&& (&& (&& (subquery in i_item_id (query
+              (select
+                (select-list
+                  (item
+                    i_item_id
+                  )
+                )
+                (from
+                  (table item)
+                )
+                (where
+                  (|| (|| (== i_color "orchid") (== i_color "chiffon")) (== i_color "lace"))
+                )
+              )
+            )
+            )
+                        (== ss_item_sk i_item_sk))
+                      (== ss_sold_date_sk d_date_sk))
+                    (== d_year 2000))
+                  (== d_moy 1))
+                (== ss_addr_sk ca_address_sk))
+              (== ca_gmt_offset (- 8)))
+          )
+          (group-by
+            i_item_id
+          )
+        )
+      )
+    )
+    (cte cs
+      (query
+        (select
+          (select-list
+            (item
+              i_item_id
+            )
+            (item as total_sales
+              (call sum cs_ext_sales_price)
+            )
+          )
+          (from
+            (table catalog_sales)
+            (table date_dim)
+            (table customer_address)
+            (table item)
+          )
+          (where
+            (&& (&& (&& (&& (&& (&& (subquery in i_item_id (query
+              (select
+                (select-list
+                  (item
+                    i_item_id
+                  )
+                )
+                (from
+                  (table item)
+                )
+                (where
+                  (|| (|| (== i_color "orchid") (== i_color "chiffon")) (== i_color "lace"))
+                )
+              )
+            )
+            )
+                        (== cs_item_sk i_item_sk))
+                      (== cs_sold_date_sk d_date_sk))
+                    (== d_year 2000))
+                  (== d_moy 1))
+                (== cs_bill_addr_sk ca_address_sk))
+              (== ca_gmt_offset (- 8)))
+          )
+          (group-by
+            i_item_id
+          )
+        )
+      )
+    )
+    (cte ws
+      (query
+        (select
+          (select-list
+            (item
+              i_item_id
+            )
+            (item as total_sales
+              (call sum ws_ext_sales_price)
+            )
+          )
+          (from
+            (table web_sales)
+            (table date_dim)
+            (table customer_address)
+            (table item)
+          )
+          (where
+            (&& (&& (&& (&& (&& (&& (subquery in i_item_id (query
+              (select
+                (select-list
+                  (item
+                    i_item_id
+                  )
+                )
+                (from
+                  (table item)
+                )
+                (where
+                  (|| (|| (== i_color "orchid") (== i_color "chiffon")) (== i_color "lace"))
+                )
+              )
+            )
+            )
+                        (== ws_item_sk i_item_sk))
+                      (== ws_sold_date_sk d_date_sk))
+                    (== d_year 2000))
+                  (== d_moy 1))
+                (== ws_bill_addr_sk ca_address_sk))
+              (== ca_gmt_offset (- 8)))
+          )
+          (group-by
+            i_item_id
+          )
+        )
+      )
+    )
+  )
+  (select
+    (select-list
+      (item
+        i_item_id
+      )
+      (item as total_sales
+        (call sum total_sales)
+      )
+    )
+    (from
+      (subquery-table as tmp1
+        (query
+          (unknown-body)
+        )
+      )
+    )
+    (group-by
+      i_item_id
+    )
+  )
+  (order-by
+    (order asc
+      total_sales
+    )
+    (order asc
+      i_item_id
+    )
+  )
+  (limit
+    100
+  )
+)

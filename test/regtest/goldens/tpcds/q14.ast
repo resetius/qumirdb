@@ -1,2 +1,93 @@
-Error: expected ')' after subquery @ Line: 14, Byte: 1, Column: 1
-
+(query
+  (with
+    (cte cross_items
+      (query
+        (select
+          (select-list
+            (item as ss_item_sk
+              i_item_sk
+            )
+          )
+          (from
+            (table item)
+            (subquery-table
+              (query
+                (unknown-body)
+              )
+            )
+          )
+          (where
+            (&& (&& (== i_brand_id brand_id) (== i_class_id class_id)) (== i_category_id category_id))
+          )
+        )
+      )
+    )
+    (cte avg_sales
+      (query
+        (select
+          (select-list
+            (item as average_sales
+              (call avg (* quantity list_price))
+            )
+          )
+          (from
+            (subquery-table as x
+              (query
+                (unknown-body)
+              )
+            )
+          )
+        )
+      )
+    )
+  )
+  (select
+    (select-list
+      (item
+        channel
+      )
+      (item
+        i_brand_id
+      )
+      (item
+        i_class_id
+      )
+      (item
+        i_category_id
+      )
+      (item
+        (call sum sales)
+      )
+      (item
+        (call sum number_sales)
+      )
+    )
+    (from
+      (subquery-table as y
+        (query
+          (unknown-body)
+        )
+      )
+    )
+    (group-by
+      (call rollup channel i_brand_id i_class_id i_category_id)
+    )
+  )
+  (order-by
+    (order asc
+      channel
+    )
+    (order asc
+      i_brand_id
+    )
+    (order asc
+      i_class_id
+    )
+    (order asc
+      i_category_id
+    )
+  )
+  (limit
+    100
+  )
+)

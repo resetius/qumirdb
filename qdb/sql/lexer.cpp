@@ -60,6 +60,8 @@ static const std::unordered_set<std::string> Keywords = {
     "LAST",
 
     "UNION",
+    "EXCEPT",
+    "INTERSECT",
     "ALL",
     "DISTINCT",
 

@@ -1,2 +1,2 @@
-Error: expected ')' after CTE query @ Line: 26, Byte: 1, Column: 1
+Error: expected a SELECT statement
 

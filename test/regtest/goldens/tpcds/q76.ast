@@ -1,2 +1,61 @@
-Error: expected ')' after subquery @ Line: 8, Byte: 8, Column: 8
-
+(query
+  (select
+    (select-list
+      (item
+        channel
+      )
+      (item
+        col_name
+      )
+      (item
+        d_year
+      )
+      (item
+        d_qoy
+      )
+      (item
+        i_category
+      )
+      (item as sales_cnt
+        (call COUNT *)
+      )
+      (item as sales_amt
+        (call SUM ext_sales_price)
+      )
+    )
+    (from
+      (subquery-table as foo
+        (query
+          (unknown-body)
+        )
+      )
+    )
+    (group-by
+      channel
+      col_name
+      d_year
+      d_qoy
+      i_category
+    )
+  )
+  (order-by
+    (order asc
+      channel
+    )
+    (order asc
+      col_name
+    )
+    (order asc
+      d_year
+    )
+    (order asc
+      d_qoy
+    )
+    (order asc
+      i_category
+    )
+  )
+  (limit
+    100
+  )
+)

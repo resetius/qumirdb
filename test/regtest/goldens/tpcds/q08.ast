@@ -1,2 +1,50 @@
-Error: expected ')' after subquery @ Line: 92, Byte: 5, Column: 5
-
+(query
+  (select
+    (select-list
+      (item
+        s_store_name
+      )
+      (item
+        (call sum ss_net_profit)
+      )
+    )
+    (from
+      (table store_sales)
+      (table date_dim)
+      (table store)
+      (subquery-table as V1
+        (query
+          (select
+            (select-list
+              (item
+                ca_zip
+              )
+            )
+            (from
+              (subquery-table as A2
+                (query
+                  (unknown-body)
+                )
+              )
+            )
+          )
+        )
+      )
+    )
+    (where
+      (&& (&& (&& (&& (== ss_store_sk s_store_sk) (== ss_sold_date_sk d_date_sk)) (== d_qoy 1)) (== d_year 2002))
+        (== (call substr s_zip 1 2) (call substr |V1.ca_zip| 1 2)))
+    )
+    (group-by
+      s_store_name
+    )
+  )
+  (order-by
+    (order asc
+      s_store_name
+    )
+  )
+  (limit
+    100
+  )
+)

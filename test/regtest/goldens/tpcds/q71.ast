@@ -1,2 +1,48 @@
-Error: expected ')' after subquery @ Line: 12, Byte: 17, Column: 17
-
+(query
+  (select
+    (select-list
+      (item as brand_id
+        i_brand_id
+      )
+      (item as brand
+        i_brand
+      )
+      (item
+        t_hour
+      )
+      (item
+        t_minute
+      )
+      (item as ext_price
+        (call sum ext_price)
+      )
+    )
+    (from
+      (table item)
+      (subquery-table as tmp
+        (query
+          (unknown-body)
+        )
+      )
+      (table time_dim)
+    )
+    (where
+      (&& (&& (&& (== sold_item_sk i_item_sk) (== i_manager_id 1)) (== time_sk t_time_sk))
+        (|| (== t_meal_time "breakfast") (== t_meal_time "dinner")))
+    )
+    (group-by
+      i_brand
+      i_brand_id
+      t_hour
+      t_minute
+    )
+  )
+  (order-by
+    (order desc
+      ext_price
+    )
+    (order asc
+      i_brand_id
+    )
+  )
+)

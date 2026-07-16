@@ -1,2 +1,183 @@
-Error: expected ')' after subquery @ Line: 8, Byte: 8, Column: 8
-
+(query
+  (with
+    (cte wscs
+      (query
+        (select
+          (select-list
+            (item
+              sold_date_sk
+            )
+            (item
+              sales_price
+            )
+          )
+          (from
+            (subquery-table
+              (query
+                (unknown-body)
+              )
+            )
+          )
+        )
+      )
+    )
+    (cte wswscs
+      (query
+        (select
+          (select-list
+            (item
+              d_week_seq
+            )
+            (item as sun_sales
+              (call sum (if (== d_day_name "Sunday") sales_price (call qdb_sql_null)))
+            )
+            (item as mon_sales
+              (call sum (if (== d_day_name "Monday") sales_price (call qdb_sql_null)))
+            )
+            (item as tue_sales
+              (call sum (if (== d_day_name "Tuesday") sales_price (call qdb_sql_null)))
+            )
+            (item as wed_sales
+              (call sum (if (== d_day_name "Wednesday") sales_price (call qdb_sql_null)))
+            )
+            (item as thu_sales
+              (call sum (if (== d_day_name "Thursday") sales_price (call qdb_sql_null)))
+            )
+            (item as fri_sales
+              (call sum (if (== d_day_name "Friday") sales_price (call qdb_sql_null)))
+            )
+            (item as sat_sales
+              (call sum (if (== d_day_name "Saturday") sales_price (call qdb_sql_null)))
+            )
+          )
+          (from
+            (table wscs)
+            (table date_dim)
+          )
+          (where
+            (== d_date_sk sold_date_sk)
+          )
+          (group-by
+            d_week_seq
+          )
+        )
+      )
+    )
+  )
+  (select
+    (select-list
+      (item
+        d_week_seq1
+      )
+      (item
+        (call round (/ sun_sales1 sun_sales2) 2)
+      )
+      (item
+        (call round (/ mon_sales1 mon_sales2) 2)
+      )
+      (item
+        (call round (/ tue_sales1 tue_sales2) 2)
+      )
+      (item
+        (call round (/ wed_sales1 wed_sales2) 2)
+      )
+      (item
+        (call round (/ thu_sales1 thu_sales2) 2)
+      )
+      (item
+        (call round (/ fri_sales1 fri_sales2) 2)
+      )
+      (item
+        (call round (/ sat_sales1 sat_sales2) 2)
+      )
+    )
+    (from
+      (subquery-table as y
+        (query
+          (select
+            (select-list
+              (item as d_week_seq1
+                |wswscs.d_week_seq|
+              )
+              (item as sun_sales1
+                sun_sales
+              )
+              (item as mon_sales1
+                mon_sales
+              )
+              (item as tue_sales1
+                tue_sales
+              )
+              (item as wed_sales1
+                wed_sales
+              )
+              (item as thu_sales1
+                thu_sales
+              )
+              (item as fri_sales1
+                fri_sales
+              )
+              (item as sat_sales1
+                sat_sales
+              )
+            )
+            (from
+              (table wswscs)
+              (table date_dim)
+            )
+            (where
+              (&& (== |date_dim.d_week_seq| |wswscs.d_week_seq|) (== d_year 2001))
+            )
+          )
+        )
+      )
+      (subquery-table as z
+        (query
+          (select
+            (select-list
+              (item as d_week_seq2
+                |wswscs.d_week_seq|
+              )
+              (item as sun_sales2
+                sun_sales
+              )
+              (item as mon_sales2
+                mon_sales
+              )
+              (item as tue_sales2
+                tue_sales
+              )
+              (item as wed_sales2
+                wed_sales
+              )
+              (item as thu_sales2
+                thu_sales
+              )
+              (item as fri_sales2
+                fri_sales
+              )
+              (item as sat_sales2
+                sat_sales
+              )
+            )
+            (from
+              (table wswscs)
+              (table date_dim)
+            )
+            (where
+              (&& (== |date_dim.d_week_seq| |wswscs.d_week_seq|) (== d_year (+ 2001 1)))
+            )
+          )
+        )
+      )
+    )
+    (where
+      (== d_week_seq1 (- d_week_seq2 53))
+    )
+  )
+  (order-by
+    (order asc
+      d_week_seq1
+    )
+  )
+)
