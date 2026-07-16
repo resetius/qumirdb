@@ -33,10 +33,17 @@ TTypePtr AggResultType(const std::string& func, const TTypePtr& argType) {
     if (func == "count") {
         return std::make_shared<TIntegerType>(); // i64
     }
-    if (argType && argType->TypeName() == TIntegerType::TypeId) {
-        // Current reducers and aggregate buffers use i64 state for every
-        // integer aggregate, including min/max over narrow integer inputs.
-        return std::make_shared<TIntegerType>();
+    if (argType) {
+        // Nullable must be unwrapped before the integer check, else a nullable
+        // integer arg falls through and the i32-width output is read against the
+        // reducer's i64 state buffer (every other output element reads a high 0).
+        const bool nullable = IsNullableType(argType);
+        auto inner = nullable ? UnwrapNullableType(argType) : argType;
+        if (inner && inner->TypeName() == TIntegerType::TypeId) {
+            // i64 state for every integer aggregate, incl. min/max over narrow ints.
+            TTypePtr i64Type = std::make_shared<TIntegerType>();
+            return nullable ? std::make_shared<TNullable>(std::move(i64Type)) : i64Type;
+        }
     }
     // Non-integer reducers are not connected yet; preserve the declared type.
     return argType;
