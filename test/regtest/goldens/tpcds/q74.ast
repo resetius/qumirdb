@@ -1,2 +1,59 @@
-Error: expected ')' after CTE query @ Line: 19, Byte: 1, Column: 1
-
+(query
+  (with
+    (cte year_total
+      (query
+        (unknown-body)
+      )
+    )
+  )
+  (select
+    (select-list
+      (item
+        |t_s_secyear.customer_id|
+      )
+      (item
+        |t_s_secyear.customer_first_name|
+      )
+      (item
+        |t_s_secyear.customer_last_name|
+      )
+    )
+    (from
+      (table year_total as t_s_firstyear)
+      (table year_total as t_s_secyear)
+      (table year_total as t_w_firstyear)
+      (table year_total as t_w_secyear)
+    )
+    (where
+      (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (== |t_s_secyear.customer_id| |t_s_firstyear.customer_id|)
+                                (== |t_s_firstyear.customer_id| |t_w_secyear.customer_id|))
+                              (== |t_s_firstyear.customer_id| |t_w_firstyear.customer_id|))
+                            (== |t_s_firstyear.sale_type| "s"))
+                          (== |t_w_firstyear.sale_type| "w"))
+                        (== |t_s_secyear.sale_type| "s"))
+                      (== |t_w_secyear.sale_type| "w"))
+                    (== |t_s_firstyear.year| 2001))
+                  (== |t_s_secyear.year| (+ 2001 1)))
+                (== |t_w_firstyear.year| 2001))
+              (== |t_w_secyear.year| (+ 2001 1)))
+            (> |t_s_firstyear.year_total| 0))
+          (> |t_w_firstyear.year_total| 0))
+        (> (if (> |t_w_firstyear.year_total| 0) (/ |t_w_secyear.year_total| |t_w_firstyear.year_total|) (call qdb_sql_null))
+          (if (> |t_s_firstyear.year_total| 0) (/ |t_s_secyear.year_total| |t_s_firstyear.year_total|) (call qdb_sql_null))))
+    )
+  )
+  (order-by
+    (order asc
+      2
+    )
+    (order asc
+      1
+    )
+    (order asc
+      3
+    )
+  )
+  (limit
+    100
+  )
+)

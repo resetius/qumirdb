@@ -1,2 +1,2 @@
-Error: expected ')' after subquery @ Line: 92, Byte: 5, Column: 5
+Error: expected a SELECT statement
 

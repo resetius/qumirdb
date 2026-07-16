@@ -1,2 +1,142 @@
-Error: expected ')' after subquery @ Line: 10, Byte: 10, Column: 10
-
+(query
+  (with
+    (cte my_customers
+      (query
+        (select distinct
+          (select-list
+            (item
+              c_customer_sk
+            )
+            (item
+              c_current_addr_sk
+            )
+          )
+          (from
+            (subquery-table as cs_or_ws_sales
+              (query
+                (unknown-body)
+              )
+            )
+            (table item)
+            (table date_dim)
+            (table customer)
+          )
+          (where
+            (&& (&& (&& (&& (&& (&& (== sold_date_sk d_date_sk) (== item_sk i_item_sk)) (== i_category "Jewelry"))
+                    (== i_class "consignment"))
+                  (== c_customer_sk |cs_or_ws_sales.customer_sk|))
+                (== d_moy 3))
+              (== d_year 1999))
+          )
+        )
+      )
+    )
+    (cte my_revenue
+      (query
+        (select
+          (select-list
+            (item
+              c_customer_sk
+            )
+            (item as revenue
+              (call sum ss_ext_sales_price)
+            )
+          )
+          (from
+            (table my_customers)
+            (table store_sales)
+            (table customer_address)
+            (table store)
+            (table date_dim)
+          )
+          (where
+            (&& (&& (&& (&& (&& (== c_current_addr_sk ca_address_sk) (== ca_county s_county)) (== ca_state s_state))
+                  (== ss_sold_date_sk d_date_sk))
+                (== c_customer_sk ss_customer_sk))
+              (&& (<= (subquery scalar (query
+              (select distinct
+                (select-list
+                  (item
+                    (+ d_month_seq 1)
+                  )
+                )
+                (from
+                  (table date_dim)
+                )
+                (where
+                  (&& (== d_year 1999) (== d_moy 3))
+                )
+              )
+            )
+            )
+                  d_month_seq)
+                (<= d_month_seq
+                  (subquery scalar (query
+              (select distinct
+                (select-list
+                  (item
+                    (+ d_month_seq 3)
+                  )
+                )
+                (from
+                  (table date_dim)
+                )
+                (where
+                  (&& (== d_year 1999) (== d_moy 3))
+                )
+              )
+            )
+            ))))
+          )
+          (group-by
+            c_customer_sk
+          )
+        )
+      )
+    )
+    (cte segments
+      (query
+        (select
+          (select-list
+            (item as segment
+              (cast (/ revenue 50) i32)
+            )
+          )
+          (from
+            (table my_revenue)
+          )
+        )
+      )
+    )
+  )
+  (select
+    (select-list
+      (item
+        segment
+      )
+      (item as num_customers
+        (call count *)
+      )
+      (item as segment_base
+        (* segment 50)
+      )
+    )
+    (from
+      (table segments)
+    )
+    (group-by
+      segment
+    )
+  )
+  (order-by
+    (order asc
+      segment
+    )
+    (order asc
+      num_customers
+    )
+  )
+  (limit
+    100
+  )
+)

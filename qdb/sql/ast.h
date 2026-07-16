@@ -138,7 +138,7 @@ struct TSqlQuery : TSqlNode {
 
     TSqlPtr<TSqlWithClause> WithClause;
 
-    TSqlNodePtr Body; // TSqlSelect / TSqlSetOp later
+    TSqlNodePtr Body; // TSqlSelect / TSqlSetOp
 
     TSqlPtr<TSqlOrder> OrderBy;
 
@@ -173,6 +173,30 @@ struct TSqlSelect : TSqlNode {
     TSqlPtr<TSqlGroupBy> GroupBy;
 
     NQumir::NAst::TExprPtr Having;
+};
+
+struct TSqlSetOp : TSqlNode {
+    static constexpr const char* NodeId = "SetOp";
+    std::string_view NodeName() const override { return NodeId; }
+
+    TSqlPtr<TSqlNode> Left;
+    TSqlPtr<TSqlNode> Right;
+
+    enum class EOp {
+        Union,
+        Intersect,
+        Except
+    };
+    EOp Op;
+
+    ESetQuantifier Quantifier;
+
+    explicit TSqlSetOp(TSqlPtr<TSqlNode> left, TSqlPtr<TSqlNode> right, EOp op, ESetQuantifier quantifier)
+        : Left(std::move(left))
+        , Right(std::move(right))
+        , Op(op)
+        , Quantifier(quantifier)
+    { }
 };
 
 // A subquery used inside an expression. Bridges a SQL query into the Qumir

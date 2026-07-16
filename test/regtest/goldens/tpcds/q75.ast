@@ -1,2 +1,106 @@
-Error: expected ')' after subquery @ Line: 22, Byte: 7, Column: 7
-
+(query
+  (with
+    (cte all_sales
+      (query
+        (select
+          (select-list
+            (item
+              d_year
+            )
+            (item
+              i_brand_id
+            )
+            (item
+              i_class_id
+            )
+            (item
+              i_category_id
+            )
+            (item
+              i_manufact_id
+            )
+            (item as sales_cnt
+              (call SUM sales_cnt)
+            )
+            (item as sales_amt
+              (call SUM sales_amt)
+            )
+          )
+          (from
+            (subquery-table as sales_detail
+              (query
+                (unknown-body)
+              )
+            )
+          )
+          (group-by
+            d_year
+            i_brand_id
+            i_class_id
+            i_category_id
+            i_manufact_id
+          )
+        )
+      )
+    )
+  )
+  (select
+    (select-list
+      (item as prev_year
+        |prev_yr.d_year|
+      )
+      (item as year
+        |curr_yr.d_year|
+      )
+      (item
+        |curr_yr.i_brand_id|
+      )
+      (item
+        |curr_yr.i_class_id|
+      )
+      (item
+        |curr_yr.i_category_id|
+      )
+      (item
+        |curr_yr.i_manufact_id|
+      )
+      (item as prev_yr_cnt
+        |prev_yr.sales_cnt|
+      )
+      (item as curr_yr_cnt
+        |curr_yr.sales_cnt|
+      )
+      (item as sales_cnt_diff
+        (- |curr_yr.sales_cnt| |prev_yr.sales_cnt|)
+      )
+      (item as sales_amt_diff
+        (- |curr_yr.sales_amt| |prev_yr.sales_amt|)
+      )
+    )
+    (from
+      (table all_sales as curr_yr)
+      (table all_sales as prev_yr)
+    )
+    (where
+      (&& (&& (&& (&& (&& (&& (== |curr_yr.i_brand_id| |prev_yr.i_brand_id|) (== |curr_yr.i_class_id| |prev_yr.i_class_id|))
+                (== |curr_yr.i_category_id| |prev_yr.i_category_id|))
+              (== |curr_yr.i_manufact_id| |prev_yr.i_manufact_id|))
+            (== |curr_yr.d_year| 2002))
+          (== |prev_yr.d_year| (- 2002 1)))
+        (< (/ (: (cast |curr_yr.sales_cnt| <named DECIMAL>) <named DECIMAL>)
+            (: (cast |prev_yr.sales_cnt| <named DECIMAL>) <named DECIMAL>))
+          0.90000000000000002))
+    )
+  )
+  (order-by
+    (order asc
+      sales_cnt_diff
+    )
+    (order asc
+      sales_amt_diff
+    )
+  )
+  (limit
+    100
+  )
+)
