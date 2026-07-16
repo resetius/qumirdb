@@ -4,8 +4,10 @@
 
 #include <qumir/optional.h>
 
+#include <cctype>
 #include <map>
 #include <set>
+#include <string>
 
 /*
 
@@ -245,6 +247,19 @@ bool IsOp(const TToken& token, TOperator op) {
 
 bool IsKeyword(const TToken& tok, const std::string& kw) {
     return tok.Type == TToken::Keyword && tok.Name == kw;
+}
+
+std::string ToLowerStr(std::string s) {
+    for (auto& c : s) {
+        c = std::tolower(c);
+    }
+    return s;
+}
+
+bool IsIntervalUnit(const std::string& name) {
+    std::string u = ToLowerStr(name);
+    return u == "day" || u == "days" || u == "month" || u == "months"
+        || u == "year" || u == "years";
 }
 
 NQumir::NAst::TExprPtr binary(TLocation loc, TOperator op, NQumir::NAst::TExprPtr left, NQumir::NAst::TExprPtr right)
@@ -1038,6 +1053,15 @@ TAstExprTask primary_expr(TParserContext& ctx) {
 
     // literals
     if (token.Type == TToken::Integer) {
+        // interval shorthand: `<integer> <unit>` (e.g. `60 days`), the unit check
+        // keeps an implicit alias like `SELECT 5 x` from being eaten as a unit.
+        auto unit = ctx.Stream.Next();
+        if ((unit.Type == TToken::Identifier || unit.Type == TToken::Keyword)
+            && IsIntervalUnit(unit.Name)) {
+            co_return i32_literal(loc, qdb_sql_interval(
+                std::to_string(token.Value.i64).c_str(), ToLowerStr(unit.Name).c_str()));
+        }
+        ctx.Stream.Unget(unit);
         co_return std::make_shared<NQumir::NAst::TNumberExpr>(loc, token.Value.i64);
     } else if (token.Type == TToken::Float) {
         co_return std::make_shared<NQumir::NAst::TNumberExpr>(loc, token.Value.f64);

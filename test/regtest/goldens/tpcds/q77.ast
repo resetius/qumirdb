@@ -1,2 +1,2 @@
-Error: ')' expected @ Line: 11, Byte: 56, Column: 56
+Error: expected ')' after subquery @ Line: 86, Byte: 1, Column: 1
 

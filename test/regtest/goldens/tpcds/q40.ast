@@ -1,2 +1,62 @@
-Error: ')' expected @ Line: 21, Byte: 54, Column: 54
-
+(query
+  (select
+    (select-list
+      (item
+        w_state
+      )
+      (item
+        i_item_id
+      )
+      (item as sales_before
+        (call
+          sum
+          (if
+            (< (: (cast d_date <named DATE>) <named DATE>) (: (cast "1998-04-08" <named DATE>) <named DATE>))
+            (- cs_sales_price (call coalesce cr_refunded_cash 0))
+            0))
+      )
+      (item as sales_after
+        (call
+          sum
+          (if
+            (>= (: (cast d_date <named DATE>) <named DATE>) (: (cast "1998-04-08" <named DATE>) <named DATE>))
+            (- cs_sales_price (call coalesce cr_refunded_cash 0))
+            0))
+      )
+    )
+    (from
+      (join left
+        (table catalog_sales)
+        (table catalog_returns)
+        (on
+          (&& (== cs_order_number cr_order_number) (== cs_item_sk cr_item_sk))
+        )
+      )
+      (table warehouse)
+      (table item)
+      (table date_dim)
+    )
+    (where
+      (&& (&& (&& (&& (&& (<= 0.98999999999999999 i_current_price) (<= i_current_price 1.49)) (== i_item_sk cs_item_sk))
+            (== cs_warehouse_sk w_warehouse_sk))
+          (== cs_sold_date_sk d_date_sk))
+        (&& (<= (- (: (cast "1998-04-08" <named DATE>) <named DATE>) (: 30 i32)) d_date)
+          (<= d_date (+ (: (cast "1998-04-08" <named DATE>) <named DATE>) (: 30 i32)))))
+    )
+    (group-by
+      w_state
+      i_item_id
+    )
+  )
+  (order-by
+    (order asc
+      w_state
+    )
+    (order asc
+      i_item_id
+    )
+  )
+  (limit
+    100
+  )
+)

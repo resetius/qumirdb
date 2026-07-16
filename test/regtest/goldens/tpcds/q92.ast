@@ -1,2 +1,47 @@
-Error: ')' expected @ Line: 12, Byte: 41, Column: 41
-
+(query
+  (select
+    (select-list
+      (item as Excess Discount Amount
+        (call sum ws_ext_discount_amt)
+      )
+    )
+    (from
+      (table web_sales)
+      (table item)
+      (table date_dim)
+    )
+    (where
+      (&& (&& (&& (&& (== i_manufact_id 269) (== i_item_sk ws_item_sk))
+            (&& (<= "1998-03-18" d_date) (<= d_date (+ (: (cast "1998-03-18" <named DATE>) <named DATE>) (: 90 i32)))))
+          (== d_date_sk ws_sold_date_sk))
+        (> ws_ext_discount_amt
+          (subquery scalar (query
+        (select
+          (select-list
+            (item
+              (* 1.3 (call avg ws_ext_discount_amt))
+            )
+          )
+          (from
+            (table web_sales)
+            (table date_dim)
+          )
+          (where
+            (&& (&& (== ws_item_sk i_item_sk)
+                (&& (<= "1998-03-18" d_date) (<= d_date (+ (: (cast "1998-03-18" <named DATE>) <named DATE>) (: 90 i32)))))
+              (== d_date_sk ws_sold_date_sk))
+          )
+        )
+      )
+      )))
+    )
+  )
+  (order-by
+    (order asc
+      (call sum ws_ext_discount_amt)
+    )
+  )
+  (limit
+    100
+  )
+)
