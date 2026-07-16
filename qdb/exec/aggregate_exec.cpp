@@ -2,6 +2,7 @@
 #include <qdb/exec/kernel_rowset.h>
 #include <qdb/modules/qumirdb_runtime.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <stdexcept>
 #include <utility>
@@ -89,6 +90,61 @@ void TAggregateProcessor::Destroy()
         Kernels_.Dispatch(HashTable_.data(), nullptr, 0, kOpDestroy);
         Destroyed_ = true;
     }
+}
+
+TGroupingSetsAggregateProcessor::TGroupingSetsAggregateProcessor(
+    TAggregateKernels kernels,
+    std::vector<std::vector<size_t>> sets,
+    size_t numKeys)
+    : Inner_(std::move(kernels))
+    , Sets_(std::move(sets))
+    , NumKeys_(numKeys)
+{
+}
+
+void TGroupingSetsAggregateProcessor::Add(TRowSet& batch)
+{
+    const int64_t rows = batch.RowCount;
+    if (static_cast<int64_t>(SetIdBuf_.size()) < rows) {
+        SetIdBuf_.resize(rows);
+    }
+    const size_t maskBytes = static_cast<size_t>((rows + 7) / 8);
+    if (NullMask_.size() < maskBytes) {
+        NullMask_.assign(maskBytes, 0); // all bits 0 => every row NULL
+    }
+    Cols_.resize(static_cast<size_t>(batch.ColumnCount) + 1);
+
+    for (size_t si = 0; si < Sets_.size(); ++si) {
+        std::fill_n(SetIdBuf_.begin(), rows, static_cast<int32_t>(si));
+        Cols_[0] = TColumn{};
+        Cols_[0].Data = reinterpret_cast<char*>(SetIdBuf_.data());
+        Cols_[0].Mask = nullptr;
+
+        const auto& set = Sets_[si];
+        for (int64_t c = 0; c < batch.ColumnCount; ++c) {
+            TColumn col = batch.Columns[c];
+            if (c < static_cast<int64_t>(NumKeys_) &&
+                std::find(set.begin(), set.end(), static_cast<size_t>(c)) == set.end())
+            {
+                col.Mask = NullMask_.data();
+                col.MaskBitOffset = 0;
+            }
+            Cols_[static_cast<size_t>(c) + 1] = col;
+        }
+
+        TRowSet masked = batch;
+        masked.Columns = Cols_.data();
+        masked.ColumnCount = batch.ColumnCount + 1;
+        masked.Destroy = nullptr;
+        masked.Private = nullptr;
+        masked.RefCount = 1;
+        Inner_.Add(masked);
+    }
+}
+
+bool TGroupingSetsAggregateProcessor::Finish(TRowSet& rowSet)
+{
+    return Inner_.Finish(rowSet);
 }
 
 } // namespace NQdb

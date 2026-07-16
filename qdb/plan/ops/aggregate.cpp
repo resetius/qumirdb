@@ -52,6 +52,11 @@ TTypePtr ComputeAggregateOutputType(
 {
     auto* inputStruct = static_cast<TStructType*>(inputSchema.get());
     std::vector<std::pair<std::string, TTypePtr>> outFields;
+    // The kernel emits the grouping-set id as the leading key so masked-NULL and
+    // real-NULL groups stay distinct; downstream references keys by name.
+    if (nullableKeys) {
+        outFields.emplace_back("__grouping_id__", std::make_shared<TIntegerType>(TIntegerType::I32));
+    }
     for (const auto& key : groupKeys) {
         auto type = FieldType(inputStruct, key);
         if (nullableKeys && type && !IsNullableType(type)) {

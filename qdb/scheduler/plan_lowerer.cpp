@@ -55,6 +55,16 @@ struct TAggregateBlockingState {
     bool Done = false;
 };
 
+struct TGroupingSetsBlockingState {
+    TGroupingSetsBlockingState(
+        TAggregateKernels kernels, std::vector<std::vector<size_t>> sets, size_t numKeys)
+        : Processor(std::move(kernels), std::move(sets), numKeys)
+    {}
+
+    TGroupingSetsAggregateProcessor Processor;
+    bool Done = false;
+};
+
 struct TLimitBlockingState {
     TLimitBlockingState(int64_t limit, int64_t offset)
         : Processor(limit, offset)
@@ -423,7 +433,9 @@ public:
             // key into partition-local aggregates (disjoint groups), so its
             // output keeps the shuffle partition count. Global aggregates
             // (`__group__` constant) stay single.
-            if (!IsGlobalAggregate(*n.Cast()) &&
+            // Grouping sets are not shuffled yet (the shuffle key would need the
+            // set id) — gather to a single lane.
+            if (!IsGlobalAggregate(*n.Cast()) && n.Cast()->GroupingSets().empty() &&
                 !n.Cast()->GroupKeys().empty() && childLanes > 1)
             {
                 return JoinPartitions(childLanes);
@@ -955,6 +967,72 @@ private:
     // Builds the aggregate code + partition-local state factory + output type
     // for a given (already-lowered) input type. Kernels are compiled once and
     // shared across all partition states.
+    TBlockingTail BuildGroupingSetsAggregateTail(
+        const NQumir::NAst::TTypePtr& childType,
+        const NQumir::NAst::TStructType& inputType,
+        TAggregateOperator& aggregate,
+        std::string stage)
+    {
+        using namespace NQumir::NAst;
+        const size_t numKeys = aggregate.GroupKeys().size();
+
+        // Kernel input = leading i32 __grouping_id__ ++ nullable keys ++ args; the
+        // masked batches the driver feeds match this layout column-for-column.
+        std::vector<std::pair<std::string, TTypePtr>> extFields;
+        extFields.emplace_back("__grouping_id__", std::make_shared<TIntegerType>(TIntegerType::I32));
+        for (size_t i = 0; i < inputType.Fields.size(); ++i) {
+            auto [name, type] = inputType.Fields[i];
+            if (i < numKeys && !IsNullableType(type)) {
+                type = std::make_shared<TNullable>(type);
+            }
+            extFields.emplace_back(name, std::move(type));
+        }
+        auto extInput = std::make_shared<TStructType>(std::move(extFields));
+
+        std::vector<std::string> extKeys;
+        extKeys.reserve(numKeys + 1);
+        extKeys.push_back("__grouping_id__");
+        for (const auto& key : aggregate.GroupKeys()) {
+            extKeys.push_back(key);
+        }
+
+        auto spec = NKernel::BuildAggregateKernelSpec(*extInput, extKeys, aggregate.Aggs());
+        TKernelCompiler compiler(KernelOptions(std::move(stage), &aggregate));
+        auto kernels = std::make_shared<TAggregateKernels>(compiler.CompileAggregate(spec));
+        auto sets = aggregate.GroupingSets();
+
+        auto code = std::make_shared<NScheduler::TBlockingCode>(
+            [](void* state, NScheduler::TInputPort& input, TRowSet& output) {
+                auto* s = static_cast<TGroupingSetsBlockingState*>(state);
+                if (s->Done) {
+                    return NScheduler::ETaskResult::FINISHED;
+                }
+                TRowSet rowSet{};
+                while (true) {
+                    auto fetch = input.Fetch(rowSet);
+                    if (fetch == NScheduler::EFetchResult::NO_DATA) {
+                        return NScheduler::ETaskResult::NEED_DATA;
+                    }
+                    if (fetch == NScheduler::EFetchResult::FINISHED) {
+                        s->Done = true;
+                        s->Processor.Finish(output);
+                        return NScheduler::ETaskResult::OK;
+                    }
+                    s->Processor.Add(rowSet);
+                    Release(&rowSet);
+                    rowSet = {};
+                }
+            });
+        return TBlockingTail{
+            .Code = std::move(code),
+            .MakeState = [kernels, sets, numKeys]() -> std::shared_ptr<void> {
+                return std::make_shared<TGroupingSetsBlockingState>(*kernels, sets, numKeys);
+            },
+            .OutputType = ComputeAggregateOutputType(
+                childType, aggregate.GroupKeys(), aggregate.Aggs(), true),
+        };
+    }
+
     TBlockingTail BuildAggregateTail(
         const NQumir::NAst::TTypePtr& childType,
         TAggregateOperator& aggregate,
@@ -964,6 +1042,9 @@ private:
             static_cast<NQumir::NAst::TStructType*>(childType.get());
         if (!inputType) {
             throw std::runtime_error("aggregate input must have TStructType");
+        }
+        if (!aggregate.GroupingSets().empty()) {
+            return BuildGroupingSetsAggregateTail(childType, *inputType, aggregate, std::move(stage));
         }
         auto spec = NKernel::BuildAggregateKernelSpec(
             *inputType, aggregate.GroupKeys(), aggregate.Aggs());
@@ -1098,6 +1179,21 @@ private:
         const size_t childLanes = OutputLanes(aggregate.Input());
         // Non-parallel input: single aggregate, nothing to parallelize.
         if (childLanes <= 1) {
+            auto group = StageGroup("aggregate", &aggregate);
+            return LowerBlocking(
+                aggregate.Input(),
+                "aggregate",
+                group,
+                [&, group](const NQumir::NAst::TTypePtr& childType) {
+                    return BuildAggregateTail(childType, aggregate, group);
+                },
+                outConn,
+                outLaneOffset);
+        }
+
+        // Grouping sets: gather to one lane and run a single grouping-sets pass
+        // (no shuffle/cascade yet).
+        if (!aggregate.GroupingSets().empty()) {
             auto group = StageGroup("aggregate", &aggregate);
             return LowerBlocking(
                 aggregate.Input(),

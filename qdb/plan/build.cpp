@@ -889,7 +889,9 @@ std::expected<TOperatorPtr, TError> BuildSelect(
 
     // The aggregate executor requires column-reference arguments, so materialize
     // computed arguments (and pass the group keys through) in a project below.
-    bool needsArgProject = global || !computedKeys.empty();
+    // Grouping sets also force it so the input is exactly [keys..., args...], which
+    // the masked-batch driver relies on.
+    bool needsArgProject = global || !computedKeys.empty() || multiSet;
     for (const auto& spec : specs) {
         if (spec.Arg && !NAst::TMaybeNode<NAst::TIdentExpr>(spec.Arg)) {
             needsArgProject = true;
