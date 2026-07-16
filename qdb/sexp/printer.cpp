@@ -8,6 +8,7 @@
 #include <qdb/plan/ops/project.h>
 #include <qdb/plan/ops/sort.h>
 #include <qdb/plan/ops/source.h>
+#include <qdb/plan/ops/union.h>
 
 #include <stdexcept>
 
@@ -177,6 +178,17 @@ static void PrintRel(NQumir::NAst::TExpr& expr, TPrinter& printer, TPrintFrame f
         if (join.Filter()) {
             printer.Separator(frame.Level + 1);
             printer.PrintExpr(join.Filter(), frame.AllowTypeWrap, frame.Level + 1);
+        }
+        out << ')';
+        return;
+    }
+
+    if (rel == TUnionAllOperator::OpId) {
+        auto& un = static_cast<TUnionAllOperator&>(op);
+        out << "(rel union-all";
+        for (const auto& input : un.Inputs()) {
+            printer.Separator(frame.Level + 1);
+            printer.PrintExpr(input, frame.AllowTypeWrap, frame.Level + 1);
         }
         out << ')';
         return;

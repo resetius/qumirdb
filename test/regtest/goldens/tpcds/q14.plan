@@ -1,2 +1,2 @@
-Error: expected a SELECT statement
+Error: only UNION ALL is supported yet (UNION/INTERSECT/EXCEPT DISTINCT not supported)
 

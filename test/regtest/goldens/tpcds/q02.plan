@@ -1,2 +1,136 @@
-Error: expected a SELECT statement
-
+(rel sort
+  (rel project
+    (rel filter
+      (rel join
+        (rel project
+          (rel filter
+            (rel join
+              (rel project
+                (rel aggregate
+                  (rel project
+                    (rel filter
+                      (rel join
+                        (rel project
+                          (rel union-all
+                            (rel project
+                              (rel source "web_sales")
+                              (sold_date_sk ws_sold_date_sk)
+                              (sales_price ws_ext_sales_price))
+                            (rel project
+                              (rel source "catalog_sales")
+                              (sold_date_sk cs_sold_date_sk)
+                              (sales_price cs_ext_sales_price)))
+                          (sold_date_sk sold_date_sk)
+                          (sales_price sales_price))
+                        (rel source "date_dim")
+                        ()
+                        (inner))
+                      (== d_date_sk sold_date_sk))
+                    (d_week_seq d_week_seq)
+                    (arg_0 (if (== d_day_name "Sunday") sales_price (call qdb_sql_null)))
+                    (arg_1 (if (== d_day_name "Monday") sales_price (call qdb_sql_null)))
+                    (arg_2 (if (== d_day_name "Tuesday") sales_price (call qdb_sql_null)))
+                    (arg_3 (if (== d_day_name "Wednesday") sales_price (call qdb_sql_null)))
+                    (arg_4 (if (== d_day_name "Thursday") sales_price (call qdb_sql_null)))
+                    (arg_5 (if (== d_day_name "Friday") sales_price (call qdb_sql_null)))
+                    (arg_6 (if (== d_day_name "Saturday") sales_price (call qdb_sql_null))))
+                  (keys d_week_seq)
+                  (agg sum_0 sum arg_0)
+                  (agg sum_1 sum arg_1)
+                  (agg sum_2 sum arg_2)
+                  (agg sum_3 sum arg_3)
+                  (agg sum_4 sum arg_4)
+                  (agg sum_5 sum arg_5)
+                  (agg sum_6 sum arg_6))
+                (d_week_seq d_week_seq)
+                (sun_sales sum_0)
+                (mon_sales sum_1)
+                (tue_sales sum_2)
+                (wed_sales sum_3)
+                (thu_sales sum_4)
+                (fri_sales sum_5)
+                (sat_sales sum_6))
+              (rel source "date_dim")
+              ()
+              (inner))
+            (&& (== |date_dim.d_week_seq| |wswscs.d_week_seq|) (== d_year 2001)))
+          (d_week_seq1 |wswscs.d_week_seq|)
+          (sun_sales1 sun_sales)
+          (mon_sales1 mon_sales)
+          (tue_sales1 tue_sales)
+          (wed_sales1 wed_sales)
+          (thu_sales1 thu_sales)
+          (fri_sales1 fri_sales)
+          (sat_sales1 sat_sales))
+        (rel project
+          (rel filter
+            (rel join
+              (rel project
+                (rel aggregate
+                  (rel project
+                    (rel filter
+                      (rel join
+                        (rel project
+                          (rel union-all
+                            (rel project
+                              (rel source "web_sales")
+                              (sold_date_sk ws_sold_date_sk)
+                              (sales_price ws_ext_sales_price))
+                            (rel project
+                              (rel source "catalog_sales")
+                              (sold_date_sk cs_sold_date_sk)
+                              (sales_price cs_ext_sales_price)))
+                          (sold_date_sk sold_date_sk)
+                          (sales_price sales_price))
+                        (rel source "date_dim")
+                        ()
+                        (inner))
+                      (== d_date_sk sold_date_sk))
+                    (d_week_seq d_week_seq)
+                    (arg_0 (if (== d_day_name "Sunday") sales_price (call qdb_sql_null)))
+                    (arg_1 (if (== d_day_name "Monday") sales_price (call qdb_sql_null)))
+                    (arg_2 (if (== d_day_name "Tuesday") sales_price (call qdb_sql_null)))
+                    (arg_3 (if (== d_day_name "Wednesday") sales_price (call qdb_sql_null)))
+                    (arg_4 (if (== d_day_name "Thursday") sales_price (call qdb_sql_null)))
+                    (arg_5 (if (== d_day_name "Friday") sales_price (call qdb_sql_null)))
+                    (arg_6 (if (== d_day_name "Saturday") sales_price (call qdb_sql_null))))
+                  (keys d_week_seq)
+                  (agg sum_0 sum arg_0)
+                  (agg sum_1 sum arg_1)
+                  (agg sum_2 sum arg_2)
+                  (agg sum_3 sum arg_3)
+                  (agg sum_4 sum arg_4)
+                  (agg sum_5 sum arg_5)
+                  (agg sum_6 sum arg_6))
+                (d_week_seq d_week_seq)
+                (sun_sales sum_0)
+                (mon_sales sum_1)
+                (tue_sales sum_2)
+                (wed_sales sum_3)
+                (thu_sales sum_4)
+                (fri_sales sum_5)
+                (sat_sales sum_6))
+              (rel source "date_dim")
+              ()
+              (inner))
+            (&& (== |date_dim.d_week_seq| |wswscs.d_week_seq|) (== d_year (+ 2001 1))))
+          (d_week_seq2 |wswscs.d_week_seq|)
+          (sun_sales2 sun_sales)
+          (mon_sales2 mon_sales)
+          (tue_sales2 tue_sales)
+          (wed_sales2 wed_sales)
+          (thu_sales2 thu_sales)
+          (fri_sales2 fri_sales)
+          (sat_sales2 sat_sales))
+        ()
+        (inner))
+      (== d_week_seq1 (- d_week_seq2 53)))
+    (d_week_seq1 d_week_seq1)
+    (col1 (call round (/ sun_sales1 sun_sales2) 2))
+    (col2 (call round (/ mon_sales1 mon_sales2) 2))
+    (col3 (call round (/ tue_sales1 tue_sales2) 2))
+    (col4 (call round (/ wed_sales1 wed_sales2) 2))
+    (col5 (call round (/ thu_sales1 thu_sales2) 2))
+    (col6 (call round (/ fri_sales1 fri_sales2) 2))
+    (col7 (call round (/ sat_sales1 sat_sales2) 2)))
+  (d_week_seq1 asc nulls-default))

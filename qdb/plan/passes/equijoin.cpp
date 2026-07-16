@@ -6,6 +6,7 @@
 #include <qdb/plan/ops/limit.h>
 #include <qdb/plan/ops/project.h>
 #include <qdb/plan/ops/sort.h>
+#include <qdb/plan/ops/union.h>
 #include <qdb/plan/passes/unbound_vars.h>
 #include <qdb/utils/union_find.h>
 
@@ -488,6 +489,15 @@ TOperatorPtr Process(TOperatorPtr node, TContext ctx) {
     } else if (auto maybeTopSort = TMaybeOp<TTopSortOperator>(node)) {
         auto topSort = maybeTopSort.Cast();
         return ProcessTopSort(topSort, std::move(ctx));
+    } else if (auto maybeUnion = TMaybeOp<TUnionAllOperator>(node)) {
+        // TODO: push ctx.Conjucts down into each branch. The predicate references
+        // the union output (first branch) names, so pushing into other branches
+        // needs positional column remapping. For now keep the predicate above the
+        // union and only optimize within each branch.
+        for (auto& branch : maybeUnion.Cast()->MutableInputs()) {
+            branch = Process(branch, {{}, ctx.Mode});
+        }
+        return Materialize(node, ctx.Conjucts);
     }
 
     return Materialize(node, ctx.Conjucts);

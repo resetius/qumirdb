@@ -14,6 +14,7 @@ add_library(qumirdb
     plan/ops/project.cpp
     plan/ops/aggregate.cpp
     plan/ops/join.cpp
+    plan/ops/union.cpp
     plan/ops/sort.cpp
     plan/ops/limit.cpp
     plan/ops/parse_kernel.cpp

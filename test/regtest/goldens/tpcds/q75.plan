@@ -1,2 +1,203 @@
-Error: expected a SELECT statement
-
+(rel limit
+  (rel project
+    (rel sort
+      (rel project
+        (rel filter
+          (rel join
+            (rel project
+              (rel aggregate
+                (rel union-all
+                  (rel project
+                    (rel filter
+                      (rel join
+                        (rel join
+                          (rel join
+                            (rel source "catalog_sales")
+                            (rel source "item")
+                            ()
+                            (inner)
+                            (== i_item_sk cs_item_sk))
+                          (rel source "date_dim")
+                          ()
+                          (inner)
+                          (== d_date_sk cs_sold_date_sk))
+                        (rel source "catalog_returns")
+                        ()
+                        (left)
+                        (&& (== cs_order_number cr_order_number) (== cs_item_sk cr_item_sk)))
+                      (== i_category "Sports"))
+                    (d_year d_year)
+                    (i_brand_id i_brand_id)
+                    (i_class_id i_class_id)
+                    (i_category_id i_category_id)
+                    (i_manufact_id i_manufact_id)
+                    (sales_cnt (- cs_quantity (call COALESCE cr_return_quantity 0)))
+                    (sales_amt (- cs_ext_sales_price (call COALESCE cr_return_amount 0))))
+                  (rel project
+                    (rel filter
+                      (rel join
+                        (rel join
+                          (rel join (rel source "store_sales") (rel source "item") () (inner) (== i_item_sk ss_item_sk))
+                          (rel source "date_dim")
+                          ()
+                          (inner)
+                          (== d_date_sk ss_sold_date_sk))
+                        (rel source "store_returns")
+                        ()
+                        (left)
+                        (&& (== ss_ticket_number sr_ticket_number) (== ss_item_sk sr_item_sk)))
+                      (== i_category "Sports"))
+                    (d_year d_year)
+                    (i_brand_id i_brand_id)
+                    (i_class_id i_class_id)
+                    (i_category_id i_category_id)
+                    (i_manufact_id i_manufact_id)
+                    (sales_cnt (- ss_quantity (call COALESCE sr_return_quantity 0)))
+                    (sales_amt (- ss_ext_sales_price (call COALESCE sr_return_amt 0))))
+                  (rel project
+                    (rel filter
+                      (rel join
+                        (rel join
+                          (rel join (rel source "web_sales") (rel source "item") () (inner) (== i_item_sk ws_item_sk))
+                          (rel source "date_dim")
+                          ()
+                          (inner)
+                          (== d_date_sk ws_sold_date_sk))
+                        (rel source "web_returns")
+                        ()
+                        (left)
+                        (&& (== ws_order_number wr_order_number) (== ws_item_sk wr_item_sk)))
+                      (== i_category "Sports"))
+                    (d_year d_year)
+                    (i_brand_id i_brand_id)
+                    (i_class_id i_class_id)
+                    (i_category_id i_category_id)
+                    (i_manufact_id i_manufact_id)
+                    (sales_cnt (- ws_quantity (call COALESCE wr_return_quantity 0)))
+                    (sales_amt (- ws_ext_sales_price (call COALESCE wr_return_amt 0)))))
+                (keys d_year i_brand_id i_class_id i_category_id i_manufact_id)
+                (agg sum_0 sum sales_cnt)
+                (agg sum_1 sum sales_amt))
+              (d_year d_year)
+              (i_brand_id i_brand_id)
+              (i_class_id i_class_id)
+              (i_category_id i_category_id)
+              (i_manufact_id i_manufact_id)
+              (sales_cnt sum_0)
+              (sales_amt sum_1))
+            (rel project
+              (rel aggregate
+                (rel union-all
+                  (rel project
+                    (rel filter
+                      (rel join
+                        (rel join
+                          (rel join
+                            (rel source "catalog_sales")
+                            (rel source "item")
+                            ()
+                            (inner)
+                            (== i_item_sk cs_item_sk))
+                          (rel source "date_dim")
+                          ()
+                          (inner)
+                          (== d_date_sk cs_sold_date_sk))
+                        (rel source "catalog_returns")
+                        ()
+                        (left)
+                        (&& (== cs_order_number cr_order_number) (== cs_item_sk cr_item_sk)))
+                      (== i_category "Sports"))
+                    (d_year d_year)
+                    (i_brand_id i_brand_id)
+                    (i_class_id i_class_id)
+                    (i_category_id i_category_id)
+                    (i_manufact_id i_manufact_id)
+                    (sales_cnt (- cs_quantity (call COALESCE cr_return_quantity 0)))
+                    (sales_amt (- cs_ext_sales_price (call COALESCE cr_return_amount 0))))
+                  (rel project
+                    (rel filter
+                      (rel join
+                        (rel join
+                          (rel join (rel source "store_sales") (rel source "item") () (inner) (== i_item_sk ss_item_sk))
+                          (rel source "date_dim")
+                          ()
+                          (inner)
+                          (== d_date_sk ss_sold_date_sk))
+                        (rel source "store_returns")
+                        ()
+                        (left)
+                        (&& (== ss_ticket_number sr_ticket_number) (== ss_item_sk sr_item_sk)))
+                      (== i_category "Sports"))
+                    (d_year d_year)
+                    (i_brand_id i_brand_id)
+                    (i_class_id i_class_id)
+                    (i_category_id i_category_id)
+                    (i_manufact_id i_manufact_id)
+                    (sales_cnt (- ss_quantity (call COALESCE sr_return_quantity 0)))
+                    (sales_amt (- ss_ext_sales_price (call COALESCE sr_return_amt 0))))
+                  (rel project
+                    (rel filter
+                      (rel join
+                        (rel join
+                          (rel join (rel source "web_sales") (rel source "item") () (inner) (== i_item_sk ws_item_sk))
+                          (rel source "date_dim")
+                          ()
+                          (inner)
+                          (== d_date_sk ws_sold_date_sk))
+                        (rel source "web_returns")
+                        ()
+                        (left)
+                        (&& (== ws_order_number wr_order_number) (== ws_item_sk wr_item_sk)))
+                      (== i_category "Sports"))
+                    (d_year d_year)
+                    (i_brand_id i_brand_id)
+                    (i_class_id i_class_id)
+                    (i_category_id i_category_id)
+                    (i_manufact_id i_manufact_id)
+                    (sales_cnt (- ws_quantity (call COALESCE wr_return_quantity 0)))
+                    (sales_amt (- ws_ext_sales_price (call COALESCE wr_return_amt 0)))))
+                (keys d_year i_brand_id i_class_id i_category_id i_manufact_id)
+                (agg sum_0 sum sales_cnt)
+                (agg sum_1 sum sales_amt))
+              (d_year d_year)
+              (i_brand_id i_brand_id)
+              (i_class_id i_class_id)
+              (i_category_id i_category_id)
+              (i_manufact_id i_manufact_id)
+              (sales_cnt sum_0)
+              (sales_amt sum_1))
+            ()
+            (inner))
+          (&& (&& (&& (&& (&& (&& (== |curr_yr.i_brand_id| |prev_yr.i_brand_id|) (== |curr_yr.i_class_id| |prev_yr.i_class_id|))
+                    (== |curr_yr.i_category_id| |prev_yr.i_category_id|))
+                  (== |curr_yr.i_manufact_id| |prev_yr.i_manufact_id|))
+                (== |curr_yr.d_year| 2002))
+              (== |prev_yr.d_year| (- 2002 1)))
+            (< (/ (: (cast |curr_yr.sales_cnt| <named DECIMAL>) <named DECIMAL>)
+                (: (cast |prev_yr.sales_cnt| <named DECIMAL>) <named DECIMAL>))
+              0.90000000000000002)))
+        (prev_year |prev_yr.d_year|)
+        (year |curr_yr.d_year|)
+        (|curr_yr.i_brand_id| |curr_yr.i_brand_id|)
+        (|curr_yr.i_class_id| |curr_yr.i_class_id|)
+        (|curr_yr.i_category_id| |curr_yr.i_category_id|)
+        (|curr_yr.i_manufact_id| |curr_yr.i_manufact_id|)
+        (prev_yr_cnt |prev_yr.sales_cnt|)
+        (curr_yr_cnt |curr_yr.sales_cnt|)
+        (sales_cnt_diff (- |curr_yr.sales_cnt| |prev_yr.sales_cnt|))
+        (sales_amt_diff (- |curr_yr.sales_amt| |prev_yr.sales_amt|))
+        (__sort_0 sales_cnt_diff)
+        (__sort_1 sales_amt_diff))
+      (__sort_0 asc nulls-default)
+      (__sort_1 asc nulls-default))
+    (prev_year prev_year)
+    (year year)
+    (|curr_yr.i_brand_id| |curr_yr.i_brand_id|)
+    (|curr_yr.i_class_id| |curr_yr.i_class_id|)
+    (|curr_yr.i_category_id| |curr_yr.i_category_id|)
+    (|curr_yr.i_manufact_id| |curr_yr.i_manufact_id|)
+    (prev_yr_cnt prev_yr_cnt)
+    (curr_yr_cnt curr_yr_cnt)
+    (sales_cnt_diff sales_cnt_diff)
+    (sales_amt_diff sales_amt_diff))
+  (limit 100))

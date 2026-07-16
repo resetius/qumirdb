@@ -13,6 +13,7 @@
 #include <qdb/plan/ops/limit.h>
 #include <qdb/plan/ops/project.h>
 #include <qdb/plan/ops/sort.h>
+#include <qdb/plan/ops/union.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/types/nullable.h>
 #include <qdb/scheduler/connection.h>
@@ -460,6 +461,17 @@ public:
             }
             return JoinPartitions(std::max(leftLanes, rightLanes));
         }
+        if (auto n = TMaybeOp<TUnionAllOperator>(op)) {
+            size_t total = 0;
+            for (const auto& branch : n.Cast()->Inputs()) {
+                size_t branchLanes = OutputLanes(branch);
+                if (branchLanes == 0) {
+                    return 0;
+                }
+                total += branchLanes;
+            }
+            return total;
+        }
         return 0;
     }
 
@@ -494,12 +506,15 @@ public:
         return lanes;
     }
 
+    // outLaneOffset shifts this operator's producer lanes within outConn, so a
+    // UNION ALL can fan several branches into one gather without lane collisions.
     TLoweredOutput Lower(
         const TOperatorPtr& op,
-        NScheduler::IConnection& outConn)
+        NScheduler::IConnection& outConn,
+        size_t outLaneOffset = 0)
     {
         if (auto n = TMaybeOp<TSourceOperator>(op)) {
-            return LowerSource(*n.Cast(), outConn);
+            return LowerSource(*n.Cast(), outConn, outLaneOffset);
         }
         if (auto n = TMaybeOp<TFilterOperator>(op)) {
             auto filter = n.Cast();
@@ -514,7 +529,8 @@ public:
                         inType,
                         KernelOptions(stageGroup, filter.get()));
                 },
-                outConn);
+                outConn,
+                outLaneOffset);
         }
         if (auto n = TMaybeOp<TProjectOperator>(op)) {
             auto project = n.Cast();
@@ -529,27 +545,53 @@ public:
                         inType,
                         KernelOptions(stageGroup, project.get()));
                 },
-                outConn);
+                outConn,
+                outLaneOffset);
         }
         if (auto n = TMaybeOp<TAggregateOperator>(op)) {
-            return LowerAggregate(*n.Cast(), outConn);
+            return LowerAggregate(*n.Cast(), outConn, outLaneOffset);
         }
         if (auto n = TMaybeOp<TLimitOperator>(op)) {
-            return LowerLimit(*n.Cast(), outConn);
+            return LowerLimit(*n.Cast(), outConn, outLaneOffset);
         }
         if (auto n = TMaybeOp<TSortOperator>(op)) {
-            return LowerSort(*n.Cast(), outConn);
+            return LowerSort(*n.Cast(), outConn, outLaneOffset);
         }
         if (auto n = TMaybeOp<TTopSortOperator>(op)) {
-            return LowerTopSort(*n.Cast(), outConn);
+            return LowerTopSort(*n.Cast(), outConn, outLaneOffset);
         }
         if (auto n = TMaybeOp<TJoinOperator>(op)) {
             if (n.Cast()->Keys().empty()) {
-                return LowerCrossJoin(*n.Cast(), outConn);
+                return LowerCrossJoin(*n.Cast(), outConn, outLaneOffset);
             }
-            return LowerJoin(*n.Cast(), outConn);
+            return LowerJoin(*n.Cast(), outConn, outLaneOffset);
+        }
+        if (auto n = TMaybeOp<TUnionAllOperator>(op)) {
+            return LowerUnionAll(*n.Cast(), outConn, outLaneOffset);
         }
         throw std::runtime_error("scheduler lowering: unsupported operator");
+    }
+
+    // UNION ALL is a no-op at runtime: lower every branch straight into outConn,
+    // giving each branch a contiguous lane range so the gather sees all rows.
+    TLoweredOutput LowerUnionAll(
+        TUnionAllOperator& un,
+        NScheduler::IConnection& outConn,
+        size_t outLaneOffset)
+    {
+        TLoweredOutput result;
+        size_t offset = outLaneOffset;
+        for (const auto& branch : un.Inputs()) {
+            auto branchOut = Lower(branch, outConn, offset);
+            if (result.Producers.empty()) {
+                result.OutputType = branchOut.OutputType;
+            }
+            for (auto* producer : branchOut.Producers) {
+                result.Producers.push_back(producer);
+            }
+            offset += branchOut.Producers.size();
+        }
+        return result;
     }
 
     size_t QueueCapacity() const {
@@ -791,7 +833,8 @@ private:
 
     TLoweredOutput LowerSource(
         TSourceOperator& src,
-        NScheduler::IConnection& outConn)
+        NScheduler::IConnection& outConn,
+        size_t outLaneOffset)
     {
         auto outputType = BuildSourceRuntimeType(src);
         auto splits = ScanSplits(src);
@@ -827,7 +870,7 @@ private:
             auto task = std::make_unique<NScheduler::TSourceTask>(
                 code,
                 std::move(state),
-                NScheduler::TOutputPort{.Connection = &outConn, .Lane = p});
+                NScheduler::TOutputPort{.Connection = &outConn, .Lane = p + outLaneOffset});
             auto& node = Graph_.AddOwnedNode(std::move(task));
             MarkNode(node,
                 "source",
@@ -844,7 +887,8 @@ private:
         std::string stageKind,
         std::string stageGroup,
         TStageBuilder buildStage,
-        NScheduler::IConnection& outConn)
+        NScheduler::IConnection& outConn,
+        size_t outLaneOffset)
     {
         const size_t lanes = OutputLanes(child);
         auto& childConnRef = AddConn<NScheduler::TOneToOneConnection>(
@@ -861,7 +905,7 @@ private:
                 stage.Code,
                 stage.MakeState(p),
                 NScheduler::TInputPort{.Connection = &childConnRef, .Lane = p},
-                NScheduler::TOutputPort{.Connection = &outConn, .Lane = p});
+                NScheduler::TOutputPort{.Connection = &outConn, .Lane = p + outLaneOffset});
             auto& node = Graph_.AddOwnedNode(std::move(task));
             MarkNode(node, stageKind, stageGroup, stageKind);
             Graph_.AddEdge(*childOut.Producers[p], node, childConnRef, p, p);
@@ -876,7 +920,8 @@ private:
         std::string stageKind,
         std::string stageGroup,
         TTailBuilder buildTail,
-        NScheduler::IConnection& outConn)
+        NScheduler::IConnection& outConn,
+        size_t outLaneOffset)
     {
         const size_t lanes = OutputLanes(child);
         NScheduler::IConnection* inputConn = nullptr;
@@ -895,7 +940,7 @@ private:
             std::move(tail.Code),
             tail.MakeState(),
             NScheduler::TInputPort{.Connection = inputConn, .Lane = 0},
-            NScheduler::TOutputPort{.Connection = &outConn, .Lane = 0});
+            NScheduler::TOutputPort{.Connection = &outConn, .Lane = 0 + outLaneOffset});
         auto& node = Graph_.AddOwnedNode(std::move(task));
         MarkNode(node, stageKind, stageGroup, stageKind);
         for (size_t p = 0; p < lanes; ++p) {
@@ -983,7 +1028,8 @@ private:
     TLoweredOutput LowerAggregateCascade(
         TAggregateOperator& aggregate,
         size_t lanes,
-        NScheduler::IConnection& outConn)
+        NScheduler::IConnection& outConn,
+        size_t outLaneOffset)
     {
         auto& childRef = AddConn<NScheduler::TOneToOneConnection>(
             lanes, lanes, "aggregate-cascade-input");
@@ -1028,7 +1074,7 @@ private:
             std::move(combineTail.Code),
             combineTail.MakeState(),
             NScheduler::TInputPort{.Connection = &gatherRef, .Lane = 0},
-            NScheduler::TOutputPort{.Connection = &outConn, .Lane = 0});
+            NScheduler::TOutputPort{.Connection = &outConn, .Lane = 0 + outLaneOffset});
         auto& finalNode = Graph_.AddOwnedNode(std::move(finalTask));
         MarkNode(finalNode,
             "aggregate",
@@ -1046,7 +1092,8 @@ private:
 
     TLoweredOutput LowerAggregate(
         TAggregateOperator& aggregate,
-        NScheduler::IConnection& outConn)
+        NScheduler::IConnection& outConn,
+        size_t outLaneOffset)
     {
         const size_t childLanes = OutputLanes(aggregate.Input());
         // Non-parallel input: single aggregate, nothing to parallelize.
@@ -1059,7 +1106,8 @@ private:
                 [&, group](const NQumir::NAst::TTypePtr& childType) {
                     return BuildAggregateTail(childType, aggregate, group);
                 },
-                outConn);
+                outConn,
+                outLaneOffset);
         }
 
         // Ungrouped or global (`__group__`) aggregate over a parallel input.
@@ -1068,7 +1116,7 @@ private:
         // is faster for cheap aggregates (the common case).
         if (aggregate.GroupKeys().empty() || IsGlobalAggregate(aggregate)) {
             if (Settings_.Aggregate.CascadeGlobal) {
-                return LowerAggregateCascade(aggregate, childLanes, outConn);
+                return LowerAggregateCascade(aggregate, childLanes, outConn, outLaneOffset);
             }
             auto group = StageGroup("aggregate", &aggregate);
             return LowerBlocking(
@@ -1078,7 +1126,8 @@ private:
                 [&, group](const NQumir::NAst::TTypePtr& childType) {
                     return BuildAggregateTail(childType, aggregate, group);
                 },
-                outConn);
+                outConn,
+                outLaneOffset);
         }
 
         // Grouped aggregate: hash-shuffle the input by group key into `parts`
@@ -1134,7 +1183,7 @@ private:
                 tail.Code,
                 tail.MakeState(),
                 NScheduler::TInputPort{.Connection = &shufRef, .Lane = m},
-                NScheduler::TOutputPort{.Connection = &outConn, .Lane = m});
+                NScheduler::TOutputPort{.Connection = &outConn, .Lane = m + outLaneOffset});
             auto& node = Graph_.AddOwnedNode(std::move(task));
             MarkNode(node,
                 "aggregate",
@@ -1150,7 +1199,8 @@ private:
 
     TLoweredOutput LowerLimit(
         TLimitOperator& limit,
-        NScheduler::IConnection& outConn)
+        NScheduler::IConnection& outConn,
+        size_t outLaneOffset)
     {
         return LowerBlocking(
             limit.Input(),
@@ -1170,7 +1220,8 @@ private:
                     .OutputType = childType,
                 };
             },
-            outConn);
+            outConn,
+            outLaneOffset);
     }
 
     TLoweredOutput LowerSortLike(
@@ -1179,7 +1230,8 @@ private:
         std::string_view kernelName,
         std::optional<int64_t> topLimit,
         const void* sortOp,
-        NScheduler::IConnection& outConn)
+        NScheduler::IConnection& outConn,
+        size_t outLaneOffset)
     {
         auto group = StageGroup(kernelName, input.get());
         return LowerBlocking(
@@ -1201,7 +1253,8 @@ private:
                     std::move(runtime.KeyColumns),
                     std::move(runtime.RadixKernel), topLimit);
             },
-            outConn);
+            outConn,
+            outLaneOffset);
     }
 
     struct TSortMergeResult {
@@ -1218,7 +1271,8 @@ private:
         std::string_view kernelName,
         std::optional<int64_t> topLimit,
         const void* sortOp,
-        NScheduler::IConnection& mergeOut)
+        NScheduler::IConnection& mergeOut,
+        size_t mergeOutLaneOffset)
     {
         const size_t lanes = OutputLanes(input);
         auto& childConnRef = AddConn<NScheduler::TOneToOneConnection>(
@@ -1316,7 +1370,7 @@ private:
             mergeCode,
             std::make_shared<TMergeState>(childType, keys, keyColumns, lanes),
             std::move(mergeInputs),
-            NScheduler::TOutputPort{.Connection = &mergeOut, .Lane = 0});
+            NScheduler::TOutputPort{.Connection = &mergeOut, .Lane = 0 + mergeOutLaneOffset});
         auto& mergeNode = Graph_.AddOwnedNode(std::move(merge));
         MarkNode(mergeNode,
             "merge",
@@ -1334,14 +1388,15 @@ private:
     // there is only one input lane.
     TLoweredOutput LowerSort(
         TSortOperator& sort,
-        NScheduler::IConnection& outConn)
+        NScheduler::IConnection& outConn,
+        size_t outLaneOffset)
     {
         if (OutputLanes(sort.Input()) <= 1) {
             return LowerSortLike(
-                sort.Input(), sort.Keys(), "sort", std::nullopt, &sort, outConn);
+                sort.Input(), sort.Keys(), "sort", std::nullopt, &sort, outConn, outLaneOffset);
         }
         auto merged = BuildSortMerge(
-            sort.Input(), sort.Keys(), "sort", std::nullopt, &sort, outConn);
+            sort.Input(), sort.Keys(), "sort", std::nullopt, &sort, outConn, outLaneOffset);
         return TLoweredOutput{
             .Producers = {merged.Merge},
             .OutputType = std::move(merged.OutputType),
@@ -1353,16 +1408,17 @@ private:
     // gathered top-sort when there is only one input lane.
     TLoweredOutput LowerTopSort(
         TTopSortOperator& sort,
-        NScheduler::IConnection& outConn)
+        NScheduler::IConnection& outConn,
+        size_t outLaneOffset)
     {
         if (OutputLanes(sort.Input()) <= 1) {
             return LowerSortLike(
-                sort.Input(), sort.Keys(), "top-sort", sort.Limit(), &sort, outConn);
+                sort.Input(), sort.Keys(), "top-sort", sort.Limit(), &sort, outConn, outLaneOffset);
         }
         auto& mergeConnRef = AddConn<NScheduler::TOneToOneConnection>(
             1, 1, "top-sort-merge-output");
         auto merged = BuildSortMerge(
-            sort.Input(), sort.Keys(), "top-sort", sort.Limit(), &sort, mergeConnRef);
+            sort.Input(), sort.Keys(), "top-sort", sort.Limit(), &sort, mergeConnRef, 0);
 
         auto limitCode = MakeLimitBlockingCode();
         const int64_t limit = sort.Limit();
@@ -1370,7 +1426,7 @@ private:
             limitCode,
             std::make_shared<TLimitBlockingState>(limit, 0),
             NScheduler::TInputPort{.Connection = &mergeConnRef, .Lane = 0},
-            NScheduler::TOutputPort{.Connection = &outConn, .Lane = 0});
+            NScheduler::TOutputPort{.Connection = &outConn, .Lane = 0 + outLaneOffset});
         auto& limitNode = Graph_.AddOwnedNode(std::move(limitTask));
         MarkNode(limitNode,
             "limit",
@@ -1390,7 +1446,8 @@ private:
     //   forwarded into a broadcast connection replicated to every vector lane.
     TLoweredOutput LowerCrossJoin(
         TJoinOperator& join,
-        NScheduler::IConnection& outConn)
+        NScheduler::IConnection& outConn,
+        size_t outLaneOffset)
     {        const size_t lanes = OutputLanes(join.Left());
 
         // Vector (streamed, partitioned) side.
@@ -1524,7 +1581,7 @@ private:
                 stage.Code,
                 stage.MakeState(m),
                 NScheduler::TInputPort{.Connection = residualConn, .Lane = m},
-                NScheduler::TOutputPort{.Connection = &outConn, .Lane = m});
+                NScheduler::TOutputPort{.Connection = &outConn, .Lane = m + outLaneOffset});
             auto& node = Graph_.AddOwnedNode(std::move(task));
             MarkNode(node,
                 "filter",
@@ -1538,7 +1595,8 @@ private:
 
     TLoweredOutput LowerJoin(
         TJoinOperator& join,
-        NScheduler::IConnection& outConn)
+        NScheduler::IConnection& outConn,
+        size_t outLaneOffset)
     {
         using namespace NQumir::NAst;
         const size_t leftLanes = OutputLanes(join.Left());
@@ -1580,7 +1638,7 @@ private:
                     .Connection = &leftPipeRef, .Lane = 0},
                 NScheduler::TInputPort{
                     .Connection = &rightPipeRef, .Lane = 0},
-                NScheduler::TOutputPort{.Connection = &outConn, .Lane = 0});
+                NScheduler::TOutputPort{.Connection = &outConn, .Lane = 0 + outLaneOffset});
             auto& node = Graph_.AddOwnedNode(std::move(task));
             MarkNode(node,
                 "join",
@@ -1622,7 +1680,7 @@ private:
                     .Connection = leftShuf.Connection, .Lane = j},
                 NScheduler::TInputPort{
                     .Connection = rightShuf.Connection, .Lane = j},
-                NScheduler::TOutputPort{.Connection = &outConn, .Lane = j});
+                NScheduler::TOutputPort{.Connection = &outConn, .Lane = j + outLaneOffset});
             auto& node = Graph_.AddOwnedNode(std::move(task));
             MarkNode(node,
                 "join",
