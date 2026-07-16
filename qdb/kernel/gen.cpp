@@ -2367,7 +2367,23 @@ std::vector<NQumir::NAst::TExprPtr> GenReducerFunDecls(
             std::make_shared<TVarStmt>(loc, "value_is_valid", boolType),
         };
         TExprPtr accumulate;
-        if (func == "sum") {
+        if (r.IsFloat) {
+            // States/values carried as i64 bits: bitcast to f64, op, bitcast back.
+            auto prevF = bitcast(slotOf("buf"), f64Type);
+            auto valueF = bitcast(ident("value"), f64Type);
+            if (func == "sum") {
+                accumulate = storeSlot("buf", bitcast(binary("+", prevF, valueF), i64Type));
+            } else if (func == "min") {
+                accumulate = std::make_shared<TIfExpr>(loc, binary("<", valueF, prevF),
+                    block({storeSlot("buf", ident("value"))}), nullptr);
+            } else if (func == "max") {
+                accumulate = std::make_shared<TIfExpr>(loc, binary(">", valueF, prevF),
+                    block({storeSlot("buf", ident("value"))}), nullptr);
+            } else {
+                throw std::invalid_argument(
+                    "GenReducerFunDecls: unsupported float aggregate: " + func);
+            }
+        } else if (func == "sum") {
             accumulate = storeSlot("buf", binary("+", slotOf("buf"), ident("value")));
         } else if (func == "min") {
             accumulate = std::make_shared<TIfExpr>(loc,
