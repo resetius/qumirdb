@@ -1,6 +1,7 @@
 #include <qdb/plan/ops/aggregate.h>
 
 #include <qdb/plan/passes/unbound_vars.h>
+#include <qdb/plan/types/nullable.h>
 
 #include <qumir/parser/ast.h>
 #include <qumir/parser/core/lexer.h>
@@ -46,12 +47,17 @@ TTypePtr AggResultType(const std::string& func, const TTypePtr& argType) {
 TTypePtr ComputeAggregateOutputType(
     const TTypePtr& inputSchema,
     const std::vector<std::string>& groupKeys,
-    const std::vector<TAggregateSpec>& aggs)
+    const std::vector<TAggregateSpec>& aggs,
+    bool nullableKeys)
 {
     auto* inputStruct = static_cast<TStructType*>(inputSchema.get());
     std::vector<std::pair<std::string, TTypePtr>> outFields;
     for (const auto& key : groupKeys) {
-        outFields.emplace_back(key, FieldType(inputStruct, key));
+        auto type = FieldType(inputStruct, key);
+        if (nullableKeys && type && !IsNullableType(type)) {
+            type = std::make_shared<TNullable>(std::move(type));
+        }
+        outFields.emplace_back(key, std::move(type));
     }
     for (const auto& agg : aggs) {
         TTypePtr argType;
@@ -73,7 +79,7 @@ TAggregateOperator::TAggregateOperator(TOperatorPtr input, std::vector<std::stri
     auto inputSchema = Input_->OutputColumns();
     Type = std::make_shared<TFunctionType>(
         std::vector<TTypePtr>{inputSchema},
-        ComputeAggregateOutputType(inputSchema, GroupKeys_, Aggs_));
+        ComputeAggregateOutputType(inputSchema, GroupKeys_, Aggs_, !GroupingSets_.empty()));
 }
 
 std::unordered_set<std::string> TAggregateOperator::ComputeReferencedColumns() const {
