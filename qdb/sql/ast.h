@@ -150,8 +150,43 @@ struct TSqlSelectList : TSqlNode {
     std::vector<TSqlPtr<TSqlSelectItem>> Items;
 };
 
+struct TSqlRollUp : TSqlNode {
+    static constexpr const char* NodeId = "RollUp";
+    std::string_view NodeName() const override { return NodeId; }
+    explicit TSqlRollUp(NQumir::NAst::TExprPtr exprs) : Exprs(std::move(exprs)) {}
+    // BlockExpr
+    NQumir::NAst::TExprPtr Exprs;
+};
+
+struct TSqlCube : TSqlNode {
+    static constexpr const char* NodeId = "Cube";
+    std::string_view NodeName() const override { return NodeId; }
+    explicit TSqlCube(NQumir::NAst::TExprPtr exprs) : Exprs(std::move(exprs)) {}
+    // BlockExpr
+    NQumir::NAst::TExprPtr Exprs;
+};
+
+struct TSqlGroupingExprOrList : TSqlNode {
+    static constexpr const char* NodeId = "GroupingExprOrList";
+    std::string_view NodeName() const override { return NodeId; }
+    explicit TSqlGroupingExprOrList(NQumir::NAst::TExprPtr exprs) : Exprs(std::move(exprs)) {}
+    // BlockExpr for a list, or a single expr
+    NQumir::NAst::TExprPtr Exprs;
+};
+
+struct TSqlGroupingSet : TSqlNode {
+    static constexpr const char* NodeId = "GroupingSet";
+    std::string_view NodeName() const override { return NodeId; }
+    // TSqlGroupingExprOrList or TSqlRollUp or TSqlCube
+    std::vector<TSqlPtr<TSqlNode>> Items;
+};
+
 struct TSqlGroupBy : TSqlNode {
-    std::vector<NQumir::NAst::TExprPtr> Items;
+    // TGroupingExpr or
+    // TSqlRollUp or
+    // TSqlCube or
+    // TSqlGroupingSet
+    std::vector<TSqlPtr<TSqlNode>> Items;
 };
 
 struct TSqlFrom : TSqlNode {

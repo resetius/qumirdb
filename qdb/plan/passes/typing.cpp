@@ -121,7 +121,12 @@ void AnnotateTypes(const TOperatorPtr& root) {
         auto* first = static_cast<TStructType*>(paramTypes[0].get());
         for (size_t b = 1; b < inputs.size(); ++b) {
             auto* other = static_cast<TStructType*>(paramTypes[b].get());
-            if (!first || !other || first->Fields.size() != other->Fields.size()) {
+            // A branch with no resolved schema means an upstream typing failure;
+            // let that surface on its own rather than reporting a count mismatch.
+            if (!first || !other || first->Fields.empty() || other->Fields.empty()) {
+                continue;
+            }
+            if (first->Fields.size() != other->Fields.size()) {
                 throw NQumir::TError("UNION ALL branches must have the same number of columns");
             }
             for (size_t i = 0; i < first->Fields.size(); ++i) {

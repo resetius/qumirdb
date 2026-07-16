@@ -254,10 +254,30 @@ struct TSqlPrinter {
         Line(ind, ")");
     }
 
+    void GroupingElement(int ind, const TSqlNodePtr& item) {
+        if (auto e = TMaybeNode<TSqlGroupingExprOrList>(item)) {
+            Expr(ind, e.Cast()->Exprs);
+        } else if (auto r = TMaybeNode<TSqlRollUp>(item)) {
+            Line(ind, "(rollup");
+            Expr(ind + 2, r.Cast()->Exprs);
+            Line(ind, ")");
+        } else if (auto c = TMaybeNode<TSqlCube>(item)) {
+            Line(ind, "(cube");
+            Expr(ind + 2, c.Cast()->Exprs);
+            Line(ind, ")");
+        } else if (auto gs = TMaybeNode<TSqlGroupingSet>(item)) {
+            Line(ind, "(grouping-sets");
+            for (const auto& set : gs.Cast()->Items) {
+                GroupingElement(ind + 2, set);
+            }
+            Line(ind, ")");
+        }
+    }
+
     void GroupBy(int ind, const TSqlPtr<TSqlGroupBy>& gb) {
         Line(ind, "(group-by");
         for (const auto& item : gb->Items) {
-            Expr(ind + 2, item);
+            GroupingElement(ind + 2, item);
         }
         Line(ind, ")");
     }

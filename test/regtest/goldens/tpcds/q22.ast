@@ -26,7 +26,13 @@
       (&& (&& (== inv_date_sk d_date_sk) (== inv_item_sk i_item_sk)) (&& (<= 1212 d_month_seq) (<= d_month_seq (+ 1212 11))))
     )
     (group-by
-      (call rollup i_product_name i_brand i_class i_category)
+      (rollup
+        (block
+          i_product_name
+          i_brand
+          i_class
+          i_category)
+      )
     )
   )
   (order-by

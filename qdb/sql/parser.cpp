@@ -94,9 +94,19 @@
 <where_clause> ::= "WHERE" <expr>
 
 <group_by_clause> ::=
-    "GROUP" "BY" <group_item> { "," <group_item> }
+    "GROUP" "BY" <grouping_element> { "," <grouping_element> }
 
-<group_item> ::= <expr>
+<grouping_element> ::=
+      <expr>
+    | "ROLLUP" "(" [ <expr_list> ] ")"
+    | "CUBE" "(" [ <expr_list> ] ")"
+    | "GROUPING" "SETS" "(" <grouping_set> { "," <grouping_set> } ")"
+
+<grouping_set> ::=
+      "(" [ <expr_list> ] ")"
+    | <expr>
+    | "ROLLUP" "(" [ <expr_list> ] ")"
+    | "CUBE" "(" [ <expr_list> ] ")"
 
 <having_clause> ::= "HAVING" <expr>
 
@@ -414,6 +424,8 @@ TAstTask<TSqlWithClause> with_clause(TParserContext& ctx);
 TAstTask<TSqlCte> cte_def(TParserContext& ctx);
 TAstTask<TSqlFrom> from_clause(TParserContext& ctx);
 TAstTask<TSqlGroupBy> group_by_clause(TParserContext& ctx);
+TAstTask<TSqlNode> grouping_element(TParserContext& ctx);
+TAstTask<TSqlNode> grouping_set(TParserContext& ctx);
 TAstTask<TSqlTableRef> table_ref(TParserContext& ctx);
 TAstTask<TSqlTableRef> table_factor(TParserContext& ctx);
 TAstTask<TJoinCondition> join_condition(TParserContext& ctx);
@@ -666,18 +678,109 @@ TAstTask<TSqlFrom> from_clause(TParserContext& ctx) {
     co_return from;
 }
 
-// <group_by_clause> ::= "GROUP" "BY" <group_item> { "," <group_item> }
-// <group_item> ::= <expr>
 TAstTask<TSqlGroupBy> group_by_clause(TParserContext& ctx) {
     auto group = std::make_shared<TSqlGroupBy>();
     TToken token;
     do {
-        auto item = co_await expr(ctx);
+        auto item = co_await grouping_element(ctx);
         group->Items.emplace_back(std::move(item));
         token = ctx.Stream.Next();
     } while (IsOp(token, ','));
     ctx.Stream.Unget(token);
     co_return group;
+}
+
+TAstTask<TSqlNode> grouping_element(TParserContext& ctx) {
+    auto token = ctx.Stream.Next();
+    if (IsKeyword(token, "ROLLUP")) {
+        auto lparen = ctx.Stream.Next();
+        if (!IsOp(lparen, '(')) {
+            co_return Error(lparen, "expected '(' after ROLLUP");
+        }
+        auto list = co_await TryKeywords(expr_list, ctx, {});
+        auto rparen = ctx.Stream.Next();
+        if (!IsOp(rparen, ')')) {
+            co_return Error(rparen, "expected ')' after ROLLUP list");
+        }
+        co_return std::make_shared<TSqlRollUp>(std::move(list));
+    }
+    if (IsKeyword(token, "CUBE")) {
+        auto lparen = ctx.Stream.Next();
+        if (!IsOp(lparen, '(')) {
+            co_return Error(lparen, "expected '(' after CUBE");
+        }
+        auto list = co_await TryKeywords(expr_list, ctx, {});
+        auto rparen = ctx.Stream.Next();
+        if (!IsOp(rparen, ')')) {
+            co_return Error(rparen, "expected ')' after CUBE list");
+        }
+        co_return std::make_shared<TSqlCube>(std::move(list));
+    }
+    if (IsKeyword(token, "GROUPING")) {
+        auto setsTok = ctx.Stream.Next();
+        if (!IsKeyword(setsTok, "SETS")) {
+            co_return Error(setsTok, "expected 'SETS' after GROUPING");
+        }
+        auto lparen = ctx.Stream.Next();
+        if (!IsOp(lparen, '(')) {
+            co_return Error(lparen, "expected '(' after GROUPING SETS");
+        }
+        auto groupingSets = std::make_shared<TSqlGroupingSet>();
+        TToken next;
+        do {
+            auto set = co_await grouping_set(ctx);
+            groupingSets->Items.emplace_back(std::move(set));
+            next = ctx.Stream.Next();
+        } while (IsOp(next, ','));
+        if (!IsOp(next, ')')) {
+            co_return Error(next, "expected ')' after GROUPING SETS list");
+        }
+        co_return groupingSets;
+    }
+
+    // fallback to <expr>
+    ctx.Stream.Unget(token);
+    co_return std::make_shared<TSqlGroupingExprOrList>(co_await expr(ctx));
+}
+
+TAstTask<TSqlNode> grouping_set(TParserContext& ctx) {
+    auto token = ctx.Stream.Next();
+    if (IsOp(token, '(')) {
+        auto list = co_await TryKeywords(expr_list, ctx, {});
+        auto rparen = ctx.Stream.Next();
+        if (!IsOp(rparen, ')')) {
+            co_return Error(rparen, "expected ')' after grouping set");
+        }
+        co_return std::make_shared<TSqlGroupingExprOrList>(std::move(list));
+    }
+    if (IsKeyword(token, "ROLLUP")) {
+        auto lparen = ctx.Stream.Next();
+        if (!IsOp(lparen, '(')) {
+            co_return Error(lparen, "expected '(' after ROLLUP");
+        }
+        auto list = co_await TryKeywords(expr_list, ctx, {});
+        auto rparen = ctx.Stream.Next();
+        if (!IsOp(rparen, ')')) {
+            co_return Error(rparen, "expected ')' after ROLLUP list");
+        }
+        co_return std::make_shared<TSqlRollUp>(std::move(list));
+    }
+    if (IsKeyword(token, "CUBE")) {
+        auto lparen = ctx.Stream.Next();
+        if (!IsOp(lparen, '(')) {
+            co_return Error(lparen, "expected '(' after CUBE");
+        }
+        auto list = co_await TryKeywords(expr_list, ctx, {});
+        auto rparen = ctx.Stream.Next();
+        if (!IsOp(rparen, ')')) {
+            co_return Error(rparen, "expected ')' after CUBE list");
+        }
+        co_return std::make_shared<TSqlCube>(std::move(list));
+    }
+
+    // fallback to <expr>
+    ctx.Stream.Unget(token);
+    co_return std::make_shared<TSqlGroupingExprOrList>(co_await expr(ctx));
 }
 
 TAstTask<TSqlTableRef> table_ref(TParserContext& ctx) {
