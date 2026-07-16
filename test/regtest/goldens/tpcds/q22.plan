@@ -2,14 +2,20 @@
   (rel sort
     (rel project
       (rel aggregate
-        (rel filter
-          (rel join
-            (rel join (rel source "inventory") (rel source "date_dim") () (inner))
-            (rel source "item")
-            ()
-            (inner))
-          (&& (&& (&& (== inv_date_sk d_date_sk) (== inv_item_sk i_item_sk)) (<= 1212 d_month_seq))
-            (<= d_month_seq (+ 1212 11))))
+        (rel project
+          (rel filter
+            (rel join
+              (rel join (rel source "inventory") (rel source "date_dim") () (inner))
+              (rel source "item")
+              ()
+              (inner))
+            (&& (&& (&& (== inv_date_sk d_date_sk) (== inv_item_sk i_item_sk)) (<= 1212 d_month_seq))
+              (<= d_month_seq (+ 1212 11))))
+          (i_product_name i_product_name)
+          (i_brand i_brand)
+          (i_class i_class)
+          (i_category i_category)
+          (inv_quantity_on_hand inv_quantity_on_hand))
         (keys i_product_name i_brand i_class i_category)
         (set i_product_name i_brand i_class i_category)
         (set i_product_name i_brand i_class)

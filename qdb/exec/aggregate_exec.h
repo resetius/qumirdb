@@ -4,6 +4,7 @@
 
 #include <array>
 #include <cstdint>
+#include <vector>
 
 namespace NQdb {
 
@@ -28,6 +29,27 @@ private:
     bool Initialized_ = false;
     bool Finished_ = false;
     bool Destroyed_ = false;
+};
+
+// Replays each batch once per set as a masked view (set id → constant column, keys
+// outside the set forced NULL), so all sets land in one table in a single pass.
+class TGroupingSetsAggregateProcessor {
+public:
+    TGroupingSetsAggregateProcessor(
+        TAggregateKernels kernels,
+        std::vector<std::vector<size_t>> sets,
+        size_t numKeys);
+
+    void Add(TRowSet& rowSet);
+    bool Finish(TRowSet& rowSet);
+
+private:
+    TAggregateProcessor Inner_;
+    std::vector<std::vector<size_t>> Sets_;
+    size_t NumKeys_;
+    std::vector<int32_t> SetIdBuf_;
+    std::vector<uint8_t> NullMask_;
+    std::vector<TColumn> Cols_;
 };
 
 } // namespace NQdb
