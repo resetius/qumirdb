@@ -1286,10 +1286,6 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
                     "' must be integer or f64");
             }
             arg.IsNullable = IsNullableType(type);
-            if (arg.IsFloat && arg.IsNullable) {
-                throw NQumir::TError(
-                    "CompileAggregate: nullable f64 aggregates are not supported yet");
-            }
             arg.ColumnIndex = columnIndex(name);
         }
         args.push_back(arg);
