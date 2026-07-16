@@ -1,2 +1,37 @@
-Error: ')' expected @ Line: 11, Byte: 41, Column: 41
-
+(rel limit
+  (rel project
+    (rel aggregate
+      (rel project
+        (rel filter
+          (rel join
+            (rel join
+              (rel join (rel source "catalog_sales") (rel source "item") () (inner))
+              (rel source "date_dim")
+              ()
+              (inner))
+            (rel project
+              (rel aggregate
+                (rel project
+                  (rel filter
+                    (rel join (rel source "catalog_sales") (rel source "date_dim") () (inner))
+                    (&& (&& (&& (== cs_item_sk i_item_sk) (<= "1998-03-18" d_date))
+                        (<= d_date (+ (: (cast "1998-03-18" <named DATE>) <named DATE>) (: 90 i32))))
+                      (== d_date_sk cs_sold_date_sk)))
+                  (cs_ext_discount_amt cs_ext_discount_amt)
+                  (__group__ 1))
+                (keys __group__)
+                (agg sum_0 sum cs_ext_discount_amt)
+                (agg count_1 count))
+              (__scalar_0__ (* 1.3 (/ sum_0 (cast count_1 f64)))))
+            ()
+            (inner))
+          (&& (&& (&& (&& (&& (== i_manufact_id 269) (== i_item_sk cs_item_sk)) (<= "1998-03-18" d_date))
+                (<= d_date (+ (: (cast "1998-03-18" <named DATE>) <named DATE>) (: 90 i32))))
+              (== d_date_sk cs_sold_date_sk))
+            (> cs_ext_discount_amt __scalar_0__)))
+        (cs_ext_discount_amt cs_ext_discount_amt)
+        (__group__ 1))
+      (keys __group__)
+      (agg sum_0 sum cs_ext_discount_amt))
+    (|excess discount amount| sum_0))
+  (limit 100))

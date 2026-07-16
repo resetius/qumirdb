@@ -1,2 +1,68 @@
-Error: ')' expected @ Line: 13, Byte: 43, Column: 43
-
+(query
+  (select
+    (select-list
+      (item as order count
+        (call count (call distinct cs_order_number))
+      )
+      (item as total shipping cost
+        (call sum cs_ext_ship_cost)
+      )
+      (item as total net profit
+        (call sum cs_net_profit)
+      )
+    )
+    (from
+      (table catalog_sales as cs1)
+      (table date_dim)
+      (table customer_address)
+      (table call_center)
+    )
+    (where
+      (&& (&& (&& (&& (&& (&& (&& (&& (<= "1999-2-01" d_date) (<= d_date (+ (: (cast "1999-2-01" <named DATE>) <named DATE>) (: 60 i32))))
+                    (== |cs1.cs_ship_date_sk| d_date_sk))
+                  (== |cs1.cs_ship_addr_sk| ca_address_sk))
+                (== ca_state "IL"))
+              (== |cs1.cs_call_center_sk| cc_call_center_sk))
+            (|| (|| (|| (|| (== cc_county "Williamson County") (== cc_county "Williamson County"))
+                  (== cc_county "Williamson County"))
+                (== cc_county "Williamson County"))
+              (== cc_county "Williamson County")))
+          (subquery exists (query
+        (select
+          (select-list
+            (star *)
+          )
+          (from
+            (table catalog_sales as cs2)
+          )
+          (where
+            (&& (== |cs1.cs_order_number| |cs2.cs_order_number|) (!= |cs1.cs_warehouse_sk| |cs2.cs_warehouse_sk|))
+          )
+        )
+      )
+      ))
+        (! (subquery exists (query
+        (select
+          (select-list
+            (star *)
+          )
+          (from
+            (table catalog_returns as cr1)
+          )
+          (where
+            (== |cs1.cs_order_number| |cr1.cr_order_number|)
+          )
+        )
+      )
+      )))
+    )
+  )
+  (order-by
+    (order asc
+      (call count (call distinct cs_order_number))
+    )
+  )
+  (limit
+    100
+  )
+)

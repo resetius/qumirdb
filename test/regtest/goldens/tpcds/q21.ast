@@ -1,2 +1,71 @@
-Error: ')' expected @ Line: 19, Byte: 58, Column: 58
-
+(query
+  (select
+    (select-list
+      (star *)
+    )
+    (from
+      (subquery-table as x
+        (query
+          (select
+            (select-list
+              (item
+                w_warehouse_name
+              )
+              (item
+                i_item_id
+              )
+              (item as inv_before
+                (call
+                  sum
+                  (if
+                    (< (: (cast d_date <named DATE>) <named DATE>) (: (cast "1998-04-08" <named DATE>) <named DATE>))
+                    inv_quantity_on_hand
+                    0))
+              )
+              (item as inv_after
+                (call
+                  sum
+                  (if
+                    (>= (: (cast d_date <named DATE>) <named DATE>) (: (cast "1998-04-08" <named DATE>) <named DATE>))
+                    inv_quantity_on_hand
+                    0))
+              )
+            )
+            (from
+              (table inventory)
+              (table warehouse)
+              (table item)
+              (table date_dim)
+            )
+            (where
+              (&& (&& (&& (&& (&& (<= 0.98999999999999999 i_current_price) (<= i_current_price 1.49)) (== i_item_sk inv_item_sk))
+                    (== inv_warehouse_sk w_warehouse_sk))
+                  (== inv_date_sk d_date_sk))
+                (&& (<= (- (: (cast "1998-04-08" <named DATE>) <named DATE>) (: 30 i32)) d_date)
+                  (<= d_date (+ (: (cast "1998-04-08" <named DATE>) <named DATE>) (: 30 i32)))))
+            )
+            (group-by
+              w_warehouse_name
+              i_item_id
+            )
+          )
+        )
+      )
+    )
+    (where
+      (&& (<= (/ 2 3) (if (> inv_before 0) (/ inv_after inv_before) (call qdb_sql_null)))
+        (<= (if (> inv_before 0) (/ inv_after inv_before) (call qdb_sql_null)) (/ 3 2)))
+    )
+  )
+  (order-by
+    (order asc
+      w_warehouse_name
+    )
+    (order asc
+      i_item_id
+    )
+  )
+  (limit
+    100
+  )
+)
