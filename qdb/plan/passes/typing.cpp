@@ -7,6 +7,7 @@
 #include <qdb/plan/ops/project.h>
 #include <qdb/plan/ops/sort.h>
 #include <qdb/plan/ops/source.h>
+#include <qdb/plan/ops/union.h>
 #include <qdb/kernel/project_type.h>
 
 #include <qumir/parser/type.h>
@@ -106,6 +107,34 @@ void AnnotateTypes(const TOperatorPtr& root) {
         root->Type = std::make_shared<TFunctionType>(
             std::vector<TTypePtr>{leftSchema, rightSchema},
             output ? *output : nullptr);
+        return;
+    }
+
+    if (auto maybe = TMaybeOp<TUnionAllOperator>(root)) {
+        auto un = maybe.Cast();
+        const auto& inputs = un->Inputs();
+        std::vector<TTypePtr> paramTypes;
+        paramTypes.reserve(inputs.size());
+        for (const auto& input : inputs) {
+            paramTypes.push_back(input->OutputColumns());
+        }
+        auto* first = static_cast<TStructType*>(paramTypes[0].get());
+        for (size_t b = 1; b < inputs.size(); ++b) {
+            auto* other = static_cast<TStructType*>(paramTypes[b].get());
+            if (!first || !other || first->Fields.size() != other->Fields.size()) {
+                throw NQumir::TError("UNION ALL branches must have the same number of columns");
+            }
+            for (size_t i = 0; i < first->Fields.size(); ++i) {
+                if (first->Fields[i].second->TypeName() != other->Fields[i].second->TypeName()) {
+                    throw NQumir::TError(
+                        "UNION ALL branch " + std::to_string(b) + " column " +
+                        std::to_string(i) + " type mismatch");
+                }
+            }
+        }
+        // Output schema = first branch's (column names come from it).
+        auto output = inputs[0]->OutputColumns();
+        root->Type = std::make_shared<TFunctionType>(std::move(paramTypes), std::move(output));
         return;
     }
 }

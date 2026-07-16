@@ -7,6 +7,7 @@
 #include <qdb/plan/ops/project.h>
 #include <qdb/plan/ops/sort.h>
 #include <qdb/plan/ops/source.h>
+#include <qdb/plan/ops/union.h>
 
 #include <qdb/plan/clone_expr.h>
 #include <qdb/plan/passes/flatten_conjuncts.h>
@@ -24,6 +25,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <functional>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -1042,16 +1044,69 @@ std::expected<TOperatorPtr, TError> ApplyLimit(
     return std::make_shared<TLimitOperator>(std::move(plan), *limit, offsetValue);
 }
 
+std::expected<TOperatorPtr, TError> BuildSetOp(
+    const NSql::TSqlSetOp& setOp,
+    const TTableSourceFactory& sources);
+
+// Builds a query body (a SELECT, a set operation, or a parenthesized query).
+std::expected<TOperatorPtr, TError> BuildQueryBody(
+    const NSql::TSqlNodePtr& body,
+    const TTableSourceFactory& sources)
+{
+    if (auto select = NSql::TMaybeNode<NSql::TSqlSelect>(body)) {
+        return BuildSelect(*select.Cast(), sources);
+    }
+    if (auto setOp = NSql::TMaybeNode<NSql::TSqlSetOp>(body)) {
+        return BuildSetOp(*setOp.Cast(), sources);
+    }
+    if (auto sub = NSql::TMaybeNode<NSql::TSqlQuery>(body)) {
+        return BuildQuery(*sub.Cast(), sources);
+    }
+    return std::unexpected(TError("unsupported query body"));
+}
+
+std::expected<TOperatorPtr, TError> BuildSetOp(
+    const NSql::TSqlSetOp& setOp,
+    const TTableSourceFactory& sources)
+{
+    if (setOp.Op != NSql::TSqlSetOp::EOp::Union
+        || setOp.Quantifier != NSql::ESetQuantifier::All)
+    {
+        return std::unexpected(TError(
+            "only UNION ALL is supported yet (UNION/INTERSECT/EXCEPT DISTINCT not supported)"));
+    }
+
+    // Flatten a nested chain of UNION ALL into a single N-ary operator.
+    std::vector<TOperatorPtr> branches;
+    std::function<std::expected<void, TError>(const NSql::TSqlNodePtr&)> collect =
+        [&](const NSql::TSqlNodePtr& node) -> std::expected<void, TError> {
+        auto inner = NSql::TMaybeNode<NSql::TSqlSetOp>(node);
+        if (inner
+            && inner.Cast()->Op == NSql::TSqlSetOp::EOp::Union
+            && inner.Cast()->Quantifier == NSql::ESetQuantifier::All)
+        {
+            if (auto l = collect(inner.Cast()->Left); !l) return l;
+            return collect(inner.Cast()->Right);
+        }
+        auto branch = BuildQueryBody(node, sources);
+        if (!branch) {
+            return std::unexpected(branch.error());
+        }
+        branches.push_back(std::move(*branch));
+        return {};
+    };
+    if (auto l = collect(setOp.Left); !l) return std::unexpected(l.error());
+    if (auto r = collect(setOp.Right); !r) return std::unexpected(r.error());
+
+    return std::make_shared<TUnionAllOperator>(std::move(branches));
+}
+
 std::expected<TOperatorPtr, TError> BuildQuery(
     const NSql::TSqlQuery& query,
     const TTableSourceFactory& sources)
 {
-    auto select = NSql::TMaybeNode<NSql::TSqlSelect>(query.Body);
-    if (!select) {
-        return std::unexpected(TError("expected a SELECT statement"));
-    }
     if (!query.WithClause) {
-        auto plan = BuildSelect(*select.Cast(), sources);
+        auto plan = BuildQueryBody(query.Body, sources);
         if (!plan) {
             return plan;
         }
@@ -1092,7 +1147,7 @@ std::expected<TOperatorPtr, TError> BuildQuery(
         return plan;
     };
 
-    auto plan = BuildSelect(*select.Cast(), factory);
+    auto plan = BuildQueryBody(query.Body, factory);
     if (!plan) {
         return plan;
     }

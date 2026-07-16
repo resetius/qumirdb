@@ -230,7 +230,13 @@ public:
     explicit TCountingSink(NQdb::ISink& inner) : Inner_(inner) {}
 
     void Write(const NQdb::TRowSet& rowSet) override {
-        Rows_ += rowSet.RowCount;
+        if (rowSet.Selection) {
+            for (int64_t i = 0; i < rowSet.RowCount; ++i) {
+                Rows_ += rowSet.Selection[i] != 0;
+            }
+        } else {
+            Rows_ += rowSet.RowCount;
+        }
         Inner_.Write(rowSet);
     }
     void Flush() override { Inner_.Flush(); }
