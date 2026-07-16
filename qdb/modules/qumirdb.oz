@@ -168,6 +168,12 @@
   (fun qdb_substring ((var str StringView) (var start i32) (var length i32)) -> StringView
        (attrs extern) (block))
 
+  (fun substr ((var str StringView) (var start i32) (var length i32)) -> StringView
+       (attrs (extern qdb_substring)) (block))
+
+  (fun substr ((var str StringView) (var start i64) (var length i64)) -> StringView
+      (block (call qdb_substring str (cast start i32) (cast length i32))))
+
   (fun qdb_bitmap_set_valid ((var bitmap <ptr u8>) (var index i64) (var valid bool)) -> void
     (block
       (var byte_index = (>> index (: 3 i64)))
