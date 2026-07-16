@@ -309,10 +309,10 @@ TEST(Cbo, FallbackAboveMaxRelations) {
 
 // Random connected graphs (spanning tree + extra edges) must all be optimal.
 TEST(Cbo, RandomGraphsOptimal) {
-    int seed = 987654321;
+    uint32_t seed = 987654321;
     auto rnd = [&](int lo, int hi) {
-        seed = (seed * 1103515245 + 12345) & 0x7fffffff;
-        return lo + seed % (hi - lo + 1);
+        seed = seed * 1103515245u + 12345u;
+        return lo + static_cast<int>((seed & 0x7fffffff) % static_cast<uint32_t>(hi - lo + 1));
     };
     for (int iter = 0; iter < 100; ++iter) {
         size_t n = rnd(2, 6);
