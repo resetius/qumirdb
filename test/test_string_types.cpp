@@ -110,6 +110,7 @@ std::unique_ptr<TLLVMRunner> CompileStringColumnReader(void*& entry) {
                 "Size")),
     });
     auto function = std::make_shared<TFunDecl>(loc, "read_string_column",
+        std::vector<TGenericParam>{},
         std::move(params), std::make_shared<TBlockExpr>(loc, std::move(body)),
         i64Type);
     auto program = std::make_shared<TBlockExpr>(loc,
@@ -157,6 +158,7 @@ std::unique_ptr<TLLVMRunner> CompileI32ColumnReader(void*& entry) {
             std::make_shared<TCastExpr>(loc, materialized.Value, i64Type)),
     });
     auto function = std::make_shared<TFunDecl>(loc, "read_i32_column",
+        std::vector<TGenericParam>{},
         std::move(params), std::make_shared<TBlockExpr>(loc, std::move(body)),
         i64Type);
     auto program = std::make_shared<TBlockExpr>(loc,
@@ -206,6 +208,7 @@ std::unique_ptr<TLLVMRunner> CompileScalarColumnReader(
         std::make_shared<TReturnExpr>(loc, materialized.Value),
     });
     auto function = std::make_shared<TFunDecl>(loc, entryName,
+        std::vector<TGenericParam>{},
         std::move(params), std::make_shared<TBlockExpr>(loc, std::move(body)),
         valueType);
     auto program = std::make_shared<TBlockExpr>(loc,

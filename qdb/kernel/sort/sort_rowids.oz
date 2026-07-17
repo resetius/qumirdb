@@ -31,14 +31,14 @@
         (call sr_row_index row_id)
         (cast (field col MaskBitOffset) i64)))))
 
-  (fun sr_load_fixed_key
+  (fun sr_load_fixed_key [Value]
        ((var store <ptr TRowSet>)
         (var row_id i64)
         (var column_idx i64)
-        (var type_witness <ptr <named Value (template)>>)) -> <named Value (template)>
+        (var type_witness <ptr Value>)) -> Value
     (block
       (var col = (call sr_column store row_id column_idx))
-      (var data = (cast (cast (field col Data) i64) <ptr <named Value (template)>>))
+      (var data = (cast (cast (field col Data) i64) <ptr Value>))
       (return (index data (call sr_row_index row_id)))))
 
   (fun sr_load_bool_key
@@ -52,7 +52,7 @@
         (block (return (: 1 u8))))
       (return (: 0 u8))))
 
-  (fun sort_fixed_rowids_count_pass
+  (fun sort_fixed_rowids_count_pass [Value]
        ((var store <ptr TRowSet>)
         (var column_idx i64)
         (var row_ids <ptr i64>)
@@ -61,7 +61,7 @@
         (var n i64)
         (var digit i64)
         (var desc bool)
-        (var type_witness <ptr <named Value (template)>>))
+        (var type_witness <ptr Value>))
     (block
       (var i i64)
       (= i (: 0 i64))
@@ -112,7 +112,7 @@
           (= row_ids [i] (index work i))
           (= i (+ i (: 1 i64)))))))
 
-  (fun sort_fixed_rowids
+  (fun sort_fixed_rowids [Value]
        ((var store <ptr TRowSet>)
         (var column_idx i64)
         (var row_ids <ptr i64>)
@@ -121,7 +121,7 @@
         (var n i64)
         (var key_bits i64)
         (var desc bool)
-        (var type_witness <ptr <named Value (template)>>))
+        (var type_witness <ptr Value>))
     (block
       (var digit i64)
       (= digit (: 0 i64))
@@ -131,7 +131,7 @@
             store column_idx row_ids work counts n digit desc type_witness)
           (= digit (+ digit (: 8 i64)))))))
 
-  (fun sort_fixed_rowids_count_pass_nullable
+  (fun sort_fixed_rowids_count_pass_nullable [Value]
        ((var store <ptr TRowSet>)
         (var column_idx i64)
         (var row_ids <ptr i64>)
@@ -141,7 +141,7 @@
         (var digit i64)
         (var desc bool)
         (var nulls_first bool)
-        (var type_witness <ptr <named Value (template)>>))
+        (var type_witness <ptr Value>))
     (block
       (var i i64)
       (= i (: 0 i64))
@@ -210,7 +210,7 @@
           (= row_ids [i] (index work i))
           (= i (+ i (: 1 i64)))))))
 
-  (fun sort_fixed_rowids_nullable
+  (fun sort_fixed_rowids_nullable [Value]
        ((var store <ptr TRowSet>)
         (var column_idx i64)
         (var row_ids <ptr i64>)
@@ -220,7 +220,7 @@
         (var key_bits i64)
         (var desc bool)
         (var nulls_first bool)
-        (var type_witness <ptr <named Value (template)>>))
+        (var type_witness <ptr Value>))
     (block
       (var digit i64)
       (= digit (: 0 i64))

@@ -228,7 +228,7 @@ NQumir::NAst::TExprPtr GenJoinInsertKeyOnlyAst(
     body.push_back(std::make_shared<TReturnExpr>(loc, number(1, boolType)));
 
     return std::make_shared<TFunDecl>(
-        loc, funcName, std::move(params),
+        loc, funcName, std::vector<TGenericParam>{}, std::move(params),
         std::make_shared<TBlockExpr>(loc, std::move(body)), boolType);
 }
 
@@ -381,7 +381,7 @@ NQumir::NAst::TExprPtr GenJoinFinalizeSemiAntiAst(
     body.push_back(std::make_shared<TReturnExpr>(loc, number(1, boolType)));
 
     return std::make_shared<TFunDecl>(
-        loc, funcName, std::move(params),
+        loc, funcName, std::vector<TGenericParam>{}, std::move(params),
         std::make_shared<TBlockExpr>(loc, std::move(body)), boolType);
 }
 
@@ -601,7 +601,7 @@ NQumir::NAst::TExprPtr GenJoinBatchAst(
     body.push_back(std::make_shared<TReturnExpr>(loc, number(1, boolType)));
 
     auto function = std::make_shared<TFunDecl>(
-        loc, funcName, std::move(params),
+        loc, funcName, std::vector<TGenericParam>{}, std::move(params),
         std::make_shared<TBlockExpr>(loc, std::move(body)), boolType);
     return function;
 }
@@ -1019,7 +1019,7 @@ NQumir::NAst::TExprPtr GenJoinHashBatchAst(
     body.push_back(std::make_shared<TReturnExpr>(loc, number(1, boolType)));
 
     return std::make_shared<TFunDecl>(
-        loc, funcName, std::move(params),
+        loc, funcName, std::vector<TGenericParam>{}, std::move(params),
         std::make_shared<TBlockExpr>(loc, std::move(body)), boolType);
 }
 

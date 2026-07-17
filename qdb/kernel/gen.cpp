@@ -576,7 +576,7 @@ std::vector<NQumir::NAst::TExprPtr> GenKeyOperationFunDecls(
         std::vector<TParam> params = {
             std::make_shared<TVarStmt>(loc, "key", type),
         };
-        auto function = std::make_shared<TFunDecl>(loc, "rh_hash", std::move(params),
+        auto function = std::make_shared<TFunDecl>(loc, "rh_hash", std::vector<TGenericParam>{}, std::move(params),
             std::make_shared<TBlockExpr>(loc, std::move(body)), i64Type);
         function->Type = std::make_shared<TFunctionType>(
             std::vector<TTypePtr>{type}, i64Type);
@@ -594,7 +594,7 @@ std::vector<NQumir::NAst::TExprPtr> GenKeyOperationFunDecls(
                 loc, EqualKeyValue(leftType, rightType, path)),
         };
         auto function = std::make_shared<TFunDecl>(loc, "rh_key_equal",
-            std::move(params), std::make_shared<TBlockExpr>(loc, std::move(body)),
+            std::vector<TGenericParam>{}, std::move(params), std::make_shared<TBlockExpr>(loc, std::move(body)),
             boolType);
         function->Type = std::make_shared<TFunctionType>(
             std::vector<TTypePtr>{leftType, rightType}, boolType);
@@ -626,6 +626,7 @@ std::vector<NQumir::NAst::TExprPtr> GenKeyOwnershipFunDecls(
         std::make_shared<TVarStmt>(loc, "key", key.LookupType),
     };
     auto bytes = std::make_shared<TFunDecl>(loc, "key_owned_bytes",
+        std::vector<TGenericParam>{},
         std::move(bytesParams), std::make_shared<TBlockExpr>(loc,
             std::vector<TExprPtr>{
                 std::make_shared<TReturnExpr>(loc, std::move(bytesExpr))}),
@@ -653,6 +654,7 @@ std::vector<NQumir::NAst::TExprPtr> GenKeyOwnershipFunDecls(
         std::make_shared<TVarStmt>(loc, "owned_buffer", ptrU8Type),
     };
     auto clone = std::make_shared<TFunDecl>(loc, "key_clone_owned",
+        std::vector<TGenericParam>{},
         std::move(cloneParams),
         std::make_shared<TBlockExpr>(loc, std::move(cloneBody)), key.StoredType);
     clone->Type = std::make_shared<TFunctionType>(
@@ -1166,6 +1168,7 @@ NQumir::NAst::TExprPtr GenJoinResidualFilterAst(
     body.push_back(std::make_shared<TReturnExpr>(loc, std::move(castedResult)));
 
     return std::make_shared<TFunDecl>(loc, "jt_residual_filter",
+        std::vector<TGenericParam>{},
         std::move(params), std::make_shared<TBlockExpr>(loc, std::move(body)),
         boolType);
 }
@@ -1304,6 +1307,7 @@ NQumir::NAst::TExprPtr GenProjectKernelAst(
 
     auto funBody = std::make_shared<TBlockExpr>(loc, std::move(bodyStmts));
     auto funDecl = std::make_shared<TFunDecl>(loc, "<project>",
+        std::vector<TGenericParam>{},
         std::move(params), funBody, std::make_shared<TVoidType>());
     return std::make_shared<TBlockExpr>(loc, std::vector<TExprPtr>{funDecl});
 }
@@ -1634,7 +1638,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
     auto body = std::make_shared<TBlockExpr>(loc,
         std::vector<TExprPtr>{std::make_shared<TReturnExpr>(loc, dispatch)});
     auto function = std::make_shared<TFunDecl>(
-        loc, "agg_dispatch", std::move(params), std::move(body), i64Type);
+        loc, "agg_dispatch", std::vector<TGenericParam>{}, std::move(params), std::move(body), i64Type);
     return std::make_shared<TBlockExpr>(loc, std::vector<TExprPtr>{function});
 }
 
@@ -1889,7 +1893,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
     bodyStmts.push_back(std::make_shared<TReturnExpr>(loc, ident("result")));
     auto body = std::make_shared<TBlockExpr>(loc, std::move(bodyStmts));
     auto function = std::make_shared<TFunDecl>(
-        loc, "agg_finalize", std::move(params), std::move(body), i64Type);
+        loc, "agg_finalize", std::vector<TGenericParam>{}, std::move(params), std::move(body), i64Type);
     return std::make_shared<TBlockExpr>(loc, std::vector<TExprPtr>{function});
 }
 
@@ -2237,6 +2241,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateMeasureAst(
     body.push_back(std::make_shared<TReturnExpr>(loc, ident("size")));
 
     auto function = std::make_shared<TFunDecl>(loc, "agg_measure_keys",
+        std::vector<TGenericParam>{},
         std::move(params), std::make_shared<TBlockExpr>(loc, std::move(body)),
         i64Type);
     return std::make_shared<TBlockExpr>(
@@ -2341,6 +2346,7 @@ std::vector<NQumir::NAst::TExprPtr> GenReducerFunDecls(
             }
             auto body = block({std::make_shared<TReturnExpr>(loc, std::move(resultExpr))});
             result.push_back(std::make_shared<TFunDecl>(loc, name,
+                std::vector<TGenericParam>{},
                 std::move(params), std::move(body), i64Type));
             continue;
         }
@@ -2359,6 +2365,7 @@ std::vector<NQumir::NAst::TExprPtr> GenReducerFunDecls(
                     nullptr),
             });
             result.push_back(std::make_shared<TFunDecl>(loc, name,
+                std::vector<TGenericParam>{},
                 std::move(params), std::move(body), voidType));
             continue;
         }
@@ -2418,6 +2425,7 @@ std::vector<NQumir::NAst::TExprPtr> GenReducerFunDecls(
                 std::move(inner), nullptr),
         });
         result.push_back(std::make_shared<TFunDecl>(loc, name,
+            std::vector<TGenericParam>{},
             std::move(params), std::move(body), voidType));
     }
     return result;
@@ -2492,6 +2500,7 @@ NQumir::NAst::TExprPtr GenApplyReducersFunDecl(const TAggReducerLayout& layout)
 
     auto body = std::make_shared<TBlockExpr>(loc, std::move(stmts));
     return std::make_shared<TFunDecl>(loc, "agg_apply_reducers",
+        std::vector<TGenericParam>{},
         std::move(params), std::move(body), std::make_shared<TVoidType>());
 }
 

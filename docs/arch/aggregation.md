@@ -12,8 +12,8 @@ query-local Robin Hood hash table, then emits one dense output `TRowSet`.
 The implementation is deliberately split into three layers:
 
 1. C++ derives concrete query types and generates query-specific Qumir AST.
-2. Reusable Oz code implements the generic hash table and lifecycle over
-   `<named Key (template)>`.
+2. Reusable Oz code implements the generic hash table and lifecycle with
+   function-level generic type parameters such as `[Key]`.
 3. C++ owns execution, the small `HashTable` header, and the result buffers;
    Oz code allocates and frees the table's internal arrays.
 
@@ -60,7 +60,7 @@ Compilation performs these steps:
    `QumirDbModule`.
 4. Build an unresolved update program with
    `BuildGenericAggregateProgramAst`.
-5. Compile it with overloads enabled and explicit entry `agg_dispatch`.
+5. Compile it with overloads/generics enabled and explicit entry `agg_dispatch`.
 6. Build a separate finalize program with
    `BuildGenericAggregateFinalizeProgramAst`.
 7. Compile it with explicit entry `agg_finalize`.
@@ -147,11 +147,11 @@ same AST. They do not come from a fixed `key_ops_i64.oz` production dependency.
 
 Specialization works as follows:
 
-1. Generic Oz functions declare parameters as
-   `<named Key (template)>`.
+1. Generic Oz functions declare function-level type parameters, for example
+   `(fun aht_update [Key] ((var ht <ref HashTable>) (var key Key) ...) ...)`.
 2. Generated `agg_dispatch` calls `aht_update` with the concrete key value.
-3. Qumir infers that template `Key` from the call and instantiates the generic
-   function chain.
+3. Qumir infers generic type parameter `Key` from the call and instantiates the
+   generic function chain.
 4. Calls to `rh_hash` and `rh_key_equal` resolve to the generated concrete
    overloads in the merged AST.
 

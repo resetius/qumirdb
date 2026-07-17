@@ -3,11 +3,11 @@
 
   ;; Rebuilds only the probe table. Dense group-key and aggregate buffers are
   ;; indexed by slot_id and therefore do not move here.
-  (fun rh_rehash_into ((var old_keys <ptr <named Key (template)>>)
+  (fun rh_rehash_into [Key] ((var old_keys <ptr Key>)
                        (var old_dist <ptr i64>)
                        (var old_slot_ids <ptr i64>)
                        (var old_capacity i64)
-                       (var new_keys <ptr <named Key (template)>>)
+                       (var new_keys <ptr Key>)
                        (var new_dist <ptr i64>)
                        (var new_slot_ids <ptr i64>)
                        (var new_capacity i64)) -> bool

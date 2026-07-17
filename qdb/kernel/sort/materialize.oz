@@ -37,7 +37,7 @@
     (block
       (return (>> (+ n (: 7 i64)) (: 3 i64)))))
 
-  (fun sort_materialize_fixed_column
+  (fun sort_materialize_fixed_column [Value]
        ((var store <ptr TRowSet>)
         (var row_ids <ptr i64>)
         (var start i64)
@@ -48,11 +48,11 @@
         (var data_owner_idx i64)
         (var mask_owner_idx i64)
         (var value_bytes i64)
-        (var type_witness <ptr <named Value (template)>>))
+        (var type_witness <ptr Value>))
     (block
       (var data =
         (cast (call qdb_alloc (* n value_bytes))
-              <ptr <named Value (template)>>))
+              <ptr Value>))
       (var mask =
         (cast (call qdb_alloc (call sort_materialize_mask_bytes n)) <ptr u8>))
       (call sort_materialize_record_owner out data_owner_idx (cast data <ptr i8>))
@@ -76,7 +76,7 @@
               (= data [i]
                  (call sr_load_fixed_key store row_id src_col_idx type_witness)))
             (block
-              (= data [i] (cast (: 0 i64) <named Value (template)>))))
+              (= data [i] (cast (: 0 i64) Value))))
           (= i (+ i (: 1 i64)))))))
 
   (fun sort_materialize_bool_column

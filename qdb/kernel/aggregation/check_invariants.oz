@@ -14,7 +14,7 @@
     (block
       (return (== left right))))
 
-  (fun rh_check_invariants ((var keys <ptr <named Key (template)>>)
+  (fun rh_check_invariants [Key] ((var keys <ptr Key>)
                             (var dist <ptr i64>)
                             (var capacity i64)) -> bool
     (block

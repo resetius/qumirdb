@@ -46,8 +46,8 @@
     (block
       (return (cast (& (>> key (cast digit u64)) (: 255 u64)) u32))))
 
-  (fun radix_count_sort_indices
-       ((var values <ptr <named Value (template)>>)
+  (fun radix_count_sort_indices [Value]
+       ((var values <ptr Value>)
         (var indices <ptr u32>)
         (var work <ptr u32>)
         (var counts <ptr u32>)
@@ -101,8 +101,8 @@
           (= indices [i] (index work i))
           (= i (+ i (: 1 i64)))))))
 
-  (fun radix_sort_indices
-       ((var values <ptr <named Value (template)>>)
+  (fun radix_sort_indices [Value]
+       ((var values <ptr Value>)
         (var indices <ptr u32>)
         (var work <ptr u32>)
         (var counts <ptr u32>)
@@ -118,15 +118,15 @@
           (= digit (+ digit (: 8 i64)))))))
 
 ;; do not use in hot path
-(fun radix_sort
+(fun radix_sort [Value]
   ((var n i64)
-   (var values <array <named Value (template)> 1>)
+   (var values <array Value 1>)
    (var desc bool)) -> void
 
   (block
     (var key_bits = (: 64 i64))
     (var counts <array u32 1> [0 255])
-    (var work <array <named Value (template)> 1> [0 n])
+    (var work <array Value 1> [0 n])
     (var indices <array u32 1> [0 n])
     (var index_work <array u32 1> [0 n])
 
@@ -138,7 +138,7 @@
         (= i (+ i (: 1 i64)))))
 
     (call radix_sort_indices
-      (cast values <ptr <named Value (template)>>)
+      (cast values <ptr Value>)
       (cast indices <ptr u32>)
       (cast index_work <ptr u32>)
       (cast counts <ptr u32>)
@@ -162,16 +162,16 @@
   )
 )
 
-(fun radix_sort
+(fun radix_sort [Value]
   ((var n i64)
-   (var values <array <named Value (template)> 1>)) -> void
+   (var values <array Value 1>)) -> void
    (block
     (call radix_sort n values #f))
 )
 
-(fun radix_sort_desc
+(fun radix_sort_desc [Value]
   ((var n i64)
-   (var values <array <named Value (template)> 1>)) -> void
+   (var values <array Value 1>)) -> void
    (block
     (call radix_sort n values #t))
 )

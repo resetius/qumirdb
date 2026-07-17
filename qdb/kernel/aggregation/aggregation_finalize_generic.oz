@@ -4,9 +4,9 @@
   ;; Copies dense Key values and i64 aggregate states out of HashTable.
   ;; The generated per-query wrapper supplies the concrete output Key pointer;
   ;; future composite wrappers project Key fields into separate output columns.
-  (fun aht_finalize
+  (fun aht_finalize [Key]
        ((var ht <ref HashTable>)
-        (var output_keys <ptr <named Key (template)>>)
+        (var output_keys <ptr Key>)
         (var output_buffers <ptr <ptr i64>>)
         (var output_capacity i64)) -> i64
     (block
@@ -15,7 +15,7 @@
         (block (return (: -1 i64))))
       (var group_keys =
         (cast (field ht GroupKeys)
-              <ptr <named Key (template)>>))
+              <ptr Key>))
       (var slot i64)
       (= slot (: 0 i64))
       (while (< slot size)

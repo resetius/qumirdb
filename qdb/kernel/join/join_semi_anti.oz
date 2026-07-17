@@ -46,17 +46,17 @@
   ;; Probe the left build table for `key` and mark every matching left row id
   ;; (that passes the residual filter) in the matched set. Generic over the dual
   ;; key types like join_update.oz: `stored_witness` only binds StoredKey.
-  (fun jt_probe_and_mark ((var build <ref HashTable>)
+  (fun jt_probe_and_mark [LookupKey StoredKey] ((var build <ref HashTable>)
                           (var matched <ref HashTable>)
-                          (var key <named LookupKey (template)>)
-                          (var stored_witness <named StoredKey (template)>)
+                          (var key LookupKey)
+                          (var stored_witness StoredKey)
                           (var right_row_id i64)
                           (var left_store <ptr TRowSet>)
                           (var right_store <ptr TRowSet>)
                           (var stream_right_batch <ref TRowSet>)) -> bool
     (block
       (var build_keys =
-        (cast (field build Keys) <ptr <named StoredKey (template)>>))
+        (cast (field build Keys) <ptr StoredKey>))
       (var build_slot = (call rh_lookup_dual build_keys (field build Dist)
                           (field build SlotId) (field build Capacity) key))
       (if (!= build_slot (: -1 i64))

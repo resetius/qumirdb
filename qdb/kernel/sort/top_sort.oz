@@ -1,9 +1,9 @@
 (block
   (pragma language overloads)
 
-  (fun top_sort_temp_before_state
-       ((var state_key <named Key (template)>)
-        (var temp_key <named Key (template)>)
+  (fun top_sort_temp_before_state [Key]
+       ((var state_key Key)
+        (var temp_key Key)
         (var desc bool)) -> bool
     (block
       (if desc
@@ -12,10 +12,10 @@
         (block
           (return (< temp_key state_key))))))
 
-  (fun top_sort_merge_picks
-       ((var state_keys <ptr <named Key (template)>>)
+  (fun top_sort_merge_picks [Key]
+       ((var state_keys <ptr Key>)
         (var state_n i64)
-        (var temp_keys <ptr <named Key (template)>>)
+        (var temp_keys <ptr Key>)
         (var temp_indices <ptr u32>)
         (var temp_n i64)
         (var pick_src <ptr u8>)
@@ -56,12 +56,12 @@
           (= out (+ out (: 1 i64)))))
       (return out)))
 
-  (fun top_sort_gather_column
-       ((var state_values <ptr <named Value (template)>>)
-        (var temp_values <ptr <named Value (template)>>)
+  (fun top_sort_gather_column [Value]
+       ((var state_values <ptr Value>)
+        (var temp_values <ptr Value>)
         (var pick_src <ptr u8>)
         (var pick_idx <ptr u32>)
-        (var out_values <ptr <named Value (template)>>)
+        (var out_values <ptr Value>)
         (var n i64))
     (block
       (var i = (: 0 i64))

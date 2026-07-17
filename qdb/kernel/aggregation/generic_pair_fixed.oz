@@ -24,15 +24,15 @@
       (return (&& (== (field left first) (field right first))
                   (== (field left second) (field right second))))))
 
-  (fun rh_process_batch ((var keys <ptr <named Key (template)>>)
+  (fun rh_process_batch [Key] ((var keys <ptr Key>)
                          (var dist <ptr i64>)
                          (var slot_ids <ptr i64>)
                          (var capacity i64)
                          (var size <ptr i64>)
-                         (var group_keys <ptr <named Key (template)>>)
+                         (var group_keys <ptr Key>)
                          (var counts <ptr i64>)
                          (var sums <ptr i64>)
-                         (var input_keys <ptr <named Key (template)>>)
+                         (var input_keys <ptr Key>)
                          (var input_values <ptr i64>)
                          (var length i64)) -> i64
     (block

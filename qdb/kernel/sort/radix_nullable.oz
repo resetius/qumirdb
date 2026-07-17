@@ -2,8 +2,8 @@
   (pragma language overloads)
   (use radix)
 
-  (fun radix_count_sort_indices_nullable
-       ((var values <ptr <named Value (template)>>)
+  (fun radix_count_sort_indices_nullable [Value]
+       ((var values <ptr Value>)
         (var valid <ptr u8>)
         (var indices <ptr u32>)
         (var work <ptr u32>)
@@ -80,8 +80,8 @@
           (= indices [i] (index work i))
           (= i (+ i (: 1 i64)))))))
 
-  (fun radix_sort_indices_nullable
-       ((var values <ptr <named Value (template)>>)
+  (fun radix_sort_indices_nullable [Value]
+       ((var values <ptr Value>)
         (var valid <ptr u8>)
         (var indices <ptr u32>)
         (var work <ptr u32>)

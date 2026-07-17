@@ -86,14 +86,14 @@
       (= group_keys_ref [(: 0 i64)] (cast (: 0 i64) <ptr u8>))
       (= agg_buffers_ref [(: 0 i64)] (cast (: 0 i64) <ptr <ptr i64>>))))
 
-  (fun agg_dense_grow ((var group_keys_ref <ptr <ptr u8>>)
+  (fun agg_dense_grow [Key] ((var group_keys_ref <ptr <ptr u8>>)
                        (var agg_buffers_ref <ptr <ptr <ptr i64>>>)
                        (var old_capacity i64)
                        (var new_capacity i64)
                        (var size i64)
                        (var key_size i64)
                        (var num_aggs i64)
-                       (var key_witness <named Key (template)>)) -> bool
+                       (var key_witness Key)) -> bool
     (block
       (if (|| (< new_capacity size)
               (|| (< new_capacity (: 1 i64))
@@ -142,9 +142,9 @@
       (var old_group_keys = (index group_keys_ref (: 0 i64)))
       (var old_agg_buffers = (index agg_buffers_ref (: 0 i64)))
       (var typed_old =
-        (cast old_group_keys <ptr <named Key (template)>>))
+        (cast old_group_keys <ptr Key>))
       (var typed_new =
-        (cast new_group_keys <ptr <named Key (template)>>))
+        (cast new_group_keys <ptr Key>))
       (var slot i64)
       (= slot (: 0 i64))
       (while (< slot size)
@@ -163,14 +163,14 @@
       (= agg_buffers_ref [(: 0 i64)] new_agg_buffers)
       (return #t)))
 
-  (fun agg_dense_update ((var group_keys <ptr u8>)
+  (fun agg_dense_update [Key] ((var group_keys <ptr u8>)
                          (var agg_buffers <ptr <ptr i64>>)
                          (var dense_slot i64)
-                         (var key <named Key (template)>)
+                         (var key Key)
                          (var value i64)
                          (var is_new bool))
     (block
       (var typed_group_keys =
-        (cast group_keys <ptr <named Key (template)>>))
+        (cast group_keys <ptr Key>))
       (if is_new (block (= typed_group_keys [dense_slot] key)))
       (call agg_apply_reducers agg_buffers dense_slot value is_new))))
