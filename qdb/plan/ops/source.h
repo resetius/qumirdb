@@ -18,7 +18,10 @@ public:
     ISource& GetSource() const { return Source_; }
     const std::string& SourcePath() const { return SourcePath_; }
     const std::string& GetAlias() const { return Alias_; }
-    void SetAlias(std::string alias) { Alias_ = std::move(alias); }
+    // Re-qualifies the output columns as alias.col right away, so build-time
+    // schemas (e.g. a join between two aliases of the same table) don't collide
+    // before the QualifyColumns pass runs.
+    void SetAlias(std::string alias);
 
     const std::string ToString() const override;
 

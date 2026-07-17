@@ -27,6 +27,18 @@ TSourceOperator::TSourceOperator(ISource& source, std::string path)
         StructTypeFromSchema(source.Schema()));
 }
 
+void TSourceOperator::SetAlias(std::string alias) {
+    Alias_ = std::move(alias);
+    std::vector<std::pair<std::string, NQumir::NAst::TTypePtr>> fields;
+    for (const auto& col : Source_.Schema().Columns) {
+        fields.emplace_back(Alias_ + "." + std::string(col.Name), col.Type);
+    }
+    auto qStruct = std::make_shared<NQumir::NAst::TStructType>(std::move(fields));
+    if (auto* fun = static_cast<NQumir::NAst::TFunctionType*>(Type.get())) {
+        fun->ReturnType = std::move(qStruct);
+    }
+}
+
 const std::string TSourceOperator::ToString() const {
     return "(rel source)";
 }
