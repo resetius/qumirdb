@@ -1,2 +1,1 @@
-Error: '*' projection is not supported yet
-
+(rel project (rel source "t"))
