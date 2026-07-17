@@ -15,7 +15,7 @@
           (c_custkey c_custkey)
           (c_count count_0))
         (|c_orders.c_custkey| c_custkey)
-        (|c_orders.col1| col1))
+        (|c_orders.c_count| c_count))
       (keys c_count)
       (agg count_0 count))
     (c_count c_count)

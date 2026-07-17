@@ -390,11 +390,13 @@ std::expected<TOperatorPtr, TError> ApplyColumnAliases(
     if (!project || project.Cast()->Projections().size() != aliases.size()) {
         return std::unexpected(TError("column alias count does not match output columns"));
     }
-    auto& projections = project.Cast()->MutableProjections();
-    for (size_t i = 0; i < projections.size(); ++i) {
-        projections[i].Name = aliases[i];
+    // Rebuild through the ctor so the operator's output Type is recomputed from
+    // the renamed columns (mutating Projections in place would leave it stale).
+    std::vector<TProjectionSpec> renamed = project.Cast()->Projections();
+    for (size_t i = 0; i < renamed.size(); ++i) {
+        renamed[i].Name = aliases[i];
     }
-    return plan;
+    return std::make_shared<TProjectOperator>(project.Cast()->Input(), std::move(renamed));
 }
 
 // Qualifies a subplan's output columns as `alias.col`. Source tables get this from

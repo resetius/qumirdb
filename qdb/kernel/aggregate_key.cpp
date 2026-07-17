@@ -162,7 +162,10 @@ TAggregateKeyDescriptor BuildAggregateKeyDescriptor(
         int32_t columnIndex = -1;
         TTypePtr type;
         for (int32_t i = 0; i < static_cast<int32_t>(inputType.Fields.size()); ++i) {
-            if (inputType.Fields[i].first == key) {
+            const auto& name = inputType.Fields[i].first;
+            const auto dot = name.rfind('.');
+            const std::string bare = dot != std::string::npos ? name.substr(dot + 1) : name;
+            if (name == key || bare == key) {
                 columnIndex = i;
                 type = inputType.Fields[i].second;
                 break;
