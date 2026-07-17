@@ -22,10 +22,10 @@
     (block
       (return (& (+ index (: 1 i64)) (- capacity (: 1 i64))))))
 
-  (fun rh_insert_fixed ((var keys <ptr <named Key (template)>>)
+  (fun rh_insert_fixed [Key] ((var keys <ptr Key>)
                         (var dist <ptr i64>)
                         (var capacity i64)
-                        (var key <named Key (template)>)) -> i64
+                        (var key Key)) -> i64
     (block
       (var carried = key)
       (var carried_dist i64)

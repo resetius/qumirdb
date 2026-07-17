@@ -95,6 +95,7 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileKeyOperation(
     auto call = std::make_shared<TCallExpr>(TLocation{},
         std::make_shared<TIdentExpr>(TLocation{}, operation), std::move(args));
     auto function = std::make_shared<TFunDecl>(TLocation{}, entryName,
+        std::vector<TGenericParam>{},
         std::move(params), std::make_shared<TBlockExpr>(TLocation{},
             std::vector<TExprPtr>{
                 std::make_shared<TReturnExpr>(TLocation{}, std::move(call))}),
@@ -177,6 +178,7 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileCloneEntry(
         std::make_shared<TVarStmt>(TLocation{}, "stored", ptrStored),
     };
     auto function = std::make_shared<TFunDecl>(TLocation{}, "clone_key",
+        std::vector<TGenericParam>{},
         std::move(params), std::make_shared<TBlockExpr>(TLocation{},
             std::vector<TExprPtr>{
                 std::move(assignOutput),

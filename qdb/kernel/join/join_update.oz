@@ -16,9 +16,9 @@
   ;; orders the emitted pair as (left, right): non-zero means the current row is
   ;; left, zero means it is right. Returns #f only on PairBuffer allocation
   ;; failure.
-  (fun jt_probe_and_emit ((var build <ref HashTable>)
-                          (var key <named LookupKey (template)>)
-                          (var stored_witness <named StoredKey (template)>)
+  (fun jt_probe_and_emit [LookupKey StoredKey] ((var build <ref HashTable>)
+                          (var key LookupKey)
+                          (var stored_witness StoredKey)
                           (var row_id i64)
                           (var is_left i64)
                           (var pairs <ref PairBuffer>)
@@ -28,7 +28,7 @@
                           (var stream_right_batch <ref TRowSet>)) -> bool
     (block
       (var build_keys =
-        (cast (field build Keys) <ptr <named StoredKey (template)>>))
+        (cast (field build Keys) <ptr StoredKey>))
       (var build_slot = (call rh_lookup_dual build_keys (field build Dist)
                         (field build SlotId) (field build Capacity) key))
       (if (!= build_slot (: -1 i64))
@@ -67,10 +67,10 @@
   ;; Probe the opposite table for `key`, emit one pair per matching stored row,
   ;; then insert `own_row_id` under `key` into the own table. is_left orders the
   ;; emitted pair as (left, right). Returns #f only on allocation failure.
-  (fun jt_emit_and_insert ((var own <ref HashTable>)
+  (fun jt_emit_and_insert [LookupKey StoredKey] ((var own <ref HashTable>)
                            (var opp <ref HashTable>)
-                           (var key <named LookupKey (template)>)
-                           (var stored_witness <named StoredKey (template)>)
+                           (var key LookupKey)
+                           (var stored_witness StoredKey)
                            (var own_row_id i64)
                            (var is_left i64)
                            (var pairs <ref PairBuffer>)
@@ -93,9 +93,9 @@
   ;; Insert a stored row under `key` without probing the opposite table.
   ;; Used by residual SEMI / ANTI: the right table is an i64 matched-id set, not
   ;; a join-key table, so left build must not call jt_probe_and_emit first.
-  (fun jt_insert_row_only ((var own <ref HashTable>)
-                           (var key <named LookupKey (template)>)
-                           (var stored_witness <named StoredKey (template)>)
+  (fun jt_insert_row_only [LookupKey StoredKey] ((var own <ref HashTable>)
+                           (var key LookupKey)
+                           (var stored_witness StoredKey)
                            (var own_row_id i64)) -> bool
     (block
       (var is_new i64)
@@ -109,9 +109,9 @@
   ;; Insert only the key into own table without storing a row ID.
   ;; Used for the non-retained side (right side) of SEMI / ANTI joins —
   ;; the right table is queried for key existence only, not row materialization.
-  (fun jt_insert_slot_only ((var own <ref HashTable>)
-                            (var key <named LookupKey (template)>)
-                            (var stored_witness <named StoredKey (template)>)) -> bool
+  (fun jt_insert_slot_only [LookupKey StoredKey] ((var own <ref HashTable>)
+                            (var key LookupKey)
+                            (var stored_witness StoredKey)) -> bool
     (block
       (var is_new i64)
       (= is_new (: 0 i64))

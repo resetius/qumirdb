@@ -4,11 +4,11 @@ This directory contains standalone oz-lang sources used to develop and test
 the aggregation hash table before it is connected to the physical pipeline.
 
 Production aggregation specializes the same Robin Hood algorithm for scalar
-and composite fixed-width integer/`f64` keys. The algorithm uses a template key
-type:
+and composite fixed-width integer/`f64` keys. Generic helper functions bind the
+key type as a function-level type parameter:
 
 ```text
-<named Key (template)>
+(fun aht_update [Key] (... (var key Key) ...) ...)
 ```
 
 Operations that depend on the key representation (`rh_hash` and equality) are

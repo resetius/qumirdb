@@ -48,7 +48,7 @@ TFunBuilder& TFunBuilder::Assign(std::string name, TExprPtr value) {
 TExprPtr TFunBuilder::Build() && {
     auto body = std::make_shared<TBlockExpr>(Loc(), std::move(Stmts_));
     return std::make_shared<TFunDecl>(
-        Loc(), std::move(Name_), std::move(Params_), std::move(body),
+        Loc(), std::move(Name_), std::vector<TGenericParam>{}, std::move(Params_), std::move(body),
         std::move(RetType_));
 }
 

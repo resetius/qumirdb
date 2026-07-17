@@ -18,19 +18,19 @@
         (^ (field key first)
              (call rh_mix_i64 (field key second)))))))
 
-  (fun rh_rehash ((var old_keys <ptr <named Key (template)>>)
+  (fun rh_rehash [Key] ((var old_keys <ptr Key>)
                   (var old_dist <ptr i64>)
                   (var old_slot_ids <ptr i64>)
                   (var old_capacity i64)
                   (var size i64)
-                  (var old_group_keys <ptr <named Key (template)>>)
+                  (var old_group_keys <ptr Key>)
                   (var old_counts <ptr i64>)
                   (var old_sums <ptr i64>)
-                  (var new_keys <ptr <named Key (template)>>)
+                  (var new_keys <ptr Key>)
                   (var new_dist <ptr i64>)
                   (var new_slot_ids <ptr i64>)
                   (var new_capacity i64)
-                  (var new_group_keys <ptr <named Key (template)>>)
+                  (var new_group_keys <ptr Key>)
                   (var new_counts <ptr i64>)
                   (var new_sums <ptr i64>)) -> i64
     (block

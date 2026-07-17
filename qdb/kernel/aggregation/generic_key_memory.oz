@@ -1,18 +1,18 @@
 (block
   (pragma language overloads)
 
-  (fun rh_read_key ((var keys <ptr <named Key (template)>>)
-                    (var index i64)) -> <named Key (template)>
+  (fun rh_read_key [Key] ((var keys <ptr Key>)
+                    (var index i64)) -> Key
     (block
       (return (index keys index))))
 
-  (fun rh_write_key ((var keys <ptr <named Key (template)>>)
+  (fun rh_write_key [Key] ((var keys <ptr Key>)
                      (var index i64)
-                     (var value <named Key (template)>))
+                     (var value Key))
     (block
       (= keys [index] value)))
 
-  (fun rh_swap_keys ((var keys <ptr <named Key (template)>>)
+  (fun rh_swap_keys [Key] ((var keys <ptr Key>)
                      (var left i64)
                      (var right i64))
     (block

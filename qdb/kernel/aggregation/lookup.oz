@@ -22,10 +22,10 @@
     (block
       (return (& (+ index (: 1 i64)) (- capacity (: 1 i64))))))
 
-  (fun rh_find_slot ((var keys <ptr <named Key (template)>>)
+  (fun rh_find_slot [Key] ((var keys <ptr Key>)
                      (var dist <ptr i64>)
                      (var capacity i64)
-                     (var query <named Key (template)>)) -> i64
+                     (var query Key)) -> i64
     (block
       (var index = (call rh_home (call rh_hash query) capacity))
       (var query_dist i64)

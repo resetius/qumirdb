@@ -1,7 +1,7 @@
 (block
   (pragma language overloads)
 
-  (fun agg_table_update_full
+  (fun agg_table_update_full [Key]
        ((var keys_ref <ptr <ptr u8>>)
         (var dist_ref <ptr <ptr i64>>)
         (var slot_ids_ref <ptr <ptr i64>>)
@@ -11,7 +11,7 @@
         (var size_ref <ptr i64>)
         (var key_size i64)
         (var num_aggs i64)
-        (var key <named Key (template)>)
+        (var key Key)
         (var value i64)
         (var out_is_new <ptr i64>)) -> i64
     (block

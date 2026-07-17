@@ -14,12 +14,12 @@
     (block
       (return (== left right))))
 
-  (fun rh_insert_slot_id ((var keys <ptr <named Key (template)>>)
+  (fun rh_insert_slot_id [Key] ((var keys <ptr Key>)
                           (var dist <ptr i64>)
                           (var slot_ids <ptr i64>)
                           (var capacity i64)
                           (var size <ptr i64>)
-                          (var key <named Key (template)>)) -> i64
+                          (var key Key)) -> i64
     (block
       (if (>= (index size (: 0 i64)) capacity)
         (block
