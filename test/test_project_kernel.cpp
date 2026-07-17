@@ -101,6 +101,35 @@ TEST(CompileProject, CompilesFromKernelSpec) {
     EXPECT_EQ(output, (std::array<int64_t, 3>{11, 12, 13}));
 }
 
+TEST(CompileProject, CastsIntegerIfBranchesBeforeLoweringPhi) {
+    TStructType inputType({
+        {"d", std::make_shared<TIntegerType>(TIntegerType::I32)},
+        {"qty", std::make_shared<TIntegerType>(TIntegerType::I32)},
+    });
+    std::vector<TExprPtr> exprs = {
+        Parse("(if (< d (: 10 i32)) qty 0)"),
+    };
+    std::vector<TTypePtr> types = {
+        NKernel::InferProjectExprType(exprs[0], inputType),
+    };
+    auto spec = NKernel::BuildProjectKernelSpec(inputType, exprs, types);
+    auto dispatch = TKernelCompiler().CompileProject(spec);
+
+    std::array<int32_t, 3> d = {5, 10, 3};
+    std::array<int32_t, 3> qty = {11, 22, 33};
+    std::array<TColumn, 2> cols = {
+        TColumn{.Data = reinterpret_cast<char*>(d.data())},
+        TColumn{.Data = reinterpret_cast<char*>(qty.data())},
+    };
+    TRowSet batch{.Columns = cols.data(), .ColumnCount = 2, .RowCount = 3, .RefCount = 1};
+    std::array<int32_t, 3> output{};
+    std::array<void*, 1> outBuffers = {output.data()};
+
+    dispatch(&batch, outBuffers.data());
+
+    EXPECT_EQ(output, (std::array<int32_t, 3>{11, 0, 33}));
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     NQumir::NCodeGen::TLLVMInitializer initializer;
