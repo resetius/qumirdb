@@ -818,7 +818,23 @@ std::expected<TOperatorPtr, TError> BuildSelect(
     for (size_t i = 0; i < select.SelectList->Items.size(); ++i) {
         const auto& item = select.SelectList->Items[i];
         if (item->Star) {
-            return std::unexpected(TError("'*' projection is not supported yet"));
+            auto* schema = static_cast<NAst::TStructType*>(node->OutputColumns().get());
+            if (!schema) {
+                return std::unexpected(TError("'*' over an unresolved input"));
+            }
+            std::string prefix;
+            for (const auto& part : item->StarPrefix) {
+                prefix += part + ".";
+            }
+            for (const auto& [colName, _] : schema->Fields) {
+                if (!prefix.empty() && colName.rfind(prefix, 0) != 0) {
+                    continue;
+                }
+                auto dot = colName.rfind('.');
+                std::string bare = dot != std::string::npos ? colName.substr(dot + 1) : colName;
+                projections.push_back({ .Name = bare, .Expression = Ident({}, colName) });
+            }
+            continue;
         }
         if (HasSubquery(item->Expr)) {
             return std::unexpected(TError("subqueries are not supported yet"));
