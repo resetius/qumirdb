@@ -4,6 +4,12 @@
   (type StringView <struct (Data <ptr u8>) (Size i64)>)
   (type OwnedString <struct (Data <ptr u8>) (Size i64)>)
   (type DATE i32)
+  ;; Nullable stores a regular value plus a validity bit. Most operators are
+  ;; null-propagating: NULL + 1 -> NULL, NULL < 10 -> NULL, 5 < 10 -> TRUE.
+  ;; SQL boolean logic is special and is implemented by Nullable[bool] overloads:
+  ;; FALSE AND NULL -> FALSE, TRUE OR NULL -> TRUE, NULL AND TRUE -> NULL,
+  ;; NULL OR FALSE -> NULL, NOT NULL -> NULL.
+  (type Nullable [T] <struct (Value T) (Valid bool)>)
 
   (type TColumn <struct
     (Data <ptr i8>)
@@ -200,4 +206,347 @@
   (fun qdb_date_add ((var d DATE) (var n i32)) -> DATE (attrs (operator "+"))
     (block (return (bitcast (+ (bitcast d i32) n) DATE))))
   (fun qdb_date_sub ((var d DATE) (var n i32)) -> DATE (attrs (operator "-"))
-    (block (return (bitcast (- (bitcast d i32) n) DATE)))))
+    (block (return (bitcast (- (bitcast d i32) n) DATE))))
+
+  ;; nullables
+  (fun nullable_from_value [T] ((var value T)) -> <named Nullable [T]> (attrs (operator "cast"))
+    (block
+      (return (cast (struct ((Value value) (Valid #t))) <named Nullable [T]>))))
+
+  (fun nullable_add [T] ((var a <named Nullable [T]>)
+        (var b <named Nullable [T]>)) -> <named Nullable [T]> (attrs (operator "+"))
+    (block
+      (return (cast
+        (if (&& (field a Valid) (field b Valid))
+          (struct ((Value (+ (field a Value) (field b Value))) (Valid #t)))
+          (struct ((Valid #f))))
+        <named Nullable [T]>)))))
+
+  (fun nullable_add_rhs [T] ((var a <named Nullable [T]>)
+        (var b T)) -> <named Nullable [T]> (attrs (operator "+"))
+    (block (return (+ a (cast b <named Nullable [T]>)))))
+
+  (fun nullable_add_lhs [T] ((var a T)
+        (var b <named Nullable [T]>)) -> <named Nullable [T]> (attrs (operator "+"))
+    (block (return (+ (cast a <named Nullable [T]>) b))))
+
+  (fun nullable_sub [T] ((var a <named Nullable [T]>)
+        (var b <named Nullable [T]>)) -> <named Nullable [T]> (attrs (operator "-"))
+    (block
+      (return (cast
+        (if (&& (field a Valid) (field b Valid))
+          (struct ((Value (- (field a Value) (field b Value))) (Valid #t)))
+          (struct ((Valid #f))))
+        <named Nullable [T]>)))))
+
+  (fun nullable_sub_rhs [T] ((var a <named Nullable [T]>)
+        (var b T)) -> <named Nullable [T]> (attrs (operator "-"))
+    (block (return (- a (cast b <named Nullable [T]>)))))
+
+  (fun nullable_sub_lhs [T] ((var a T)
+        (var b <named Nullable [T]>)) -> <named Nullable [T]> (attrs (operator "-"))
+    (block (return (- (cast a <named Nullable [T]>) b))))
+
+  (fun nullable_mul [T] ((var a <named Nullable [T]>)
+        (var b <named Nullable [T]>)) -> <named Nullable [T]> (attrs (operator "*"))
+    (block
+      (return (cast
+        (if (&& (field a Valid) (field b Valid))
+          (struct ((Value (* (field a Value) (field b Value))) (Valid #t)))
+          (struct ((Valid #f))))
+        <named Nullable [T]>)))))
+
+  (fun nullable_mul_rhs [T] ((var a <named Nullable [T]>)
+        (var b T)) -> <named Nullable [T]> (attrs (operator "*"))
+    (block (return (* a (cast b <named Nullable [T]>)))))
+
+  (fun nullable_mul_lhs [T] ((var a T)
+        (var b <named Nullable [T]>)) -> <named Nullable [T]> (attrs (operator "*"))
+    (block (return (* (cast a <named Nullable [T]>) b))))
+
+  (fun nullable_div [T] ((var a <named Nullable [T]>)
+        (var b <named Nullable [T]>)) -> <named Nullable [f64]> (attrs (operator "/"))
+    (block
+      (return (cast
+        (if (&& (field a Valid) (field b Valid))
+          (struct ((Value (/ (field a Value) (field b Value))) (Valid #t)))
+          (struct ((Valid #f))))
+        <named Nullable [f64]>)))))
+
+  (fun nullable_div_rhs [T] ((var a <named Nullable [T]>)
+        (var b T)) -> <named Nullable [f64]> (attrs (operator "/"))
+    (block (return (/ a (cast b <named Nullable [T]>)))))
+
+  (fun nullable_div_lhs [T] ((var a T)
+        (var b <named Nullable [T]>)) -> <named Nullable [f64]> (attrs (operator "/"))
+    (block (return (/ (cast a <named Nullable [T]>) b))))
+
+  (fun nullable_mod [T] ((var a <named Nullable [T]>)
+        (var b <named Nullable [T]>)) -> <named Nullable [i64]> (attrs (operator "%"))
+    (block
+      (return (cast
+        (if (&& (field a Valid) (field b Valid))
+          (struct ((Value (% (field a Value) (field b Value))) (Valid #t)))
+          (struct ((Valid #f))))
+        <named Nullable [i64]>)))))
+
+  (fun nullable_mod_rhs [T] ((var a <named Nullable [T]>)
+        (var b T)) -> <named Nullable [i64]> (attrs (operator "%"))
+    (block (return (% a (cast b <named Nullable [T]>)))))
+
+  (fun nullable_mod_lhs [T] ((var a T)
+        (var b <named Nullable [T]>)) -> <named Nullable [i64]> (attrs (operator "%"))
+    (block (return (% (cast a <named Nullable [T]>) b))))
+
+  (fun nullable_neg [T] ((var a <named Nullable [T]>)) -> <named Nullable [T]> (attrs (operator "neg"))
+    (block
+      (return (cast
+        (if (field a Valid)
+          (struct ((Value (- (field a Value))) (Valid #t)))
+          (struct ((Valid #f))))
+        <named Nullable [T]>)))))
+
+  (fun nullable_lt [T] ((var a <named Nullable [T]>)
+        (var b <named Nullable [T]>)) -> <named Nullable [bool]> (attrs (operator "<"))
+    (block
+      (return (cast
+        (if (&& (field a Valid) (field b Valid))
+          (struct ((Value (< (field a Value) (field b Value))) (Valid #t)))
+          (struct ((Valid #f))))
+        <named Nullable [bool]>)))))
+
+  (fun nullable_lt_rhs [T] ((var a <named Nullable [T]>)
+        (var b T)) -> <named Nullable [bool]> (attrs (operator "<"))
+    (block (return (< a (cast b <named Nullable [T]>)))))
+
+  (fun nullable_lt_lhs [T] ((var a T)
+        (var b <named Nullable [T]>)) -> <named Nullable [bool]> (attrs (operator "<"))
+    (block (return (< (cast a <named Nullable [T]>) b))))
+
+  (fun nullable_le [T] ((var a <named Nullable [T]>)
+        (var b <named Nullable [T]>)) -> <named Nullable [bool]> (attrs (operator "<="))
+    (block
+      (return (cast
+        (if (&& (field a Valid) (field b Valid))
+          (struct ((Value (<= (field a Value) (field b Value))) (Valid #t)))
+          (struct ((Valid #f))))
+        <named Nullable [bool]>)))))
+
+  (fun nullable_le_rhs [T] ((var a <named Nullable [T]>)
+        (var b T)) -> <named Nullable [bool]> (attrs (operator "<="))
+    (block (return (<= a (cast b <named Nullable [T]>)))))
+
+  (fun nullable_le_lhs [T] ((var a T)
+        (var b <named Nullable [T]>)) -> <named Nullable [bool]> (attrs (operator "<="))
+    (block (return (<= (cast a <named Nullable [T]>) b))))
+
+  (fun nullable_gt [T] ((var a <named Nullable [T]>)
+        (var b <named Nullable [T]>)) -> <named Nullable [bool]> (attrs (operator ">"))
+    (block
+      (return (cast
+        (if (&& (field a Valid) (field b Valid))
+          (struct ((Value (> (field a Value) (field b Value))) (Valid #t)))
+          (struct ((Valid #f))))
+        <named Nullable [bool]>)))))
+
+  (fun nullable_gt_rhs [T] ((var a <named Nullable [T]>)
+        (var b T)) -> <named Nullable [bool]> (attrs (operator ">"))
+    (block (return (> a (cast b <named Nullable [T]>)))))
+
+  (fun nullable_gt_lhs [T] ((var a T)
+        (var b <named Nullable [T]>)) -> <named Nullable [bool]> (attrs (operator ">"))
+    (block (return (> (cast a <named Nullable [T]>) b))))
+
+  (fun nullable_ge [T] ((var a <named Nullable [T]>)
+        (var b <named Nullable [T]>)) -> <named Nullable [bool]> (attrs (operator ">="))
+    (block
+      (return (cast
+        (if (&& (field a Valid) (field b Valid))
+          (struct ((Value (>= (field a Value) (field b Value))) (Valid #t)))
+          (struct ((Valid #f))))
+        <named Nullable [bool]>)))))
+
+  (fun nullable_ge_rhs [T] ((var a <named Nullable [T]>)
+        (var b T)) -> <named Nullable [bool]> (attrs (operator ">="))
+    (block (return (>= a (cast b <named Nullable [T]>)))))
+
+  (fun nullable_ge_lhs [T] ((var a T)
+        (var b <named Nullable [T]>)) -> <named Nullable [bool]> (attrs (operator ">="))
+    (block (return (>= (cast a <named Nullable [T]>) b))))
+
+  (fun nullable_eq [T] ((var a <named Nullable [T]>)
+        (var b <named Nullable [T]>)) -> <named Nullable [bool]> (attrs (operator "=="))
+    (block
+      (return (cast
+        (if (&& (field a Valid) (field b Valid))
+          (struct ((Value (== (field a Value) (field b Value))) (Valid #t)))
+          (struct ((Valid #f))))
+        <named Nullable [bool]>)))))
+
+  (fun nullable_eq_rhs [T] ((var a <named Nullable [T]>)
+        (var b T)) -> <named Nullable [bool]> (attrs (operator "=="))
+    (block (return (== a (cast b <named Nullable [T]>)))))
+
+  (fun nullable_eq_lhs [T] ((var a T)
+        (var b <named Nullable [T]>)) -> <named Nullable [bool]> (attrs (operator "=="))
+    (block (return (== (cast a <named Nullable [T]>) b))))
+
+  (fun nullable_ne [T] ((var a <named Nullable [T]>)
+        (var b <named Nullable [T]>)) -> <named Nullable [bool]> (attrs (operator "!="))
+    (block
+      (return (cast
+        (if (&& (field a Valid) (field b Valid))
+          (struct ((Value (!= (field a Value) (field b Value))) (Valid #t)))
+          (struct ((Valid #f))))
+        <named Nullable [bool]>)))))
+
+  (fun nullable_ne_rhs [T] ((var a <named Nullable [T]>)
+        (var b T)) -> <named Nullable [bool]> (attrs (operator "!="))
+    (block (return (!= a (cast b <named Nullable [T]>)))))
+
+  (fun nullable_ne_lhs [T] ((var a T)
+        (var b <named Nullable [T]>)) -> <named Nullable [bool]> (attrs (operator "!="))
+    (block (return (!= (cast a <named Nullable [T]>) b))))
+
+  (fun nullable_bit_and [T] ((var a <named Nullable [T]>)
+        (var b <named Nullable [T]>)) -> <named Nullable [T]> (attrs (operator "&"))
+    (block
+      (return (cast
+        (if (&& (field a Valid) (field b Valid))
+          (struct ((Value (& (field a Value) (field b Value))) (Valid #t)))
+          (struct ((Valid #f))))
+        <named Nullable [T]>)))))
+
+  (fun nullable_bit_and_rhs [T] ((var a <named Nullable [T]>)
+        (var b T)) -> <named Nullable [T]> (attrs (operator "&"))
+    (block (return (& a (cast b <named Nullable [T]>)))))
+
+  (fun nullable_bit_and_lhs [T] ((var a T)
+        (var b <named Nullable [T]>)) -> <named Nullable [T]> (attrs (operator "&"))
+    (block (return (& (cast a <named Nullable [T]>) b))))
+
+  (fun nullable_bit_or [T] ((var a <named Nullable [T]>)
+        (var b <named Nullable [T]>)) -> <named Nullable [T]> (attrs (operator "|"))
+    (block
+      (return (cast
+        (if (&& (field a Valid) (field b Valid))
+          (struct ((Value (| (field a Value) (field b Value))) (Valid #t)))
+          (struct ((Valid #f))))
+        <named Nullable [T]>)))))
+
+  (fun nullable_bit_or_rhs [T] ((var a <named Nullable [T]>)
+        (var b T)) -> <named Nullable [T]> (attrs (operator "|"))
+    (block (return (| a (cast b <named Nullable [T]>)))))
+
+  (fun nullable_bit_or_lhs [T] ((var a T)
+        (var b <named Nullable [T]>)) -> <named Nullable [T]> (attrs (operator "|"))
+    (block (return (| (cast a <named Nullable [T]>) b))))
+
+  (fun nullable_bit_xor [T] ((var a <named Nullable [T]>)
+        (var b <named Nullable [T]>)) -> <named Nullable [T]> (attrs (operator "^"))
+    (block
+      (return (cast
+        (if (&& (field a Valid) (field b Valid))
+          (struct ((Value (^ (field a Value) (field b Value))) (Valid #t)))
+          (struct ((Valid #f))))
+        <named Nullable [T]>)))))
+
+  (fun nullable_bit_xor_rhs [T] ((var a <named Nullable [T]>)
+        (var b T)) -> <named Nullable [T]> (attrs (operator "^"))
+    (block (return (^ a (cast b <named Nullable [T]>)))))
+
+  (fun nullable_bit_xor_lhs [T] ((var a T)
+        (var b <named Nullable [T]>)) -> <named Nullable [T]> (attrs (operator "^"))
+    (block (return (^ (cast a <named Nullable [T]>) b))))
+
+  (fun nullable_shl [T] ((var a <named Nullable [T]>)
+        (var b <named Nullable [T]>)) -> <named Nullable [T]> (attrs (operator "<<"))
+    (block
+      (return (cast
+        (if (&& (field a Valid) (field b Valid))
+          (struct ((Value (<< (field a Value) (field b Value))) (Valid #t)))
+          (struct ((Valid #f))))
+        <named Nullable [T]>)))))
+
+  (fun nullable_shl_rhs [T] ((var a <named Nullable [T]>)
+        (var b T)) -> <named Nullable [T]> (attrs (operator "<<"))
+    (block (return (<< a (cast b <named Nullable [T]>)))))
+
+  (fun nullable_shl_lhs [T] ((var a T)
+        (var b <named Nullable [T]>)) -> <named Nullable [T]> (attrs (operator "<<"))
+    (block (return (<< (cast a <named Nullable [T]>) b))))
+
+  (fun nullable_shr [T] ((var a <named Nullable [T]>)
+        (var b <named Nullable [T]>)) -> <named Nullable [T]> (attrs (operator ">>"))
+    (block
+      (return (cast
+        (if (&& (field a Valid) (field b Valid))
+          (struct ((Value (>> (field a Value) (field b Value))) (Valid #t)))
+          (struct ((Valid #f))))
+        <named Nullable [T]>)))))
+
+  (fun nullable_shr_rhs [T] ((var a <named Nullable [T]>)
+        (var b T)) -> <named Nullable [T]> (attrs (operator ">>"))
+    (block (return (>> a (cast b <named Nullable [T]>)))))
+
+  (fun nullable_shr_lhs [T] ((var a T)
+        (var b <named Nullable [T]>)) -> <named Nullable [T]> (attrs (operator ">>"))
+    (block (return (>> (cast a <named Nullable [T]>) b))))
+
+  (fun nullable_bit_not [T] ((var a <named Nullable [T]>)) -> <named Nullable [T]> (attrs (operator "~"))
+    (block
+      (return (cast
+        (if (field a Valid)
+          (struct ((Value (~ (field a Value))) (Valid #t)))
+          (struct ((Valid #f))))
+        <named Nullable [T]>)))))
+
+  (fun nullable_bool_and ((var a <named Nullable [bool]>)
+        (var b <named Nullable [bool]>)) -> <named Nullable [bool]> (attrs (operator "&&"))
+    (block
+      (return (cast
+        (if (|| (&& (field a Valid) (! (field a Value)))
+                (&& (field b Valid) (! (field b Value))))
+          (struct ((Value #f) (Valid #t)))
+          (if (&& (field a Valid) (field b Valid))
+            (struct ((Value (&& (field a Value) (field b Value))) (Valid #t)))
+            (struct ((Valid #f)))))
+        <named Nullable [bool]>)))))
+
+  (fun nullable_bool_and_rhs ((var a <named Nullable [bool]>)
+        (var b bool)) -> <named Nullable [bool]> (attrs (operator "&&"))
+    (block (return (&& a (cast b <named Nullable [bool]>)))))
+
+  (fun nullable_bool_and_lhs ((var a bool)
+        (var b <named Nullable [bool]>)) -> <named Nullable [bool]> (attrs (operator "&&"))
+    (block (return (&& (cast a <named Nullable [bool]>) b))))
+
+  (fun nullable_bool_or ((var a <named Nullable [bool]>)
+        (var b <named Nullable [bool]>)) -> <named Nullable [bool]> (attrs (operator "||"))
+    (block
+      (return (cast
+        (if (|| (&& (field a Valid) (field a Value))
+                (&& (field b Valid) (field b Value)))
+          (struct ((Value #t) (Valid #t)))
+          (if (&& (field a Valid) (field b Valid))
+            (struct ((Value (|| (field a Value) (field b Value))) (Valid #t)))
+            (struct ((Valid #f)))))
+        <named Nullable [bool]>)))))
+
+  (fun nullable_bool_or_rhs ((var a <named Nullable [bool]>)
+        (var b bool)) -> <named Nullable [bool]> (attrs (operator "||"))
+    (block (return (|| a (cast b <named Nullable [bool]>)))))
+
+  (fun nullable_bool_or_lhs ((var a bool)
+        (var b <named Nullable [bool]>)) -> <named Nullable [bool]> (attrs (operator "||"))
+    (block (return (|| (cast a <named Nullable [bool]>) b))))
+
+  (fun nullable_bool_not ((var a <named Nullable [bool]>)) -> <named Nullable [bool]> (attrs (operator "!"))
+    (block
+      (return (cast
+        (if (field a Valid)
+          (struct ((Value (! (field a Value))) (Valid #t)))
+          (struct ((Valid #f))))
+        <named Nullable [bool]>)))))
+
+)
