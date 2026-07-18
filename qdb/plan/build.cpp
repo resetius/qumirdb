@@ -417,6 +417,20 @@ TOperatorPtr AliasSubplan(TOperatorPtr plan, const std::string& alias) {
     return std::make_shared<TProjectOperator>(std::move(plan), std::move(projections));
 }
 
+// SELECT DISTINCT: dedup by grouping on every output column. A pass-through project
+// on top keeps a project-typed root (scalar-subquery/CTE handling relies on it) and
+// preserves column order.
+TOperatorPtr ApplyDistinct(TOperatorPtr projected, const std::vector<std::string>& columns) {
+    auto agg = std::make_shared<TAggregateOperator>(
+        std::move(projected), columns, std::vector<TAggregateSpec>{});
+    std::vector<TProjectionSpec> passthrough;
+    passthrough.reserve(columns.size());
+    for (const auto& col : columns) {
+        passthrough.push_back({ .Name = col, .Expression = Ident({}, col) });
+    }
+    return std::make_shared<TProjectOperator>(std::move(agg), std::move(passthrough));
+}
+
 std::expected<TOperatorPtr, TError> BuildTableRef(
     const NSql::TSqlPtr<NSql::TSqlTableRef>& ref,
     const TTableSourceFactory& sources)
@@ -625,10 +639,18 @@ void CollectLocalColumns(
     std::unordered_set<std::string>& out)
 {
     if (auto table = NSql::TMaybeNode<NSql::TSqlTableName>(ref)) {
-        if (auto src = sources(TableName(table.Cast()->Name))) {
+        auto node = table.Cast();
+        if (auto src = sources(TableName(node->Name))) {
             if (auto source = TMaybeOp<TSourceOperator>(*src)) {
+                // Qualify by the table's alias (or its name), so a local column of
+                // `item j` (`j.i_category`) is distinguishable from an outer column
+                // of another alias of the same table (`i.i_category`); a bare name
+                // is also kept for unqualified references.
+                const std::string prefix =
+                    node->Alias ? *node->Alias : node->Name.back();
                 for (const auto& col : source.Cast()->GetSource().Schema().Columns) {
                     out.insert(std::string(col.Name));
+                    out.insert(prefix + "." + std::string(col.Name));
                 }
             }
         }
@@ -636,6 +658,81 @@ void CollectLocalColumns(
         CollectLocalColumns(join.Cast()->Left, sources, out);
         CollectLocalColumns(join.Cast()->Right, sources, out);
     }
+}
+
+// Collects correlation equalities (outer_col == local_col) anywhere in a subquery
+// predicate — including inside OR/AND — so a correlation buried in a disjunction is
+// lifted too (not only top-level conjuncts).
+void CollectCorrelations(
+    const NAst::TExprPtr& expr,
+    const std::unordered_set<std::string>& local,
+    std::vector<std::pair<std::string, std::string>>& out) // (outer, local)
+{
+    if (!expr) {
+        return;
+    }
+    if (auto binary = NAst::TMaybeNode<NAst::TBinaryExpr>(expr);
+        binary && binary.Cast()->Operator == "==")
+    {
+        auto left = NAst::TMaybeNode<NAst::TIdentExpr>(binary.Cast()->Left);
+        auto right = NAst::TMaybeNode<NAst::TIdentExpr>(binary.Cast()->Right);
+        if (left && right) {
+            const std::string& ln = left.Cast()->Name;
+            const std::string& rn = right.Cast()->Name;
+            bool lLocal = local.count(ln) > 0;
+            bool rLocal = local.count(rn) > 0;
+            if (lLocal && !rLocal) {
+                out.emplace_back(rn, ln);
+                return;
+            }
+            if (rLocal && !lLocal) {
+                out.emplace_back(ln, rn);
+                return;
+            }
+        }
+    }
+    for (auto* child : expr->MutableChildren()) {
+        CollectCorrelations(*child, local, out);
+    }
+}
+
+// Renames identifier leaves in place per `rename` (outer column -> local column).
+void RenameIdents(
+    const NAst::TExprPtr& expr,
+    const std::unordered_map<std::string, std::string>& rename)
+{
+    if (!expr) {
+        return;
+    }
+    if (auto ident = NAst::TMaybeNode<NAst::TIdentExpr>(expr)) {
+        if (auto it = rename.find(ident.Cast()->Name); it != rename.end()) {
+            ident.Cast()->Name = it->second;
+        }
+        return;
+    }
+    for (auto* child : expr->MutableChildren()) {
+        RenameIdents(*child, rename);
+    }
+}
+
+// True if any identifier leaf is not a local column (a leftover outer reference not
+// covered by a correlation equality — that shape we cannot decorrelate).
+bool HasUnmappedOuter(
+    const NAst::TExprPtr& expr,
+    const std::unordered_set<std::string>& local)
+{
+    if (!expr) {
+        return false;
+    }
+    if (auto ident = NAst::TMaybeNode<NAst::TIdentExpr>(expr)) {
+        return local.count(ident.Cast()->Name) == 0;
+    }
+    for (auto* child : expr->MutableChildren()) {
+        if (HasUnmappedOuter(*child, local)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 // Replaces each scalar subquery in `expr` with a reference to a fresh column.
@@ -667,46 +764,28 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
                 CollectLocalColumns(item, sources, local);
             }
 
-            // Correlation = an equality with one local and one outer column.
+            // Correlation = an equality with one local and one outer column, found
+            // anywhere in the predicate (deduplicated by the (outer, local) pair).
             std::vector<std::pair<std::string, std::string>> correlation; // (outer, local)
-            std::vector<NAst::TExprPtr> localPreds;
-            std::vector<NAst::TExprPtr> conjuncts;
-            FlattenConjuncts(sel->Where, conjuncts);
-            for (const auto& conj : conjuncts) {
-                bool isCorrelation = false;
-                if (auto binary = NAst::TMaybeNode<NAst::TBinaryExpr>(conj);
-                    binary && binary.Cast()->Operator == "==")
-                {
-                    auto left = NAst::TMaybeNode<NAst::TIdentExpr>(binary.Cast()->Left);
-                    auto right = NAst::TMaybeNode<NAst::TIdentExpr>(binary.Cast()->Right);
-                    if (left && right) {
-                        const std::string& ln = left.Cast()->Name;
-                        const std::string& rn = right.Cast()->Name;
-                        bool lLocal = local.count(ln) > 0;
-                        bool rLocal = local.count(rn) > 0;
-                        if (lLocal && !rLocal) {
-                            correlation.emplace_back(rn, ln);
-                            isCorrelation = true;
-                        } else if (rLocal && !lLocal) {
-                            correlation.emplace_back(ln, rn);
-                            isCorrelation = true;
-                        }
+            {
+                std::vector<std::pair<std::string, std::string>> found;
+                CollectCorrelations(sel->Where, local, found);
+                std::set<std::pair<std::string, std::string>> seen;
+                for (auto& pair : found) {
+                    if (seen.insert(pair).second) {
+                        correlation.push_back(pair);
                     }
-                }
-                if (!isCorrelation) {
-                    localPreds.push_back(conj);
                 }
             }
 
             if (!correlation.empty()) {
                 int id = counter++;
-                // Group by the correlation columns (exposed under fresh names) and
-                // keep only the local predicates.
                 if (!sel->GroupBy) {
                     sel->GroupBy = std::make_shared<NSql::TSqlGroupBy>();
                 }
                 std::vector<NSql::TSqlPtr<NSql::TSqlSelectItem>> prepend;
                 std::vector<TJoinKey> joinKeys;
+                std::unordered_map<std::string, std::string> outerToLocal;
                 for (size_t k = 0; k < correlation.size(); ++k) {
                     const auto& [outerCol, localCol] = correlation[k];
                     std::string corrName =
@@ -718,10 +797,19 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
                     sel->GroupBy->Items.push_back(
                         std::make_shared<NSql::TSqlGroupingExprOrList>(Ident({}, localCol)));
                     joinKeys.push_back({ .Left = outerCol, .Right = corrName });
+                    outerToLocal[outerCol] = localCol;
                 }
                 sel->SelectList->Items.insert(
                     sel->SelectList->Items.begin(), prepend.begin(), prepend.end());
-                sel->Where = localPreds.empty() ? nullptr : Conjoin(localPreds);
+                // Rewrite outer refs to their correlated local columns: a correlation
+                // buried in a disjunction (`a = out AND P1) OR (a = out AND P2)`)
+                // becomes fully local; the correlation itself is enforced by the
+                // group-by + join keys above.
+                RenameIdents(sel->Where, outerToLocal);
+                if (HasUnmappedOuter(sel->Where, local)) {
+                    return std::unexpected(
+                        TError("unsupported correlated subquery (outer column outside an equality)"));
+                }
 
                 auto plan = BuildQuery(*scalar->Query, sources);
                 if (!plan) {
@@ -849,6 +937,13 @@ std::expected<TOperatorPtr, TError> BuildSelect(
         projections.push_back({ .Name = std::move(name), .Expression = std::move(*expr) });
     }
 
+    std::vector<std::string> outputNames;
+    outputNames.reserve(projections.size());
+    for (const auto& p : projections) {
+        outputNames.push_back(p.Name);
+    }
+    const bool distinct = select.Quantifier == NSql::ESetQuantifier::Distinct;
+
     // A scalar subquery in HAVING is left intact by the aggregate collector
     // (it is opaque) and decorrelated below, once the aggregate node exists.
     NAst::TExprPtr having;
@@ -865,7 +960,9 @@ std::expected<TOperatorPtr, TError> BuildSelect(
         if (having) {
             return std::unexpected(TError("HAVING requires aggregation"));
         }
-        return std::make_shared<TProjectOperator>(std::move(node), std::move(projections));
+        TOperatorPtr projected =
+            std::make_shared<TProjectOperator>(std::move(node), std::move(projections));
+        return distinct ? ApplyDistinct(std::move(projected), outputNames) : projected;
     }
 
     std::vector<TGroupKey> groupKeys;
@@ -992,7 +1089,9 @@ std::expected<TOperatorPtr, TError> BuildSelect(
         }
         node = std::make_shared<TFilterOperator>(std::move(node), std::move(*rewritten));
     }
-    return std::make_shared<TProjectOperator>(std::move(node), std::move(projections));
+    TOperatorPtr projected =
+        std::make_shared<TProjectOperator>(std::move(node), std::move(projections));
+    return distinct ? ApplyDistinct(std::move(projected), outputNames) : projected;
 }
 
 // Deep-clones the expressions embedded in an operator subtree, so a sub-plan
