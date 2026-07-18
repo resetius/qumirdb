@@ -20,7 +20,11 @@
                   ()
                   (inner))
                 (rel project
-                  (rel filter (rel source "date_dim") (&& (== d_year 2000) (== d_moy 2)))
+                  (rel aggregate
+                    (rel project
+                      (rel filter (rel source "date_dim") (&& (== d_year 2000) (== d_moy 2)))
+                      (d_month_seq d_month_seq))
+                    (keys d_month_seq))
                   (__scalar_0__ d_month_seq))
                 ()
                 (inner))

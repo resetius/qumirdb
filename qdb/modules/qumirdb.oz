@@ -220,7 +220,7 @@
         (if (&& (field a Valid) (field b Valid))
           (struct ((Value (+ (field a Value) (field b Value))) (Valid #t)))
           (struct ((Valid #f))))
-        <named Nullable [T]>)))))
+        <named Nullable [T]>))))
 
   (fun nullable_add_rhs [T] ((var a <named Nullable [T]>)
         (var b T)) -> <named Nullable [T]> (attrs (operator "+"))
@@ -237,7 +237,7 @@
         (if (&& (field a Valid) (field b Valid))
           (struct ((Value (- (field a Value) (field b Value))) (Valid #t)))
           (struct ((Valid #f))))
-        <named Nullable [T]>)))))
+        <named Nullable [T]>))))
 
   (fun nullable_sub_rhs [T] ((var a <named Nullable [T]>)
         (var b T)) -> <named Nullable [T]> (attrs (operator "-"))
@@ -254,7 +254,7 @@
         (if (&& (field a Valid) (field b Valid))
           (struct ((Value (* (field a Value) (field b Value))) (Valid #t)))
           (struct ((Valid #f))))
-        <named Nullable [T]>)))))
+        <named Nullable [T]>))))
 
   (fun nullable_mul_rhs [T] ((var a <named Nullable [T]>)
         (var b T)) -> <named Nullable [T]> (attrs (operator "*"))
@@ -271,7 +271,7 @@
         (if (&& (field a Valid) (field b Valid))
           (struct ((Value (/ (field a Value) (field b Value))) (Valid #t)))
           (struct ((Valid #f))))
-        <named Nullable [f64]>)))))
+        <named Nullable [f64]>))))
 
   (fun nullable_div_rhs [T] ((var a <named Nullable [T]>)
         (var b T)) -> <named Nullable [f64]> (attrs (operator "/"))
@@ -288,7 +288,7 @@
         (if (&& (field a Valid) (field b Valid))
           (struct ((Value (% (field a Value) (field b Value))) (Valid #t)))
           (struct ((Valid #f))))
-        <named Nullable [i64]>)))))
+        <named Nullable [i64]>))))
 
   (fun nullable_mod_rhs [T] ((var a <named Nullable [T]>)
         (var b T)) -> <named Nullable [i64]> (attrs (operator "%"))
@@ -304,7 +304,7 @@
         (if (field a Valid)
           (struct ((Value (- (field a Value))) (Valid #t)))
           (struct ((Valid #f))))
-        <named Nullable [T]>)))))
+        <named Nullable [T]>))))
 
   (fun nullable_lt [T] ((var a <named Nullable [T]>)
         (var b <named Nullable [T]>)) -> <named Nullable [bool]> (attrs (operator "<"))
@@ -313,7 +313,7 @@
         (if (&& (field a Valid) (field b Valid))
           (struct ((Value (< (field a Value) (field b Value))) (Valid #t)))
           (struct ((Valid #f))))
-        <named Nullable [bool]>)))))
+        <named Nullable [bool]>))))
 
   (fun nullable_lt_rhs [T] ((var a <named Nullable [T]>)
         (var b T)) -> <named Nullable [bool]> (attrs (operator "<"))
@@ -330,7 +330,7 @@
         (if (&& (field a Valid) (field b Valid))
           (struct ((Value (<= (field a Value) (field b Value))) (Valid #t)))
           (struct ((Valid #f))))
-        <named Nullable [bool]>)))))
+        <named Nullable [bool]>))))
 
   (fun nullable_le_rhs [T] ((var a <named Nullable [T]>)
         (var b T)) -> <named Nullable [bool]> (attrs (operator "<="))
@@ -347,7 +347,7 @@
         (if (&& (field a Valid) (field b Valid))
           (struct ((Value (> (field a Value) (field b Value))) (Valid #t)))
           (struct ((Valid #f))))
-        <named Nullable [bool]>)))))
+        <named Nullable [bool]>))))
 
   (fun nullable_gt_rhs [T] ((var a <named Nullable [T]>)
         (var b T)) -> <named Nullable [bool]> (attrs (operator ">"))
@@ -364,7 +364,7 @@
         (if (&& (field a Valid) (field b Valid))
           (struct ((Value (>= (field a Value) (field b Value))) (Valid #t)))
           (struct ((Valid #f))))
-        <named Nullable [bool]>)))))
+        <named Nullable [bool]>))))
 
   (fun nullable_ge_rhs [T] ((var a <named Nullable [T]>)
         (var b T)) -> <named Nullable [bool]> (attrs (operator ">="))
@@ -381,7 +381,7 @@
         (if (&& (field a Valid) (field b Valid))
           (struct ((Value (== (field a Value) (field b Value))) (Valid #t)))
           (struct ((Valid #f))))
-        <named Nullable [bool]>)))))
+        <named Nullable [bool]>))))
 
   (fun nullable_eq_rhs [T] ((var a <named Nullable [T]>)
         (var b T)) -> <named Nullable [bool]> (attrs (operator "=="))
@@ -398,7 +398,7 @@
         (if (&& (field a Valid) (field b Valid))
           (struct ((Value (!= (field a Value) (field b Value))) (Valid #t)))
           (struct ((Valid #f))))
-        <named Nullable [bool]>)))))
+        <named Nullable [bool]>))))
 
   (fun nullable_ne_rhs [T] ((var a <named Nullable [T]>)
         (var b T)) -> <named Nullable [bool]> (attrs (operator "!="))
@@ -415,7 +415,7 @@
         (if (&& (field a Valid) (field b Valid))
           (struct ((Value (& (field a Value) (field b Value))) (Valid #t)))
           (struct ((Valid #f))))
-        <named Nullable [T]>)))))
+        <named Nullable [T]>))))
 
   (fun nullable_bit_and_rhs [T] ((var a <named Nullable [T]>)
         (var b T)) -> <named Nullable [T]> (attrs (operator "&"))
@@ -432,7 +432,7 @@
         (if (&& (field a Valid) (field b Valid))
           (struct ((Value (| (field a Value) (field b Value))) (Valid #t)))
           (struct ((Valid #f))))
-        <named Nullable [T]>)))))
+        <named Nullable [T]>))))
 
   (fun nullable_bit_or_rhs [T] ((var a <named Nullable [T]>)
         (var b T)) -> <named Nullable [T]> (attrs (operator "|"))
@@ -449,7 +449,7 @@
         (if (&& (field a Valid) (field b Valid))
           (struct ((Value (^ (field a Value) (field b Value))) (Valid #t)))
           (struct ((Valid #f))))
-        <named Nullable [T]>)))))
+        <named Nullable [T]>))))
 
   (fun nullable_bit_xor_rhs [T] ((var a <named Nullable [T]>)
         (var b T)) -> <named Nullable [T]> (attrs (operator "^"))
@@ -466,7 +466,7 @@
         (if (&& (field a Valid) (field b Valid))
           (struct ((Value (<< (field a Value) (field b Value))) (Valid #t)))
           (struct ((Valid #f))))
-        <named Nullable [T]>)))))
+        <named Nullable [T]>))))
 
   (fun nullable_shl_rhs [T] ((var a <named Nullable [T]>)
         (var b T)) -> <named Nullable [T]> (attrs (operator "<<"))
@@ -483,7 +483,7 @@
         (if (&& (field a Valid) (field b Valid))
           (struct ((Value (>> (field a Value) (field b Value))) (Valid #t)))
           (struct ((Valid #f))))
-        <named Nullable [T]>)))))
+        <named Nullable [T]>))))
 
   (fun nullable_shr_rhs [T] ((var a <named Nullable [T]>)
         (var b T)) -> <named Nullable [T]> (attrs (operator ">>"))
@@ -499,7 +499,7 @@
         (if (field a Valid)
           (struct ((Value (~ (field a Value))) (Valid #t)))
           (struct ((Valid #f))))
-        <named Nullable [T]>)))))
+        <named Nullable [T]>))))
 
   (fun nullable_bool_and ((var a <named Nullable [bool]>)
         (var b <named Nullable [bool]>)) -> <named Nullable [bool]> (attrs (operator "&&"))
@@ -511,7 +511,7 @@
           (if (&& (field a Valid) (field b Valid))
             (struct ((Value (&& (field a Value) (field b Value))) (Valid #t)))
             (struct ((Valid #f)))))
-        <named Nullable [bool]>)))))
+        <named Nullable [bool]>))))
 
   (fun nullable_bool_and_rhs ((var a <named Nullable [bool]>)
         (var b bool)) -> <named Nullable [bool]> (attrs (operator "&&"))
@@ -531,7 +531,7 @@
           (if (&& (field a Valid) (field b Valid))
             (struct ((Value (|| (field a Value) (field b Value))) (Valid #t)))
             (struct ((Valid #f)))))
-        <named Nullable [bool]>)))))
+        <named Nullable [bool]>))))
 
   (fun nullable_bool_or_rhs ((var a <named Nullable [bool]>)
         (var b bool)) -> <named Nullable [bool]> (attrs (operator "||"))
@@ -547,6 +547,6 @@
         (if (field a Valid)
           (struct ((Value (! (field a Value))) (Valid #t)))
           (struct ((Valid #f))))
-        <named Nullable [bool]>)))))
+        <named Nullable [bool]>))))
 
 )

@@ -5,7 +5,7 @@
 #include <qdb/plan/ops/join.h>
 #include <qdb/plan/ops/limit.h>
 #include <qdb/kernel/compiler.h>
-#include <qdb/kernel/project_type.h>
+#include <qdb/kernel/annotate_type.h>
 #include <qdb/kernel/spec.h>
 #include <qdb/plan/types/nullable.h>
 
@@ -187,7 +187,7 @@ TProjectColumnPlan BuildProjectColumnPlan(
             });
             outFields.emplace_back(projection.Name, it->second);
         } else {
-            auto outType = NKernel::InferProjectExprType(
+            auto outType = NKernel::AnnotateExprType(
                 projection.Expression,
                 inputStruct);
             auto jitType = ProjectJitType(outType);
