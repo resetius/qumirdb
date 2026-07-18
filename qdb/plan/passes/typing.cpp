@@ -8,7 +8,7 @@
 #include <qdb/plan/ops/sort.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/ops/union.h>
-#include <qdb/kernel/project_type.h>
+#include <qdb/kernel/annotate_type.h>
 
 #include <qumir/parser/type.h>
 
@@ -79,7 +79,7 @@ void AnnotateTypes(const TOperatorPtr& root) {
                     }
                 } else {
                     // Computed column: infer the expression's result type.
-                    fieldType = NKernel::InferProjectExprType(spec.Expression, *inputStruct);
+                    fieldType = NKernel::AnnotateExprType(spec.Expression, *inputStruct);
                 }
                 outFields.emplace_back(spec.Name, fieldType);
             }

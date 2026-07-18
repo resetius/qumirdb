@@ -279,7 +279,7 @@ public:
 
     // Compiles a project kernel for the computed (non-ident) projections.
     // computedExprs and computedTypes are parallel; computedTypes[k] is the
-    // inferred output type of computedExprs[k] (see InferProjectExprType). The
+    // inferred output type of computedExprs[k] (see AnnotateExprType). The
     // kernel writes each expression to its output buffer, casting to that type.
     TProjectDispatch CompileProject(const NKernel::TOperatorKernelSpec& spec);
 
