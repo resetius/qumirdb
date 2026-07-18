@@ -21,7 +21,7 @@
 #include <qdb/plan/types/nullable.h>
 #include <qdb/kernel/compiler.h>
 #include <qdb/kernel/join_key.h>
-#include <qdb/kernel/project_type.h>
+#include <qdb/kernel/annotate_type.h>
 #include <qdb/scheduler/plan_lowerer.h>
 #include <qdb/scheduler/scan_split.h>
 #include <qdb/sexp/printer.h>
