@@ -50,7 +50,10 @@ size_t ProjectColumnWidth(const NQumir::NAst::TTypePtr& type) {
 NQumir::NAst::TTypePtr ProjectJitType(const NQumir::NAst::TTypePtr& outType) {
     using namespace NQumir::NAst;
     if (TMaybeType<TStringType>(UnwrapNamedType(UnwrapNullableType(outType)))) {
-        return std::make_shared<TNamedType>("StringView", nullptr);
+        TTypePtr sv = std::make_shared<TNamedType>("StringView", nullptr);
+        // Keep nullability so the project kernel emits the Nullable[StringView] split
+        // (Value -> data, Valid -> mask) instead of casting the struct to StringView.
+        return IsNullableType(outType) ? std::make_shared<TNullable>(std::move(sv)) : sv;
     }
     return outType;
 }
@@ -202,6 +205,7 @@ TProjectColumnPlan BuildProjectColumnPlan(
             plan.ComputedJitTypes.push_back(jitType);
             plan.ComputedWidths.push_back(ProjectColumnWidth(outType));
             plan.ComputedIsString.push_back(isStr);
+            plan.ComputedIsNullable.push_back(IsNullableType(outType));
             outFields.emplace_back(projection.Name, outType);
         }
     }
@@ -236,7 +240,8 @@ TUnaryRuntimeProcess BuildProjectRuntimeProcess(
         std::move(plan.Columns),
         std::move(dispatch),
         std::move(plan.ComputedWidths),
-        std::move(plan.ComputedIsString));
+        std::move(plan.ComputedIsString),
+        std::move(plan.ComputedIsNullable));
 
     return {
         .Process = std::move(process),

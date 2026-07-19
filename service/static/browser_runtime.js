@@ -1008,42 +1008,9 @@ function createQdbEnv(getMemory, holder) {
     while (mem[end] !== 0) ++end;
     return mem.subarray(start, end);
   };
-  const cstrEquals = (ptr, text) => {
-    if (Number(ptr) === 0) return false;
-    const bytes = cstrAt(ptr);
-    if (bytes.length !== text.length) return false;
-    for (let i = 0; i < bytes.length; ++i) {
-      if (bytes[i] !== text.charCodeAt(i)) return false;
-    }
-    return true;
-  };
-  const atoi = (ptr) => {
-    if (Number(ptr) === 0) return 0;
-    const bytes = cstrAt(ptr);
-    let i = 0;
-    while (i < bytes.length && (bytes[i] === 32 || (bytes[i] >= 9 && bytes[i] <= 13))) ++i;
-    let sign = 1;
-    if (bytes[i] === 45 || bytes[i] === 43) {
-      sign = bytes[i] === 45 ? -1 : 1;
-      ++i;
-    }
-    let value = 0;
-    while (i < bytes.length && bytes[i] >= 48 && bytes[i] <= 57) {
-      value = value * 10 + (bytes[i] - 48);
-      ++i;
-    }
-    return (sign * value) | 0;
-  };
-
-  const svLit = (t) => (d, s, lit) => (t(compareBytes(bytesAt(d, s), cstrAt(lit))) ? 1 : 0);
-  const litSv = (t) => (lit, d, s) => (t(compareBytes(cstrAt(lit), bytesAt(d, s))) ? 1 : 0);
-  const litLit = (t) => (l, r) => (t(compareBytes(cstrAt(l), cstrAt(r))) ? 1 : 0);
-  const EQ = c => c === 0, NE = c => c !== 0;
-  const LT = c => c < 0, LE = c => c <= 0, GT = c => c > 0, GE = c => c >= 0;
-
-  const sqlDate = (date) => {
-    if (Number(date) === 0) return 0;
-    const bytes = cstrAt(date);
+  // Size-aware: CAST(<string column> AS DATE) passes a non-null-terminated StringView.
+  const sqlDate = (data, size) => {
+    const bytes = bytesAt(data, size);
     const parts = [0, 0, 0];
     let idx = 0;
     for (const b of bytes) {
@@ -1056,11 +1023,25 @@ function createQdbEnv(getMemory, holder) {
     }
     return daysFromCivil(parts[0], parts[1], parts[2]);
   };
-  const sqlInterval = (amount, unit) => {
-    const n = atoi(amount);
-    if (cstrEquals(unit, 'year') || cstrEquals(unit, 'years')) return (n * 365) | 0;
-    if (cstrEquals(unit, 'month') || cstrEquals(unit, 'months')) return (n * 30) | 0;
-    return n;
+  // year/month are approximate (365/30). amount and unit are StringViews.
+  const sqlInterval = (ad, as, ud, us) => {
+    const bytes = bytesAt(ad, as);
+    let n = 0;
+    let neg = false;
+    for (const b of bytes) {
+      if (b === 45) neg = true;
+      else if (b >= 48 && b <= 57) n = n * 10 + (b - 48);
+    }
+    if (neg) n = -n;
+    const bytesEqual = (bs, text) => {
+      if (bs.length !== text.length) return false;
+      for (let i = 0; i < bs.length; ++i) if (bs[i] !== text.charCodeAt(i)) return false;
+      return true;
+    };
+    const u = bytesAt(ud, us);
+    if (bytesEqual(u, 'year') || bytesEqual(u, 'years')) return (n * 365) | 0;
+    if (bytesEqual(u, 'month') || bytesEqual(u, 'months')) return (n * 30) | 0;
+    return n | 0;
   };
   const substring = (out, data, size, start, length) => {
     const strSize = Number(size);
@@ -1089,20 +1070,22 @@ function createQdbEnv(getMemory, holder) {
 
     qdb_filter_string_compare: (ld, ls, rd, rs) =>
       BigInt(compareBytes(bytesAt(ld, ls), bytesAt(rd, rs))),
-    qdb_string_view_cmp_cstr: (d, s, c) => BigInt(compareBytes(bytesAt(d, s), cstrAt(c))),
-    qdb_cstr_cmp_cstr: (a, b) => BigInt(compareBytes(cstrAt(a), cstrAt(b))),
-    qdb_string_view_sql_like: (d, s, p) => BigInt(sqlLikeBytes(bytesAt(d, s), cstrAt(p))),
+    // Pattern is a StringView (string literals are emitted as StringView).
+    qdb_string_view_sql_like: (sd, ss, pd, ps) =>
+      BigInt(sqlLikeBytes(bytesAt(sd, ss), bytesAt(pd, ps))),
     qdb_substring: substring,
     qdb_date_year: dateYear,
     qdb_sql_date: sqlDate,
     qdb_sql_interval: sqlInterval,
 
-    qdb_sv_lit_eq: svLit(EQ), qdb_sv_lit_ne: svLit(NE), qdb_sv_lit_lt: svLit(LT),
-    qdb_sv_lit_le: svLit(LE), qdb_sv_lit_gt: svLit(GT), qdb_sv_lit_ge: svLit(GE),
-    qdb_lit_sv_eq: litSv(EQ), qdb_lit_sv_ne: litSv(NE), qdb_lit_sv_lt: litSv(LT),
-    qdb_lit_sv_le: litSv(LE), qdb_lit_sv_gt: litSv(GT), qdb_lit_sv_ge: litSv(GE),
-    qdb_lit_lit_eq: litLit(EQ), qdb_lit_lit_ne: litLit(NE), qdb_lit_lit_lt: litLit(LT),
-    qdb_lit_lit_le: litLit(LE), qdb_lit_lit_gt: litLit(GT), qdb_lit_lit_ge: litLit(GE),
+    // Cast a string-literal char* to a StringView {Data = lit, Size = strlen}
+    // (sret out pointer). Matches qdb_lit_to_sv in qumirdb_runtime.cpp.
+    qdb_lit_to_sv: (out, lit) => {
+      const bytes = cstrAt(lit);
+      const dv = new DataView(getMemory().buffer);
+      dv.setBigUint64(Number(out), BigInt(lit), true);
+      dv.setBigInt64(Number(out) + 8, BigInt(bytes.length), true);
+    },
 
     // SQL three-valued booleans (0 false, 1 true, 2 unknown); negatives => true.
     qdb_sql_bool_and: (l, r) => {

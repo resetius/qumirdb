@@ -32,19 +32,40 @@
         s_zip
       )
       (item as 30 days
-        (call sum (if (<= (- sr_returned_date_sk ss_sold_date_sk) 30) 1 0))
+        (call sum (if (call qdb_is_true (<= (- sr_returned_date_sk ss_sold_date_sk) 30)) 1 0))
       )
       (item as 31-60 days
-        (call sum (if (&& (> (- sr_returned_date_sk ss_sold_date_sk) 30) (<= (- sr_returned_date_sk ss_sold_date_sk) 60)) 1 0))
+        (call
+          sum
+          (if
+            (call
+              qdb_is_true
+              (&& (> (- sr_returned_date_sk ss_sold_date_sk) 30) (<= (- sr_returned_date_sk ss_sold_date_sk) 60)))
+            1
+            0))
       )
       (item as 61-90 days
-        (call sum (if (&& (> (- sr_returned_date_sk ss_sold_date_sk) 60) (<= (- sr_returned_date_sk ss_sold_date_sk) 90)) 1 0))
+        (call
+          sum
+          (if
+            (call
+              qdb_is_true
+              (&& (> (- sr_returned_date_sk ss_sold_date_sk) 60) (<= (- sr_returned_date_sk ss_sold_date_sk) 90)))
+            1
+            0))
       )
       (item as 91-120 days
-        (call sum (if (&& (> (- sr_returned_date_sk ss_sold_date_sk) 90) (<= (- sr_returned_date_sk ss_sold_date_sk) 120)) 1 0))
+        (call
+          sum
+          (if
+            (call
+              qdb_is_true
+              (&& (> (- sr_returned_date_sk ss_sold_date_sk) 90) (<= (- sr_returned_date_sk ss_sold_date_sk) 120)))
+            1
+            0))
       )
       (item as >120 days
-        (call sum (if (> (- sr_returned_date_sk ss_sold_date_sk) 120) 1 0))
+        (call sum (if (call qdb_is_true (> (- sr_returned_date_sk ss_sold_date_sk) 120)) 1 0))
       )
     )
     (from

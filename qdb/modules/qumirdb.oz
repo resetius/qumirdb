@@ -11,6 +11,8 @@
   ;; NULL OR FALSE -> NULL, NOT NULL -> NULL.
   (type Nullable [T] <struct (Value T) (Valid bool)>)
 
+  (type null_tag <struct (Tag i8)>)
+
   (type TColumn <struct
     (Data <ptr i8>)
     (DataBitOffset i32)
@@ -126,16 +128,18 @@
        (attrs extern) (block))
 
   (fun qdb_string_view_sql_like
-       ((var str StringView) (var pattern string)) -> i64
+       ((var str StringView) (var pattern StringView)) -> i64
        (attrs extern) (block))
 
-  (fun qdb_string_view_cmp_cstr
-       ((var data <ptr u8>) (var size i64) (var cstr string)) -> i64
-       (attrs extern) (block))
-
-  (fun qdb_cstr_cmp_cstr
-       ((var left string) (var right string)) -> i64
-       (attrs extern) (block))
+  ;; LIKE on a nullable string: NULL propagates (NULL LIKE p -> NULL).
+  (fun qdb_string_view_sql_like
+       ((var str <named Nullable [StringView]>) (var pattern StringView)) -> <named Nullable [bool]>
+    (block
+      (return (cast
+        (if (field str Valid)
+          (struct ((Value (!= (call qdb_string_view_sql_like (field str Value) pattern) (: 0 i64))) (Valid #t)))
+          (struct ((Valid #f))))
+        <named Nullable [bool]>))))
 
   (fun qdb_sv_sv_eq ((var left StringView) (var right StringView)) -> bool (attrs (operator "=="))
     (block (return (== (call qdb_filter_string_compare (field left Data) (field left Size) (field right Data) (field right Size)) (: 0 i64)))))
@@ -150,26 +154,12 @@
   (fun qdb_sv_sv_ge ((var left StringView) (var right StringView)) -> bool (attrs (operator ">="))
     (block (return (>= (call qdb_filter_string_compare (field left Data) (field left Size) (field right Data) (field right Size)) (: 0 i64)))))
 
-  (fun qdb_sv_lit_eq ((var left StringView) (var right string)) -> bool (attrs extern (operator "==")) (block))
-  (fun qdb_sv_lit_ne ((var left StringView) (var right string)) -> bool (attrs extern (operator "!=")) (block))
-  (fun qdb_sv_lit_lt ((var left StringView) (var right string)) -> bool (attrs extern (operator "<")) (block))
-  (fun qdb_sv_lit_le ((var left StringView) (var right string)) -> bool (attrs extern (operator "<=")) (block))
-  (fun qdb_sv_lit_gt ((var left StringView) (var right string)) -> bool (attrs extern (operator ">")) (block))
-  (fun qdb_sv_lit_ge ((var left StringView) (var right string)) -> bool (attrs extern (operator ">=")) (block))
+  ;; String literals are emitted as StringView (see the SQL parser), so the literal
+  ;; comparison overloads are gone — qdb_sv_sv_* above handles every comparison.
 
-  (fun qdb_lit_sv_eq ((var left string) (var right StringView)) -> bool (attrs extern (operator "==")) (block))
-  (fun qdb_lit_sv_ne ((var left string) (var right StringView)) -> bool (attrs extern (operator "!=")) (block))
-  (fun qdb_lit_sv_lt ((var left string) (var right StringView)) -> bool (attrs extern (operator "<")) (block))
-  (fun qdb_lit_sv_le ((var left string) (var right StringView)) -> bool (attrs extern (operator "<=")) (block))
-  (fun qdb_lit_sv_gt ((var left string) (var right StringView)) -> bool (attrs extern (operator ">")) (block))
-  (fun qdb_lit_sv_ge ((var left string) (var right StringView)) -> bool (attrs extern (operator ">=")) (block))
-
-  (fun qdb_lit_lit_eq ((var left string) (var right string)) -> bool (attrs extern (operator "==")) (block))
-  (fun qdb_lit_lit_ne ((var left string) (var right string)) -> bool (attrs extern (operator "!=")) (block))
-  (fun qdb_lit_lit_lt ((var left string) (var right string)) -> bool (attrs extern (operator "<")) (block))
-  (fun qdb_lit_lit_le ((var left string) (var right string)) -> bool (attrs extern (operator "<=")) (block))
-  (fun qdb_lit_lit_gt ((var left string) (var right string)) -> bool (attrs extern (operator ">")) (block))
-  (fun qdb_lit_lit_ge ((var left string) (var right string)) -> bool (attrs extern (operator ">=")) (block))
+  ;; Cast a string literal (char*) to a StringView without materializing a managed
+  ;; string. TODO: replace with native qumir support for StringView literals.
+  (fun qdb_lit_to_sv ((var lit string)) -> StringView (attrs extern (operator "cast")) (block))
 
   (fun qdb_substring ((var str StringView) (var start i32) (var length i32)) -> StringView
        (attrs extern) (block))
@@ -179,6 +169,15 @@
 
   (fun substr ((var str StringView) (var start i64) (var length i64)) -> StringView
       (block (call qdb_substring str (cast start i32) (cast length i32))))
+
+  (fun substr
+      ((var str <named Nullable [StringView]>) (var start i64) (var length i64))
+      -> <named Nullable [StringView]>
+    (block
+      (cast (if (field str Valid)
+        (struct ((Value (call qdb_substring (field str Value) (cast start i32) (cast length i32))) (Valid #t)))
+        (struct ((Valid #f))))
+        <named Nullable [StringView]>)))
 
   (fun qdb_bitmap_set_valid ((var bitmap <ptr u8>) (var index i64) (var valid bool)) -> void
     (block
@@ -196,8 +195,8 @@
   (fun qdb_sql_bool_not ((var value i64)) -> i64 (attrs extern) (block))
 
   (fun qdb_date_year ((var days i32)) -> i32 (attrs extern) (block))
-  (fun qdb_sql_date ((var date string)) -> DATE (attrs extern (operator "cast")) (block))
-  (fun qdb_sql_interval ((var amount string) (var unit string)) -> i32 (attrs extern) (block))
+  (fun qdb_sql_date ((var date StringView)) -> DATE (attrs extern (operator "cast")) (block))
+  (fun qdb_sql_interval ((var amount StringView) (var unit StringView)) -> i32 (attrs extern) (block))
 
   (fun qdb_date_to_i32 ((var d DATE)) -> i32 (attrs (operator "cast"))
     (block (return (bitcast d i32))))
@@ -212,6 +211,31 @@
   (fun nullable_from_value [T] ((var value T)) -> <named Nullable [T]> (attrs (operator "cast"))
     (block
       (return (cast (struct ((Value value) (Valid #t))) <named Nullable [T]>))))
+
+  (fun qdb_sql_null () -> null_tag
+    (block
+      (return (cast (struct ((Tag (: 0 i8)))) null_tag))))
+
+  (fun nullable_from_null [T] ((var value null_tag)) -> <named Nullable [T]> (attrs (operator "cast"))
+    (block
+      (return (cast (struct ((Valid #f))) <named Nullable [T]>))))
+
+  (fun qdb_is_null [T] ((var x <named Nullable [T]>)) -> bool
+    (block
+      (return (! (field x Valid)))))
+
+  ;; IS NULL on a non-nullable value is always false.
+  (fun qdb_is_null [T] ((var x T)) -> bool
+    (block (return #f)))
+
+  ;; SQL WHERE truthiness: a row passes iff the predicate is TRUE (NULL is not TRUE).
+  (fun qdb_is_true ((var x bool)) -> bool
+    (block (return x)))
+  (fun qdb_is_true ((var x <named Nullable [bool]>)) -> bool
+    (block (return (&& (field x Valid) (field x Value)))))
+  ;; LIKE and other predicates return i64 (0/1); nonzero is TRUE.
+  (fun qdb_is_true ((var x i64)) -> bool
+    (block (return (!= x (: 0 i64)))))
 
   (fun nullable_add [T] ((var a <named Nullable [T]>)
         (var b <named Nullable [T]>)) -> <named Nullable [T]> (attrs (operator "+"))
@@ -247,14 +271,14 @@
         (var b <named Nullable [T]>)) -> <named Nullable [T]> (attrs (operator "-"))
     (block (return (- (cast a <named Nullable [T]>) b))))
 
-  (fun nullable_mul [T] ((var a <named Nullable [T]>)
-        (var b <named Nullable [T]>)) -> <named Nullable [T]> (attrs (operator "*"))
+  (fun nullable_mul [T1 T2 R] ((var a <named Nullable [T1]>)
+        (var b <named Nullable [T2]>)) -> <named Nullable [R]> (attrs (operator "*"))
     (block
       (return (cast
         (if (&& (field a Valid) (field b Valid))
           (struct ((Value (* (field a Value) (field b Value))) (Valid #t)))
           (struct ((Valid #f))))
-        <named Nullable [T]>))))
+        <named Nullable [R]>))))
 
   (fun nullable_mul_rhs [T] ((var a <named Nullable [T]>)
         (var b T)) -> <named Nullable [T]> (attrs (operator "*"))
@@ -264,8 +288,8 @@
         (var b <named Nullable [T]>)) -> <named Nullable [T]> (attrs (operator "*"))
     (block (return (* (cast a <named Nullable [T]>) b))))
 
-  (fun nullable_div [T] ((var a <named Nullable [T]>)
-        (var b <named Nullable [T]>)) -> <named Nullable [f64]> (attrs (operator "/"))
+  (fun nullable_div [T1 T2] ((var a <named Nullable [T1]>)
+        (var b <named Nullable [T2]>)) -> <named Nullable [f64]> (attrs (operator "/"))
     (block
       (return (cast
         (if (&& (field a Valid) (field b Valid))
@@ -273,13 +297,23 @@
           (struct ((Valid #f))))
         <named Nullable [f64]>))))
 
-  (fun nullable_div_rhs [T] ((var a <named Nullable [T]>)
-        (var b T)) -> <named Nullable [f64]> (attrs (operator "/"))
-    (block (return (/ a (cast b <named Nullable [T]>)))))
+  (fun nullable_div_rhs [T1 T2] ((var a <named Nullable [T1]>)
+        (var b T2)) -> <named Nullable [f64]> (attrs (operator "/"))
+    (block
+      (return (cast
+        (if (field a Valid)
+          (struct ((Value (/ (field a Value) b)) (Valid #t)))
+          (struct ((Valid #f))))
+        <named Nullable [f64]>))))
 
-  (fun nullable_div_lhs [T] ((var a T)
-        (var b <named Nullable [T]>)) -> <named Nullable [f64]> (attrs (operator "/"))
-    (block (return (/ (cast a <named Nullable [T]>) b))))
+  (fun nullable_div_lhs [T1 T2] ((var a T1)
+        (var b <named Nullable [T2]>)) -> <named Nullable [f64]> (attrs (operator "/"))
+    (block
+      (return (cast
+        (if (field b Valid)
+          (struct ((Value (/ a (field b Value))) (Valid #t)))
+          (struct ((Valid #f))))
+        <named Nullable [f64]>))))
 
   (fun nullable_mod [T] ((var a <named Nullable [T]>)
         (var b <named Nullable [T]>)) -> <named Nullable [i64]> (attrs (operator "%"))
@@ -306,8 +340,8 @@
           (struct ((Valid #f))))
         <named Nullable [T]>))))
 
-  (fun nullable_lt [T] ((var a <named Nullable [T]>)
-        (var b <named Nullable [T]>)) -> <named Nullable [bool]> (attrs (operator "<"))
+  (fun nullable_lt [T1 T2] ((var a <named Nullable [T1]>)
+        (var b <named Nullable [T2]>)) -> <named Nullable [bool]> (attrs (operator "<"))
     (block
       (return (cast
         (if (&& (field a Valid) (field b Valid))
@@ -315,16 +349,26 @@
           (struct ((Valid #f))))
         <named Nullable [bool]>))))
 
-  (fun nullable_lt_rhs [T] ((var a <named Nullable [T]>)
-        (var b T)) -> <named Nullable [bool]> (attrs (operator "<"))
-    (block (return (< a (cast b <named Nullable [T]>)))))
+  (fun nullable_lt_rhs [T1 T2] ((var a <named Nullable [T1]>)
+        (var b T2)) -> <named Nullable [bool]> (attrs (operator "<"))
+    (block
+      (return (cast
+        (if (field a Valid)
+          (struct ((Value (< (field a Value) b)) (Valid #t)))
+          (struct ((Valid #f))))
+        <named Nullable [bool]>))))
 
-  (fun nullable_lt_lhs [T] ((var a T)
-        (var b <named Nullable [T]>)) -> <named Nullable [bool]> (attrs (operator "<"))
-    (block (return (< (cast a <named Nullable [T]>) b))))
+  (fun nullable_lt_lhs [T1 T2] ((var a T1)
+        (var b <named Nullable [T2]>)) -> <named Nullable [bool]> (attrs (operator "<"))
+    (block
+      (return (cast
+        (if (field b Valid)
+          (struct ((Value (< a (field b Value))) (Valid #t)))
+          (struct ((Valid #f))))
+        <named Nullable [bool]>))))
 
-  (fun nullable_le [T] ((var a <named Nullable [T]>)
-        (var b <named Nullable [T]>)) -> <named Nullable [bool]> (attrs (operator "<="))
+  (fun nullable_le [T1 T2] ((var a <named Nullable [T1]>)
+        (var b <named Nullable [T2]>)) -> <named Nullable [bool]> (attrs (operator "<="))
     (block
       (return (cast
         (if (&& (field a Valid) (field b Valid))
@@ -332,16 +376,26 @@
           (struct ((Valid #f))))
         <named Nullable [bool]>))))
 
-  (fun nullable_le_rhs [T] ((var a <named Nullable [T]>)
-        (var b T)) -> <named Nullable [bool]> (attrs (operator "<="))
-    (block (return (<= a (cast b <named Nullable [T]>)))))
+  (fun nullable_le_rhs [T1 T2] ((var a <named Nullable [T1]>)
+        (var b T2)) -> <named Nullable [bool]> (attrs (operator "<="))
+    (block
+      (return (cast
+        (if (field a Valid)
+          (struct ((Value (<= (field a Value) b)) (Valid #t)))
+          (struct ((Valid #f))))
+        <named Nullable [bool]>))))
 
-  (fun nullable_le_lhs [T] ((var a T)
-        (var b <named Nullable [T]>)) -> <named Nullable [bool]> (attrs (operator "<="))
-    (block (return (<= (cast a <named Nullable [T]>) b))))
+  (fun nullable_le_lhs [T1 T2] ((var a T1)
+        (var b <named Nullable [T2]>)) -> <named Nullable [bool]> (attrs (operator "<="))
+    (block
+      (return (cast
+        (if (field b Valid)
+          (struct ((Value (<= a (field b Value))) (Valid #t)))
+          (struct ((Valid #f))))
+        <named Nullable [bool]>))))
 
-  (fun nullable_gt [T] ((var a <named Nullable [T]>)
-        (var b <named Nullable [T]>)) -> <named Nullable [bool]> (attrs (operator ">"))
+  (fun nullable_gt [T1 T2] ((var a <named Nullable [T1]>)
+        (var b <named Nullable [T2]>)) -> <named Nullable [bool]> (attrs (operator ">"))
     (block
       (return (cast
         (if (&& (field a Valid) (field b Valid))
@@ -349,16 +403,26 @@
           (struct ((Valid #f))))
         <named Nullable [bool]>))))
 
-  (fun nullable_gt_rhs [T] ((var a <named Nullable [T]>)
-        (var b T)) -> <named Nullable [bool]> (attrs (operator ">"))
-    (block (return (> a (cast b <named Nullable [T]>)))))
+  (fun nullable_gt_rhs [T1 T2] ((var a <named Nullable [T1]>)
+        (var b T2)) -> <named Nullable [bool]> (attrs (operator ">"))
+    (block
+      (return (cast
+        (if (field a Valid)
+          (struct ((Value (> (field a Value) b)) (Valid #t)))
+          (struct ((Valid #f))))
+        <named Nullable [bool]>))))
 
-  (fun nullable_gt_lhs [T] ((var a T)
-        (var b <named Nullable [T]>)) -> <named Nullable [bool]> (attrs (operator ">"))
-    (block (return (> (cast a <named Nullable [T]>) b))))
+  (fun nullable_gt_lhs [T1 T2] ((var a T1)
+        (var b <named Nullable [T2]>)) -> <named Nullable [bool]> (attrs (operator ">"))
+    (block
+      (return (cast
+        (if (field b Valid)
+          (struct ((Value (> a (field b Value))) (Valid #t)))
+          (struct ((Valid #f))))
+        <named Nullable [bool]>))))
 
-  (fun nullable_ge [T] ((var a <named Nullable [T]>)
-        (var b <named Nullable [T]>)) -> <named Nullable [bool]> (attrs (operator ">="))
+  (fun nullable_ge [T1 T2] ((var a <named Nullable [T1]>)
+        (var b <named Nullable [T2]>)) -> <named Nullable [bool]> (attrs (operator ">="))
     (block
       (return (cast
         (if (&& (field a Valid) (field b Valid))
@@ -366,16 +430,26 @@
           (struct ((Valid #f))))
         <named Nullable [bool]>))))
 
-  (fun nullable_ge_rhs [T] ((var a <named Nullable [T]>)
-        (var b T)) -> <named Nullable [bool]> (attrs (operator ">="))
-    (block (return (>= a (cast b <named Nullable [T]>)))))
+  (fun nullable_ge_rhs [T1 T2] ((var a <named Nullable [T1]>)
+        (var b T2)) -> <named Nullable [bool]> (attrs (operator ">="))
+    (block
+      (return (cast
+        (if (field a Valid)
+          (struct ((Value (>= (field a Value) b)) (Valid #t)))
+          (struct ((Valid #f))))
+        <named Nullable [bool]>))))
 
-  (fun nullable_ge_lhs [T] ((var a T)
-        (var b <named Nullable [T]>)) -> <named Nullable [bool]> (attrs (operator ">="))
-    (block (return (>= (cast a <named Nullable [T]>) b))))
+  (fun nullable_ge_lhs [T1 T2] ((var a T1)
+        (var b <named Nullable [T2]>)) -> <named Nullable [bool]> (attrs (operator ">="))
+    (block
+      (return (cast
+        (if (field b Valid)
+          (struct ((Value (>= a (field b Value))) (Valid #t)))
+          (struct ((Valid #f))))
+        <named Nullable [bool]>))))
 
-  (fun nullable_eq [T] ((var a <named Nullable [T]>)
-        (var b <named Nullable [T]>)) -> <named Nullable [bool]> (attrs (operator "=="))
+  (fun nullable_eq [T1 T2] ((var a <named Nullable [T1]>)
+        (var b <named Nullable [T2]>)) -> <named Nullable [bool]> (attrs (operator "=="))
     (block
       (return (cast
         (if (&& (field a Valid) (field b Valid))
@@ -383,16 +457,26 @@
           (struct ((Valid #f))))
         <named Nullable [bool]>))))
 
-  (fun nullable_eq_rhs [T] ((var a <named Nullable [T]>)
-        (var b T)) -> <named Nullable [bool]> (attrs (operator "=="))
-    (block (return (== a (cast b <named Nullable [T]>)))))
+  (fun nullable_eq_rhs [T1 T2] ((var a <named Nullable [T1]>)
+        (var b T2)) -> <named Nullable [bool]> (attrs (operator "=="))
+    (block
+      (return (cast
+        (if (field a Valid)
+          (struct ((Value (== (field a Value) b)) (Valid #t)))
+          (struct ((Valid #f))))
+        <named Nullable [bool]>))))
 
-  (fun nullable_eq_lhs [T] ((var a T)
-        (var b <named Nullable [T]>)) -> <named Nullable [bool]> (attrs (operator "=="))
-    (block (return (== (cast a <named Nullable [T]>) b))))
+  (fun nullable_eq_lhs [T1 T2] ((var a T1)
+        (var b <named Nullable [T2]>)) -> <named Nullable [bool]> (attrs (operator "=="))
+    (block
+      (return (cast
+        (if (field b Valid)
+          (struct ((Value (== a (field b Value))) (Valid #t)))
+          (struct ((Valid #f))))
+        <named Nullable [bool]>))))
 
-  (fun nullable_ne [T] ((var a <named Nullable [T]>)
-        (var b <named Nullable [T]>)) -> <named Nullable [bool]> (attrs (operator "!="))
+  (fun nullable_ne [T1 T2] ((var a <named Nullable [T1]>)
+        (var b <named Nullable [T2]>)) -> <named Nullable [bool]> (attrs (operator "!="))
     (block
       (return (cast
         (if (&& (field a Valid) (field b Valid))
@@ -400,13 +484,23 @@
           (struct ((Valid #f))))
         <named Nullable [bool]>))))
 
-  (fun nullable_ne_rhs [T] ((var a <named Nullable [T]>)
-        (var b T)) -> <named Nullable [bool]> (attrs (operator "!="))
-    (block (return (!= a (cast b <named Nullable [T]>)))))
+  (fun nullable_ne_rhs [T1 T2] ((var a <named Nullable [T1]>)
+        (var b T2)) -> <named Nullable [bool]> (attrs (operator "!="))
+    (block
+      (return (cast
+        (if (field a Valid)
+          (struct ((Value (!= (field a Value) b)) (Valid #t)))
+          (struct ((Valid #f))))
+        <named Nullable [bool]>))))
 
-  (fun nullable_ne_lhs [T] ((var a T)
-        (var b <named Nullable [T]>)) -> <named Nullable [bool]> (attrs (operator "!="))
-    (block (return (!= (cast a <named Nullable [T]>) b))))
+  (fun nullable_ne_lhs [T1 T2] ((var a T1)
+        (var b <named Nullable [T2]>)) -> <named Nullable [bool]> (attrs (operator "!="))
+    (block
+      (return (cast
+        (if (field b Valid)
+          (struct ((Value (!= a (field b Value))) (Valid #t)))
+          (struct ((Valid #f))))
+        <named Nullable [bool]>))))
 
   (fun nullable_bit_and [T] ((var a <named Nullable [T]>)
         (var b <named Nullable [T]>)) -> <named Nullable [T]> (attrs (operator "&"))

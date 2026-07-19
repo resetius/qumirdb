@@ -21,7 +21,7 @@
                   (== c_nationkey s_nationkey))
                 (== s_nationkey n_nationkey))
               (== n_regionkey r_regionkey))
-            (== r_name "MIDDLE EAST"))
+            (== r_name (: (cast "MIDDLE EAST" <named StringView>) <named StringView>)))
           (>= o_orderdate (: 9131 i32)))
         (< o_orderdate (+ (: 9131 i32) (: 365 i32))))
     )

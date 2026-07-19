@@ -11,10 +11,10 @@
         |d1.d_week_seq|
       )
       (item as no_promo
-        (call sum (if (call qdb_sql_is_null p_promo_sk) 1 0))
+        (call sum (if (call qdb_is_true (call qdb_is_null p_promo_sk)) 1 0))
       )
       (item as promo
-        (call sum (if (! (call qdb_sql_is_null p_promo_sk)) 1 0))
+        (call sum (if (call qdb_is_true (! (call qdb_is_null p_promo_sk))) 1 0))
       )
       (item as total_cnt
         (call count *)
@@ -86,9 +86,9 @@
     (where
       (&& (&& (&& (&& (&& (== |d1.d_week_seq| |d2.d_week_seq|) (< inv_quantity_on_hand cs_quantity))
               (> |d3.d_date| (+ |d1.d_date| 5)))
-            (== hd_buy_potential "1001-5000"))
+            (== hd_buy_potential (: (cast "1001-5000" <named StringView>) <named StringView>)))
           (== |d1.d_year| 2001))
-        (== cd_marital_status "M"))
+        (== cd_marital_status (: (cast "M" <named StringView>) <named StringView>)))
     )
     (group-by
       i_item_desc

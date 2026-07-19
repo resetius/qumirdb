@@ -33,7 +33,9 @@
     )
     (where
       (&& (&& (&& (&& (== |c.c_current_addr_sk| |ca.ca_address_sk|)
-              (|| (|| (== ca_state "CO") (== ca_state "IL")) (== ca_state "MN")))
+              (|| (|| (== ca_state (: (cast "CO" <named StringView>) <named StringView>))
+                  (== ca_state (: (cast "IL" <named StringView>) <named StringView>)))
+                (== ca_state (: (cast "MN" <named StringView>) <named StringView>))))
             (== cd_demo_sk |c.c_current_cdemo_sk|))
           (subquery exists (query
         (select

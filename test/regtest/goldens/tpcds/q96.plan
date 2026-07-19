@@ -19,7 +19,7 @@
                     (== |time_dim.t_hour| 8))
                   (>= |time_dim.t_minute| 30))
                 (== |household_demographics.hd_dep_count| 5))
-              (== |store.s_store_name| "ese")))
+              (== |store.s_store_name| (: (cast "ese" <named StringView>) <named StringView>))))
           (__group__ 1))
         (keys __group__)
         (agg count_0 count))

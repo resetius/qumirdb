@@ -54,13 +54,19 @@
   (select
     (select-list
       (item as store_only
-        (call sum (if (&& (! (call qdb_sql_is_null |ssci.customer_sk|)) (call qdb_sql_is_null |csci.customer_sk|)) 1 0))
+        (call
+          sum
+          (if (call qdb_is_true (&& (! (call qdb_is_null |ssci.customer_sk|)) (call qdb_is_null |csci.customer_sk|))) 1 0))
       )
       (item as catalog_only
-        (call sum (if (&& (call qdb_sql_is_null |ssci.customer_sk|) (! (call qdb_sql_is_null |csci.customer_sk|))) 1 0))
+        (call
+          sum
+          (if (call qdb_is_true (&& (call qdb_is_null |ssci.customer_sk|) (! (call qdb_is_null |csci.customer_sk|)))) 1 0))
       )
       (item as store_and_catalog
-        (call sum (if (&& (! (call qdb_sql_is_null |ssci.customer_sk|)) (! (call qdb_sql_is_null |csci.customer_sk|))) 1 0))
+        (call
+          sum
+          (if (call qdb_is_true (&& (! (call qdb_is_null |ssci.customer_sk|)) (! (call qdb_is_null |csci.customer_sk|)))) 1 0))
       )
     )
     (from
