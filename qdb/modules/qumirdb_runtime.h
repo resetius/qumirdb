@@ -38,5 +38,7 @@ int32_t qdb_sql_date(qdb_string_view date);
 // SQL INTERVAL '<amount>' <unit> -> days (year/month approximate: 365/30).
 int32_t qdb_sql_interval(qdb_string_view amount, qdb_string_view unit);
 
+// SQL ROUND(x, digits) -> round half away from zero.
+double qdb_round(double value, int32_t digits);
 
 } // extern "C"

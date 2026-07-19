@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <string_view>
@@ -173,6 +174,12 @@ int32_t qdb_sql_interval(qdb_string_view amount, qdb_string_view unit) {
         return n * 30;
     }
     return n;
+}
+
+// SQL ROUND: round half away from zero to `digits` decimals.
+double qdb_round(double value, int32_t digits) {
+    double factor = std::pow(10.0, digits);
+    return std::round(value * factor) / factor;
 }
 
 } // extern "C"

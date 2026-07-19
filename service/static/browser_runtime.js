@@ -1076,6 +1076,12 @@ function createQdbEnv(getMemory, holder) {
     qdb_date_year: dateYear,
     qdb_sql_date: sqlDate,
     qdb_sql_interval: sqlInterval,
+    // SQL ROUND: round half away from zero (Math.round is half-up, so split the sign).
+    qdb_round: (value, digits) => {
+      const factor = Math.pow(10, digits);
+      const x = value * factor;
+      return (Math.sign(x) * Math.round(Math.abs(x))) / factor;
+    },
 
     // Cast a string-literal char* to a StringView {Data = lit, Size = strlen}
     // (sret out pointer). Matches qdb_lit_to_sv in qumirdb_runtime.cpp.

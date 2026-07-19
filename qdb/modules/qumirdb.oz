@@ -190,6 +190,14 @@
   (fun substr ((var str StringView) (var start i64) (var length i64)) -> StringView
       (block (call qdb_substring str (cast start i32) (cast length i32))))
 
+  ;; SQL ROUND(x[, d]) — round half away from zero to d decimals (std::round in the
+  ;; runtime). The digit count comes in as an i64 literal from the parser.
+  (fun qdb_round ((var value f64) (var digits i32)) -> f64 (attrs extern) (block))
+  (fun round ((var value f64) (var digits i64)) -> f64
+      (block (call qdb_round value (cast digits i32))))
+  (fun round ((var value f64)) -> f64
+      (block (call qdb_round value (: 0 i32))))
+
   (fun qdb_bitmap_set_valid ((var bitmap <ptr u8>) (var index i64) (var valid bool)) -> void
     (block
       (var byte_index = (>> index (: 3 i64)))
