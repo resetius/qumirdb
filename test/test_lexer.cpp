@@ -60,12 +60,15 @@ TEST(SqlLexer, KeywordsAreUppercased) {
     EXPECT_EQ(tokens[2].Name, "WHERE");
 }
 
-TEST(SqlLexer, IdentifiersPreserveCase) {
+TEST(SqlLexer, UnquotedIdentifiersFoldToLowercase) {
     auto tokens = Tokenize("Foo bar_123");
     ASSERT_EQ(tokens.size(), 2u);
 
+    // SQL folds unquoted identifiers case-insensitively; Name is lowercased, the source
+    // spelling is kept in RawValue.
     EXPECT_EQ(tokens[0].Type, TToken::Identifier);
-    EXPECT_EQ(tokens[0].Name, "Foo");
+    EXPECT_EQ(tokens[0].Name, "foo");
+    EXPECT_EQ(tokens[0].RawValue, "Foo");
 
     EXPECT_EQ(tokens[1].Type, TToken::Identifier);
     EXPECT_EQ(tokens[1].Name, "bar_123");

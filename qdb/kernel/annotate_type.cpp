@@ -329,6 +329,20 @@ TTypePtr UnifyBranchTypes(const TTypePtr& a, const TTypePtr& b) {
     return va;
 }
 
+// COALESCE result: value type (unified over non-NULL args) and whether every arg is
+// nullable (a bare NULL arg is ignored). Non-nullable arg ⇒ the whole COALESCE is
+// non-nullable (it is guaranteed to return that arg's value at worst).
+std::pair<TTypePtr, bool> CoalesceValueType(const std::vector<TTypePtr>& argTypes) {
+    TTypePtr v = nullptr;
+    bool allNullable = true;
+    for (const auto& t : argTypes) {
+        if (!t) continue; // bare NULL — never chosen
+        v = v ? UnifyBranchTypes(v, t) : UnwrapNullableType(t);
+        if (!IsNullableType(t)) allNullable = false;
+    }
+    return {v, allNullable};
+}
+
 // The plain (non-null-propagated) result value type of a binary op, matching qumir's
 // AnnotateBinary: `/` -> float, `%` -> i64 (both int), `+ - *`/bitwise -> CommonNumeric,
 // comparisons/logical -> bool. Integer-literal operands adopt the other operand's int
@@ -413,6 +427,12 @@ TTypePtr InferType(const TExprPtr& e, const TStructType& schema) {
         std::vector<TTypePtr> at;
         for (const auto& a : node->Args) {
             at.push_back(InferType(a, schema));
+        }
+        if (name == "coalesce") {
+            auto [v, allNullable] = CoalesceValueType(at);
+            if (!v) return nullptr;
+            return allNullable
+                ? std::static_pointer_cast<TType>(std::make_shared<TNullable>(v)) : v;
         }
         TTypePtr ret = Context().ExternReturnType(name);
         bool nullable = false;
@@ -572,6 +592,66 @@ TExprPtr CoerceBranch(const TExprPtr& branch, const TTypePtr& branchType, bool i
         }, value, counter, loc);
 }
 
+TTypePtr Expand(TExprPtr& e, const TStructType& inputType, uint64_t& counter);
+
+// COALESCE(a, b, ...) -> an `if`-chain: return the first arg with `.Valid`; once a
+// non-nullable arg is reached it is returned directly (result becomes non-nullable).
+// Bare-NULL args are dropped. Args are bound to temps (referenced for both `.Valid` and
+// value). Returns {rewritten expr, planner type}.
+std::pair<TExprPtr, TTypePtr> ExpandCoalesce(const TCallExpr& node,
+    const TStructType& inputType, uint64_t& counter)
+{
+    const TLocation loc = node.Location;
+    std::vector<std::pair<TExprPtr, TTypePtr>> args; // (expr, type); bare NULLs dropped
+    std::vector<TTypePtr> types;
+    for (const auto& a : node.Args) {
+        TExprPtr arg = a;
+        TTypePtr t = Expand(arg, inputType, counter);
+        if (t) { args.emplace_back(arg, t); types.push_back(t); }
+    }
+    auto [T, allNullable] = CoalesceValueType(types);
+    if (args.empty() || !T) {
+        return {MakeNull(loc), nullptr}; // degenerate (all NULL) — untyped
+    }
+    const bool resultNullable = allNullable;
+    auto tq = ToQumirType(T);
+
+    // Terminator = first non-nullable arg (guaranteed value), else the last arg.
+    size_t m = args.size() - 1;
+    for (size_t i = 0; i < args.size(); ++i) {
+        if (!IsNullableType(args[i].second)) { m = i; break; }
+    }
+
+    // The value contributed by a (temp-bound) arg when it is the chosen one.
+    auto pick = [&](const TExprPtr& ref, const TTypePtr& t) -> TExprPtr {
+        if (resultNullable) {
+            return CoerceBranch(ref, t, /*isNull*/false, T, counter, loc); // -> Nullable[T]
+        }
+        TExprPtr val = IsNullableType(t) ? FieldOf(ref, "Value", loc) : CloneExpr(ref);
+        if (TypeKey(UnwrapNullableType(t)) != TypeKey(T)) {
+            val = std::make_shared<TCastExpr>(loc, val, tq); // widen to T
+        }
+        return val;
+    };
+
+    std::vector<TExprPtr> stmts;
+    // Terminator is returned unconditionally (no `.Valid` guard).
+    TExprPtr acc = pick(args[m].first, args[m].second);
+    // Chain args[0..m-1] (all nullable) from the inside out.
+    for (int i = static_cast<int>(m) - 1; i >= 0; --i) {
+        TExprPtr ref = BindTemp(args[i].first, stmts, counter, loc);
+        acc = std::make_shared<TIfExpr>(loc,
+            FieldOf(ref, "Valid", loc), pick(ref, args[i].second), acc);
+    }
+    if (stmts.empty()) {
+        return {acc, resultNullable ? std::static_pointer_cast<TType>(
+            std::make_shared<TNullable>(T)) : T};
+    }
+    stmts.push_back(acc);
+    return {std::make_shared<TBlockExpr>(loc, std::move(stmts)),
+        resultNullable ? std::static_pointer_cast<TType>(std::make_shared<TNullable>(T)) : T};
+}
+
 // Bottom-up rewrite. Mutates `e` in place, returns its planner type (`TNullable`-aware),
 // or nullptr for a bare NULL leaf (the enclosing `if`/op supplies the type).
 TTypePtr Expand(TExprPtr& e, const TStructType& inputType, uint64_t& counter) {
@@ -677,6 +757,11 @@ TTypePtr Expand(TExprPtr& e, const TStructType& inputType, uint64_t& counter) {
         std::string name;
         if (auto id = TMaybeNode<TIdentExpr>(node->Callee)) {
             name = id.Cast()->Name;
+        }
+        if (name == "coalesce") {
+            auto [expr, type] = ExpandCoalesce(*node, inputType, counter);
+            e = expr;
+            return type;
         }
         std::vector<TTypePtr> argTypes;
         for (auto& arg : node->Args) {

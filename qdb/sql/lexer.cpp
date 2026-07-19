@@ -407,8 +407,15 @@ void TTokenStream::Read() {
                     .Location = tokenLocation,
                 });
             } else {
+                // SQL folds unquoted identifiers case-insensitively; parquet columns and
+                // .oz function names are lowercase, so fold to lowercase. Quoted
+                // identifiers (handled above) keep their case.
+                std::string lowerName;
+                for (char c : name) {
+                    lowerName += std::tolower(c);
+                }
                 Tokens.emplace_back(TToken {
-                    .Name = name,
+                    .Name = lowerName,
                     .RawValue = name,
                     .Type = TToken::Identifier,
                     .Location = tokenLocation,

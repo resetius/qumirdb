@@ -1,16 +1,16 @@
 (query
   (select
     (select-list
-      (item as Call_Center
+      (item as call_center
         cc_call_center_id
       )
-      (item as Call_Center_Name
+      (item as call_center_name
         cc_name
       )
-      (item as Manager
+      (item as manager
         cc_manager
       )
-      (item as Returns_Loss
+      (item as returns_loss
         (call sum cr_net_loss)
       )
     )
