@@ -21,7 +21,9 @@
                       (rel project
                         (rel filter
                           (rel source "item")
-                          (|| (|| (== i_color "orchid") (== i_color "chiffon")) (== i_color "lace")))
+                          (|| (|| (== i_color (: (cast "orchid" <named StringView>) <named StringView>))
+                              (== i_color (: (cast "chiffon" <named StringView>) <named StringView>)))
+                            (== i_color (: (cast "lace" <named StringView>) <named StringView>))))
                         (i_item_id i_item_id))
                       ()
                       (left_semi)
@@ -53,7 +55,9 @@
                       (rel project
                         (rel filter
                           (rel source "item")
-                          (|| (|| (== i_color "orchid") (== i_color "chiffon")) (== i_color "lace")))
+                          (|| (|| (== i_color (: (cast "orchid" <named StringView>) <named StringView>))
+                              (== i_color (: (cast "chiffon" <named StringView>) <named StringView>)))
+                            (== i_color (: (cast "lace" <named StringView>) <named StringView>))))
                         (i_item_id i_item_id))
                       ()
                       (left_semi)
@@ -85,7 +89,9 @@
                       (rel project
                         (rel filter
                           (rel source "item")
-                          (|| (|| (== i_color "orchid") (== i_color "chiffon")) (== i_color "lace")))
+                          (|| (|| (== i_color (: (cast "orchid" <named StringView>) <named StringView>))
+                              (== i_color (: (cast "chiffon" <named StringView>) <named StringView>)))
+                            (== i_color (: (cast "lace" <named StringView>) <named StringView>))))
                         (i_item_id i_item_id))
                       ()
                       (left_semi)

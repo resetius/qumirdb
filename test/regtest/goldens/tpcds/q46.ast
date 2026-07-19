@@ -59,9 +59,11 @@
                       (|| (== |household_demographics.hd_dep_count| 5) (== |household_demographics.hd_vehicle_count| 3)))
                     (|| (== |date_dim.d_dow| 6) (== |date_dim.d_dow| 0)))
                   (|| (|| (== |date_dim.d_year| 1999) (== |date_dim.d_year| (+ 1999 1))) (== |date_dim.d_year| (+ 1999 2))))
-                (|| (|| (|| (|| (== |store.s_city| "Midway") (== |store.s_city| "Fairview")) (== |store.s_city| "Fairview"))
-                    (== |store.s_city| "Fairview"))
-                  (== |store.s_city| "Fairview")))
+                (|| (|| (|| (|| (== |store.s_city| (: (cast "Midway" <named StringView>) <named StringView>))
+                        (== |store.s_city| (: (cast "Fairview" <named StringView>) <named StringView>)))
+                      (== |store.s_city| (: (cast "Fairview" <named StringView>) <named StringView>)))
+                    (== |store.s_city| (: (cast "Fairview" <named StringView>) <named StringView>)))
+                  (== |store.s_city| (: (cast "Fairview" <named StringView>) <named StringView>))))
             )
             (group-by
               ss_ticket_number

@@ -30,17 +30,19 @@ namespace {
         "project type inference [" + std::string(stage) + "]: " + cause.ToString());
 }
 
-// Planner column type -> the qumir type the annotator should see. De-risk boundary:
-// nullability is dropped (kernels still materialize scalar values), so a NQdb::TNullable
-// column is passed as its plain underlying type — the annotator resolves ordinary
-// operators, not the generic Nullable[T] overloads. String columns are StringView in
-// kernels. (Increment B will pass Nullable[T] and exercise those overloads.)
+// Planner column type -> the qumir type the annotator should see. String columns are
+// StringView in kernels; nullable columns use qumirdb.oz's Nullable[T] alias so
+// operator result types come from the same source-module overloads kernels use.
 TTypePtr ToQumirType(const TTypePtr& type) {
     if (!type) {
         return type;
     }
     if (IsNullableType(type)) {
-        return ToQumirType(UnwrapNullableType(type));
+        return std::make_shared<TNamedType>(
+            "Nullable",
+            nullptr,
+            std::vector<TGenericArg>{
+                TGenericArg::TypeArg(ToQumirType(UnwrapNullableType(type)))});
     }
     if (TMaybeType<TStringType>(type)) {
         return std::make_shared<TNamedType>("StringView", nullptr);
@@ -48,15 +50,15 @@ TTypePtr ToQumirType(const TTypePtr& type) {
     return type;
 }
 
-// Annotator result -> planner type. De-risk boundary: unwrap Nullable, and map the
-// StringView named type back to a plain string so downstream treats it as a string
-// column.
+// Annotator result -> planner type. Map qumirdb.oz source-module aliases back to
+// planner types.
 TTypePtr FromQumirType(const TTypePtr& type) {
     TTypePtr t = type;
     if (auto named = TMaybeType<TNamedType>(t);
         named && named.Cast()->Name == "Nullable" && !named.Cast()->TypeArgs.empty())
     {
-        t = named.Cast()->TypeArgs.front().Type;
+        return std::make_shared<TNullable>(
+            FromQumirType(named.Cast()->TypeArgs.front().Type));
     }
     if (auto named = TMaybeType<TNamedType>(t); named && named.Cast()->Name == "StringView") {
         return std::make_shared<TStringType>();

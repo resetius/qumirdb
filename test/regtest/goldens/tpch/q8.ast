@@ -5,7 +5,8 @@
         o_year
       )
       (item as mkt_share
-        (/ (call sum (if (== nation "FRANCE") volume 0)) (call sum volume))
+        (/ (call sum (if (call qdb_is_true (== nation (: (cast "FRANCE" <named StringView>) <named StringView>))) volume 0))
+          (call sum volume))
       )
     )
     (from
@@ -38,10 +39,10 @@
                             (== o_custkey c_custkey))
                           (== c_nationkey |n1.n_nationkey|))
                         (== |n1.n_regionkey| r_regionkey))
-                      (== r_name "EUROPE"))
+                      (== r_name (: (cast "EUROPE" <named StringView>) <named StringView>)))
                     (== s_nationkey |n2.n_nationkey|))
                   (&& (<= (: 9131 i32) o_orderdate) (<= o_orderdate (: 9861 i32))))
-                (== p_type "PROMO POLISHED BRASS"))
+                (== p_type (: (cast "PROMO POLISHED BRASS" <named StringView>) <named StringView>)))
             )
           )
         )

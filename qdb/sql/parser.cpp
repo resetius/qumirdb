@@ -321,6 +321,12 @@ NQumir::NAst::TExprPtr cast(TLocation loc, NQumir::NAst::TExprPtr expr, NQumir::
     return std::make_shared<NQumir::NAst::TCastExpr>(loc, std::move(expr), std::move(type));
 }
 
+// Wraps a string's bytes as a qdb_string_view for the parse-time date/interval
+// constant folders (the referenced string must outlive the call).
+qdb_string_view AsStringView(const std::string& s) {
+    return {reinterpret_cast<const uint8_t*>(s.data()), static_cast<int64_t>(s.size())};
+}
+
 NQumir::NAst::TExprPtr list(TLocation loc, std::vector<NQumir::NAst::TExprPtr> items) {
     return std::make_shared<NQumir::NAst::TBlockExpr>(loc, std::move(items));
 }
@@ -1139,7 +1145,7 @@ TAstExprTask comparison_expr(TParserContext& ctx) {
         if (!IsKeyword(next, "NULL")) {
             co_return Error(next, "`NULL' expected after `IS'");
         }
-        auto isNull = call(token.Location, "qdb_sql_is_null", { ret });
+        auto isNull = call(token.Location, "qdb_is_null", { ret });
         co_return notNull ? unary(token.Location, "!"_op, isNull) : isNull;
     }
 
@@ -1259,14 +1265,17 @@ TAstExprTask primary_expr(TParserContext& ctx) {
         if ((unit.Type == TToken::Identifier || unit.Type == TToken::Keyword)
             && IsIntervalUnit(unit.Name)) {
             co_return i32_literal(loc, qdb_sql_interval(
-                std::to_string(token.Value.i64).c_str(), ToLowerStr(unit.Name).c_str()));
+                AsStringView(std::to_string(token.Value.i64)), AsStringView(ToLowerStr(unit.Name))));
         }
         ctx.Stream.Unget(unit);
         co_return std::make_shared<NQumir::NAst::TNumberExpr>(loc, token.Value.i64);
     } else if (token.Type == TToken::Float) {
         co_return std::make_shared<NQumir::NAst::TNumberExpr>(loc, token.Value.f64);
     } else if (token.Type == TToken::String) {
-        co_return std::make_shared<NQumir::NAst::TStringLiteralExpr>(loc, token.Name);
+        // TODO: call struct constructor inplace!
+        auto literal = std::make_shared<NQumir::NAst::TStringLiteralExpr>(loc, token.Name);
+        auto target = std::make_shared<NQumir::NAst::TNamedType>("StringView", nullptr);
+        co_return std::make_shared<NQumir::NAst::TCastExpr>(loc, std::move(literal), std::move(target));
     } else if (token.Type == TToken::Char) {
         auto ret = std::make_shared<NQumir::NAst::TNumberExpr>(loc, token.Value.i64);
         ret->Type = std::make_shared<NQumir::NAst::TIntegerType>(NQumir::NAst::TIntegerType::U8);
@@ -1292,7 +1301,7 @@ TAstExprTask primary_expr(TParserContext& ctx) {
         }
         // TODO: constant functions should be expanded by Qumir constant folding,
         // not special-cased in the SQL parser.
-        co_return i32_literal(loc, qdb_sql_date(value.Name.c_str()));
+        co_return i32_literal(loc, qdb_sql_date(AsStringView(value.Name)));
     }
 
     // <interval_literal> ::= "INTERVAL" <string_literal> <unit>
@@ -1307,7 +1316,7 @@ TAstExprTask primary_expr(TParserContext& ctx) {
         }
         // TODO: constant functions should be expanded by Qumir constant folding,
         // not special-cased in the SQL parser.
-        co_return i32_literal(loc, qdb_sql_interval(value.Name.c_str(), unit.Name.c_str()));
+        co_return i32_literal(loc, qdb_sql_interval(AsStringView(value.Name), AsStringView(unit.Name)));
     }
 
     if (token.Type == TToken::Identifier) {
@@ -1542,7 +1551,10 @@ TAstExprTask case_expr(TParserContext& ctx) {
     }
 
     for (auto it = branches.rbegin(); it != branches.rend(); ++it) {
-        ret = std::make_shared<NQumir::NAst::TIfExpr>(loc, it->first, it->second, ret);
+        // A WHEN condition may be Nullable[bool] (SQL: NULL is not TRUE); qdb_is_true
+        // coerces it to a plain bool for the `if` (identity for a non-nullable bool).
+        auto cond = call(loc, "qdb_is_true", {it->first});
+        ret = std::make_shared<NQumir::NAst::TIfExpr>(loc, std::move(cond), it->second, ret);
     }
     co_return ret;
 }

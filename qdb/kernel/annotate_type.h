@@ -11,8 +11,8 @@ namespace NQdb::NKernel {
 // and type-annotated. External-function and operator (incl. Nullable[T]) return
 // types therefore come from their declarations, not a hand-maintained table.
 //
-// De-risk boundary: the result is unwrapped from Nullable (and StringView is mapped
-// to a string type) so the planner/kernel behaviour is unchanged for now.
+// Source-module aliases are mapped back to planner types: Nullable[T] stays
+// nullable, and StringView becomes a string type.
 // Throws NQumir::TError for expressions the annotator cannot type.
 NQumir::NAst::TTypePtr AnnotateExprType(
     const NQumir::NAst::TExprPtr& expr,

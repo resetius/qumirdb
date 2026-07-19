@@ -11,19 +11,34 @@
         cc_name
       )
       (item as 30 days
-        (call sum (if (<= (- cs_ship_date_sk cs_sold_date_sk) 30) 1 0))
+        (call sum (if (call qdb_is_true (<= (- cs_ship_date_sk cs_sold_date_sk) 30)) 1 0))
       )
       (item as 31-60 days
-        (call sum (if (&& (> (- cs_ship_date_sk cs_sold_date_sk) 30) (<= (- cs_ship_date_sk cs_sold_date_sk) 60)) 1 0))
+        (call
+          sum
+          (if
+            (call qdb_is_true (&& (> (- cs_ship_date_sk cs_sold_date_sk) 30) (<= (- cs_ship_date_sk cs_sold_date_sk) 60)))
+            1
+            0))
       )
       (item as 61-90 days
-        (call sum (if (&& (> (- cs_ship_date_sk cs_sold_date_sk) 60) (<= (- cs_ship_date_sk cs_sold_date_sk) 90)) 1 0))
+        (call
+          sum
+          (if
+            (call qdb_is_true (&& (> (- cs_ship_date_sk cs_sold_date_sk) 60) (<= (- cs_ship_date_sk cs_sold_date_sk) 90)))
+            1
+            0))
       )
       (item as 91-120 days
-        (call sum (if (&& (> (- cs_ship_date_sk cs_sold_date_sk) 90) (<= (- cs_ship_date_sk cs_sold_date_sk) 120)) 1 0))
+        (call
+          sum
+          (if
+            (call qdb_is_true (&& (> (- cs_ship_date_sk cs_sold_date_sk) 90) (<= (- cs_ship_date_sk cs_sold_date_sk) 120)))
+            1
+            0))
       )
       (item as >120 days
-        (call sum (if (> (- cs_ship_date_sk cs_sold_date_sk) 120) 1 0))
+        (call sum (if (call qdb_is_true (> (- cs_ship_date_sk cs_sold_date_sk) 120)) 1 0))
       )
     )
     (from

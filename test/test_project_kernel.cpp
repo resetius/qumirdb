@@ -2,7 +2,7 @@
 
 #include <qdb/io/io.h>
 #include <qdb/kernel/compiler.h>
-#include <qdb/kernel/project_type.h>
+#include <qdb/kernel/annotate_type.h>
 #include <qdb/kernel/spec.h>
 
 #include <qumir/codegen/llvm/llvm_initializer.h>
@@ -47,7 +47,7 @@ TEST(CompileProject, ComputesF64AndI64Columns) {
     std::vector<TExprPtr> exprs = {Parse("(* p (- 1.0 d))"), Parse("(+ k 100)")};
     std::vector<TTypePtr> types;
     for (auto& e : exprs) {
-        types.push_back(NKernel::InferProjectExprType(e, inputType));
+        types.push_back(NKernel::AnnotateExprType(e, inputType));
     }
     ASSERT_TRUE(TMaybeType<TFloatType>(types[0]));
     ASSERT_TRUE(TMaybeType<TIntegerType>(types[1]));
@@ -83,7 +83,7 @@ TEST(CompileProject, CompilesFromKernelSpec) {
     });
     std::vector<TExprPtr> exprs = {Parse("(+ value 10)")};
     std::vector<TTypePtr> types = {
-        NKernel::InferProjectExprType(exprs[0], inputType),
+        NKernel::AnnotateExprType(exprs[0], inputType),
     };
     auto spec = NKernel::BuildProjectKernelSpec(inputType, exprs, types);
     auto dispatch = TKernelCompiler().CompileProject(spec);
@@ -110,7 +110,7 @@ TEST(CompileProject, CastsIntegerIfBranchesBeforeLoweringPhi) {
         Parse("(if (< d (: 10 i32)) qty 0)"),
     };
     std::vector<TTypePtr> types = {
-        NKernel::InferProjectExprType(exprs[0], inputType),
+        NKernel::AnnotateExprType(exprs[0], inputType),
     };
     auto spec = NKernel::BuildProjectKernelSpec(inputType, exprs, types);
     auto dispatch = TKernelCompiler().CompileProject(spec);
@@ -122,12 +122,13 @@ TEST(CompileProject, CastsIntegerIfBranchesBeforeLoweringPhi) {
         TColumn{.Data = reinterpret_cast<char*>(qty.data())},
     };
     TRowSet batch{.Columns = cols.data(), .ColumnCount = 2, .RowCount = 3, .RefCount = 1};
-    std::array<int32_t, 3> output{};
+    // The native annotator unifies the branches (i32 qty, i64 literal 0) to i64.
+    std::array<int64_t, 3> output{};
     std::array<void*, 1> outBuffers = {output.data()};
 
     dispatch(&batch, outBuffers.data());
 
-    EXPECT_EQ(output, (std::array<int32_t, 3>{11, 0, 33}));
+    EXPECT_EQ(output, (std::array<int64_t, 3>{11, 0, 33}));
 }
 
 int main(int argc, char** argv) {

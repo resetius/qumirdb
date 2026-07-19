@@ -35,10 +35,10 @@
     )
     (where
       (&& (&& (&& (&& (&& (&& (&& (== p_partkey ps_partkey) (== s_suppkey ps_suppkey)) (== p_size 37))
-                (call qdb_string_view_sql_like p_type "%BRASS"))
+                (call qdb_string_view_sql_like p_type (: (cast "%BRASS" <named StringView>) <named StringView>)))
               (== s_nationkey n_nationkey))
             (== n_regionkey r_regionkey))
-          (== r_name "EUROPE"))
+          (== r_name (: (cast "EUROPE" <named StringView>) <named StringView>)))
         (== ps_supplycost
           (subquery scalar (query
         (select
@@ -56,7 +56,7 @@
           (where
             (&& (&& (&& (&& (== p_partkey ps_partkey) (== s_suppkey ps_suppkey)) (== s_nationkey n_nationkey))
                 (== n_regionkey r_regionkey))
-              (== r_name "EUROPE"))
+              (== r_name (: (cast "EUROPE" <named StringView>) <named StringView>)))
           )
         )
       )

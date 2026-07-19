@@ -793,6 +793,36 @@ bool UsesNullableValue(
     });
 }
 
+// qumirdb.oz's Nullable[T] = <struct (Value T) (Valid bool)>. Wrap a materialized
+// value + validity into that struct so the .oz nullable operators apply.
+NQumir::NAst::TTypePtr NullableNamedType(const NQumir::NAst::TTypePtr& valueType) {
+    using namespace NQumir::NAst;
+    auto structType = std::make_shared<TStructType>(
+        std::vector<std::pair<std::string, TTypePtr>>{
+            {"Value", valueType}, {"Valid", std::make_shared<TBoolType>()}});
+    return std::make_shared<TNamedType>("Nullable", structType,
+        std::vector<TGenericArg>{TGenericArg::TypeArg(valueType)});
+}
+
+NQumir::NAst::TExprPtr BuildNullableStruct(
+    NQumir::NAst::TExprPtr value,
+    NQumir::NAst::TExprPtr valid,
+    const NQumir::NAst::TTypePtr& valueType)
+{
+    using namespace NQumir::NAst;
+    NQumir::TLocation loc{};
+    // Mirror the .oz operators: (cast (struct ((Value v) (Valid b))) <named Nullable[T]>).
+    // A cast constructs the named struct; a bare `(:)` annotation is weaker and leaves
+    // operator resolution unable to pick the nullable overloads.
+    auto anonStruct = std::make_shared<TStructType>(
+        std::vector<std::pair<std::string, TTypePtr>>{
+            {"Value", valueType}, {"Valid", std::make_shared<TBoolType>()}});
+    auto structLit = std::make_shared<TStructConstructExpr>(loc, anonStruct,
+        std::vector<TExprPtr>{std::move(value), std::move(valid)},
+        std::vector<std::string>{"Value", "Valid"});
+    return std::make_shared<TCastExpr>(loc, structLit, NullableNamedType(valueType));
+}
+
 // Kernel takes (ref TRowSet) directly. Column data pointers are extracted via
 // TRowSet.Columns[colIdx].Data with a two-step cast: <ptr i8> -> i64 -> <ptr T>.
 NQumir::NAst::TExprPtr GenFilterKernelAst(
@@ -878,10 +908,18 @@ NQumir::NAst::TExprPtr GenFilterKernelAst(
             ? stringValues.at(name)
             : fixedValues.at(name);
         if (IsNullableType(type)) {
+            // Bind as Nullable[T] so predicate operators resolve to the .oz nullable
+            // overloads (comparisons -> Nullable[bool], qdb_is_null -> bool).
             validityNames.emplace(valueName, prefix + "_valid");
+            auto nt = NullableNamedType(materialized.ValueType);
+            loopSetup.push_back(NOz::Var(valueName, nt));
+            loopSetup.push_back(NOz::Assign(valueName, BuildNullableStruct(
+                std::move(materialized.Value), std::move(materialized.IsValid),
+                materialized.ValueType)));
+        } else {
+            loopSetup.push_back(NOz::Var(valueName, materialized.ValueType));
+            loopSetup.push_back(NOz::Assign(valueName, std::move(materialized.Value)));
         }
-        loopSetup.push_back(NOz::Var(valueName, materialized.ValueType));
-        loopSetup.push_back(NOz::Assign(valueName, std::move(materialized.Value)));
     }
 
     // Loop
@@ -893,14 +931,14 @@ NQumir::NAst::TExprPtr GenFilterKernelAst(
         std::make_shared<TIdentExpr>(loc, "n"));
     TExprPtr selected;
     if (validityNames.empty() || !UsesNullableValue(predicate, validityNames)) {
+        // No nullable column referenced: ordinary bool predicate (unchanged path).
         selected = std::move(predicate);
     } else {
-        size_t nextTruthTemporary = 0;
-        auto truth = BuildFilterTruthAst(
-            std::move(predicate), validityNames, loopSetup, nextTruthTemporary);
-        selected = std::make_shared<TBinaryExpr>(loc, TOperator("=="),
-            std::make_shared<TIdentExpr>(loc, truth.State),
-            std::make_shared<TNumberExpr>(loc, int64_t{1}));
+        // The predicate evaluates through the .oz nullable operators to Nullable[bool]
+        // (or plain bool); qdb_is_true selects iff it is TRUE (NULL is not TRUE).
+        selected = std::make_shared<TCallExpr>(loc,
+            std::make_shared<TIdentExpr>(loc, "qdb_is_true"),
+            std::vector<TExprPtr>{std::move(predicate)});
     }
     auto castedPred = std::make_shared<TCastExpr>(loc, std::move(selected),
         std::make_shared<TIntegerType>(TIntegerType::U8));
@@ -1212,6 +1250,21 @@ NQumir::NAst::TExprPtr GenProjectKernelAst(
     auto u8Type = std::make_shared<TIntegerType>(TIntegerType::U8);
     auto ptrU8Type = std::make_shared<TPointerType>(u8Type);
     auto ptrPtrU8Type = std::make_shared<TPointerType>(ptrU8Type);
+    auto boolType = std::make_shared<TBoolType>();
+
+    // qumirdb.oz's Nullable[T] = <struct (Value T) (Valid bool)>. Kernels carry
+    // nullable values as this struct so the .oz operators apply; on output the
+    // struct is split back into a data buffer (Value) and a validity mask (Valid).
+    auto nullableType = [&](const TTypePtr& valueType) -> TTypePtr {
+        auto structType = std::make_shared<TStructType>(
+            std::vector<std::pair<std::string, TTypePtr>>{
+                {"Value", valueType}, {"Valid", boolType}});
+        return std::make_shared<TNamedType>("Nullable", structType,
+            std::vector<TGenericArg>{TGenericArg::TypeArg(valueType)});
+    };
+    auto field = [&](const std::string& name, const std::string& f) -> TExprPtr {
+        return std::make_shared<TFieldAccessExpr>(loc, ident(name), f);
+    };
 
     // Collect column names referenced in computed expressions before substitution.
     std::unordered_set<std::string> referencedCols;
@@ -1279,25 +1332,59 @@ NQumir::NAst::TExprPtr GenProjectKernelAst(
             std::make_move_iterator(materialized.Setup.end()));
         const std::string valueName = stringFields.contains(name)
             ? stringValues.at(name) : fixedValues.at(name);
-        loopSetup.push_back(var(valueName, materialized.ValueType));
-        loopSetup.push_back(assign(valueName, std::move(materialized.Value)));
+        if (IsNullableType(type)) {
+            // Bind the column as a Nullable[T] struct so nullable operators apply.
+            loopSetup.push_back(var(valueName, nullableType(materialized.ValueType)));
+            loopSetup.push_back(assign(valueName, BuildNullableStruct(
+                std::move(materialized.Value), std::move(materialized.IsValid),
+                materialized.ValueType)));
+        } else {
+            loopSetup.push_back(var(valueName, materialized.ValueType));
+            loopSetup.push_back(assign(valueName, std::move(materialized.Value)));
+        }
     }
 
-    // Hoist typed output pointers: out_k = (<ptr T_k>) out[k].
-    for (size_t k = 0; k < computedExprs.size(); ++k) {
-        auto ptrTk = std::make_shared<TPointerType>(computedTypes[k]);
+    // Data buffers live at out[k]; validity masks for nullable columns at
+    // out[numComputed + k]. out_k = (<ptr Value_k>) out[k].
+    const size_t numComputed = computedExprs.size();
+    for (size_t k = 0; k < numComputed; ++k) {
+        const bool nullable = IsNullableType(computedTypes[k]);
+        auto valueType = nullable ? UnwrapNullableType(computedTypes[k]) : computedTypes[k];
+        auto ptrTk = std::make_shared<TPointerType>(valueType);
         auto outK = std::make_shared<TIndexExpr>(loc, ident("out"), numI64(int64_t(k)));
         bodyStmts.push_back(var("out_" + std::to_string(k), ptrTk));
         bodyStmts.push_back(assign("out_" + std::to_string(k),
             cast(cast(outK, i64Type), ptrTk)));
+        if (nullable) {
+            auto outMaskK = std::make_shared<TIndexExpr>(loc, ident("out"),
+                numI64(int64_t(numComputed + k)));
+            bodyStmts.push_back(var("out_mask_" + std::to_string(k), ptrU8Type));
+            bodyStmts.push_back(assign("out_mask_" + std::to_string(k),
+                cast(cast(outMaskK, i64Type), ptrU8Type)));
+        }
     }
 
     bodyStmts.push_back(var("i", i64Type));
     bodyStmts.push_back(assign("i", numI64(0)));
-    for (size_t k = 0; k < computedExprs.size(); ++k) {
-        loopSetup.push_back(std::make_shared<TArrayAssignExpr>(loc,
-            "out_" + std::to_string(k), std::vector<TExprPtr>{ident("i")},
-            cast(std::move(computedExprs[k]), computedTypes[k])));
+    for (size_t k = 0; k < numComputed; ++k) {
+        if (IsNullableType(computedTypes[k])) {
+            // Split the Nullable[T] result: Value -> data buffer, Valid -> mask.
+            auto nt = nullableType(UnwrapNullableType(computedTypes[k]));
+            const std::string rName = "r_" + std::to_string(k);
+            loopSetup.push_back(var(rName, nt));
+            loopSetup.push_back(assign(rName, std::move(computedExprs[k])));
+            loopSetup.push_back(std::make_shared<TArrayAssignExpr>(loc,
+                "out_" + std::to_string(k), std::vector<TExprPtr>{ident("i")},
+                field(rName, "Value")));
+            loopSetup.push_back(std::make_shared<TCallExpr>(loc,
+                ident("qdb_bitmap_set_valid"),
+                std::vector<TExprPtr>{ident("out_mask_" + std::to_string(k)),
+                    ident("i"), field(rName, "Valid")}));
+        } else {
+            loopSetup.push_back(std::make_shared<TArrayAssignExpr>(loc,
+                "out_" + std::to_string(k), std::vector<TExprPtr>{ident("i")},
+                cast(std::move(computedExprs[k]), computedTypes[k])));
+        }
     }
     loopSetup.push_back(assign("i",
         std::make_shared<TBinaryExpr>(loc, TOperator("+"), ident("i"), numI64(1))));

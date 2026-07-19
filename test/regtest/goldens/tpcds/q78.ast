@@ -39,7 +39,7 @@
             )
           )
           (where
-            (call qdb_sql_is_null wr_order_number)
+            (call qdb_is_null wr_order_number)
           )
           (group-by
             d_year
@@ -88,7 +88,7 @@
             )
           )
           (where
-            (call qdb_sql_is_null cr_order_number)
+            (call qdb_is_null cr_order_number)
           )
           (group-by
             d_year
@@ -137,7 +137,7 @@
             )
           )
           (where
-            (call qdb_sql_is_null sr_ticket_number)
+            (call qdb_is_null sr_ticket_number)
           )
           (group-by
             d_year

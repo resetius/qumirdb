@@ -2,7 +2,7 @@
   (select
     (select-list
       (item as s
-        (if (> a 0) 1 0)
+        (if (call qdb_is_true (> a 0)) 1 0)
       )
     )
     (from

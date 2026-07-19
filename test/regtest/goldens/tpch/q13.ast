@@ -25,7 +25,8 @@
                 (table customer)
                 (table orders)
                 (on
-                  (&& (== c_custkey o_custkey) (! (call qdb_string_view_sql_like o_comment "%special%packages%")))
+                  (&& (== c_custkey o_custkey)
+                    (! (call qdb_string_view_sql_like o_comment (: (cast "%special%packages%" <named StringView>) <named StringView>))))
                 )
               )
             )

@@ -19,7 +19,9 @@
                         (rel project
                           (rel filter
                             (rel source "date_dim")
-                            (|| (|| (== d_date "1998-01-02") (== d_date "1998-10-15")) (== d_date "1998-11-10")))
+                            (|| (|| (== d_date (: (cast "1998-01-02" <named StringView>) <named StringView>))
+                                (== d_date (: (cast "1998-10-15" <named StringView>) <named StringView>)))
+                              (== d_date (: (cast "1998-11-10" <named StringView>) <named StringView>))))
                           (d_week_seq d_week_seq))
                         ()
                         (left_semi)
@@ -48,7 +50,9 @@
                         (rel project
                           (rel filter
                             (rel source "date_dim")
-                            (|| (|| (== d_date "1998-01-02") (== d_date "1998-10-15")) (== d_date "1998-11-10")))
+                            (|| (|| (== d_date (: (cast "1998-01-02" <named StringView>) <named StringView>))
+                                (== d_date (: (cast "1998-10-15" <named StringView>) <named StringView>)))
+                              (== d_date (: (cast "1998-11-10" <named StringView>) <named StringView>))))
                           (d_week_seq d_week_seq))
                         ()
                         (left_semi)
@@ -79,7 +83,9 @@
                       (rel project
                         (rel filter
                           (rel source "date_dim")
-                          (|| (|| (== d_date "1998-01-02") (== d_date "1998-10-15")) (== d_date "1998-11-10")))
+                          (|| (|| (== d_date (: (cast "1998-01-02" <named StringView>) <named StringView>))
+                              (== d_date (: (cast "1998-10-15" <named StringView>) <named StringView>)))
+                            (== d_date (: (cast "1998-11-10" <named StringView>) <named StringView>))))
                         (d_week_seq d_week_seq))
                       ()
                       (left_semi)

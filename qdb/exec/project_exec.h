@@ -21,6 +21,7 @@ TUnaryStreamProcess MakeProjectProcess(
     std::vector<TProjectColumn> columns,
     TKernelCompiler::TProjectDispatch computeDispatch,
     std::vector<size_t> computedWidths,
-    std::vector<bool> computedIsString = {});
+    std::vector<bool> computedIsString = {},
+    std::vector<bool> computedIsNullable = {});
 
 } // namespace NQdb

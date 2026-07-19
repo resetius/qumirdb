@@ -19,8 +19,8 @@
       (table part)
     )
     (where
-      (&& (&& (&& (&& (== p_partkey ps_partkey) (!= p_brand "Brand#54"))
-            (! (call qdb_string_view_sql_like p_type "PROMO ANODIZED%")))
+      (&& (&& (&& (&& (== p_partkey ps_partkey) (!= p_brand (: (cast "Brand#54" <named StringView>) <named StringView>)))
+            (! (call qdb_string_view_sql_like p_type (: (cast "PROMO ANODIZED%" <named StringView>) <named StringView>))))
           (|| (|| (|| (|| (|| (|| (|| (== p_size 24) (== p_size 47)) (== p_size 25)) (== p_size 36)) (== p_size 22))
                 (== p_size 26))
               (== p_size 49))
@@ -36,7 +36,7 @@
             (table supplier)
           )
           (where
-            (call qdb_string_view_sql_like s_comment "%Customer%Complaints%")
+            (call qdb_string_view_sql_like s_comment (: (cast "%Customer%Complaints%" <named StringView>) <named StringView>))
           )
         )
       )

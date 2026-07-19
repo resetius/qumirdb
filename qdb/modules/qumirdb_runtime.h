@@ -21,30 +21,11 @@ struct qdb_string_view {
     int64_t Size;
 };
 
-int64_t qdb_string_view_sql_like(qdb_string_view str, const char* pattern);
-int64_t qdb_string_view_cmp_cstr(const uint8_t* data, int64_t size, const char* cstr);
-int64_t qdb_cstr_cmp_cstr(const char* a, const char* b);
+int64_t qdb_string_view_sql_like(qdb_string_view str, qdb_string_view pattern);
 
-bool qdb_sv_lit_eq(qdb_string_view left, const char* right);
-bool qdb_sv_lit_ne(qdb_string_view left, const char* right);
-bool qdb_sv_lit_lt(qdb_string_view left, const char* right);
-bool qdb_sv_lit_le(qdb_string_view left, const char* right);
-bool qdb_sv_lit_gt(qdb_string_view left, const char* right);
-bool qdb_sv_lit_ge(qdb_string_view left, const char* right);
-
-bool qdb_lit_sv_eq(const char* left, qdb_string_view right);
-bool qdb_lit_sv_ne(const char* left, qdb_string_view right);
-bool qdb_lit_sv_lt(const char* left, qdb_string_view right);
-bool qdb_lit_sv_le(const char* left, qdb_string_view right);
-bool qdb_lit_sv_gt(const char* left, qdb_string_view right);
-bool qdb_lit_sv_ge(const char* left, qdb_string_view right);
-
-bool qdb_lit_lit_eq(const char* left, const char* right);
-bool qdb_lit_lit_ne(const char* left, const char* right);
-bool qdb_lit_lit_lt(const char* left, const char* right);
-bool qdb_lit_lit_le(const char* left, const char* right);
-bool qdb_lit_lit_gt(const char* left, const char* right);
-bool qdb_lit_lit_ge(const char* left, const char* right);
+// TODO: needs qumir changes — temporary cast so string literals reach nullable
+// StringView operators without str_from_lit (not linked in JIT kernels).
+qdb_string_view qdb_lit_to_sv(const char* lit);
 
 qdb_string_view qdb_substring(qdb_string_view str, int32_t start, int32_t length);
 
@@ -52,10 +33,10 @@ qdb_string_view qdb_substring(qdb_string_view str, int32_t start, int32_t length
 int32_t qdb_date_year(int32_t days);
 
 // SQL DATE '<yyyy-mm-dd>' literal -> days since 1970-01-01.
-int32_t qdb_sql_date(const char* date);
+int32_t qdb_sql_date(qdb_string_view date);
 
 // SQL INTERVAL '<amount>' <unit> -> days (year/month approximate: 365/30).
-int32_t qdb_sql_interval(const char* amount, const char* unit);
+int32_t qdb_sql_interval(qdb_string_view amount, qdb_string_view unit);
 
 int64_t qdb_sql_bool_and(int64_t left, int64_t right);
 int64_t qdb_sql_bool_or(int64_t left, int64_t right);

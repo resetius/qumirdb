@@ -11,7 +11,10 @@
         (call
           sum
           (if
-            (< (: (cast d_date <named DATE>) <named DATE>) (: (cast "1998-04-08" <named DATE>) <named DATE>))
+            (call
+              qdb_is_true
+              (< (: (cast d_date <named DATE>) <named DATE>)
+                (: (cast (: (cast "1998-04-08" <named StringView>) <named StringView>) <named DATE>) <named DATE>)))
             (- cs_sales_price (call coalesce cr_refunded_cash 0))
             0))
       )
@@ -19,7 +22,10 @@
         (call
           sum
           (if
-            (>= (: (cast d_date <named DATE>) <named DATE>) (: (cast "1998-04-08" <named DATE>) <named DATE>))
+            (call
+              qdb_is_true
+              (>= (: (cast d_date <named DATE>) <named DATE>)
+                (: (cast (: (cast "1998-04-08" <named StringView>) <named StringView>) <named DATE>) <named DATE>)))
             (- cs_sales_price (call coalesce cr_refunded_cash 0))
             0))
       )
@@ -40,8 +46,10 @@
       (&& (&& (&& (&& (&& (<= 0.98999999999999999 i_current_price) (<= i_current_price 1.49)) (== i_item_sk cs_item_sk))
             (== cs_warehouse_sk w_warehouse_sk))
           (== cs_sold_date_sk d_date_sk))
-        (&& (<= (- (: (cast "1998-04-08" <named DATE>) <named DATE>) (: 30 i32)) d_date)
-          (<= d_date (+ (: (cast "1998-04-08" <named DATE>) <named DATE>) (: 30 i32)))))
+        (&& (<= (- (: (cast (: (cast "1998-04-08" <named StringView>) <named StringView>) <named DATE>) <named DATE>) (: 30 i32))
+            d_date)
+          (<= d_date
+            (+ (: (cast (: (cast "1998-04-08" <named StringView>) <named StringView>) <named DATE>) <named DATE>) (: 30 i32)))))
     )
     (group-by
       w_state
