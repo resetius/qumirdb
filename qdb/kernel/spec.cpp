@@ -1,5 +1,6 @@
 #include <qdb/kernel/spec.h>
 
+#include <qdb/kernel/annotate_type.h>
 #include <qdb/plan/passes/unbound_vars.h>
 
 #include <qumir/parser/core/printer.h>
@@ -46,7 +47,9 @@ TOperatorKernelSpec BuildFilterKernelSpec(
     const NQumir::NAst::TExprPtr& predicate,
     std::string entrypointName)
 {
-    const auto refs = FindUnboundVars(predicate);
+    // Make NULL propagation explicit right before compilation (never in logical planning).
+    auto expanded = NKernel::ExpandNullable(predicate, inputType).first;
+    const auto refs = FindUnboundVars(expanded);
 
     std::vector<TKernelColumnRef> referenced;
     for (int32_t i = 0; i < static_cast<int32_t>(inputType.Fields.size()); ++i) {
@@ -66,7 +69,7 @@ TOperatorKernelSpec BuildFilterKernelSpec(
         .InputSchemas = {std::make_shared<NQumir::NAst::TStructType>(inputType.Fields)},
         .OutputSchema = std::make_shared<NQumir::NAst::TStructType>(inputType.Fields),
         .ReferencedColumns = std::move(referenced),
-        .Expressions = {predicate},
+        .Expressions = {expanded},
         .Entrypoints = {
             {.Name = std::move(entrypointName), .Abi = "void(ref TRowSet)"},
         },
@@ -86,8 +89,14 @@ TOperatorKernelSpec BuildProjectKernelSpec(
         outputFields.emplace_back("computed_" + std::to_string(i), computedTypes[i]);
     }
 
-    std::unordered_set<std::string> refs;
+    std::vector<NQumir::NAst::TExprPtr> expanded;
+    expanded.reserve(computedExprs.size());
     for (const auto& expr : computedExprs) {
+        expanded.push_back(NKernel::ExpandNullable(expr, inputType).first);
+    }
+
+    std::unordered_set<std::string> refs;
+    for (const auto& expr : expanded) {
         auto exprRefs = FindUnboundVars(expr);
         refs.insert(exprRefs.begin(), exprRefs.end());
     }
@@ -110,7 +119,7 @@ TOperatorKernelSpec BuildProjectKernelSpec(
         .InputSchemas = {std::make_shared<NQumir::NAst::TStructType>(inputType.Fields)},
         .OutputSchema = std::make_shared<NQumir::NAst::TStructType>(std::move(outputFields)),
         .ReferencedColumns = std::move(referenced),
-        .Expressions = computedExprs,
+        .Expressions = expanded,
         .Entrypoints = {
             {.Name = std::move(entrypointName), .Abi = "void(ref TRowSet, ptr ptr i8)"},
         },
@@ -142,10 +151,12 @@ TOperatorKernelSpec BuildAggregateKernelSpec(
     std::vector<TKernelAggregateSpec> aggregateSpecs;
     aggregateSpecs.reserve(aggs.size());
     for (const auto& agg : aggs) {
+        // Expand NULL propagation in the argument expression before compilation.
+        auto argExpr = agg.Arg ? NKernel::ExpandNullable(agg.Arg, inputType).first : agg.Arg;
         TKernelAggregateSpec spec{
             .Name = agg.Name,
             .Func = agg.Func,
-            .ArgExpr = agg.Arg,
+            .ArgExpr = argExpr,
         };
         if (agg.Arg) {
             auto ident = NQumir::NAst::TMaybeNode<NQumir::NAst::TIdentExpr>(agg.Arg);

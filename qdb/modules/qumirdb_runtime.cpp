@@ -175,27 +175,4 @@ int32_t qdb_sql_interval(qdb_string_view amount, qdb_string_view unit) {
     return n;
 }
 
-int64_t qdb_sql_bool_and(int64_t left, int64_t right) {
-    left = left < 0 ? 1 : left;
-    right = right < 0 ? 1 : right;
-    if (left == 0 || right == 0) {
-        return 0;
-    }
-    return left == 1 && right == 1 ? 1 : 2;
-}
-
-int64_t qdb_sql_bool_or(int64_t left, int64_t right) {
-    left = left < 0 ? 1 : left;
-    right = right < 0 ? 1 : right;
-    if (left == 1 || right == 1) {
-        return 1;
-    }
-    return left == 0 && right == 0 ? 0 : 2;
-}
-
-int64_t qdb_sql_bool_not(int64_t value) {
-    value = value < 0 ? 1 : value;
-    return value == 2 ? 2 : 1 - value;
-}
-
 } // extern "C"

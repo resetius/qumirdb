@@ -175,49 +175,49 @@ TEST(QumirDbStringOps, SqlLikeMatchesSqlWildcards) {
     void* likeEntry = (void*)qdb_string_view_sql_like;
     ASSERT_NE(likeEntry, nullptr);
 
-    auto like = reinterpret_cast<int64_t(*)(NQdb::TStringView, const char*)>(
+    auto like = reinterpret_cast<int64_t(*)(NQdb::TStringView, NQdb::TStringView)>(
         likeEntry);
 
     const std::string value("same\0bytes", 10);
     auto view = View(value);
 
-    EXPECT_EQ(like(view, "same%"), 1);
-    EXPECT_EQ(like(view, "same_bytes"), 1);
-    EXPECT_EQ(like(view, "%bytes"), 1);
-    EXPECT_EQ(like(view, "%bytez"), 0);
-    EXPECT_EQ(like(view, "same%xxx"), 0);
+    EXPECT_EQ(like(view, View("same%")), 1);
+    EXPECT_EQ(like(view, View("same_bytes")), 1);
+    EXPECT_EQ(like(view, View("%bytes")), 1);
+    EXPECT_EQ(like(view, View("%bytez")), 0);
+    EXPECT_EQ(like(view, View("same%xxx")), 0);
 
-    EXPECT_EQ(like(view, "same"), 0);
-    EXPECT_EQ(like(view, "same_bytes_"), 0);
-    EXPECT_EQ(like(view, "same%xxx"), 0);
+    EXPECT_EQ(like(view, View("same")), 0);
+    EXPECT_EQ(like(view, View("same_bytes_")), 0);
+    EXPECT_EQ(like(view, View("same%xxx")), 0);
 }
 
 TEST(QumirDbStringOps, SqlLikeHandlesEmptyAndPercentOnlyPatterns) {
     void* likeEntry = (void*)qdb_string_view_sql_like;
     ASSERT_NE(likeEntry, nullptr);
 
-    auto like = reinterpret_cast<int64_t(*)(NQdb::TStringView, const char*)>(
+    auto like = reinterpret_cast<int64_t(*)(NQdb::TStringView, NQdb::TStringView)>(
         likeEntry);
 
-    EXPECT_EQ(like(View(""), ""), 1);
-    EXPECT_EQ(like(View("abc"), "%"), 1);
-    EXPECT_EQ(like(View(""), "%"), 1);
-    EXPECT_EQ(like(View("abc"), "%%"), 1);
-    EXPECT_EQ(like(View("abc"), ""), 0);
+    EXPECT_EQ(like(View(""), View("")), 1);
+    EXPECT_EQ(like(View("abc"), View("%")), 1);
+    EXPECT_EQ(like(View(""), View("%")), 1);
+    EXPECT_EQ(like(View("abc"), View("%%")), 1);
+    EXPECT_EQ(like(View("abc"), View("")), 0);
 }
 
 TEST(QumirDbStringOps, SqlLikeBacktracksOverPercent) {
     void* likeEntry = (void*)qdb_string_view_sql_like;
     ASSERT_NE(likeEntry, nullptr);
 
-    auto like = reinterpret_cast<int64_t(*)(NQdb::TStringView, const char*)>(
+    auto like = reinterpret_cast<int64_t(*)(NQdb::TStringView, NQdb::TStringView)>(
         likeEntry);
 
-    EXPECT_EQ(like(View("abbbc"), "a%c"), 1);
-    EXPECT_EQ(like(View("abbbc"), "a%b%c"), 1);
-    EXPECT_EQ(like(View("abbbc"), "a%bc"), 1);
-    EXPECT_EQ(like(View("abbbc"), "a%d"), 0);
-    EXPECT_EQ(like(View("mississippi"), "m%iss%ppi"), 1);
+    EXPECT_EQ(like(View("abbbc"), View("a%c")), 1);
+    EXPECT_EQ(like(View("abbbc"), View("a%b%c")), 1);
+    EXPECT_EQ(like(View("abbbc"), View("a%bc")), 1);
+    EXPECT_EQ(like(View("abbbc"), View("a%d")), 0);
+    EXPECT_EQ(like(View("mississippi"), View("m%iss%ppi")), 1);
 }
 
 TEST(DateYear, KnownDates) {

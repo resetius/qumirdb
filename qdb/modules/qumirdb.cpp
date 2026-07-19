@@ -18,9 +18,6 @@ const void* const QumirDbRuntimeSymbolAnchors[] __attribute__((used)) = {
     reinterpret_cast<const void*>(&qdb_date_year),
     reinterpret_cast<const void*>(&qdb_sql_date),
     reinterpret_cast<const void*>(&qdb_sql_interval),
-    reinterpret_cast<const void*>(&qdb_sql_bool_and),
-    reinterpret_cast<const void*>(&qdb_sql_bool_or),
-    reinterpret_cast<const void*>(&qdb_sql_bool_not),
 };
 
 std::vector<TExternalType> BuildQumirDbExternalTypes() {
