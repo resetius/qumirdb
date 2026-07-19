@@ -18,7 +18,11 @@
                         (rel source "item")
                         ()
                         (inner))
-                      (rel project (rel filter (rel source "item") (== i_category "Children")) (i_item_id i_item_id))
+                      (rel project
+                        (rel filter
+                          (rel source "item")
+                          (== i_category (: (cast "Children" <named StringView>) <named StringView>)))
+                        (i_item_id i_item_id))
                       ()
                       (left_semi)
                       (== i_item_id i_item_id))
@@ -46,7 +50,11 @@
                         (rel source "item")
                         ()
                         (inner))
-                      (rel project (rel filter (rel source "item") (== i_category "Children")) (i_item_id i_item_id))
+                      (rel project
+                        (rel filter
+                          (rel source "item")
+                          (== i_category (: (cast "Children" <named StringView>) <named StringView>)))
+                        (i_item_id i_item_id))
                       ()
                       (left_semi)
                       (== i_item_id i_item_id))
@@ -74,7 +82,11 @@
                         (rel source "item")
                         ()
                         (inner))
-                      (rel project (rel filter (rel source "item") (== i_category "Children")) (i_item_id i_item_id))
+                      (rel project
+                        (rel filter
+                          (rel source "item")
+                          (== i_category (: (cast "Children" <named StringView>) <named StringView>)))
+                        (i_item_id i_item_id))
                       ()
                       (left_semi)
                       (== i_item_id i_item_id))

@@ -19,7 +19,9 @@
                         ()
                         (inner))
                       (rel project
-                        (rel filter (rel source "item") (== i_category "Books"))
+                        (rel filter
+                          (rel source "item")
+                          (== i_category (: (cast "Books" <named StringView>) <named StringView>)))
                         (i_manufact_id i_manufact_id))
                       ()
                       (left_semi)
@@ -49,7 +51,9 @@
                         ()
                         (inner))
                       (rel project
-                        (rel filter (rel source "item") (== i_category "Books"))
+                        (rel filter
+                          (rel source "item")
+                          (== i_category (: (cast "Books" <named StringView>) <named StringView>)))
                         (i_manufact_id i_manufact_id))
                       ()
                       (left_semi)
@@ -79,7 +83,9 @@
                         ()
                         (inner))
                       (rel project
-                        (rel filter (rel source "item") (== i_category "Books"))
+                        (rel filter
+                          (rel source "item")
+                          (== i_category (: (cast "Books" <named StringView>) <named StringView>)))
                         (i_manufact_id i_manufact_id))
                       ()
                       (left_semi)

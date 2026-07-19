@@ -24,7 +24,7 @@
               )
               (item as act_sales
                 (if
-                  (! (call qdb_sql_is_null sr_return_quantity))
+                  (call qdb_is_true (! (call qdb_is_null sr_return_quantity)))
                   (* (- ss_quantity sr_return_quantity) ss_sales_price)
                   (* ss_quantity ss_sales_price))
               )
@@ -40,7 +40,8 @@
               (table reason)
             )
             (where
-              (&& (== sr_reason_sk r_reason_sk) (== r_reason_desc "Did not like the warranty"))
+              (&& (== sr_reason_sk r_reason_sk)
+                (== r_reason_desc (: (cast "Did not like the warranty" <named StringView>) <named StringView>)))
             )
           )
         )

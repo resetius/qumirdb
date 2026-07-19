@@ -14,7 +14,8 @@
       (table nation)
     )
     (where
-      (&& (&& (== ps_suppkey s_suppkey) (== s_nationkey n_nationkey)) (== n_name "JAPAN"))
+      (&& (&& (== ps_suppkey s_suppkey) (== s_nationkey n_nationkey))
+        (== n_name (: (cast "JAPAN" <named StringView>) <named StringView>)))
     )
     (group-by
       ps_partkey
@@ -34,7 +35,8 @@
             (table nation)
           )
           (where
-            (&& (&& (== ps_suppkey s_suppkey) (== s_nationkey n_nationkey)) (== n_name "JAPAN"))
+            (&& (&& (== ps_suppkey s_suppkey) (== s_nationkey n_nationkey))
+              (== n_name (: (cast "JAPAN" <named StringView>) <named StringView>)))
           )
         )
       )

@@ -33,14 +33,26 @@
           (s_county s_county)
           (s_state s_state)
           (s_zip s_zip)
-          (arg_0 (if (<= (- sr_returned_date_sk ss_sold_date_sk) 30) 1 0))
-          (arg_1 (if (&& (> (- sr_returned_date_sk ss_sold_date_sk) 30) (<= (- sr_returned_date_sk ss_sold_date_sk) 60)) 1 0))
-          (arg_2 (if (&& (> (- sr_returned_date_sk ss_sold_date_sk) 60) (<= (- sr_returned_date_sk ss_sold_date_sk) 90)) 1 0))
-          (arg_3 (if
-              (&& (> (- sr_returned_date_sk ss_sold_date_sk) 90) (<= (- sr_returned_date_sk ss_sold_date_sk) 120))
+          (arg_0 (if (call qdb_is_true (<= (- sr_returned_date_sk ss_sold_date_sk) 30)) 1 0))
+          (arg_1 (if
+              (call
+                qdb_is_true
+                (&& (> (- sr_returned_date_sk ss_sold_date_sk) 30) (<= (- sr_returned_date_sk ss_sold_date_sk) 60)))
               1
               0))
-          (arg_4 (if (> (- sr_returned_date_sk ss_sold_date_sk) 120) 1 0)))
+          (arg_2 (if
+              (call
+                qdb_is_true
+                (&& (> (- sr_returned_date_sk ss_sold_date_sk) 60) (<= (- sr_returned_date_sk ss_sold_date_sk) 90)))
+              1
+              0))
+          (arg_3 (if
+              (call
+                qdb_is_true
+                (&& (> (- sr_returned_date_sk ss_sold_date_sk) 90) (<= (- sr_returned_date_sk ss_sold_date_sk) 120)))
+              1
+              0))
+          (arg_4 (if (call qdb_is_true (> (- sr_returned_date_sk ss_sold_date_sk) 120)) 1 0)))
         (keys s_store_name s_company_id s_street_number s_street_name s_street_type s_suite_number s_city s_county s_state s_zip)
         (agg sum_0 sum arg_0)
         (agg sum_1 sum arg_1)

@@ -51,9 +51,11 @@
     )
     (where
       (&& (&& (&& (&& (== |c.c_current_addr_sk| |ca.ca_address_sk|)
-              (|| (|| (|| (|| (== ca_county "Walker County") (== ca_county "Richland County")) (== ca_county "Gaines County"))
-                  (== ca_county "Douglas County"))
-                (== ca_county "Dona Ana County")))
+              (|| (|| (|| (|| (== ca_county (: (cast "Walker County" <named StringView>) <named StringView>))
+                      (== ca_county (: (cast "Richland County" <named StringView>) <named StringView>)))
+                    (== ca_county (: (cast "Gaines County" <named StringView>) <named StringView>)))
+                  (== ca_county (: (cast "Douglas County" <named StringView>) <named StringView>)))
+                (== ca_county (: (cast "Dona Ana County" <named StringView>) <named StringView>))))
             (== cd_demo_sk |c.c_current_cdemo_sk|))
           (subquery exists (query
         (select

@@ -18,7 +18,10 @@
                 (call
                   sum
                   (if
-                    (< (: (cast d_date <named DATE>) <named DATE>) (: (cast "1998-04-08" <named DATE>) <named DATE>))
+                    (call
+                      qdb_is_true
+                      (< (: (cast d_date <named DATE>) <named DATE>)
+                        (: (cast (: (cast "1998-04-08" <named StringView>) <named StringView>) <named DATE>) <named DATE>)))
                     inv_quantity_on_hand
                     0))
               )
@@ -26,7 +29,10 @@
                 (call
                   sum
                   (if
-                    (>= (: (cast d_date <named DATE>) <named DATE>) (: (cast "1998-04-08" <named DATE>) <named DATE>))
+                    (call
+                      qdb_is_true
+                      (>= (: (cast d_date <named DATE>) <named DATE>)
+                        (: (cast (: (cast "1998-04-08" <named StringView>) <named StringView>) <named DATE>) <named DATE>)))
                     inv_quantity_on_hand
                     0))
               )
@@ -41,8 +47,10 @@
               (&& (&& (&& (&& (&& (<= 0.98999999999999999 i_current_price) (<= i_current_price 1.49)) (== i_item_sk inv_item_sk))
                     (== inv_warehouse_sk w_warehouse_sk))
                   (== inv_date_sk d_date_sk))
-                (&& (<= (- (: (cast "1998-04-08" <named DATE>) <named DATE>) (: 30 i32)) d_date)
-                  (<= d_date (+ (: (cast "1998-04-08" <named DATE>) <named DATE>) (: 30 i32)))))
+                (&& (<= (- (: (cast (: (cast "1998-04-08" <named StringView>) <named StringView>) <named DATE>) <named DATE>) (: 30 i32))
+                    d_date)
+                  (<= d_date
+                    (+ (: (cast (: (cast "1998-04-08" <named StringView>) <named StringView>) <named DATE>) <named DATE>) (: 30 i32)))))
             )
             (group-by
               w_warehouse_name
@@ -53,8 +61,8 @@
       )
     )
     (where
-      (&& (<= (/ 2 3) (if (> inv_before 0) (/ inv_after inv_before) (call qdb_sql_null)))
-        (<= (if (> inv_before 0) (/ inv_after inv_before) (call qdb_sql_null)) (/ 3 2)))
+      (&& (<= (/ 2 3) (if (call qdb_is_true (> inv_before 0)) (/ inv_after inv_before) (call qdb_sql_null)))
+        (<= (if (call qdb_is_true (> inv_before 0)) (/ inv_after inv_before) (call qdb_sql_null)) (/ 3 2)))
     )
   )
   (order-by

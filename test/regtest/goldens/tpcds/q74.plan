@@ -25,7 +25,7 @@
                       (customer_last_name c_last_name)
                       (year d_year)
                       (year_total max_0)
-                      (sale_type "s"))
+                      (sale_type (: (cast "s" <named StringView>) <named StringView>)))
                     (rel project
                       (rel aggregate
                         (rel filter
@@ -43,7 +43,7 @@
                       (customer_last_name c_last_name)
                       (year d_year)
                       (year_total max_0)
-                      (sale_type "w")))
+                      (sale_type (: (cast "w" <named StringView>) <named StringView>))))
                   (|t_s_firstyear.customer_id| customer_id)
                   (|t_s_firstyear.customer_first_name| customer_first_name)
                   (|t_s_firstyear.customer_last_name| customer_last_name)
@@ -69,7 +69,7 @@
                       (customer_last_name c_last_name)
                       (year d_year)
                       (year_total max_0)
-                      (sale_type "s"))
+                      (sale_type (: (cast "s" <named StringView>) <named StringView>)))
                     (rel project
                       (rel aggregate
                         (rel filter
@@ -87,7 +87,7 @@
                       (customer_last_name c_last_name)
                       (year d_year)
                       (year_total max_0)
-                      (sale_type "w")))
+                      (sale_type (: (cast "w" <named StringView>) <named StringView>))))
                   (|t_s_secyear.customer_id| customer_id)
                   (|t_s_secyear.customer_first_name| customer_first_name)
                   (|t_s_secyear.customer_last_name| customer_last_name)
@@ -115,7 +115,7 @@
                     (customer_last_name c_last_name)
                     (year d_year)
                     (year_total max_0)
-                    (sale_type "s"))
+                    (sale_type (: (cast "s" <named StringView>) <named StringView>)))
                   (rel project
                     (rel aggregate
                       (rel filter
@@ -133,7 +133,7 @@
                     (customer_last_name c_last_name)
                     (year d_year)
                     (year_total max_0)
-                    (sale_type "w")))
+                    (sale_type (: (cast "w" <named StringView>) <named StringView>))))
                 (|t_w_firstyear.customer_id| customer_id)
                 (|t_w_firstyear.customer_first_name| customer_first_name)
                 (|t_w_firstyear.customer_last_name| customer_last_name)
@@ -161,7 +161,7 @@
                   (customer_last_name c_last_name)
                   (year d_year)
                   (year_total max_0)
-                  (sale_type "s"))
+                  (sale_type (: (cast "s" <named StringView>) <named StringView>)))
                 (rel project
                   (rel aggregate
                     (rel filter
@@ -179,7 +179,7 @@
                   (customer_last_name c_last_name)
                   (year d_year)
                   (year_total max_0)
-                  (sale_type "w")))
+                  (sale_type (: (cast "w" <named StringView>) <named StringView>))))
               (|t_w_secyear.customer_id| customer_id)
               (|t_w_secyear.customer_first_name| customer_first_name)
               (|t_w_secyear.customer_last_name| customer_last_name)
@@ -191,10 +191,10 @@
           (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (== |t_s_secyear.customer_id| |t_s_firstyear.customer_id|)
                                     (== |t_s_firstyear.customer_id| |t_w_secyear.customer_id|))
                                   (== |t_s_firstyear.customer_id| |t_w_firstyear.customer_id|))
-                                (== |t_s_firstyear.sale_type| "s"))
-                              (== |t_w_firstyear.sale_type| "w"))
-                            (== |t_s_secyear.sale_type| "s"))
-                          (== |t_w_secyear.sale_type| "w"))
+                                (== |t_s_firstyear.sale_type| (: (cast "s" <named StringView>) <named StringView>)))
+                              (== |t_w_firstyear.sale_type| (: (cast "w" <named StringView>) <named StringView>)))
+                            (== |t_s_secyear.sale_type| (: (cast "s" <named StringView>) <named StringView>)))
+                          (== |t_w_secyear.sale_type| (: (cast "w" <named StringView>) <named StringView>)))
                         (== |t_s_firstyear.year| 2001))
                       (== |t_s_secyear.year| (+ 2001 1)))
                     (== |t_w_firstyear.year| 2001))
@@ -202,11 +202,11 @@
                 (> |t_s_firstyear.year_total| 0))
               (> |t_w_firstyear.year_total| 0))
             (> (if
-                (> |t_w_firstyear.year_total| 0)
+                (call qdb_is_true (> |t_w_firstyear.year_total| 0))
                 (/ |t_w_secyear.year_total| |t_w_firstyear.year_total|)
                 (call qdb_sql_null))
               (if
-                (> |t_s_firstyear.year_total| 0)
+                (call qdb_is_true (> |t_s_firstyear.year_total| 0))
                 (/ |t_s_secyear.year_total| |t_s_firstyear.year_total|)
                 (call qdb_sql_null)))))
         (|t_s_secyear.customer_id| |t_s_secyear.customer_id|)

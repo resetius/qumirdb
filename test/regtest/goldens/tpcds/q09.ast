@@ -3,7 +3,9 @@
     (select-list
       (item as bucket1
         (if
-          (> (subquery scalar (query
+          (call
+            qdb_is_true
+            (> (subquery scalar (query
           (select
             (select-list
               (item
@@ -19,7 +21,7 @@
           )
         )
         )
-            25437)
+              25437))
           (subquery scalar (query
           (select
             (select-list
@@ -55,7 +57,9 @@
       )
       (item as bucket2
         (if
-          (> (subquery scalar (query
+          (call
+            qdb_is_true
+            (> (subquery scalar (query
           (select
             (select-list
               (item
@@ -71,7 +75,7 @@
           )
         )
         )
-            22746)
+              22746))
           (subquery scalar (query
           (select
             (select-list
@@ -107,7 +111,9 @@
       )
       (item as bucket3
         (if
-          (> (subquery scalar (query
+          (call
+            qdb_is_true
+            (> (subquery scalar (query
           (select
             (select-list
               (item
@@ -123,7 +129,7 @@
           )
         )
         )
-            9387)
+              9387))
           (subquery scalar (query
           (select
             (select-list
@@ -159,7 +165,9 @@
       )
       (item as bucket4
         (if
-          (> (subquery scalar (query
+          (call
+            qdb_is_true
+            (> (subquery scalar (query
           (select
             (select-list
               (item
@@ -175,7 +183,7 @@
           )
         )
         )
-            10098)
+              10098))
           (subquery scalar (query
           (select
             (select-list
@@ -211,7 +219,9 @@
       )
       (item as bucket5
         (if
-          (> (subquery scalar (query
+          (call
+            qdb_is_true
+            (> (subquery scalar (query
           (select
             (select-list
               (item
@@ -227,7 +237,7 @@
           )
         )
         )
-            18213)
+              18213))
           (subquery scalar (query
           (select
             (select-list

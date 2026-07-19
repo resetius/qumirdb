@@ -9,7 +9,9 @@
               (rel join
                 (rel source "partsupp")
                 (rel project
-                  (rel filter (rel source "part") (call qdb_string_view_sql_like p_name "thistle%"))
+                  (rel filter
+                    (rel source "part")
+                    (call qdb_string_view_sql_like p_name (: (cast "thistle%" <named StringView>) <named StringView>)))
                   (p_partkey p_partkey))
                 ()
                 (left_semi)
@@ -33,7 +35,7 @@
         ()
         (left_semi)
         (== s_suppkey ps_suppkey))
-      (&& (== s_nationkey n_nationkey) (== n_name "PERU")))
+      (&& (== s_nationkey n_nationkey) (== n_name (: (cast "PERU" <named StringView>) <named StringView>))))
     (s_name s_name)
     (s_address s_address))
   (s_name asc nulls-default))

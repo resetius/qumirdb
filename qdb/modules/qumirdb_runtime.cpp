@@ -44,32 +44,30 @@ int64_t qdb_filter_string_compare(
 }
 
 
-int64_t qdb_string_view_sql_like(qdb_string_view str, const char* pattern)
+// Size-aware LIKE: the pattern is a StringView (Size-delimited, not null-terminated).
+int64_t qdb_string_view_sql_like(qdb_string_view str, qdb_string_view pattern)
 {
-    if (!pattern) {
-        return 0;
-    }
+    const uint8_t* p = pattern.Data;
+    const uint8_t* pend = pattern.Data + pattern.Size;
+    int64_t s = 0;
 
-    const char* p = pattern;
-    size_t s = 0;
-
-    const char* last_percent = nullptr;
-    size_t s_after_percent = 0;
+    const uint8_t* last_percent = nullptr;
+    int64_t s_after_percent = 0;
 
     while (s < str.Size) {
-        if (*p == '%') {
+        if (p < pend && *p == '%') {
             // collapse multiple %%
-            while (*p == '%') {
+            while (p < pend && *p == '%') {
                 ++p;
             }
 
-            if (*p == '\0') {
+            if (p == pend) {
                 return 1; // trailing % matches everything
             }
 
             last_percent = p;
             s_after_percent = s;
-        } else if (*p == '_' || *p == str.Data[s]) {
+        } else if (p < pend && (*p == '_' || *p == str.Data[s])) {
             ++p;
             ++s;
         } else if (last_percent) {
@@ -82,103 +80,22 @@ int64_t qdb_string_view_sql_like(qdb_string_view str, const char* pattern)
     }
 
     // remaining pattern must be only %
-    while (*p == '%') {
+    while (p < pend && *p == '%') {
         ++p;
     }
 
-    return *p == '\0' ? 1 : 0;
+    return p == pend ? 1 : 0;
 }
 
-int64_t qdb_string_view_cmp_cstr(const uint8_t* data, int64_t size, const char* cstr)
-{
-    if (!cstr) return size > 0 ? 1 : 0;
-    for (int64_t i = 0; i < size; ++i) {
-        if (cstr[i] == '\0') return 1;
-        int diff = static_cast<int>(static_cast<uint8_t>(data[i]))
-                 - static_cast<int>(static_cast<uint8_t>(cstr[i]));
-        if (diff != 0) return diff;
-    }
-    return cstr[size] == '\0' ? 0 : -1;
-}
-
-int64_t qdb_cstr_cmp_cstr(const char* a, const char* b)
-{
-    if (!a && !b) return 0;
-    if (!a) return -1;
-    if (!b) return 1;
-    return static_cast<int64_t>(std::strcmp(a, b));
-}
-
-bool qdb_sv_lit_eq(qdb_string_view left, const char* right) {
-    return qdb_string_view_cmp_cstr(left.Data, left.Size, right) == 0;
-}
-
-bool qdb_sv_lit_ne(qdb_string_view left, const char* right) {
-    return qdb_string_view_cmp_cstr(left.Data, left.Size, right) != 0;
-}
-
-bool qdb_sv_lit_lt(qdb_string_view left, const char* right) {
-    return qdb_string_view_cmp_cstr(left.Data, left.Size, right) < 0;
-}
-
-bool qdb_sv_lit_le(qdb_string_view left, const char* right) {
-    return qdb_string_view_cmp_cstr(left.Data, left.Size, right) <= 0;
-}
-
-bool qdb_sv_lit_gt(qdb_string_view left, const char* right) {
-    return qdb_string_view_cmp_cstr(left.Data, left.Size, right) > 0;
-}
-
-bool qdb_sv_lit_ge(qdb_string_view left, const char* right) {
-    return qdb_string_view_cmp_cstr(left.Data, left.Size, right) >= 0;
-}
-
-bool qdb_lit_sv_eq(const char* left, qdb_string_view right) {
-    return qdb_string_view_cmp_cstr(right.Data, right.Size, left) == 0;
-}
-
-bool qdb_lit_sv_ne(const char* left, qdb_string_view right) {
-    return qdb_string_view_cmp_cstr(right.Data, right.Size, left) != 0;
-}
-
-bool qdb_lit_sv_lt(const char* left, qdb_string_view right) {
-    return 0 < qdb_string_view_cmp_cstr(right.Data, right.Size, left);
-}
-
-bool qdb_lit_sv_le(const char* left, qdb_string_view right) {
-    return 0 <= qdb_string_view_cmp_cstr(right.Data, right.Size, left);
-}
-
-bool qdb_lit_sv_gt(const char* left, qdb_string_view right) {
-    return 0 > qdb_string_view_cmp_cstr(right.Data, right.Size, left);
-}
-
-bool qdb_lit_sv_ge(const char* left, qdb_string_view right) {
-    return 0 >= qdb_string_view_cmp_cstr(right.Data, right.Size, left);
-}
-
-bool qdb_lit_lit_eq(const char* left, const char* right) {
-    return qdb_cstr_cmp_cstr(left, right) == 0;
-}
-
-bool qdb_lit_lit_ne(const char* left, const char* right) {
-    return qdb_cstr_cmp_cstr(left, right) != 0;
-}
-
-bool qdb_lit_lit_lt(const char* left, const char* right) {
-    return qdb_cstr_cmp_cstr(left, right) < 0;
-}
-
-bool qdb_lit_lit_le(const char* left, const char* right) {
-    return qdb_cstr_cmp_cstr(left, right) <= 0;
-}
-
-bool qdb_lit_lit_gt(const char* left, const char* right) {
-    return qdb_cstr_cmp_cstr(left, right) > 0;
-}
-
-bool qdb_lit_lit_ge(const char* left, const char* right) {
-    return qdb_cstr_cmp_cstr(left, right) >= 0;
+// TODO: needs qumir changes. A string literal passed by value into a generic
+// Nullable[StringView] operator otherwise materializes via str_from_lit (a qumir
+// string-runtime symbol not linked into JIT kernels). This cast wraps the literal's
+// char* as a StringView directly, so nullable string comparisons work without it.
+qdb_string_view qdb_lit_to_sv(const char* lit) {
+    return {
+        reinterpret_cast<const uint8_t*>(lit),
+        static_cast<int64_t>(std::strlen(lit))
+    };
 }
 
 // SQL SUBSTRING(str FROM start FOR length), 1-based start index.
@@ -216,17 +133,16 @@ static int32_t DaysFromCivil(int y, int m, int d) {
     return static_cast<int32_t>(era * 146097 + doe - 719468);
 }
 
-int32_t qdb_sql_date(const char* date) {
-    if (!date) {
-        return 0;
-    }
+// Size-aware: CAST(<string column> AS DATE) passes a non-null-terminated StringView.
+int32_t qdb_sql_date(qdb_string_view date) {
     int parts[3] = {0, 0, 0};
     int idx = 0;
-    for (const char* p = date; *p && idx < 3; ++p) {
-        if (*p == '-') {
+    for (int64_t i = 0; i < date.Size && idx < 3; ++i) {
+        const char c = static_cast<char>(date.Data[i]);
+        if (c == '-') {
             ++idx;
-        } else if (*p >= '0' && *p <= '9') {
-            parts[idx] = parts[idx] * 10 + (*p - '0');
+        } else if (c >= '0' && c <= '9') {
+            parts[idx] = parts[idx] * 10 + (c - '0');
         }
     }
     return DaysFromCivil(parts[0], parts[1], parts[2]);
@@ -234,9 +150,22 @@ int32_t qdb_sql_date(const char* date) {
 
 // year/month are approximate (365/30): the base date is not available here for
 // calendar-exact arithmetic.
-int32_t qdb_sql_interval(const char* amount, const char* unit) {
-    int n = amount ? std::atoi(amount) : 0;
-    std::string_view u = unit ? unit : "";
+int32_t qdb_sql_interval(qdb_string_view amount, qdb_string_view unit) {
+    int n = 0;
+    bool neg = false;
+    for (int64_t i = 0; i < amount.Size; ++i) {
+        const char c = static_cast<char>(amount.Data[i]);
+        if (c == '-') {
+            neg = true;
+        } else if (c >= '0' && c <= '9') {
+            n = n * 10 + (c - '0');
+        }
+    }
+    if (neg) {
+        n = -n;
+    }
+    std::string_view u(reinterpret_cast<const char*>(unit.Data),
+                       static_cast<size_t>(unit.Size));
     if (u == "year" || u == "years") {
         return n * 365;
     }

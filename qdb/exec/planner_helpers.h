@@ -30,6 +30,7 @@ struct TProjectColumnPlan {
     std::vector<NQumir::NAst::TTypePtr> ComputedJitTypes;
     std::vector<size_t> ComputedWidths;
     std::vector<bool> ComputedIsString;
+    std::vector<bool> ComputedIsNullable;
     NQumir::NAst::TTypePtr OutputType;
 };
 
