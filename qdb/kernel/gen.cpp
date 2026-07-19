@@ -684,112 +684,45 @@ void SubstFieldsInPlace(
     }
 }
 
-struct TFilterTruthAst {
-    std::string State;
-};
-
-NQumir::NAst::TExprPtr FilterExprValidity(
-    const NQumir::NAst::TExprPtr& expr,
-    const std::unordered_map<std::string, std::string>& validityNames)
-{
-    using namespace NQumir::NAst;
-    NQumir::TLocation loc{};
-    TExprPtr result = std::make_shared<TNumberExpr>(loc, true);
-    result->Type = std::make_shared<TBoolType>();
-    std::unordered_set<std::string> used;
-    auto visit = [&](auto&& self, const TExprPtr& node) -> void {
-        if (auto ident = TMaybeNode<TIdentExpr>(node)) {
-            auto it = validityNames.find(ident.Cast()->Name);
-            if (it != validityNames.end() && used.insert(it->second).second) {
-                result = std::make_shared<TCallExpr>(loc,
-                    std::make_shared<TIdentExpr>(loc, "qdb_sql_bool_and"),
-                    std::vector<TExprPtr>{
-                        std::make_shared<TCastExpr>(loc, std::move(result),
-                            std::make_shared<TIntegerType>()),
-                        std::make_shared<TCastExpr>(loc,
-                            std::make_shared<TIdentExpr>(loc, it->second),
-                            std::make_shared<TIntegerType>())});
-                result = std::make_shared<TBinaryExpr>(loc, TOperator("=="),
-                    std::move(result),
-                    std::make_shared<TNumberExpr>(loc, int64_t{1}));
-            }
-            return;
-        }
-        for (const auto& child : node->Children()) {
-            self(self, child);
-        }
-    };
-    visit(visit, expr);
-    return result;
-}
-
-TFilterTruthAst BuildFilterTruthAst(
-    NQumir::NAst::TExprPtr expr,
-    const std::unordered_map<std::string, std::string>& validityNames,
-    std::vector<NQumir::NAst::TExprPtr>& body,
-    size_t& nextTemporary)
-{
-    using namespace NQumir::NAst;
-    NQumir::TLocation loc{};
-    auto ident = [&](const std::string& name) -> TExprPtr {
-        return std::make_shared<TIdentExpr>(loc, name);
-    };
-    auto number = [&](int64_t value) -> TExprPtr {
-        auto result = std::make_shared<TNumberExpr>(loc, value);
-        result->Type = std::make_shared<TIntegerType>();
-        return result;
-    };
-    auto materialize = [&](TExprPtr state) {
-        const std::string suffix = std::to_string(nextTemporary++);
-        TFilterTruthAst result{
-            .State = "filter_truth_state_" + suffix,
-        };
-        auto i64Type = std::make_shared<TIntegerType>();
-        body.push_back(std::make_shared<TVarStmt>(loc, result.State, i64Type));
-        body.push_back(std::make_shared<TAssignExpr>(
-            loc, result.State, std::move(state)));
-        return result;
-    };
-    auto call = [&](const char* name, std::vector<TExprPtr> args) -> TExprPtr {
-        return std::make_shared<TCallExpr>(loc,
-            std::make_shared<TIdentExpr>(loc, name), std::move(args));
-    };
-    auto bitcast = [&](TExprPtr value, TTypePtr type) -> TExprPtr {
-        return std::make_shared<TBitcastExpr>(loc, std::move(value), std::move(type));
-    };
-    auto binaryExpr = TMaybeNode<TBinaryExpr>(expr);
-    if (binaryExpr && (binaryExpr.Cast()->Operator == "&&" ||
-                      binaryExpr.Cast()->Operator == "||")) {
-        const bool isAnd = binaryExpr.Cast()->Operator == "&&";
-        auto left = BuildFilterTruthAst(
-            binaryExpr.Cast()->Left, validityNames, body, nextTemporary);
-        auto right = BuildFilterTruthAst(
-            binaryExpr.Cast()->Right, validityNames, body, nextTemporary);
-        return materialize(call(isAnd ? "qdb_sql_bool_and" : "qdb_sql_bool_or",
-            {ident(left.State), ident(right.State)}));
-    }
-    if (auto unary = TMaybeNode<TUnaryExpr>(expr);
-        unary && unary.Cast()->Operator == "!") {
-        auto operand = BuildFilterTruthAst(
-            unary.Cast()->Operand, validityNames, body, nextTemporary);
-        return materialize(call("qdb_sql_bool_not", {ident(operand.State)}));
-    }
-    auto value = std::make_shared<TIfExpr>(loc, std::move(expr), number(1), number(0));
-    auto state = std::make_shared<TIfExpr>(loc,
-        FilterExprValidity(value, validityNames), std::move(value), number(2));
-    return materialize(std::move(state));
-}
-
 bool UsesNullableValue(
     const NQumir::NAst::TExprPtr& expr,
     const std::unordered_map<std::string, std::string>& validityNames)
 {
     using namespace NQumir::NAst;
+    if (!expr) {
+        return false;
+    }
     if (auto ident = TMaybeNode<TIdentExpr>(expr)) {
         return validityNames.contains(ident.Cast()->Name);
     }
     return std::ranges::any_of(expr->Children(), [&](const auto& child) {
         return UsesNullableValue(child, validityNames);
+    });
+}
+
+bool IsNullableBoolType(const NQumir::NAst::TTypePtr& type) {
+    using namespace NQumir::NAst;
+    auto named = TMaybeType<TNamedType>(type);
+    if (!named || named.Cast()->Name != "Nullable" ||
+        named.Cast()->TypeArgs.size() != 1)
+    {
+        return false;
+    }
+    const auto& arg = named.Cast()->TypeArgs.front();
+    return arg.Kind == TGenericArg::EKind::Type &&
+        static_cast<bool>(TMaybeType<TBoolType>(arg.Type));
+}
+
+bool HasNullableBoolCast(const NQumir::NAst::TExprPtr& expr) {
+    using namespace NQumir::NAst;
+    if (!expr) {
+        return false;
+    }
+    if (TMaybeNode<TCastExpr>(expr) && IsNullableBoolType(expr->Type)) {
+        return true;
+    }
+    return std::ranges::any_of(expr->Children(), [](const auto& child) {
+        return HasNullableBoolCast(child);
     });
 }
 
@@ -930,7 +863,9 @@ NQumir::NAst::TExprPtr GenFilterKernelAst(
         std::make_shared<TIdentExpr>(loc, "i"),
         std::make_shared<TIdentExpr>(loc, "n"));
     TExprPtr selected;
-    if (validityNames.empty() || !UsesNullableValue(predicate, validityNames)) {
+    if (!HasNullableBoolCast(predicate) &&
+        (validityNames.empty() || !UsesNullableValue(predicate, validityNames)))
+    {
         // No nullable column referenced: ordinary bool predicate (unchanged path).
         selected = std::move(predicate);
     } else {
@@ -1186,21 +1121,27 @@ NQumir::NAst::TExprPtr GenJoinResidualFilterAst(
             : fixedValues.at(name);
         if (IsNullableType(type)) {
             validityNames.emplace(valueName, prefix + "_valid");
+            auto nt = NullableNamedType(materialized.ValueType);
+            body.push_back(var(valueName, nt));
+            body.push_back(assign(valueName, BuildNullableStruct(
+                std::move(materialized.Value), std::move(materialized.IsValid),
+                materialized.ValueType)));
+        } else {
+            body.push_back(var(valueName, materialized.ValueType));
+            body.push_back(assign(valueName, std::move(materialized.Value)));
         }
-        body.push_back(var(valueName, materialized.ValueType));
-        body.push_back(assign(valueName, std::move(materialized.Value)));
     }
 
     // Evaluate the predicate (with three-valued-logic truth when nullable).
     TExprPtr result;
-    if (validityNames.empty() || !UsesNullableValue(predicate, validityNames)) {
+    if (!HasNullableBoolCast(predicate) &&
+        (validityNames.empty() || !UsesNullableValue(predicate, validityNames)))
+    {
         result = std::move(predicate);
     } else {
-        size_t nextTruthTemporary = 0;
-        auto truth = BuildFilterTruthAst(
-            std::move(predicate), validityNames, body, nextTruthTemporary);
-        result = std::make_shared<TBinaryExpr>(loc, TOperator("=="),
-            ident(truth.State), numI64(1));
+        result = std::make_shared<TCallExpr>(loc,
+            std::make_shared<TIdentExpr>(loc, "qdb_is_true"),
+            std::vector<TExprPtr>{std::move(predicate)});
     }
     auto castedResult = std::make_shared<TCastExpr>(loc, std::move(result), boolType);
     body.push_back(std::make_shared<TReturnExpr>(loc, std::move(castedResult)));

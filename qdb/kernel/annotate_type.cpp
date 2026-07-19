@@ -182,4 +182,117 @@ TTypePtr AnnotateExprType(const TExprPtr& expr, const TStructType& inputType) {
     return FromQumirType(Context().Annotate(expr, inputType));
 }
 
+namespace {
+
+// A bare SQL NULL desugars to `qdb_sql_null()` (see the SQL parser); a missing CASE
+// ELSE arrives as a null child pointer. Both are "untyped null" branches.
+bool IsNullLiteral(const TExprPtr& e) {
+    if (!e) {
+        return true;
+    }
+    if (auto call = TMaybeNode<TCallExpr>(e)) {
+        if (auto id = TMaybeNode<TIdentExpr>(call.Cast()->Callee)) {
+            return id.Cast()->Name == "qdb_sql_null";
+        }
+    }
+    return false;
+}
+
+// Cheap structural check: does the subtree contain anything this pass must touch
+// (an `if`/CASE or a bare NULL)? Lets us skip annotating branches that are plain
+// value expressions with no null semantics.
+bool NeedsRewrite(const TExprPtr& e) {
+    if (!e) {
+        return true; // a null child == implicit ELSE NULL
+    }
+    if (TMaybeNode<TIfExpr>(e) || IsNullLiteral(e)) {
+        return true;
+    }
+    for (const auto& child : e->Children()) {
+        if (NeedsRewrite(child)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+TExprPtr MakeNull(const NQumir::TLocation& loc) {
+    return std::make_shared<TCallExpr>(
+        loc, std::make_shared<TIdentExpr>(loc, "qdb_sql_null"),
+        std::vector<TExprPtr>{});
+}
+
+// Turn a branch into Nullable[T]. `nullableQumir` is the concrete `<named Nullable
+// [T]>` type node; the cast resolves to nullable_from_null (null branch) or
+// nullable_from_value (plain T) in qumirdb.oz. Already-nullable branches pass through.
+TExprPtr CoerceBranch(
+    const TExprPtr& branch, bool isNull, bool isNullable,
+    const TTypePtr& nullableQumir, const NQumir::TLocation& loc)
+{
+    if (isNull) {
+        return std::make_shared<TCastExpr>(loc, branch ? branch : MakeNull(loc), nullableQumir);
+    }
+    if (isNullable) {
+        return branch; // already Nullable[T]
+    }
+    return std::make_shared<TCastExpr>(branch->Location, branch, nullableQumir);
+}
+
+// Post-order rewrite. Returns the (planner) type of the possibly-rewritten `e`, or
+// nullptr for an untyped NULL branch — the enclosing `if` supplies T.
+TTypePtr RewriteIfs(TExprPtr& e, const TStructType& inputType) {
+    if (IsNullLiteral(e)) {
+        return nullptr; // defer typing to the parent `if`
+    }
+    if (auto ifp = TMaybeNode<TIfExpr>(e)) {
+        auto node = ifp.Cast();
+        RewriteIfs(node->Cond, inputType); // rewrite nested ifs in the condition
+        if (!node->Then) {
+            node->Then = MakeNull(node->Location);
+        }
+        if (!node->Else) {
+            node->Else = MakeNull(node->Location);
+        }
+        TTypePtr thenT = RewriteIfs(node->Then, inputType);
+        TTypePtr elseT = RewriteIfs(node->Else, inputType);
+        const bool thenNull = !thenT;
+        const bool elseNull = !elseT;
+        const bool thenNullable = thenNull || IsNullableType(thenT);
+        const bool elseNullable = elseNull || IsNullableType(elseT);
+        if (!thenNullable && !elseNullable) {
+            return thenT; // no null anywhere — let the annotator unify the branches
+        }
+        // T from whichever branch carries a value type (unwrap if already nullable).
+        TTypePtr value = thenT ? (IsNullableType(thenT) ? UnwrapNullableType(thenT) : thenT)
+                       : elseT ? (IsNullableType(elseT) ? UnwrapNullableType(elseT) : elseT)
+                       : nullptr;
+        if (!value) {
+            return nullptr; // both branches NULL: genuinely untyped, leave for the parent
+        }
+        auto nullableQumir = ToQumirType(std::make_shared<TNullable>(value));
+        node->Then = CoerceBranch(node->Then, thenNull, thenNullable, nullableQumir, node->Location);
+        node->Else = CoerceBranch(node->Else, elseNull, elseNullable, nullableQumir, node->Location);
+        return std::make_shared<TNullable>(value);
+    }
+    // Generic node: descend only into children that carry null/`if` semantics, then
+    // type the whole node once (avoids annotating every leaf of a plain expression).
+    for (auto* child : e->MutableChildren()) {
+        if (NeedsRewrite(*child)) {
+            RewriteIfs(*child, inputType);
+        }
+    }
+    return AnnotateExprType(e, inputType);
+}
+
+} // namespace
+
+TExprPtr NormalizeNullBranches(const TExprPtr& expr, const TStructType& inputType) {
+    if (!NeedsRewrite(expr)) {
+        return expr; // fast path: no NULL/`if`, non-nullable expression untouched
+    }
+    TExprPtr e = expr;
+    RewriteIfs(e, inputType);
+    return e;
+}
+
 } // namespace NQdb::NKernel

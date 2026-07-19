@@ -11,6 +11,7 @@
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/passes/column_pruning.h>
 #include <qdb/plan/passes/typing.h>
+#include <qdb/plan/types/nullable.h>
 #include <qdb/sexp/parser.h>
 
 #include <array>
@@ -51,6 +52,14 @@ std::unique_ptr<TTestRuntime> Plan(
 }
 
 } // namespace
+
+bool IsValid(const TColumn& column, int64_t row) {
+    if (!column.Mask) {
+        return true;
+    }
+    const int64_t bit = column.MaskBitOffset + row;
+    return ((column.Mask[bit / 8] >> (bit % 8)) & 1) != 0;
+}
 
 TEST(ProjectE2E, IdentZeroCopyPlusComputed) {
     std::array<double, 3> x = {10.0, 20.0, 4.0};
@@ -94,6 +103,40 @@ TEST(ProjectE2E, IdentZeroCopyPlusComputed) {
     EXPECT_FALSE(plan->Next(out));
 }
 
+TEST(ProjectE2E, NormalizesBareNullIfBranchBeforeProjectKernel) {
+    std::array<int64_t, 4> values = {1, 4, 2, 5};
+    std::array<TColumn, 1> cols = {
+        TColumn{.Data = reinterpret_cast<char*>(values.data())},
+    };
+    TRowSet batch{.Columns = cols.data(), .ColumnCount = 1, .RowCount = 4, .RefCount = 1};
+    NQdb::TMockSource src({"value"}, {std::make_shared<TIntegerType>()}, {batch});
+
+    auto plan = Plan(
+        "(rel project (rel source \"L\") "
+        "(maybe_value (if (< value (: 3 i64)) value (call qdb_sql_null))))",
+        src);
+
+    auto* outType = static_cast<TStructType*>(plan->OutputType().get());
+    ASSERT_EQ(outType->Fields.size(), 1u);
+    ASSERT_TRUE(IsNullableType(outType->Fields[0].second));
+    EXPECT_TRUE(TMaybeType<TIntegerType>(UnwrapNullableType(outType->Fields[0].second)));
+
+    TRowSet out{};
+    ASSERT_TRUE(plan->Next(out));
+    ASSERT_EQ(out.ColumnCount, 1);
+    ASSERT_EQ(out.RowCount, 4);
+    ASSERT_NE(out.Columns[0].Mask, nullptr);
+    const auto* maybeValue = reinterpret_cast<const int64_t*>(out.Columns[0].Data);
+    EXPECT_TRUE(IsValid(out.Columns[0], 0));
+    EXPECT_FALSE(IsValid(out.Columns[0], 1));
+    EXPECT_TRUE(IsValid(out.Columns[0], 2));
+    EXPECT_FALSE(IsValid(out.Columns[0], 3));
+    EXPECT_EQ(maybeValue[0], values[0]);
+    EXPECT_EQ(maybeValue[2], values[2]);
+    Release(&out);
+    EXPECT_FALSE(plan->Next(out));
+}
+
 TEST(FilterE2E, PublishesSelectionFromUnaryStreamingShell) {
     std::array<int64_t, 4> values = {0, 1, 2, 3};
     std::array<TColumn, 1> cols = {
@@ -110,6 +153,29 @@ TEST(FilterE2E, PublishesSelectionFromUnaryStreamingShell) {
     EXPECT_EQ(
         std::vector<uint8_t>(out.Selection, out.Selection + out.RowCount),
         (std::vector<uint8_t>{0, 0, 0xff, 0xff}));
+    Release(&out);
+    EXPECT_FALSE(plan->Next(out));
+}
+
+TEST(FilterE2E, NormalizesBareNullIfBranchBeforeFilterKernel) {
+    std::array<int64_t, 4> values = {1, 4, 2, 5};
+    std::array<TColumn, 1> cols = {
+        TColumn{.Data = reinterpret_cast<char*>(values.data())},
+    };
+    TRowSet batch{.Columns = cols.data(), .ColumnCount = 1, .RowCount = 4, .RefCount = 1};
+    NQdb::TMockSource src({"value"}, {std::make_shared<TIntegerType>()}, {batch});
+
+    auto plan = Plan(
+        "(rel filter (rel source \"L\") "
+        "(if (< value (: 3 i64)) #t (call qdb_sql_null)))",
+        src);
+
+    TRowSet out{};
+    ASSERT_TRUE(plan->Next(out));
+    ASSERT_NE(out.Selection, nullptr);
+    EXPECT_EQ(
+        std::vector<uint8_t>(out.Selection, out.Selection + out.RowCount),
+        (std::vector<uint8_t>{0xff, 0, 0xff, 0}));
     Release(&out);
     EXPECT_FALSE(plan->Next(out));
 }
