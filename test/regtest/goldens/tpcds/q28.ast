@@ -4,17 +4,17 @@
       (star *)
     )
     (from
-      (subquery-table as B1
+      (subquery-table as b1
         (query
           (select
             (select-list
-              (item as B1_LP
+              (item as b1_lp
                 (call avg ss_list_price)
               )
-              (item as B1_CNT
+              (item as b1_cnt
                 (call count ss_list_price)
               )
-              (item as B1_CNTD
+              (item as b1_cntd
                 (call count (call distinct ss_list_price))
               )
             )
@@ -30,17 +30,17 @@
           )
         )
       )
-      (subquery-table as B2
+      (subquery-table as b2
         (query
           (select
             (select-list
-              (item as B2_LP
+              (item as b2_lp
                 (call avg ss_list_price)
               )
-              (item as B2_CNT
+              (item as b2_cnt
                 (call count ss_list_price)
               )
-              (item as B2_CNTD
+              (item as b2_cntd
                 (call count (call distinct ss_list_price))
               )
             )
@@ -56,17 +56,17 @@
           )
         )
       )
-      (subquery-table as B3
+      (subquery-table as b3
         (query
           (select
             (select-list
-              (item as B3_LP
+              (item as b3_lp
                 (call avg ss_list_price)
               )
-              (item as B3_CNT
+              (item as b3_cnt
                 (call count ss_list_price)
               )
-              (item as B3_CNTD
+              (item as b3_cntd
                 (call count (call distinct ss_list_price))
               )
             )
@@ -82,17 +82,17 @@
           )
         )
       )
-      (subquery-table as B4
+      (subquery-table as b4
         (query
           (select
             (select-list
-              (item as B4_LP
+              (item as b4_lp
                 (call avg ss_list_price)
               )
-              (item as B4_CNT
+              (item as b4_cnt
                 (call count ss_list_price)
               )
-              (item as B4_CNTD
+              (item as b4_cntd
                 (call count (call distinct ss_list_price))
               )
             )
@@ -108,17 +108,17 @@
           )
         )
       )
-      (subquery-table as B5
+      (subquery-table as b5
         (query
           (select
             (select-list
-              (item as B5_LP
+              (item as b5_lp
                 (call avg ss_list_price)
               )
-              (item as B5_CNT
+              (item as b5_cnt
                 (call count ss_list_price)
               )
-              (item as B5_CNTD
+              (item as b5_cntd
                 (call count (call distinct ss_list_price))
               )
             )
@@ -134,17 +134,17 @@
           )
         )
       )
-      (subquery-table as B6
+      (subquery-table as b6
         (query
           (select
             (select-list
-              (item as B6_LP
+              (item as b6_lp
                 (call avg ss_list_price)
               )
-              (item as B6_CNT
+              (item as b6_cnt
                 (call count ss_list_price)
               )
-              (item as B6_CNTD
+              (item as b6_cntd
                 (call count (call distinct ss_list_price))
               )
             )

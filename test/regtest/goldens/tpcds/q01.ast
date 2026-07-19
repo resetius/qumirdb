@@ -11,7 +11,7 @@
               sr_store_sk
             )
             (item as ctr_total_return
-              (call sum SR_FEE)
+              (call sum sr_fee)
             )
           )
           (from

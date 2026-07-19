@@ -12,7 +12,7 @@
       (table store_sales)
       (table date_dim)
       (table store)
-      (subquery-table as V1
+      (subquery-table as v1
         (query
           (select
             (select-list
@@ -21,7 +21,7 @@
               )
             )
             (from
-              (subquery-table as A2
+              (subquery-table as a2
                 (query
                   (unknown-body)
                 )
@@ -33,7 +33,7 @@
     )
     (where
       (&& (&& (&& (&& (== ss_store_sk s_store_sk) (== ss_sold_date_sk d_date_sk)) (== d_qoy 1)) (== d_year 2002))
-        (== (call substr s_zip 1 2) (call substr |V1.ca_zip| 1 2)))
+        (== (call substr s_zip 1 2) (call substr |v1.ca_zip| 1 2)))
     )
     (group-by
       s_store_name

@@ -20,10 +20,10 @@
               i_manufact_id
             )
             (item as sales_cnt
-              (call SUM sales_cnt)
+              (call sum sales_cnt)
             )
             (item as sales_amt
-              (call SUM sales_amt)
+              (call sum sales_amt)
             )
           )
           (from

@@ -17,10 +17,10 @@
         i_category
       )
       (item as sales_cnt
-        (call COUNT *)
+        (call count *)
       )
       (item as sales_amt
-        (call SUM ext_sales_price)
+        (call sum ext_sales_price)
       )
     )
     (from

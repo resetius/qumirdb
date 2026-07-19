@@ -32,8 +32,8 @@
                       (i_class_id i_class_id)
                       (i_category_id i_category_id)
                       (i_manufact_id i_manufact_id)
-                      (sales_cnt (- cs_quantity (call COALESCE cr_return_quantity 0)))
-                      (sales_amt (- cs_ext_sales_price (call COALESCE cr_return_amount 0))))
+                      (sales_cnt (- cs_quantity (call coalesce cr_return_quantity 0)))
+                      (sales_amt (- cs_ext_sales_price (call coalesce cr_return_amount 0))))
                     (rel project
                       (rel filter
                         (rel join
@@ -58,8 +58,8 @@
                       (i_class_id i_class_id)
                       (i_category_id i_category_id)
                       (i_manufact_id i_manufact_id)
-                      (sales_cnt (- ss_quantity (call COALESCE sr_return_quantity 0)))
-                      (sales_amt (- ss_ext_sales_price (call COALESCE sr_return_amt 0))))
+                      (sales_cnt (- ss_quantity (call coalesce sr_return_quantity 0)))
+                      (sales_amt (- ss_ext_sales_price (call coalesce sr_return_amt 0))))
                     (rel project
                       (rel filter
                         (rel join
@@ -79,8 +79,8 @@
                       (i_class_id i_class_id)
                       (i_category_id i_category_id)
                       (i_manufact_id i_manufact_id)
-                      (sales_cnt (- ws_quantity (call COALESCE wr_return_quantity 0)))
-                      (sales_amt (- ws_ext_sales_price (call COALESCE wr_return_amt 0)))))
+                      (sales_cnt (- ws_quantity (call coalesce wr_return_quantity 0)))
+                      (sales_amt (- ws_ext_sales_price (call coalesce wr_return_amt 0)))))
                   (|sales_detail.d_year| d_year)
                   (|sales_detail.i_brand_id| i_brand_id)
                   (|sales_detail.i_class_id| i_class_id)
@@ -134,8 +134,8 @@
                       (i_class_id i_class_id)
                       (i_category_id i_category_id)
                       (i_manufact_id i_manufact_id)
-                      (sales_cnt (- cs_quantity (call COALESCE cr_return_quantity 0)))
-                      (sales_amt (- cs_ext_sales_price (call COALESCE cr_return_amount 0))))
+                      (sales_cnt (- cs_quantity (call coalesce cr_return_quantity 0)))
+                      (sales_amt (- cs_ext_sales_price (call coalesce cr_return_amount 0))))
                     (rel project
                       (rel filter
                         (rel join
@@ -160,8 +160,8 @@
                       (i_class_id i_class_id)
                       (i_category_id i_category_id)
                       (i_manufact_id i_manufact_id)
-                      (sales_cnt (- ss_quantity (call COALESCE sr_return_quantity 0)))
-                      (sales_amt (- ss_ext_sales_price (call COALESCE sr_return_amt 0))))
+                      (sales_cnt (- ss_quantity (call coalesce sr_return_quantity 0)))
+                      (sales_amt (- ss_ext_sales_price (call coalesce sr_return_amt 0))))
                     (rel project
                       (rel filter
                         (rel join
@@ -181,8 +181,8 @@
                       (i_class_id i_class_id)
                       (i_category_id i_category_id)
                       (i_manufact_id i_manufact_id)
-                      (sales_cnt (- ws_quantity (call COALESCE wr_return_quantity 0)))
-                      (sales_amt (- ws_ext_sales_price (call COALESCE wr_return_amt 0)))))
+                      (sales_cnt (- ws_quantity (call coalesce wr_return_quantity 0)))
+                      (sales_amt (- ws_ext_sales_price (call coalesce wr_return_amt 0)))))
                   (|sales_detail.d_year| d_year)
                   (|sales_detail.i_brand_id| i_brand_id)
                   (|sales_detail.i_class_id| i_class_id)
