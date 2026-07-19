@@ -157,6 +157,36 @@
   ;; String literals are emitted as StringView (see the SQL parser), so the literal
   ;; comparison overloads are gone — qdb_sv_sv_* above handles every comparison.
 
+  ;; DATE columns are erased to plain i32 at the schema boundary (parquet DATE32 ->
+  ;; TIntegerType::I32), so `date_col OP 'YYYY-MM-DD'` reaches here as (i32, StringView).
+  ;; SQL implicitly casts the date string to a date, so parse the literal via qdb_sql_date
+  ;; and compare as i32. Only fires for i32-vs-StringView, never for StringView pairs.
+  (fun qdb_i32_svdate_eq ((var l i32) (var r StringView)) -> bool (attrs (operator "=="))
+    (block (return (== l (call qdb_date_to_i32 (call qdb_sql_date r))))))
+  (fun qdb_i32_svdate_ne ((var l i32) (var r StringView)) -> bool (attrs (operator "!="))
+    (block (return (!= l (call qdb_date_to_i32 (call qdb_sql_date r))))))
+  (fun qdb_i32_svdate_lt ((var l i32) (var r StringView)) -> bool (attrs (operator "<"))
+    (block (return (< l (call qdb_date_to_i32 (call qdb_sql_date r))))))
+  (fun qdb_i32_svdate_le ((var l i32) (var r StringView)) -> bool (attrs (operator "<="))
+    (block (return (<= l (call qdb_date_to_i32 (call qdb_sql_date r))))))
+  (fun qdb_i32_svdate_gt ((var l i32) (var r StringView)) -> bool (attrs (operator ">"))
+    (block (return (> l (call qdb_date_to_i32 (call qdb_sql_date r))))))
+  (fun qdb_i32_svdate_ge ((var l i32) (var r StringView)) -> bool (attrs (operator ">="))
+    (block (return (>= l (call qdb_date_to_i32 (call qdb_sql_date r))))))
+
+  (fun qdb_svdate_i32_eq ((var l StringView) (var r i32)) -> bool (attrs (operator "=="))
+    (block (return (== (call qdb_date_to_i32 (call qdb_sql_date l)) r))))
+  (fun qdb_svdate_i32_ne ((var l StringView) (var r i32)) -> bool (attrs (operator "!="))
+    (block (return (!= (call qdb_date_to_i32 (call qdb_sql_date l)) r))))
+  (fun qdb_svdate_i32_lt ((var l StringView) (var r i32)) -> bool (attrs (operator "<"))
+    (block (return (< (call qdb_date_to_i32 (call qdb_sql_date l)) r))))
+  (fun qdb_svdate_i32_le ((var l StringView) (var r i32)) -> bool (attrs (operator "<="))
+    (block (return (<= (call qdb_date_to_i32 (call qdb_sql_date l)) r))))
+  (fun qdb_svdate_i32_gt ((var l StringView) (var r i32)) -> bool (attrs (operator ">"))
+    (block (return (> (call qdb_date_to_i32 (call qdb_sql_date l)) r))))
+  (fun qdb_svdate_i32_ge ((var l StringView) (var r i32)) -> bool (attrs (operator ">="))
+    (block (return (>= (call qdb_date_to_i32 (call qdb_sql_date l)) r))))
+
   ;; Cast a string literal (char*) to a StringView without materializing a managed
   ;; string. TODO: replace with native qumir support for StringView literals.
   (fun qdb_lit_to_sv ((var lit string)) -> StringView (attrs extern (operator "cast")) (block))
