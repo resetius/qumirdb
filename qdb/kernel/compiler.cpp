@@ -1,4 +1,5 @@
 #include <qdb/kernel/compiler.h>
+#include <qdb/kernel/annotate_type.h>
 #include <qdb/kernel/builder.h>
 #include <qdb/kernel/column_value.h>
 #include <qdb/kernel/finalize.h>
@@ -1390,8 +1391,8 @@ TJoinKernels TKernelCompiler::CompileJoin(
         keys.emplace_back(key.Left.Name, key.Right.Name);
     }
 
-    const TExprPtr residualPredicate =
-        spec.Expressions.empty() ? nullptr : spec.Expressions[0];
+    TExprPtr residualPredicate =
+        spec.Expressions.empty() ? nullptr : ClonePredicate(spec.Expressions[0]);
     if (residualPredicate &&
         spec.JoinType != EJoinType::Inner &&
         spec.JoinType != EJoinType::LeftSemi &&
@@ -1413,6 +1414,8 @@ TJoinKernels TKernelCompiler::CompileJoin(
         innerOutputType = *innerOutput;
         innerType = static_cast<TStructType*>(innerOutputType.get());
         leftFieldCount = leftType.Cast()->Fields.size();
+        residualPredicate = NKernel::NormalizeNullBranches(
+            residualPredicate, *innerType);
     }
 
     if (Diagnostics_) {
