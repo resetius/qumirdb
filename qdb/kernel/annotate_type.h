@@ -18,4 +18,13 @@ NQumir::NAst::TTypePtr AnnotateExprType(
     const NQumir::NAst::TExprPtr& expr,
     const NQumir::NAst::TStructType& inputType);
 
+// Coerces the branches of a CASE/`if` with a bare NULL (or nullable/non-nullable
+// mismatch) to a common Nullable[T]: T is inferred from the non-null branch via
+// AnnotateExprType, branches are wrapped with qumirdb.oz's nullable_from_value /
+// nullable_from_null casts. Post-order and per-`if`, so nesting needs no handling.
+// No-op without a NULL/`if`. `inputType` describes the referenced columns.
+NQumir::NAst::TExprPtr NormalizeNullBranches(
+    const NQumir::NAst::TExprPtr& expr,
+    const NQumir::NAst::TStructType& inputType);
+
 } // namespace NQdb::NKernel

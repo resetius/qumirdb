@@ -12,11 +12,14 @@
 #include "qumirdb_source_module.h"
 
 #include <qumir/codegen/llvm/llvm_initializer.h>
+#include <qumir/parser/core/lexer.h>
+#include <qumir/parser/core/parser.h>
 #include <qumir/runner/runner_llvm.h>
 
 #include <algorithm>
 #include <cstdint>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <tuple>
 #include <unordered_set>
@@ -56,6 +59,17 @@ static_assert(sizeof(TPairBuffer) == TKernelCompiler::kPairBufferSize);
 
 constexpr int64_t JoinOpCode(EJoinKernelOp op) {
     return static_cast<int64_t>(op);
+}
+
+NQumir::NAst::TExprPtr ParseExpr(const std::string& src) {
+    std::istringstream in(src);
+    NQumir::NAst::NCore::TTokenStream tokens(in);
+    NQumir::NAst::NCore::TParser parser;
+    auto parsed = parser.Parse(tokens);
+    if (!parsed) {
+        throw std::runtime_error(parsed.error().ToString());
+    }
+    return *parsed;
 }
 
 std::unique_ptr<NQumir::TLLVMRunner> CompileJoinEntry(
@@ -244,6 +258,22 @@ TEST(CompileJoin, ProducesWorkingInnerJoinKernels) {
 
     kernels.Dispatch(&left, &right, nullptr, 0, &pairs, nullptr, nullptr,
         0, JoinOpCode(EJoinKernelOp::Destroy));
+}
+
+TEST(CompileJoin, NormalizesNullableResidualIfBranch) {
+    using namespace NQumir::NAst;
+    auto i64 = [] { return std::make_shared<TIntegerType>(TIntegerType::I64); };
+    auto f64 = [] { return std::make_shared<TFloatType>(); };
+    TStructType leftType({{"lk", i64()}, {"lv", f64()}});
+    TStructType rightType({{"rk", i64()}, {"rv", std::make_shared<TNullable>(f64())}});
+
+    auto spec = NKernel::BuildJoinKernelSpec(
+        leftType, rightType, {{"lk", "rk"}}, EJoinType::Inner,
+        ParseExpr("(> (if (< lv (: 10.0 f64)) lv rv) (: 0.0 f64))"));
+
+    TKernelCompiler compiler;
+    auto kernels = compiler.CompileJoin(spec);
+    EXPECT_TRUE(static_cast<bool>(kernels.Dispatch));
 }
 
 TEST(CompileJoinHash, ProducesMatchingSideHashes) {
