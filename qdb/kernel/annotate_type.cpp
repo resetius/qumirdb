@@ -379,12 +379,7 @@ TTypePtr InferType(const TExprPtr& e, const TStructType& schema) {
         for (const auto& [fn, ft] : schema.Fields) {
             if (fn == n) return ft;
         }
-        // `__`-prefixed names are pass-internal temps (not columns); anything else is an
-        // unknown column, which is an error.
-        if (n.rfind("__", 0) == 0) {
-            return nullptr;
-        }
-        throw NQumir::TError("project type inference: unknown column '" + n + "'");
+        return nullptr; // unknown here — tolerated when nested (null propagates)
     }
     if (auto bin = TMaybeNode<TBinaryExpr>(e)) {
         auto node =bin.Cast();
@@ -733,7 +728,12 @@ TTypePtr AnnotateExprType(const TExprPtr& expr, const TStructType& inputType) {
     if (!expr) {
         throw NQumir::TError("project type inference: null expression");
     }
-    return InferType(expr, inputType);
+    TTypePtr t = InferType(expr, inputType);
+    if (!t) {
+        throw NQumir::TError("project type inference: could not infer type of '" +
+            NQumir::NAst::NCore::PrintAst(expr) + "'");
+    }
+    return t;
 }
 
 namespace {
