@@ -1414,8 +1414,8 @@ TJoinKernels TKernelCompiler::CompileJoin(
         innerOutputType = *innerOutput;
         innerType = static_cast<TStructType*>(innerOutputType.get());
         leftFieldCount = leftType.Cast()->Fields.size();
-        residualPredicate = NKernel::NormalizeNullBranches(
-            residualPredicate, *innerType);
+        residualPredicate = NKernel::ExpandNullable(
+            residualPredicate, *innerType).first;
     }
 
     if (Diagnostics_) {

@@ -16,21 +16,6 @@ namespace NQdb {
 
 using namespace NQumir::NAst;
 
-namespace {
-
-// Rewrite CASE/`if` NULL branches to Nullable[T] before the expression is typed.
-// No-op unless `e` has a NULL/`if`. Idempotent (AnnotateTypes reruns it).
-void NormalizeNulls(TExprPtr& e, const TTypePtr& schema) {
-    if (!e || !schema) {
-        return;
-    }
-    if (auto* s = static_cast<TStructType*>(schema.get())) {
-        e = NKernel::NormalizeNullBranches(e, *s);
-    }
-}
-
-} // namespace
-
 void AnnotateTypes(const TOperatorPtr& root) {
     // Bottom-up: children first.
     for (const auto& child : root->Children()) {
@@ -50,9 +35,7 @@ void AnnotateTypes(const TOperatorPtr& root) {
     }
 
     if (auto maybe = TMaybeOp<TFilterOperator>(root)) {
-        auto filter = maybe.Cast();
-        auto schema = filter->Input()->OutputColumns();
-        NormalizeNulls(filter->MutablePredicate(), schema);
+        auto schema = maybe.Cast()->Input()->OutputColumns();
         root->Type = std::make_shared<TFunctionType>(
             std::vector<TTypePtr>{schema},
             schema);
@@ -88,15 +71,14 @@ void AnnotateTypes(const TOperatorPtr& root) {
         auto* inputStruct = static_cast<TStructType*>(proj->Input()->OutputColumns().get());
         std::vector<std::pair<std::string, TTypePtr>> outFields;
         if (inputStruct) {
-            for (auto& spec : proj->MutableProjections()) {
+            for (const auto& spec : proj->Projections()) {
                 TTypePtr fieldType;
                 if (auto ident = TMaybeNode<TIdentExpr>(spec.Expression)) {
                     for (auto& [name, type] : inputStruct->Fields) {
                         if (name == ident.Cast()->Name) { fieldType = type; break; }
                     }
                 } else {
-                    // Computed column: normalize NULL branches, then infer its type.
-                    NormalizeNulls(spec.Expression, proj->Input()->OutputColumns());
+                    // Computed column: rule-based SQL type inference (no rewrite).
                     fieldType = NKernel::AnnotateExprType(spec.Expression, *inputStruct);
                 }
                 outFields.emplace_back(spec.Name, fieldType);
@@ -111,9 +93,6 @@ void AnnotateTypes(const TOperatorPtr& root) {
     if (auto maybe = TMaybeOp<TAggregateOperator>(root)) {
         auto agg = maybe.Cast();
         auto inputSchema = agg->Input()->OutputColumns();
-        for (auto& spec : agg->MutableAggs()) {
-            NormalizeNulls(spec.Arg, inputSchema);
-        }
         root->Type = std::make_shared<TFunctionType>(
             std::vector<TTypePtr>{inputSchema},
             ComputeAggregateOutputType(inputSchema, agg->GroupKeys(), agg->Aggs(),
@@ -126,13 +105,6 @@ void AnnotateTypes(const TOperatorPtr& root) {
         auto leftSchema = join->Left()->OutputColumns();
         auto rightSchema = join->Right()->OutputColumns();
         auto output = ComputeJoinOutputType(leftSchema, rightSchema, join->JoinType());
-        if (join->Filter()) {
-            // The join filter sees both sides' columns (inner-join shape).
-            auto filterInput = ComputeJoinOutputType(leftSchema, rightSchema, EJoinType::Inner);
-            if (filterInput) {
-                NormalizeNulls(join->MutableFilter(), *filterInput);
-            }
-        }
         root->Type = std::make_shared<TFunctionType>(
             std::vector<TTypePtr>{leftSchema, rightSchema},
             output ? *output : nullptr);

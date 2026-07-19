@@ -967,6 +967,18 @@ NQumir::NAst::TExprPtr CloneFilterExpr(const NQumir::NAst::TExprPtr& expr) {
         out = std::make_shared<TIfExpr>(loc,
             CloneFilterExpr(ifExpr->Cond), CloneFilterExpr(ifExpr->Then),
             ifExpr->Else ? CloneFilterExpr(ifExpr->Else) : nullptr);
+    } else if (auto n = TMaybeNode<TFieldAccessExpr>(expr)) {
+        out = std::make_shared<TFieldAccessExpr>(loc,
+            CloneFilterExpr(n.Cast()->Object), n.Cast()->FieldName);
+    } else if (auto n = TMaybeNode<TBlockExpr>(expr)) {
+        std::vector<TExprPtr> stmts;
+        stmts.reserve(n.Cast()->Stmts.size());
+        for (const auto& s : n.Cast()->Stmts) stmts.push_back(CloneFilterExpr(s));
+        out = std::make_shared<TBlockExpr>(loc, std::move(stmts));
+    } else if (auto n = TMaybeNode<TVarStmt>(expr)) {
+        auto v = std::make_shared<TVarStmt>(loc, n.Cast()->Name, n.Cast()->Type);
+        if (n.Cast()->Init) v->Init = CloneFilterExpr(n.Cast()->Init);
+        out = std::move(v);
     } else {
         throw std::runtime_error(
             "residual filter: cannot clone predicate node '" +

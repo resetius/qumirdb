@@ -38,8 +38,5 @@ int32_t qdb_sql_date(qdb_string_view date);
 // SQL INTERVAL '<amount>' <unit> -> days (year/month approximate: 365/30).
 int32_t qdb_sql_interval(qdb_string_view amount, qdb_string_view unit);
 
-int64_t qdb_sql_bool_and(int64_t left, int64_t right);
-int64_t qdb_sql_bool_or(int64_t left, int64_t right);
-int64_t qdb_sql_bool_not(int64_t value);
 
 } // extern "C"

@@ -5,25 +5,22 @@
 
 namespace NQdb::NKernel {
 
-// Infers the result type of a Project/aggregate expression over `inputType` by
-// running the real qumir annotator: the expression is wrapped in a function whose
-// parameters are the input columns, composed with qumirdb.oz, then name-resolved
-// and type-annotated. External-function and operator (incl. Nullable[T]) return
-// types therefore come from their declarations, not a hand-maintained table.
-//
-// Source-module aliases are mapped back to planner types: Nullable[T] stays
-// nullable, and StringView becomes a string type.
-// Throws NQumir::TError for expressions the annotator cannot type.
+// Lightweight, rule-based SQL type inference for a Project/filter/aggregate expression
+// over `inputType`. No AST rewrite and no per-node qumirdb.oz compose: operators use
+// promotion rules, extern-call returns come from the resolver, and NULL propagates (a
+// nullable operand makes the result Nullable[T]) — i.e. it types the expression as if
+// ExpandNullable had already run. Used by the logical typing pass, which must keep the
+// AST clean (`a==b`, `a+b`) for equi-join extraction. Throws on a null expression.
 NQumir::NAst::TTypePtr AnnotateExprType(
     const NQumir::NAst::TExprPtr& expr,
     const NQumir::NAst::TStructType& inputType);
 
-// Coerces the branches of a CASE/`if` with a bare NULL (or nullable/non-nullable
-// mismatch) to a common Nullable[T]: T is inferred from the non-null branch via
-// AnnotateExprType, branches are wrapped with qumirdb.oz's nullable_from_value /
-// nullable_from_null casts. Post-order and per-`if`, so nesting needs no handling.
-// No-op without a NULL/`if`. `inputType` describes the referenced columns.
-NQumir::NAst::TExprPtr NormalizeNullBranches(
+// Heavy rewrite, run once per kernel just before compilation (never during logical
+// planning). Rewrites null-strict ops/calls/casts, AND/OR (SQL 3VL) and CASE/`if`
+// branches so nullability is explicit in the AST (guards on `.Valid`, results wrapped
+// Nullable[T]); the non-nullable path is untouched. Operates on a clone — the plan's
+// shared expression is left intact. Returns the rewritten expression and its planner type.
+std::pair<NQumir::NAst::TExprPtr, NQumir::NAst::TTypePtr> ExpandNullable(
     const NQumir::NAst::TExprPtr& expr,
     const NQumir::NAst::TStructType& inputType);
 
