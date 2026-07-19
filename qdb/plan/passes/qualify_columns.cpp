@@ -52,24 +52,47 @@ void CollectSources(const TOperatorPtr& op,
     }
 }
 
-// Look up `name` in `schema`. If it already contains '.' return as-is.
-// Matches by the bare part after the last '.' in each field name.
-// Returns the qualified field name, or `name` unchanged if no match found.
-std::string QualifyIdent(const TStructType& schema, const std::string& name) {
-    if (name.find('.') != std::string::npos) return name; // already qualified
+// Is `table` an alias `stem_<digits>` of `stem` (the suffix AssignSourceAliases gives a
+// duplicated source: `time_dim` -> `time_dim_0`)?
+bool IsAliasOfStem(std::string_view table, std::string_view stem) {
+    if (table.size() <= stem.size() + 1 || table.substr(0, stem.size()) != stem
+        || table[stem.size()] != '_')
+    {
+        return false;
+    }
+    for (size_t i = stem.size() + 1; i < table.size(); ++i) {
+        if (table[i] < '0' || table[i] > '9') return false;
+    }
+    return true;
+}
 
-    std::string_view sv = name;
+// Qualify `name` against `schema`, matching by the bare column part. A dotted reference
+// (`time_dim.t_time_sk`) is remapped to the field's actual table alias when the source was
+// renamed (`time_dim` -> `time_dim_0`) — otherwise the reference no longer matches the
+// schema and equi-join edges over it get dropped. Returns `name` if no unique match.
+std::string QualifyIdent(const TStructType& schema, const std::string& name) {
+    const auto dotPos = name.rfind('.');
+    const std::string_view bare = (dotPos != std::string::npos)
+        ? std::string_view(name).substr(dotPos + 1) : std::string_view(name);
+    const std::string_view prefix = (dotPos != std::string::npos)
+        ? std::string_view(name).substr(0, dotPos) : std::string_view();
+
     std::string result;
     int matches = 0;
     for (const auto& [fieldName, _] : schema.Fields) {
-        auto dot = fieldName.rfind('.');
-        std::string_view bare = (dot != std::string::npos)
-            ? std::string_view(fieldName).substr(dot + 1)
+        if (fieldName == name) return name; // already qualified to this schema
+        const auto fdot = fieldName.rfind('.');
+        const std::string_view fbare = (fdot != std::string::npos)
+            ? std::string_view(fieldName).substr(fdot + 1)
             : std::string_view(fieldName);
-        if (bare == sv) {
-            result = fieldName;
-            ++matches;
+        if (fbare != bare) continue;
+        if (dotPos != std::string::npos) {
+            const std::string_view ftable = (fdot != std::string::npos)
+                ? std::string_view(fieldName).substr(0, fdot) : std::string_view();
+            if (ftable != prefix && !IsAliasOfStem(ftable, prefix)) continue;
         }
+        result = fieldName;
+        ++matches;
     }
     if (matches == 1) return result;
     return name; // zero or ambiguous → keep original (best-effort)
