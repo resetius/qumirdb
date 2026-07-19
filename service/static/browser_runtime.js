@@ -1060,7 +1060,6 @@ function createQdbEnv(getMemory, holder) {
     dv.setBigInt64(Number(out) + 8, BigInt(len), true);
   };
 
-  const norm = v => (v < 0n ? 1n : v);
   return {
     // malloc family over the query's shared linear memory (segregated
     // free-list; free reclaims). qdb_realloc is not imported: it is implemented
@@ -1085,22 +1084,6 @@ function createQdbEnv(getMemory, holder) {
       const dv = new DataView(getMemory().buffer);
       dv.setBigUint64(Number(out), BigInt(lit), true);
       dv.setBigInt64(Number(out) + 8, BigInt(bytes.length), true);
-    },
-
-    // SQL three-valued booleans (0 false, 1 true, 2 unknown); negatives => true.
-    qdb_sql_bool_and: (l, r) => {
-      l = norm(l); r = norm(r);
-      if (l === 0n || r === 0n) return 0n;
-      return (l === 1n && r === 1n) ? 1n : 2n;
-    },
-    qdb_sql_bool_or: (l, r) => {
-      l = norm(l); r = norm(r);
-      if (l === 1n || r === 1n) return 1n;
-      return (l === 0n && r === 0n) ? 0n : 2n;
-    },
-    qdb_sql_bool_not: (v) => {
-      v = norm(v);
-      return v === 2n ? 2n : 1n - v;
     },
   };
 }

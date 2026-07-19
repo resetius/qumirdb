@@ -58,6 +58,8 @@ void Collect(
         auto innerBound = bound;
         for (const auto& stmt : node.Cast()->Stmts) {
             if (auto var = TMaybeNode<TVarStmt>(stmt)) {
+                // The initializer is evaluated before the name is in scope.
+                if (var.Cast()->Init) Collect(var.Cast()->Init, innerBound, out);
                 innerBound.insert(var.Cast()->Name);
             } else {
                 Collect(stmt, innerBound, out);
@@ -70,6 +72,7 @@ void Collect(
         auto innerBound = bound;
         for (const auto& v : node.Cast()->Vars) {
             if (auto var = TMaybeNode<TVarStmt>(v)) {
+                if (var.Cast()->Init) Collect(var.Cast()->Init, innerBound, out);
                 innerBound.insert(var.Cast()->Name);
             } else {
                 Collect(v, innerBound, out);

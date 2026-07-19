@@ -126,17 +126,15 @@ TEST(ProjectType, NullableIsNullAnnotates) {
     EXPECT_TRUE(IsBool(AnnotateExprType(Parse("(call qdb_is_null a)"), NullableSchema())));
 }
 
-TEST(ProjectType, NormalizeNullBranchesWrapsPlainSiblingOfNullableBranch) {
+TEST(ProjectType, ExpandNullableWrapsPlainSiblingOfNullableBranch) {
     TStructType sc({
         {"p", std::make_shared<TFloatType>()},
         {"maybe_p", std::make_shared<NQdb::TNullable>(
             std::make_shared<TFloatType>())},
     });
 
-    auto expr = NormalizeNullBranches(
-        Parse("(if (< p (: 10.0 f64)) p maybe_p)"),
-        sc);
-    auto type = AnnotateExprType(expr, sc);
+    auto [expr, type] = ExpandNullable(
+        Parse("(if (< p (: 10.0 f64)) p maybe_p)"), sc);
 
     ASSERT_TRUE(IsNullable(type));
     EXPECT_TRUE(IsF64(NullableInner(type)));
