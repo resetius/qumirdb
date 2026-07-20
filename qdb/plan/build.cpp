@@ -1333,21 +1333,20 @@ std::expected<TOperatorPtr, TError> BuildSetOp(
     const NSql::TSqlSetOp& setOp,
     const TTableSourceFactory& sources)
 {
-    if (setOp.Op != NSql::TSqlSetOp::EOp::Union
-        || setOp.Quantifier != NSql::ESetQuantifier::All)
-    {
+    if (setOp.Op != NSql::TSqlSetOp::EOp::Union) {
         return std::unexpected(TError(
-            "only UNION ALL is supported yet (UNION/INTERSECT/EXCEPT DISTINCT not supported)"));
+            "only UNION and UNION ALL are supported yet (INTERSECT/EXCEPT not supported)"));
     }
 
-    // Flatten a nested chain of UNION ALL into a single N-ary operator.
+    // Flatten only a nested chain of the same UNION quantifier. Mixed chains such
+    // as `(a UNION b) UNION ALL c` must keep the inner DISTINCT boundary.
     std::vector<TOperatorPtr> branches;
     std::function<std::expected<void, TError>(const NSql::TSqlNodePtr&)> collect =
         [&](const NSql::TSqlNodePtr& node) -> std::expected<void, TError> {
         auto inner = NSql::TMaybeNode<NSql::TSqlSetOp>(node);
         if (inner
             && inner.Cast()->Op == NSql::TSqlSetOp::EOp::Union
-            && inner.Cast()->Quantifier == NSql::ESetQuantifier::All)
+            && inner.Cast()->Quantifier == setOp.Quantifier)
         {
             if (auto l = collect(inner.Cast()->Left); !l) return l;
             return collect(inner.Cast()->Right);
@@ -1362,7 +1361,21 @@ std::expected<TOperatorPtr, TError> BuildSetOp(
     if (auto l = collect(setOp.Left); !l) return std::unexpected(l.error());
     if (auto r = collect(setOp.Right); !r) return std::unexpected(r.error());
 
-    return std::make_shared<TUnionAllOperator>(std::move(branches));
+    auto unionAll = std::make_shared<TUnionAllOperator>(std::move(branches));
+    if (setOp.Quantifier == NSql::ESetQuantifier::All) {
+        return unionAll;
+    }
+
+    auto* output = static_cast<NAst::TStructType*>(unionAll->OutputColumns().get());
+    if (!output) {
+        return std::unexpected(TError("UNION output schema must be a struct"));
+    }
+    std::vector<std::string> outputNames;
+    outputNames.reserve(output->Fields.size());
+    for (const auto& [name, _] : output->Fields) {
+        outputNames.push_back(name);
+    }
+    return ApplyDistinct(std::move(unionAll), outputNames);
 }
 
 std::expected<TOperatorPtr, TError> BuildQuery(
