@@ -317,6 +317,43 @@ TEST(SqlExceptE2E, BareExceptDeduplicatesNullRows) {
     EXPECT_EQ(nullCount, 0);
 }
 
+TEST(SqlGroupingE2E, RollupGroupingColumns) {
+    std::array<int64_t, 3> a = {1, 1, 2};
+    std::array<int64_t, 3> b = {10, 20, 10};
+    std::array<TColumn, 2> cols = {
+        TColumn{.Data = reinterpret_cast<char*>(a.data())},
+        TColumn{.Data = reinterpret_cast<char*>(b.data())},
+    };
+    TRowSet batch{.Columns = cols.data(), .ColumnCount = 2, .RowCount = 3, .RefCount = 1};
+    TMockSource t({"a", "b"}, {batch});
+
+    auto plan = SqlPlan(
+        "select grouping(a) ga, grouping(b) gb, count(*) c "
+        "from t group by rollup(a, b);",
+        {{"t", &t}});
+
+    std::vector<std::array<int64_t, 3>> rows;
+    TRowSet out{};
+    while (plan->Next(out)) {
+        const auto* ga = reinterpret_cast<const int64_t*>(out.Columns[0].Data);
+        const auto* gb = reinterpret_cast<const int64_t*>(out.Columns[1].Data);
+        const auto* c = reinterpret_cast<const int64_t*>(out.Columns[2].Data);
+        for (int64_t i = 0; i < out.RowCount; ++i) {
+            rows.push_back({ga[i], gb[i], c[i]});
+        }
+        Release(&out);
+    }
+    std::sort(rows.begin(), rows.end());
+    EXPECT_EQ(rows, (std::vector<std::array<int64_t, 3>>{
+        {0, 0, 1},
+        {0, 0, 1},
+        {0, 0, 1},
+        {0, 1, 1},
+        {0, 1, 2},
+        {1, 1, 3},
+    }));
+}
+
 TEST(ProjectE2E, IdentZeroCopyPlusComputed) {
     std::array<double, 3> x = {10.0, 20.0, 4.0};
     std::array<double, 3> z = {0.5, 0.25, 0.75};

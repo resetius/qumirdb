@@ -1,2 +1,2 @@
-Error: Unsupported expression @ Line: 6, Byte: 4, Column: 4
+Error: expected ';' or end of file @ Line: 7, Byte: 16, Column: 16
 

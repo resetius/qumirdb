@@ -1,0 +1,31 @@
+(query
+  (select
+    (select-list
+      (item
+        a
+      )
+      (item
+        b
+      )
+      (item as ga
+        (call grouping a)
+      )
+      (item as gb
+        (call grouping b)
+      )
+      (item as c
+        (call count *)
+      )
+    )
+    (from
+      (table t)
+    )
+    (group-by
+      (rollup
+        (block
+          a
+          b)
+      )
+    )
+  )
+)

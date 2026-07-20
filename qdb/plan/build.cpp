@@ -254,7 +254,14 @@ struct TGroupKey {
 struct TGroupingParse {
     std::vector<TGroupKey> Keys;
     std::vector<std::vector<size_t>> Sets;
+    bool HasGroupingSyntax = false;
 };
+
+bool IsGroupingSyntax(const NSql::TSqlNodePtr& element) {
+    return NSql::TMaybeNode<NSql::TSqlRollUp>(element)
+        || NSql::TMaybeNode<NSql::TSqlCube>(element)
+        || NSql::TMaybeNode<NSql::TSqlGroupingSet>(element);
+}
 
 std::vector<NAst::TExprPtr> UnpackExprs(const NAst::TExprPtr& exprs) {
     std::vector<NAst::TExprPtr> out;
@@ -327,6 +334,12 @@ std::expected<TGroupingParse, TError> ParseGrouping(const NSql::TSqlGroupBy& gro
     }
 
     TGroupingParse result;
+    for (const auto& item : groupBy.Items) {
+        if (IsGroupingSyntax(item)) {
+            result.HasGroupingSyntax = true;
+            break;
+        }
+    }
     std::unordered_map<std::string, size_t> keyIndex; // PrintAst -> index in Keys
     auto keyFor = [&](const NAst::TExprPtr& expr) -> std::expected<size_t, TError> {
         std::string k = NAst::NCore::PrintAst(expr);
@@ -358,6 +371,124 @@ std::expected<TGroupingParse, TError> ParseGrouping(const NSql::TSqlGroupBy& gro
         result.Sets.push_back(std::move(set));
     }
     return result;
+}
+
+bool IsGroupingCall(const NAst::TExprPtr& expr) {
+    auto call = NAst::TMaybeNode<NAst::TCallExpr>(expr);
+    if (!call) {
+        return false;
+    }
+    auto callee = NAst::TMaybeNode<NAst::TIdentExpr>(call.Cast()->Callee);
+    return callee && ToLower(callee.Cast()->Name) == "grouping";
+}
+
+bool HasGroupingCall(const NAst::TExprPtr& expr) {
+    if (!expr) {
+        return false;
+    }
+    if (IsGroupingCall(expr)) {
+        return true;
+    }
+    for (const auto& child : expr->Children()) {
+        if (HasGroupingCall(child)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+NAst::TExprPtr I64Literal(TLocation loc, int64_t value) {
+    return std::make_shared<NAst::TNumberExpr>(std::move(loc), value);
+}
+
+NAst::TExprPtr I32Literal(TLocation loc, int32_t value) {
+    auto ret = std::make_shared<NAst::TNumberExpr>(std::move(loc), static_cast<int64_t>(value));
+    ret->Type = std::make_shared<NAst::TIntegerType>(NAst::TIntegerType::I32);
+    return ret;
+}
+
+struct TGroupingRewriteInfo {
+    bool HasGroupingSyntax = false;
+    std::unordered_map<std::string, size_t> KeyIndex;
+    std::vector<std::vector<size_t>> Sets;
+};
+
+TGroupingRewriteInfo MakeGroupingRewriteInfo(
+    const std::vector<TGroupKey>& keys,
+    const std::vector<std::vector<size_t>>& sets,
+    bool hasGroupingSyntax)
+{
+    TGroupingRewriteInfo info;
+    info.HasGroupingSyntax = hasGroupingSyntax;
+    info.Sets = sets;
+    for (size_t i = 0; i < keys.size(); ++i) {
+        info.KeyIndex.emplace(NAst::NCore::PrintAst(keys[i].Expression), i);
+        info.KeyIndex.emplace(NAst::NCore::PrintAst(Ident({}, keys[i].Name)), i);
+    }
+    return info;
+}
+
+bool GroupingSetContainsKey(const std::vector<size_t>& set, size_t keyIndex) {
+    return std::find(set.begin(), set.end(), keyIndex) != set.end();
+}
+
+std::expected<NAst::TExprPtr, TError> BuildGroupingValue(
+    const NAst::TExprPtr& expr,
+    const TGroupingRewriteInfo& info)
+{
+    auto call = NAst::TMaybeNode<NAst::TCallExpr>(expr);
+    if (!call || call.Cast()->Args.size() != 1) {
+        return std::unexpected(TError(expr->Location, "GROUPING() expects exactly one argument"));
+    }
+    if (!info.HasGroupingSyntax) {
+        return std::unexpected(TError(expr->Location,
+            "GROUPING() requires GROUPING SETS, ROLLUP, or CUBE"));
+    }
+
+    auto arg = call.Cast()->Args[0];
+    auto key = info.KeyIndex.find(NAst::NCore::PrintAst(arg));
+    if (key == info.KeyIndex.end()) {
+        return std::unexpected(TError(arg->Location,
+            "GROUPING() argument must be a GROUP BY key"));
+    }
+
+    NAst::TExprPtr result = I64Literal(expr->Location, 0);
+    for (size_t setId = info.Sets.size(); setId-- > 0;) {
+        if (GroupingSetContainsKey(info.Sets[setId], key->second)) {
+            continue;
+        }
+        auto condition = std::make_shared<NAst::TBinaryExpr>(
+            expr->Location,
+            NAst::TOperator("=="),
+            Ident(expr->Location, "__grouping_id__"),
+            I32Literal(expr->Location, static_cast<int32_t>(setId)));
+        result = std::make_shared<NAst::TIfExpr>(
+            expr->Location,
+            std::move(condition),
+            I64Literal(expr->Location, 1),
+            std::move(result));
+    }
+    return result;
+}
+
+std::expected<NAst::TExprPtr, TError> RewriteGroupingCalls(
+    NAst::TExprPtr expr,
+    const TGroupingRewriteInfo& info)
+{
+    if (!expr) {
+        return expr;
+    }
+    if (IsGroupingCall(expr)) {
+        return BuildGroupingValue(expr, info);
+    }
+    for (auto* child : expr->MutableChildren()) {
+        auto rewritten = RewriteGroupingCalls(*child, info);
+        if (!rewritten) {
+            return std::unexpected(rewritten.error());
+        }
+        *child = std::move(*rewritten);
+    }
+    return expr;
 }
 
 // Rewrites subtrees equal to a computed group key into a reference to its column:
@@ -987,6 +1118,12 @@ std::expected<TOperatorPtr, TError> BuildSelect(
 
     bool aggregated = select.GroupBy != nullptr || !collector.Empty();
     if (!aggregated) {
+        for (const auto& projection : projections) {
+            if (HasGroupingCall(projection.Expression)) {
+                return std::unexpected(TError(projection.Expression->Location,
+                    "GROUPING() requires GROUPING SETS, ROLLUP, or CUBE"));
+            }
+        }
         if (having) {
             return std::unexpected(TError("HAVING requires aggregation"));
         }
@@ -997,6 +1134,7 @@ std::expected<TOperatorPtr, TError> BuildSelect(
 
     std::vector<TGroupKey> groupKeys;
     std::vector<std::vector<size_t>> groupingSets;
+    bool hasGroupingSyntax = false;
     if (select.GroupBy) {
         auto parsed = ParseGrouping(*select.GroupBy);
         if (!parsed) {
@@ -1004,6 +1142,7 @@ std::expected<TOperatorPtr, TError> BuildSelect(
         }
         groupKeys = std::move(parsed->Keys);
         groupingSets = std::move(parsed->Sets);
+        hasGroupingSyntax = parsed->HasGroupingSyntax;
     }
     // A single set over all keys is a plain aggregate; >1 set needs the kernel's
     // grouping-sets machinery (keys become nullable, masked per set).
@@ -1022,6 +1161,22 @@ std::expected<TOperatorPtr, TError> BuildSelect(
         having = SubstituteGroupKeys(having, computedKeys);
     }
 
+    auto groupingInfo = MakeGroupingRewriteInfo(groupKeys, groupingSets, hasGroupingSyntax);
+    for (auto& projection : projections) {
+        auto rewritten = RewriteGroupingCalls(projection.Expression, groupingInfo);
+        if (!rewritten) {
+            return std::unexpected(rewritten.error());
+        }
+        projection.Expression = std::move(*rewritten);
+    }
+    if (having) {
+        auto rewritten = RewriteGroupingCalls(having, groupingInfo);
+        if (!rewritten) {
+            return std::unexpected(rewritten.error());
+        }
+        having = std::move(*rewritten);
+    }
+
     std::vector<std::string> keys;
     keys.reserve(groupKeys.size());
     for (const auto& key : groupKeys) {
@@ -1029,6 +1184,12 @@ std::expected<TOperatorPtr, TError> BuildSelect(
     }
 
     auto specs = collector.TakeSpecs();
+    for (const auto& spec : specs) {
+        if (HasGroupingCall(spec.Arg)) {
+            return std::unexpected(TError(spec.Arg->Location,
+                "GROUPING() inside aggregate arguments is not supported"));
+        }
+    }
 
     // count(distinct col): dedup with an inner aggregate on (group keys ∪ col),
     // then count over the deduped rows above — the double aggregation the hand
@@ -1233,6 +1394,10 @@ std::expected<TOperatorPtr, TError> ApplyOrderBy(
             if (!topProject) {
                 return std::unexpected(TError(item->Expr->Location,
                     "ORDER BY on an expression is not supported here"));
+            }
+            if (HasGroupingCall(item->Expr)) {
+                return std::unexpected(TError(item->Expr->Location,
+                    "ORDER BY GROUPING() expression must appear in the select list"));
             }
             // Reuse the aggregate collector purely to detect aggregate calls:
             // a non-empty result means the expression aggregates but is not in
