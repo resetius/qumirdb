@@ -1,0 +1,19 @@
+(query
+  (select
+    (select-list
+      (item
+        (call grouping c)
+      )
+    )
+    (from
+      (table t)
+    )
+    (group-by
+      (rollup
+        (block
+          a
+          b)
+      )
+    )
+  )
+)

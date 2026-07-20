@@ -1,0 +1,2 @@
+Error: GROUPING() requires GROUPING SETS, ROLLUP, or CUBE @ Line: 1, Byte: 8, Column: 8
+

@@ -1,2 +1,59 @@
-Error: Unsupported expression @ Line: 3, Byte: 17, Column: 17
-
+(rel limit
+  (rel sort
+    (rel project
+      (rel aggregate
+        (rel project
+          (rel filter
+            (rel join
+              (rel join
+                (rel join
+                  (rel join (rel source "store_sales") (rel source "customer_demographics") () (inner))
+                  (rel source "date_dim")
+                  ()
+                  (inner))
+                (rel source "store")
+                ()
+                (inner))
+              (rel source "item")
+              ()
+              (inner))
+            (&& (&& (&& (&& (&& (&& (&& (&& (== ss_sold_date_sk d_date_sk) (== ss_item_sk i_item_sk)) (== ss_store_sk s_store_sk))
+                        (== ss_cdemo_sk cd_demo_sk))
+                      (== cd_gender (: (cast "F" <named StringView>) <named StringView>)))
+                    (== cd_marital_status (: (cast "W" <named StringView>) <named StringView>)))
+                  (== cd_education_status (: (cast "Primary" <named StringView>) <named StringView>)))
+                (== d_year 1998))
+              (|| (|| (|| (|| (|| (== s_state (: (cast "TN" <named StringView>) <named StringView>))
+                        (== s_state (: (cast "TN" <named StringView>) <named StringView>)))
+                      (== s_state (: (cast "TN" <named StringView>) <named StringView>)))
+                    (== s_state (: (cast "TN" <named StringView>) <named StringView>)))
+                  (== s_state (: (cast "TN" <named StringView>) <named StringView>)))
+                (== s_state (: (cast "TN" <named StringView>) <named StringView>)))))
+          (i_item_id i_item_id)
+          (s_state s_state)
+          (ss_quantity ss_quantity)
+          (ss_list_price ss_list_price)
+          (ss_coupon_amt ss_coupon_amt)
+          (ss_sales_price ss_sales_price))
+        (keys i_item_id s_state)
+        (set i_item_id s_state)
+        (set i_item_id)
+        (set)
+        (agg sum_0 sum ss_quantity)
+        (agg count_1 count)
+        (agg sum_2 sum ss_list_price)
+        (agg count_3 count)
+        (agg sum_4 sum ss_coupon_amt)
+        (agg count_5 count)
+        (agg sum_6 sum ss_sales_price)
+        (agg count_7 count))
+      (i_item_id i_item_id)
+      (s_state s_state)
+      (g_state (if (== __grouping_id__ (: 1 i32)) 1 (if (== __grouping_id__ (: 2 i32)) 1 0)))
+      (agg1 (/ sum_0 (cast count_1 f64)))
+      (agg2 (/ sum_2 (cast count_3 f64)))
+      (agg3 (/ sum_4 (cast count_5 f64)))
+      (agg4 (/ sum_6 (cast count_7 f64))))
+    (i_item_id asc nulls-default)
+    (s_state asc nulls-default))
+  (limit 100))
