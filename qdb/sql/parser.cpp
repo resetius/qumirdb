@@ -1,12 +1,14 @@
 #include "parser.h"
 
 #include <qdb/modules/qumirdb_runtime.h>
+#include <qdb/plan/types/decimal.h>
 
 #include <qumir/optional.h>
 
 #include <cctype>
 #include <map>
 #include <set>
+#include <stdexcept>
 #include <string>
 
 /*
@@ -1620,18 +1622,22 @@ TAstTypeTask type_name(TParserContext& ctx) {
     } else if (name == "DATE" || name == "TIMESTAMP") {
         co_return std::make_shared<TNamedType>(name, nullptr);
     } else if (name == "DECIMAL") {
+        int32_t precisionValue = DefaultDecimalPrecision;
+        int32_t scaleValue = DefaultDecimalScale;
         auto next = ctx.Stream.Next();
         if (IsOp(next, '(')) {
             auto precision = ctx.Stream.Next();
             if (precision.Type != TToken::Integer) {
                 co_return Error(precision, "integer expected in DECIMAL");
             }
+            precisionValue = static_cast<int32_t>(precision.Value.i64);
             next = ctx.Stream.Next();
             if (IsOp(next, ',')) {
                 auto scale = ctx.Stream.Next();
                 if (scale.Type != TToken::Integer) {
                     co_return Error(scale, "integer expected in DECIMAL");
                 }
+                scaleValue = static_cast<int32_t>(scale.Value.i64);
                 next = ctx.Stream.Next();
             }
             if (!IsOp(next, ')')) {
@@ -1640,7 +1646,11 @@ TAstTypeTask type_name(TParserContext& ctx) {
         } else {
             ctx.Stream.Unget(next);
         }
-        co_return std::make_shared<TNamedType>(name, nullptr);
+        try {
+            co_return std::make_shared<NQdb::TDecimal>(precisionValue, scaleValue);
+        } catch (const std::invalid_argument& e) {
+            co_return Error(token, e.what());
+        }
     }
 
     co_return Error(token, "unknown type name `" + name + "'");

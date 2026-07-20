@@ -19,6 +19,20 @@ const void* const QumirDbRuntimeSymbolAnchors[] __attribute__((used)) = {
     reinterpret_cast<const void*>(&qdb_sql_date),
     reinterpret_cast<const void*>(&qdb_sql_interval),
     reinterpret_cast<const void*>(&qdb_round),
+    reinterpret_cast<const void*>(&qdb_decimal_from_i64),
+    reinterpret_cast<const void*>(&qdb_decimal_from_f64),
+    reinterpret_cast<const void*>(&qdb_decimal_scale_up),
+    reinterpret_cast<const void*>(&qdb_decimal_add),
+    reinterpret_cast<const void*>(&qdb_decimal_sub),
+    reinterpret_cast<const void*>(&qdb_decimal_neg),
+    reinterpret_cast<const void*>(&qdb_decimal_mul_i64),
+    reinterpret_cast<const void*>(&qdb_decimal_div_i64),
+    reinterpret_cast<const void*>(&qdb_decimal_eq),
+    reinterpret_cast<const void*>(&qdb_decimal_ne),
+    reinterpret_cast<const void*>(&qdb_decimal_lt),
+    reinterpret_cast<const void*>(&qdb_decimal_le),
+    reinterpret_cast<const void*>(&qdb_decimal_gt),
+    reinterpret_cast<const void*>(&qdb_decimal_ge),
 };
 
 std::vector<TExternalType> BuildQumirDbExternalTypes() {

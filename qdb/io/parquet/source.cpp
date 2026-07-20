@@ -1,4 +1,5 @@
 #include <qdb/io/parquet/source.h>
+#include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
 
 #include <cstdlib>
@@ -46,6 +47,12 @@ TTypePtr ArrowTypeToQumir(const std::shared_ptr<arrow::DataType>& type) {
         case arrow::Type::LARGE_STRING: return std::make_shared<NQumir::NAst::TStringType>();
         case arrow::Type::DATE32: return std::make_shared<TIntegerType>(TIntegerType::I32);
         case arrow::Type::DATE64: return std::make_shared<TIntegerType>(TIntegerType::I64);
+        case arrow::Type::DECIMAL128: {
+            auto decimal = std::static_pointer_cast<arrow::Decimal128Type>(type);
+            return std::make_shared<TDecimal>(decimal->precision(), decimal->scale());
+        }
+        case arrow::Type::DECIMAL256:
+            throw std::runtime_error("DECIMAL256 parquet columns are not supported");
         default: return nullptr;
     }
 }
@@ -70,6 +77,11 @@ void DestroyBatch(TRowSet* rs) {
 char* NumericData(const std::shared_ptr<arrow::Array>& arr) {
     auto fwType = static_cast<const arrow::FixedWidthType*>(arr->type().get());
     int byteWidth = fwType->bit_width() / 8;
+    const uint8_t* raw = arr->data()->buffers[1]->data();
+    return const_cast<char*>(reinterpret_cast<const char*>(raw)) + arr->offset() * byteWidth;
+}
+
+char* FixedByteWidthData(const std::shared_ptr<arrow::Array>& arr, int32_t byteWidth) {
     const uint8_t* raw = arr->data()->buffers[1]->data();
     return const_cast<char*>(reinterpret_cast<const char*>(raw)) + arr->offset() * byteWidth;
 }
@@ -540,6 +552,10 @@ bool TParquetSource::Next(TRowSet& rowSet) {
             case arrow::Type::DATE32:
             case arrow::Type::DATE64: {
                 col.Data = NumericData(arr);
+                break;
+            }
+            case arrow::Type::DECIMAL128: {
+                col.Data = FixedByteWidthData(arr, 16);
                 break;
             }
             case arrow::Type::FLOAT: {

@@ -1,5 +1,6 @@
 #include <qdb/scheduler/runtime_adapter.h>
 
+#include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
 
 #include <qumir/error.h>
@@ -105,6 +106,9 @@ TTypePtr ShuffleValueType(const TTypePtr& type) {
 }
 
 size_t ShuffleColumnFixedWidth(const TTypePtr& type) {
+    if (IsDecimalType(type)) {
+        return 16;
+    }
     auto valueType = ShuffleValueType(type);
     if (auto integer = TMaybeType<TIntegerType>(valueType)) {
         return static_cast<size_t>(integer.Cast()->BitWidth() / 8);

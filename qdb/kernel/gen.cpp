@@ -2,6 +2,7 @@
 #include <qdb/kernel/builder.h>
 #include <qdb/kernel/column_value.h>
 #include <qdb/plan/passes/unbound_vars.h>
+#include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
 
 #include <qumir/parser/ast.h>
@@ -50,6 +51,23 @@ NQumir::NAst::TTypePtr PointerPointeeOr(
         return pointer.Cast()->PointeeType;
     }
     return fallback ? fallback : NamedType("TColumn");
+}
+
+bool IsBinIntValueType(const NQumir::NAst::TTypePtr& type) {
+    return IsBinIntStorageType(type) || IsDecimalType(type);
+}
+
+NQumir::NAst::TTypePtr AggregateStorageType(
+    const NQumir::NAst::TTypePtr& type)
+{
+    if (IsBinIntValueType(type)) {
+        return BinIntStorageType();
+    }
+    return type;
+}
+
+int64_t AggStateByteWidth(const TAggReducerInfo& reducer) {
+    return reducer.IsBinInt() ? 16 : 8;
 }
 
 // Rewrites string-column TIdentExpr nodes to their pre-materialized StringView
@@ -1358,7 +1376,7 @@ TAggReducerLayout BuildAggReducerLayout(
 {
     TAggReducerLayout layout;
     layout.Reducers.reserve(funcs.size());
-    int nextBufIdx = static_cast<int>(funcs.size());
+    int nextBufIdx = 0;
     for (size_t i = 0; i < funcs.size(); ++i) {
         TAggReducerInfo info;
         info.Func = funcs[i];
@@ -1368,7 +1386,13 @@ TAggReducerLayout BuildAggReducerLayout(
         info.NeedsValidity = arg.IsNullable && info.HasArg;
         const bool isAggFunc =
             info.Func == "sum" || info.Func == "min" || info.Func == "max";
-        info.IsFloat = arg.IsFloat && info.HasArg && isAggFunc;
+        info.ValueKind = info.HasArg && isAggFunc
+            ? arg.ValueKind
+            : EAggValueKind::Int64;
+        info.ValueBufIdx = nextBufIdx++;
+        if (info.IsBinInt()) {
+            info.ExtraBufIdx = nextBufIdx++;
+        }
         info.IsNullableOutput = info.NeedsValidity && isAggFunc;
         if (info.IsNullableOutput) {
             info.ValidBufIdx = nextBufIdx++;
@@ -1473,7 +1497,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
     // the shared TColumn materializer (arg_column_<idx>). Reducers then read
     // their own column by index (layout's ArgColumnIndex).
     struct TArgColumn {
-        bool Float = false;
+        EAggValueKind ValueKind = EAggValueKind::Int64;
         bool Nullable = false;
         std::optional<TColumnValueAst> Mat; // set for nullable columns
     };
@@ -1485,8 +1509,12 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
         const int32_t idx = r.ArgColumnIndex;
         const auto& colType = inputType.Fields[idx].second;
         TArgColumn ac;
-        ac.Float = static_cast<bool>(
-            TMaybeType<TFloatType>(UnwrapNamedType(UnwrapNullableType(colType))));
+        const auto valueType = UnwrapNullableType(colType);
+        if (IsBinIntValueType(valueType)) {
+            ac.ValueKind = EAggValueKind::BinInt;
+        } else if (TMaybeType<TFloatType>(UnwrapNamedType(valueType))) {
+            ac.ValueKind = EAggValueKind::Float64;
+        }
         ac.Nullable = IsNullableType(colType);
         if (ac.Nullable) {
             const std::string colName = "arg_column_" + std::to_string(idx);
@@ -1495,7 +1523,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
             ac.Mat = BuildColumnValueAst(
                 colName, "i", "arg_value_" + std::to_string(idx), colType, stringViewType);
         } else {
-            auto valType = UnwrapNullableType(colType);
+            auto valType = AggregateStorageType(UnwrapNullableType(colType));
             auto ptrValType = std::make_shared<TPointerType>(valType);
             const std::string ptrName = "values_" + std::to_string(idx);
             update.push_back(var(ptrName, ptrValType));
@@ -1577,7 +1605,8 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
             std::make_move_iterator(keyField.Setup.begin()),
             std::make_move_iterator(keyField.Setup.end()));
     }
-    // Compute each arg column's value (as i64 bits) and validity once per row.
+    // Compute each arg column's value and validity once per row. Scalar
+    // integers/floats are carried as i64 bits; BinInt stays typed.
     for (auto& [idx, ac] : argColumns) {
         const std::string vname = "arg_val_" + std::to_string(idx);
         TExprPtr valExpr;
@@ -1585,18 +1614,28 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
             materialize.insert(materialize.end(),
                 std::make_move_iterator(ac.Mat->Setup.begin()),
                 std::make_move_iterator(ac.Mat->Setup.end()));
-            // Float values are carried as i64 bits (bitcast), integers converted.
-            valExpr = ac.Float
-                ? bitcast(ac.Mat->Value, i64Type)
-                : cast(ac.Mat->Value, i64Type);
+            if (ac.ValueKind == EAggValueKind::BinInt) {
+                valExpr = ac.Mat->Value;
+            } else if (ac.ValueKind == EAggValueKind::Float64) {
+                valExpr = bitcast(ac.Mat->Value, i64Type);
+            } else {
+                valExpr = cast(ac.Mat->Value, i64Type);
+            }
         } else {
             auto cell = std::make_shared<TIndexExpr>(loc,
                 ident("values_" + std::to_string(idx)), ident("i"));
-            valExpr = ac.Float
-                ? bitcast(std::move(cell), i64Type)
-                : cast(std::move(cell), i64Type);
+            if (ac.ValueKind == EAggValueKind::BinInt) {
+                valExpr = std::move(cell);
+            } else if (ac.ValueKind == EAggValueKind::Float64) {
+                valExpr = bitcast(std::move(cell), i64Type);
+            } else {
+                valExpr = cast(std::move(cell), i64Type);
+            }
         }
-        materialize.push_back(var(vname, i64Type));
+        auto argType = ac.ValueKind == EAggValueKind::BinInt
+            ? BinIntStorageType()
+            : i64Type;
+        materialize.push_back(var(vname, argType));
         materialize.push_back(assign(vname, std::move(valExpr)));
         if (ac.Nullable) {
             const std::string validName = "arg_valid_" + std::to_string(idx);
@@ -1616,7 +1655,15 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
         reducerStmts.push_back(var(bufName, ptrI64Type));
         reducerStmts.push_back(assign(bufName,
             std::make_shared<TIndexExpr>(loc, ident("agg_buffers"),
-                numI64(static_cast<int64_t>(ri)))));
+                numI64(static_cast<int64_t>(info.ValueBufIdx)))));
+        std::string hiBufName;
+        if (info.IsBinInt()) {
+            hiBufName = "hibuf_" + std::to_string(ri);
+            reducerStmts.push_back(var(hiBufName, ptrI64Type));
+            reducerStmts.push_back(assign(hiBufName,
+                std::make_shared<TIndexExpr>(loc, ident("agg_buffers"),
+                    numI64(static_cast<int64_t>(info.ExtraBufIdx)))));
+        }
         auto valueI = [&]() -> TExprPtr {
             return info.HasArg ? ident("arg_val_" + std::to_string(info.ArgColumnIndex))
                                : numI64(0);
@@ -1626,6 +1673,23 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
                 ? ident("arg_valid_" + std::to_string(info.ArgColumnIndex))
                 : number(1, boolType);
         };
+        if (info.IsBinInt()) {
+            if (!info.NeedsValidity) {
+                reducerStmts.push_back(call(reduceName, {
+                    ident(bufName), ident(hiBufName), ident("dense_slot"),
+                    valueI(), binary("!=", ident("is_new"), numI64(0))}));
+                continue;
+            }
+            const std::string validBufName = "validbuf_" + std::to_string(ri);
+            reducerStmts.push_back(var(validBufName, ptrI64Type));
+            reducerStmts.push_back(assign(validBufName,
+                std::make_shared<TIndexExpr>(loc, ident("agg_buffers"),
+                    numI64(static_cast<int64_t>(info.ValidBufIdx)))));
+            reducerStmts.push_back(call(reduceName, {
+                ident(bufName), ident(hiBufName), ident("dense_slot"),
+                ident(validBufName), valueI(), validI()}));
+            continue;
+        }
         if (!info.NeedsValidity) {
             auto callR = call(reduceName, {slotIndex(bufName), valueI(),
                 binary("!=", ident("is_new"), numI64(0))});
@@ -1702,9 +1766,6 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
         expr->Type = i64Type;
         return expr;
     };
-    const bool anyNullableAgg = std::any_of(
-        layout.Reducers.begin(), layout.Reducers.end(),
-        [](const TAggReducerInfo& r) { return r.IsNullableOutput; });
     auto ptrI64Type = std::make_shared<TPointerType>(i64Type);
     auto ptrPtrI64Type = std::make_shared<TPointerType>(ptrI64Type);
     auto ptrColumnType = columnType
@@ -1716,6 +1777,13 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
     auto ident = [&](const std::string& name) -> TExprPtr {
         return std::make_shared<TIdentExpr>(loc, name);
     };
+    auto binary = [&](const char* op, TExprPtr left, TExprPtr right) -> TExprPtr {
+        return std::make_shared<TBinaryExpr>(
+            loc, TOperator(op), std::move(left), std::move(right));
+    };
+    auto index = [&](TExprPtr object, TExprPtr slot) -> TExprPtr {
+        return std::make_shared<TIndexExpr>(loc, std::move(object), std::move(slot));
+    };
 
     std::vector<TParam> params = {
         std::make_shared<TVarStmt>(loc, "ht", hashTableRefType),
@@ -1724,18 +1792,17 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
         std::make_shared<TVarStmt>(loc, "output_agg_masks", ptrPtrU8Type),
         std::make_shared<TVarStmt>(loc, "output_capacity", i64Type),
     };
-    // Only the first layout.Reducers.size() AggBuffers are value buffers exposed
-    // to output_buffers; trailing valid-count buffers stay internal.
-    auto stateCall = std::make_shared<TCallExpr>(loc, ident("aht_finalize_states"),
-        std::vector<TExprPtr>{
-            ident("ht"), ident("output_buffers"),
-            numI64(static_cast<int64_t>(layout.Reducers.size())),
-            ident("output_capacity"),
-        });
 
     std::vector<TExprPtr> bodyStmts;
     bodyStmts.push_back(std::make_shared<TVarStmt>(loc, "result", i64Type));
-    bodyStmts.push_back(std::make_shared<TAssignExpr>(loc, "result", stateCall));
+    bodyStmts.push_back(std::make_shared<TAssignExpr>(loc, "result",
+        std::make_shared<TFieldAccessExpr>(loc, ident("ht"), "Size")));
+    bodyStmts.push_back(std::make_shared<TIfExpr>(loc,
+        binary("<", ident("output_capacity"), ident("result")),
+        std::make_shared<TBlockExpr>(loc, std::vector<TExprPtr>{
+            std::make_shared<TAssignExpr>(loc, "result", numI64(-1)),
+        }),
+        nullptr));
 
     std::vector<TExprPtr> project;
     project.push_back(std::make_shared<TVarStmt>(loc, "group_keys", ptrKeyType));
@@ -1821,23 +1888,35 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
                         loc, column, "Data"), i64Type),
                 ptrFieldType)));
     }
-    if (anyNullableAgg) {
-        // Bind the internal valid-count buffers so the slot loop can derive each
-        // nullable aggregate's output mask (a group with zero valid arguments
-        // produces a NULL result).
+    if (!layout.Reducers.empty()) {
         project.push_back(std::make_shared<TVarStmt>(loc, "agg_buffers", ptrPtrI64Type));
         project.push_back(std::make_shared<TAssignExpr>(loc, "agg_buffers",
             std::make_shared<TFieldAccessExpr>(loc, ident("ht"), "AggBuffers")));
         for (size_t i = 0; i < layout.Reducers.size(); ++i) {
             const auto& r = layout.Reducers[i];
+            const std::string srcName = "agg_src_" + std::to_string(i);
+            const std::string dstName = "output_agg_" + std::to_string(i);
+            project.push_back(std::make_shared<TVarStmt>(loc, srcName, ptrI64Type));
+            project.push_back(std::make_shared<TAssignExpr>(loc, srcName,
+                index(ident("agg_buffers"), numI64(static_cast<int64_t>(r.ValueBufIdx)))));
+            project.push_back(std::make_shared<TVarStmt>(loc, dstName, ptrI64Type));
+            project.push_back(std::make_shared<TAssignExpr>(loc, dstName,
+                index(ident("output_buffers"), numI64(static_cast<int64_t>(i)))));
+            if (r.IsBinInt()) {
+                const std::string hiName = "agg_hi_" + std::to_string(i);
+                project.push_back(std::make_shared<TVarStmt>(loc, hiName, ptrI64Type));
+                project.push_back(std::make_shared<TAssignExpr>(loc, hiName,
+                    index(ident("agg_buffers"), numI64(static_cast<int64_t>(r.ExtraBufIdx)))));
+            }
             if (!r.IsNullableOutput) {
                 continue;
             }
+            // Bind the internal valid-count buffer so the slot loop can derive a
+            // nullable aggregate's output mask (zero valid args => NULL result).
             const std::string validName = "validbuf_" + std::to_string(i);
             project.push_back(std::make_shared<TVarStmt>(loc, validName, ptrI64Type));
             project.push_back(std::make_shared<TAssignExpr>(loc, validName,
-                std::make_shared<TIndexExpr>(loc, ident("agg_buffers"),
-                    numI64(static_cast<int64_t>(r.ValidBufIdx)))));
+                index(ident("agg_buffers"), numI64(static_cast<int64_t>(r.ValidBufIdx)))));
         }
     }
     project.push_back(std::make_shared<TVarStmt>(loc, "slot", i64Type));
@@ -1903,6 +1982,24 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
     }
     for (size_t i = 0; i < layout.Reducers.size(); ++i) {
         const auto& r = layout.Reducers[i];
+        const std::string srcName = "agg_src_" + std::to_string(i);
+        const std::string dstName = "output_agg_" + std::to_string(i);
+        if (r.IsBinInt()) {
+            const std::string hiName = "agg_hi_" + std::to_string(i);
+            auto outLoSlot = binary("*", ident("slot"), numI64(2));
+            auto outHiSlot = binary("+",
+                binary("*", ident("slot"), numI64(2)), numI64(1));
+            loopStmts.push_back(std::make_shared<TArrayAssignExpr>(loc, dstName,
+                std::vector<TExprPtr>{std::move(outLoSlot)},
+                index(ident(srcName), ident("slot"))));
+            loopStmts.push_back(std::make_shared<TArrayAssignExpr>(loc, dstName,
+                std::vector<TExprPtr>{std::move(outHiSlot)},
+                index(ident(hiName), ident("slot"))));
+        } else {
+            loopStmts.push_back(std::make_shared<TArrayAssignExpr>(loc, dstName,
+                std::vector<TExprPtr>{ident("slot")},
+                index(ident(srcName), ident("slot"))));
+        }
         if (!r.IsNullableOutput) {
             continue;
         }
@@ -2135,7 +2232,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinishRowSetAst(
         builder
             .Var(dataName, ptrI64Type)
             .Assign(dataName, allocAs(ptrI64Type,
-                Oz::Mul(Oz::Ident("size"), number(8))));
+                Oz::Mul(Oz::Ident("size"), number(AggStateByteWidth(reducer)))));
         remember(dataName);
         builder
             .Stmt(Oz::ArrayAssign("agg_buffers", idx, Oz::Ident(dataName)))
@@ -2300,6 +2397,7 @@ std::vector<NQumir::NAst::TExprPtr> GenReducerFunDecls(
     auto boolType = std::make_shared<TBoolType>();
     auto voidType = std::make_shared<TVoidType>();
     auto ptrI64Type = std::make_shared<TPointerType>(i64Type);
+    auto binIntType = BinIntStorageType();
 
     auto ident = [&](const std::string& name) {
         return std::make_shared<TIdentExpr>(loc, name);
@@ -2329,6 +2427,49 @@ std::vector<NQumir::NAst::TExprPtr> GenReducerFunDecls(
             std::move(e),
             type);
     };
+    auto cast = [&](TExprPtr e, TTypePtr type) -> TExprPtr {
+        return std::make_shared<TCastExpr>(loc, std::move(e), std::move(type));
+    };
+    auto field = [&](TExprPtr object, const std::string& name) -> TExprPtr {
+        return std::make_shared<TFieldAccessExpr>(loc, std::move(object), name);
+    };
+    auto binInt = [&](TExprPtr lo, TExprPtr hi) -> TExprPtr {
+        return std::make_shared<TStructConstructExpr>(loc, binIntType,
+            std::vector<TExprPtr>{
+                cast(std::move(lo), u64Type),
+                cast(std::move(hi), u64Type),
+            },
+            std::vector<std::string>{"Lo", "Hi"});
+    };
+    auto storeBinInt = [&](const std::string& loBuf,
+                           const std::string& hiBuf) -> std::vector<TExprPtr> {
+        return {
+            storeSlot(loBuf, cast(field(ident("next"), "Lo"), i64Type)),
+            storeSlot(hiBuf, cast(field(ident("next"), "Hi"), i64Type)),
+        };
+    };
+    auto binIntAccumulate = [&](const std::string& func,
+                                TExprPtr seed) -> TExprPtr {
+        if (func == "sum") {
+            return binary("+", ident("prev"), ident("value"));
+        }
+        if (func == "min") {
+            return std::make_shared<TIfExpr>(loc, std::move(seed),
+                ident("value"),
+                std::make_shared<TIfExpr>(loc,
+                    binary("<", ident("value"), ident("prev")),
+                    ident("value"), ident("prev")));
+        }
+        if (func == "max") {
+            return std::make_shared<TIfExpr>(loc, std::move(seed),
+                ident("value"),
+                std::make_shared<TIfExpr>(loc,
+                    binary(">", ident("value"), ident("prev")),
+                    ident("value"), ident("prev")));
+        }
+        throw std::invalid_argument(
+            "GenReducerFunDecls: unsupported BinInt aggregate: " + func);
+    };
 
     std::vector<TExprPtr> result;
     result.reserve(layout.Reducers.size());
@@ -2336,6 +2477,58 @@ std::vector<NQumir::NAst::TExprPtr> GenReducerFunDecls(
         const auto& r = layout.Reducers[i];
         const std::string& func = r.Func;
         const std::string name = "reduce_" + std::to_string(i);
+
+        if (r.IsBinInt()) {
+            const std::string loBuf = "lo_buf";
+            const std::string hiBuf = "hi_buf";
+            std::vector<TParam> params = {
+                std::make_shared<TVarStmt>(loc, loBuf, ptrI64Type),
+                std::make_shared<TVarStmt>(loc, hiBuf, ptrI64Type),
+                std::make_shared<TVarStmt>(loc, "dense_slot", i64Type),
+            };
+            if (r.NeedsValidity) {
+                params.push_back(std::make_shared<TVarStmt>(loc, "valid_buf", ptrI64Type));
+            }
+            params.push_back(std::make_shared<TVarStmt>(loc, "value", binIntType));
+            if (r.NeedsValidity) {
+                params.push_back(std::make_shared<TVarStmt>(loc, "value_is_valid", boolType));
+            } else {
+                params.push_back(std::make_shared<TVarStmt>(loc, "is_new", boolType));
+            }
+
+            std::vector<TExprPtr> stmts = {
+                std::make_shared<TVarStmt>(loc, "prev", binIntType),
+                std::make_shared<TAssignExpr>(loc, "prev",
+                    binInt(slotOf(loBuf), slotOf(hiBuf))),
+                std::make_shared<TVarStmt>(loc, "next", binIntType),
+            };
+            if (r.NeedsValidity) {
+                auto stores = storeBinInt(loBuf, hiBuf);
+                std::vector<TExprPtr> inner = {
+                    std::make_shared<TAssignExpr>(loc, "next",
+                        binIntAccumulate(func,
+                            binary("==", slotOf("valid_buf"), numI64(0)))),
+                };
+                inner.insert(inner.end(),
+                    std::make_move_iterator(stores.begin()),
+                    std::make_move_iterator(stores.end()));
+                inner.push_back(storeSlot("valid_buf",
+                    binary("+", slotOf("valid_buf"), numI64(1))));
+                stmts.push_back(std::make_shared<TIfExpr>(loc, ident("value_is_valid"),
+                    block(std::move(inner)), nullptr));
+            } else {
+                stmts.push_back(std::make_shared<TAssignExpr>(loc, "next",
+                    binIntAccumulate(func, ident("is_new"))));
+                auto stores = storeBinInt(loBuf, hiBuf);
+                stmts.insert(stmts.end(),
+                    std::make_move_iterator(stores.begin()),
+                    std::make_move_iterator(stores.end()));
+            }
+            result.push_back(std::make_shared<TFunDecl>(loc, name,
+                std::vector<TGenericParam>{},
+                std::move(params), block(std::move(stmts)), voidType));
+            continue;
+        }
 
         // Shape A: scalar accumulator over a single i64 buffer slot. Used for
         // the whole non-nullable-argument path and for count(*). Byte-identical
@@ -2347,7 +2540,7 @@ std::vector<NQumir::NAst::TExprPtr> GenReducerFunDecls(
                 std::make_shared<TVarStmt>(loc, "is_new", boolType),
             };
             TExprPtr resultExpr;
-            if (r.IsFloat) {
+            if (r.IsFloat()) {
                 // f64 reducer: states/values are carried as i64 bits, so we
                 // bitcast to f64, run f64 arithmetic, and bitcast back to i64.
                 auto prevF = bitcast(ident("prev"), f64Type);
@@ -2422,7 +2615,7 @@ std::vector<NQumir::NAst::TExprPtr> GenReducerFunDecls(
             std::make_shared<TVarStmt>(loc, "value_is_valid", boolType),
         };
         TExprPtr accumulate;
-        if (r.IsFloat) {
+        if (r.IsFloat()) {
             // States/values carried as i64 bits: bitcast to f64, op, bitcast back.
             auto prevF = bitcast(slotOf("buf"), f64Type);
             auto valueF = bitcast(ident("value"), f64Type);
@@ -2509,7 +2702,13 @@ NQumir::NAst::TExprPtr GenApplyReducersFunDecl(const TAggReducerLayout& layout)
         const auto& r = layout.Reducers[i];
         const std::string bufName = "buf_" + std::to_string(i);
         const std::string reduceName = "reduce_" + std::to_string(i);
-        bindBuffer(bufName, static_cast<int>(i), stmts);
+        bindBuffer(bufName, r.ValueBufIdx, stmts);
+        if (r.IsBinInt()) {
+            // Legacy aht_update/agg_apply_reducers carries a single i64 value.
+            // BinInt aggregation is handled by the fused dispatch path, which
+            // materializes typed per-column values before calling reducers.
+            continue;
+        }
 
         if (!r.NeedsValidity) {
             // Shape A: out-of-line scalar reducer; capture and store the result.

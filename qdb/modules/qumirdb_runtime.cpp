@@ -3,9 +3,44 @@
 #include <algorithm>
 #include <bit>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <string_view>
+#include <type_traits>
+
+static_assert(std::is_trivially_copyable_v<qdb_bin_int>);
+static_assert(std::is_standard_layout_v<qdb_bin_int>);
+static_assert(sizeof(qdb_bin_int) == 16);
+
+namespace {
+
+__int128 ToI128(qdb_bin_int value) {
+    const unsigned __int128 raw = static_cast<unsigned __int128>(value.Lo) |
+        (static_cast<unsigned __int128>(value.Hi) << 64);
+    return static_cast<__int128>(raw);
+}
+
+qdb_bin_int FromI128(__int128 value) {
+    const auto raw = static_cast<unsigned __int128>(value);
+    return {
+        .Lo = static_cast<uint64_t>(raw),
+        .Hi = static_cast<uint64_t>(raw >> 64),
+    };
+}
+
+__int128 Pow10I128(int64_t scale) {
+    if (scale < 0) {
+        return 0;
+    }
+    __int128 value = 1;
+    for (int64_t i = 0; i < scale; ++i) {
+        value *= 10;
+    }
+    return value;
+}
+
+} // namespace
 
 extern "C" {
 
@@ -180,6 +215,64 @@ int32_t qdb_sql_interval(qdb_string_view amount, qdb_string_view unit) {
 double qdb_round(double value, int32_t digits) {
     double factor = std::pow(10.0, digits);
     return std::round(value * factor) / factor;
+}
+
+qdb_bin_int qdb_decimal_from_i64(int64_t value, int64_t scale) {
+    return FromI128(static_cast<__int128>(value) * Pow10I128(scale));
+}
+
+qdb_bin_int qdb_decimal_from_f64(double value, int64_t scale) {
+    const long double factor = std::powl(10.0L, static_cast<long double>(scale));
+    const long double rounded = std::roundl(static_cast<long double>(value) * factor);
+    return FromI128(static_cast<__int128>(rounded));
+}
+
+qdb_bin_int qdb_decimal_scale_up(qdb_bin_int value, int64_t delta) {
+    return FromI128(ToI128(value) * Pow10I128(delta));
+}
+
+qdb_bin_int qdb_decimal_add(qdb_bin_int left, qdb_bin_int right) {
+    return FromI128(ToI128(left) + ToI128(right));
+}
+
+qdb_bin_int qdb_decimal_sub(qdb_bin_int left, qdb_bin_int right) {
+    return FromI128(ToI128(left) - ToI128(right));
+}
+
+qdb_bin_int qdb_decimal_neg(qdb_bin_int value) {
+    return FromI128(-ToI128(value));
+}
+
+qdb_bin_int qdb_decimal_mul_i64(qdb_bin_int left, int64_t right) {
+    return FromI128(ToI128(left) * static_cast<__int128>(right));
+}
+
+qdb_bin_int qdb_decimal_div_i64(qdb_bin_int left, int64_t right) {
+    return FromI128(ToI128(left) / static_cast<__int128>(right));
+}
+
+bool qdb_decimal_eq(qdb_bin_int left, qdb_bin_int right) {
+    return ToI128(left) == ToI128(right);
+}
+
+bool qdb_decimal_ne(qdb_bin_int left, qdb_bin_int right) {
+    return ToI128(left) != ToI128(right);
+}
+
+bool qdb_decimal_lt(qdb_bin_int left, qdb_bin_int right) {
+    return ToI128(left) < ToI128(right);
+}
+
+bool qdb_decimal_le(qdb_bin_int left, qdb_bin_int right) {
+    return ToI128(left) <= ToI128(right);
+}
+
+bool qdb_decimal_gt(qdb_bin_int left, qdb_bin_int right) {
+    return ToI128(left) > ToI128(right);
+}
+
+bool qdb_decimal_ge(qdb_bin_int left, qdb_bin_int right) {
+    return ToI128(left) >= ToI128(right);
 }
 
 } // extern "C"

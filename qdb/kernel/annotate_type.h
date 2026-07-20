@@ -24,4 +24,10 @@ std::pair<NQumir::NAst::TExprPtr, NQumir::NAst::TTypePtr> ExpandNullable(
     const NQumir::NAst::TExprPtr& expr,
     const NQumir::NAst::TStructType& inputType);
 
+// Final expression rewrite for kernel compilation. Applies the existing nullable
+// normalization and then qdb-only decimal erasure (Decimal -> qumirdb.oz BinInt).
+std::pair<NQumir::NAst::TExprPtr, NQumir::NAst::TTypePtr> ExpandKernelExpr(
+    const NQumir::NAst::TExprPtr& expr,
+    const NQumir::NAst::TStructType& inputType);
+
 } // namespace NQdb::NKernel

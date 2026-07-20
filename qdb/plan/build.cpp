@@ -11,6 +11,7 @@
 
 #include <qdb/plan/clone_expr.h>
 #include <qdb/plan/passes/flatten_conjuncts.h>
+#include <qdb/plan/types/decimal.h>
 
 #include <qumir/parser/ast.h>
 #include <qumir/parser/core/printer.h>
@@ -116,6 +117,16 @@ bool HasSubquery(const NAst::TExprPtr& expr) {
     return false;
 }
 
+bool IsDecimalExprHint(const NAst::TExprPtr& expr) {
+    if (!expr) {
+        return false;
+    }
+    if (auto cast = NAst::TMaybeNode<NAst::TCastExpr>(expr)) {
+        return IsDecimalType(cast.Cast()->Type);
+    }
+    return IsDecimalType(expr->Type);
+}
+
 // Replaces aggregate calls in an expression with references to synthetic
 // aggregate output columns, collecting the corresponding specs.
 class TAggCollector {
@@ -183,8 +194,11 @@ private:
             std::string countName = NextName("count");
             Specs_.push_back({ .Name = countName, .Func = "count", .Arg = nullptr });
 
-            auto count = std::make_shared<NAst::TCastExpr>(
-                loc, Ident(loc, countName), std::make_shared<NAst::TFloatType>());
+            NAst::TExprPtr count = Ident(loc, countName);
+            if (!IsDecimalExprHint(agg.Arg)) {
+                count = std::make_shared<NAst::TCastExpr>(
+                    loc, std::move(count), std::make_shared<NAst::TFloatType>());
+            }
             return std::make_shared<NAst::TBinaryExpr>(
                 loc, NAst::TOperator('/'), Ident(loc, sumName), std::move(count));
         }

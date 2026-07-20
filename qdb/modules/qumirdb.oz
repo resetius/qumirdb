@@ -3,6 +3,7 @@
 
   (type StringView <struct (Data <ptr u8>) (Size i64)>)
   (type OwnedString <struct (Data <ptr u8>) (Size i64)>)
+  (type BinInt <struct (Lo u64) (Hi u64)>)
   (type DATE i32)
   ;; Nullable stores a regular value plus a validity bit. Most operators are
   ;; null-propagating: NULL + 1 -> NULL, NULL < 10 -> NULL, 5 < 10 -> TRUE.
@@ -197,6 +198,43 @@
       (block (call qdb_round value (cast digits i32))))
   (fun round ((var value f64)) -> f64
       (block (call qdb_round value (: 0 i32))))
+
+  ;; Decimal kernel storage. qdb logical Decimal(p,s) is erased to this signed
+  ;; 128-bit two's-complement value before qumir compilation; precision/scale
+  ;; decisions stay in qdb typing/expansion.
+  (fun qdb_decimal_from_i64 ((var value i64) (var scale i64)) -> BinInt
+    (attrs extern) (block))
+  (fun qdb_decimal_from_f64 ((var value f64) (var scale i64)) -> BinInt
+    (attrs extern) (block))
+  (fun qdb_decimal_scale_up ((var value BinInt) (var delta i64)) -> BinInt
+    (attrs extern) (block))
+
+  (fun qdb_decimal_add ((var left BinInt) (var right BinInt)) -> BinInt
+    (attrs extern (operator "+")) (block))
+  (fun qdb_decimal_sub ((var left BinInt) (var right BinInt)) -> BinInt
+    (attrs extern (operator "-")) (block))
+  (fun qdb_decimal_neg ((var value BinInt)) -> BinInt
+    (attrs extern (operator "-")) (block))
+  (fun qdb_decimal_mul_i64 ((var left BinInt) (var right i64)) -> BinInt
+    (attrs extern (operator "*")) (block))
+  (fun qdb_decimal_i64_mul ((var left i64) (var right BinInt)) -> BinInt
+    (attrs (operator "*"))
+    (block (return (call qdb_decimal_mul_i64 right left))))
+  (fun qdb_decimal_div_i64 ((var left BinInt) (var right i64)) -> BinInt
+    (attrs extern (operator "/")) (block))
+
+  (fun qdb_decimal_eq ((var left BinInt) (var right BinInt)) -> bool
+    (attrs extern (operator "==")) (block))
+  (fun qdb_decimal_ne ((var left BinInt) (var right BinInt)) -> bool
+    (attrs extern (operator "!=")) (block))
+  (fun qdb_decimal_lt ((var left BinInt) (var right BinInt)) -> bool
+    (attrs extern (operator "<")) (block))
+  (fun qdb_decimal_le ((var left BinInt) (var right BinInt)) -> bool
+    (attrs extern (operator "<=")) (block))
+  (fun qdb_decimal_gt ((var left BinInt) (var right BinInt)) -> bool
+    (attrs extern (operator ">")) (block))
+  (fun qdb_decimal_ge ((var left BinInt) (var right BinInt)) -> bool
+    (attrs extern (operator ">=")) (block))
 
   (fun qdb_bitmap_set_valid ((var bitmap <ptr u8>) (var index i64) (var valid bool)) -> void
     (block

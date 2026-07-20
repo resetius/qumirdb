@@ -21,6 +21,11 @@ struct qdb_string_view {
     int64_t Size;
 };
 
+struct qdb_bin_int {
+    uint64_t Lo;
+    uint64_t Hi;
+};
+
 int64_t qdb_string_view_sql_like(qdb_string_view str, qdb_string_view pattern);
 
 // TODO: needs qumir changes — temporary cast so string literals reach nullable
@@ -40,5 +45,20 @@ int32_t qdb_sql_interval(qdb_string_view amount, qdb_string_view unit);
 
 // SQL ROUND(x, digits) -> round half away from zero.
 double qdb_round(double value, int32_t digits);
+
+qdb_bin_int qdb_decimal_from_i64(int64_t value, int64_t scale);
+qdb_bin_int qdb_decimal_from_f64(double value, int64_t scale);
+qdb_bin_int qdb_decimal_scale_up(qdb_bin_int value, int64_t delta);
+qdb_bin_int qdb_decimal_add(qdb_bin_int left, qdb_bin_int right);
+qdb_bin_int qdb_decimal_sub(qdb_bin_int left, qdb_bin_int right);
+qdb_bin_int qdb_decimal_neg(qdb_bin_int value);
+qdb_bin_int qdb_decimal_mul_i64(qdb_bin_int left, int64_t right);
+qdb_bin_int qdb_decimal_div_i64(qdb_bin_int left, int64_t right);
+bool qdb_decimal_eq(qdb_bin_int left, qdb_bin_int right);
+bool qdb_decimal_ne(qdb_bin_int left, qdb_bin_int right);
+bool qdb_decimal_lt(qdb_bin_int left, qdb_bin_int right);
+bool qdb_decimal_le(qdb_bin_int left, qdb_bin_int right);
+bool qdb_decimal_gt(qdb_bin_int left, qdb_bin_int right);
+bool qdb_decimal_ge(qdb_bin_int left, qdb_bin_int right);
 
 } // extern "C"
