@@ -333,6 +333,39 @@ NQumir::NAst::TExprPtr list(TLocation loc, std::vector<NQumir::NAst::TExprPtr> i
     return std::make_shared<NQumir::NAst::TBlockExpr>(loc, std::move(items));
 }
 
+NQumir::NAst::TExprPtr BuildInListPredicate(
+    TLocation loc,
+    NQumir::NAst::TExprPtr lhs,
+    const std::vector<NQumir::NAst::TExprPtr>& items)
+{
+    const bool simpleLhs =
+        static_cast<bool>(NQumir::NAst::TMaybeNode<NQumir::NAst::TIdentExpr>(lhs));
+    const std::string tempName = "__qdb_sql_in";
+
+    NQumir::NAst::TExprPtr disjunction = nullptr;
+    for (const auto& item : items) {
+        auto left = simpleLhs
+            ? lhs
+            : std::static_pointer_cast<NQumir::NAst::TExpr>(
+                std::make_shared<NQumir::NAst::TIdentExpr>(loc, tempName));
+        auto eq = binary(loc, "=="_op, std::move(left), item);
+        disjunction = disjunction ? binary(loc, "||"_op, std::move(disjunction), eq) : eq;
+    }
+
+    if (simpleLhs) {
+        return disjunction;
+    }
+
+    auto temp = std::make_shared<NQumir::NAst::TVarStmt>(
+        loc, tempName, NQumir::NAst::TTypePtr{});
+    temp->Init = std::move(lhs);
+    std::vector<NQumir::NAst::TExprPtr> stmts;
+    stmts.reserve(2);
+    stmts.push_back(std::move(temp));
+    stmts.push_back(std::move(disjunction));
+    return std::make_shared<NQumir::NAst::TBlockExpr>(loc, std::move(stmts));
+}
+
 // builds a column reference as a single dotted ident (a.b.c -> "a.b.c"), the
 // qualified form the logical layer (QualifyColumns, equijoin, pushdown) expects.
 NQumir::NAst::TExprPtr qualified_ref(TLocation loc, const std::vector<std::string>& parts) {
@@ -1180,12 +1213,7 @@ TAstExprTask comparison_expr(TParserContext& ctx) {
         } else {
             // ret IN (a, b, c) -> ret == a || ret == b || ret == c
             auto block = std::static_pointer_cast<NQumir::NAst::TBlockExpr>(items);
-            NQumir::NAst::TExprPtr disjunction = nullptr;
-            for (auto& item : block->Stmts) {
-                auto eq = binary(loc, "=="_op, ret, item);
-                disjunction = disjunction ? binary(loc, "||"_op, disjunction, eq) : eq;
-            }
-            ret = disjunction;
+            ret = BuildInListPredicate(loc, std::move(ret), block->Stmts);
         }
     } else if (IsKeyword(opToken, "BETWEEN")) {
         auto left = co_await add_expr(ctx);
