@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <memory>
 #include <sstream>
 #include <stdexcept>
@@ -352,6 +353,112 @@ TEST(SqlGroupingE2E, RollupGroupingColumns) {
         {0, 1, 2},
         {1, 1, 3},
     }));
+}
+
+TEST(SqlStddevSampE2E, GlobalFloat) {
+    std::array<double, 3> v = {1.0, 2.0, 3.0};
+    std::array<TColumn, 1> cols = {
+        TColumn{.Data = reinterpret_cast<char*>(v.data())},
+    };
+    TRowSet batch{.Columns = cols.data(), .ColumnCount = 1, .RowCount = 3, .RefCount = 1};
+    TMockSource t({"v"}, {std::make_shared<TFloatType>()}, {batch});
+
+    auto plan = SqlPlan("select stddev_samp(v) as s from t;", {{"t", &t}});
+
+    auto* outType = static_cast<TStructType*>(plan->OutputType().get());
+    ASSERT_EQ(outType->Fields.size(), 1u);
+    ASSERT_TRUE(IsNullableType(outType->Fields[0].second));
+    EXPECT_TRUE(TMaybeType<TFloatType>(UnwrapNullableType(outType->Fields[0].second)));
+
+    TRowSet out{};
+    ASSERT_TRUE(plan->Next(out));
+    ASSERT_EQ(out.ColumnCount, 1);
+    ASSERT_EQ(out.RowCount, 1);
+    ASSERT_TRUE(IsValid(out.Columns[0], 0));
+    const auto* data = reinterpret_cast<const double*>(out.Columns[0].Data);
+    EXPECT_NEAR(data[0], 1.0, 1e-12);
+    Release(&out);
+    EXPECT_FALSE(plan->Next(out));
+}
+
+TEST(SqlStddevSampE2E, GlobalIntegerCastsToFloat) {
+    std::array<int64_t, 3> v = {1, 2, 3};
+    std::array<TColumn, 1> cols = {
+        TColumn{.Data = reinterpret_cast<char*>(v.data())},
+    };
+    TRowSet batch{.Columns = cols.data(), .ColumnCount = 1, .RowCount = 3, .RefCount = 1};
+    TMockSource t({"v"}, {std::make_shared<TIntegerType>()}, {batch});
+
+    auto plan = SqlPlan("select stddev_samp(v) as s from t;", {{"t", &t}});
+
+    TRowSet out{};
+    ASSERT_TRUE(plan->Next(out));
+    ASSERT_EQ(out.ColumnCount, 1);
+    ASSERT_EQ(out.RowCount, 1);
+    ASSERT_TRUE(IsValid(out.Columns[0], 0));
+    const auto* data = reinterpret_cast<const double*>(out.Columns[0].Data);
+    EXPECT_NEAR(data[0], 1.0, 1e-12);
+    Release(&out);
+    EXPECT_FALSE(plan->Next(out));
+}
+
+TEST(SqlStddevSampE2E, NullableFloatGroupsReturnNullForSmallSamples) {
+    std::array<int64_t, 4> k = {1, 2, 2, 3};
+    std::array<double, 4> v = {42.0, 1.0, 3.0, 99.0};
+    std::array<uint8_t, 1> mask = {0b00000111};
+    std::array<TColumn, 2> cols = {
+        TColumn{.Data = reinterpret_cast<char*>(k.data())},
+        TColumn{.Data = reinterpret_cast<char*>(v.data()), .Mask = mask.data()},
+    };
+    TRowSet batch{.Columns = cols.data(), .ColumnCount = 2, .RowCount = 4, .RefCount = 1};
+    TMockSource t(
+        {"k", "v"},
+        {std::make_shared<TIntegerType>(),
+         std::make_shared<TNullable>(std::make_shared<TFloatType>())},
+        {batch});
+
+    auto plan = SqlPlan("select k, stddev_samp(v) as s from t group by k;", {{"t", &t}});
+
+    struct TRow {
+        int64_t K = 0;
+        bool Valid = false;
+        double Value = 0;
+    };
+    std::vector<TRow> rows;
+    TRowSet out{};
+    while (plan->Next(out)) {
+        const auto* keys = reinterpret_cast<const int64_t*>(out.Columns[0].Data);
+        const auto* values = reinterpret_cast<const double*>(out.Columns[1].Data);
+        for (int64_t i = 0; i < out.RowCount; ++i) {
+            rows.push_back({keys[i], IsValid(out.Columns[1], i), values[i]});
+        }
+        Release(&out);
+    }
+    std::sort(rows.begin(), rows.end(), [](const TRow& lhs, const TRow& rhs) {
+        return lhs.K < rhs.K;
+    });
+
+    ASSERT_EQ(rows.size(), 3u);
+    EXPECT_EQ(rows[0].K, 1);
+    EXPECT_FALSE(rows[0].Valid);
+    EXPECT_EQ(rows[1].K, 2);
+    ASSERT_TRUE(rows[1].Valid);
+    EXPECT_NEAR(rows[1].Value, std::sqrt(2.0), 1e-12);
+    EXPECT_EQ(rows[2].K, 3);
+    EXPECT_FALSE(rows[2].Valid);
+}
+
+TEST(SqlStddevSampE2E, DecimalInputIsRejected) {
+    TMockSource t({"v"}, {std::make_shared<TDecimal>(12, 2)}, {});
+
+    try {
+        (void)SqlPlan("select stddev_samp(v) as s from t;", {{"t", &t}});
+        FAIL() << "stddev_samp(decimal) unexpectedly planned";
+    } catch (const std::runtime_error& error) {
+        EXPECT_NE(
+            std::string(error.what()).find("stddev_samp(decimal) is not supported in qdb v1"),
+            std::string::npos);
+    }
 }
 
 TEST(ProjectE2E, IdentZeroCopyPlusComputed) {

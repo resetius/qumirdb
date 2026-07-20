@@ -198,6 +198,7 @@
       (block (call qdb_round value (cast digits i32))))
   (fun round ((var value f64)) -> f64
       (block (call qdb_round value (: 0 i32))))
+  (fun qdb_sqrt ((var value f64)) -> f64 (attrs (extern sqrt)) (block))
 
   ;; Decimal kernel storage. qdb logical Decimal(p,s) is erased to this signed
   ;; 128-bit two's-complement value before qumir compilation; precision/scale

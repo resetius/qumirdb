@@ -1,0 +1,18 @@
+(query
+  (select
+    (select-list
+      (item
+        k
+      )
+      (item as s
+        (call stddev_samp (+ a b))
+      )
+    )
+    (from
+      (table t)
+    )
+    (group-by
+      k
+    )
+  )
+)
