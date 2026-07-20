@@ -1,2 +1,16 @@
-Error: expected ')' after table reference @ Line: 8, Byte: 7, Column: 7
-
+(query
+  (select
+    (select-list
+      (item
+        (call count *)
+      )
+    )
+    (from
+      (subquery-table as cool_cust
+        (query
+          (unknown-body)
+        )
+      )
+    )
+  )
+)
