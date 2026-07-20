@@ -1,0 +1,5 @@
+(rel union-all
+  (rel project
+    (rel aggregate (rel union-all (rel project (rel source "t") (a a)) (rel project (rel source "s") (a a))) (keys a))
+    (a a))
+  (rel project (rel source "u") (a a)))

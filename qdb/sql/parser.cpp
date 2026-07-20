@@ -499,7 +499,9 @@ TAstTask<TSqlNode> query_expr(TParserContext& ctx) {
                 : TSqlSetOp::EOp::Except;
 
             auto quantifierTok = ctx.Stream.Next();
-            ESetQuantifier quantifier = ESetQuantifier::All;
+            ESetQuantifier quantifier = op == TSqlSetOp::EOp::Union
+                ? ESetQuantifier::Distinct
+                : ESetQuantifier::All;
             if (IsKeyword(quantifierTok, "ALL")) {
                 quantifier = ESetQuantifier::All;
             } else if (IsKeyword(quantifierTok, "DISTINCT")) {

@@ -9,17 +9,21 @@
 #include "plan_runner.h"
 #include <qdb/io/io.h>
 #include <qdb/modules/qumirdb_runtime.h>
+#include <qdb/plan/build.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/passes/column_pruning.h>
 #include <qdb/plan/passes/typing.h>
 #include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
 #include <qdb/sexp/parser.h>
+#include <qdb/sql/parser.h>
 
+#include <algorithm>
 #include <array>
 #include <memory>
 #include <sstream>
 #include <stdexcept>
+#include <unordered_map>
 #include <vector>
 
 using namespace NQdb;
@@ -53,6 +57,48 @@ std::unique_ptr<TTestRuntime> Plan(
     return RunPlan(root, schedulerSettings);
 }
 
+std::unique_ptr<TTestRuntime> SqlPlan(
+    const std::string& sql,
+    const std::unordered_map<std::string, ISource*>& sources)
+{
+    std::istringstream in(sql);
+    NSql::TTokenStream ts(in);
+    NSql::TParser parser;
+    auto parsed = parser.Parse(ts);
+    if (!parsed) {
+        throw std::runtime_error(parsed.error().ToString());
+    }
+    auto root = BuildPlan(*parsed, [&](std::string_view table)
+        -> std::expected<TOperatorPtr, NQumir::TError>
+    {
+        auto it = sources.find(std::string(table));
+        if (it == sources.end()) {
+            return std::unexpected(NQumir::TError(
+                "unknown test table: " + std::string(table)));
+        }
+        return std::make_shared<TSourceOperator>(*it->second, std::string(table));
+    });
+    if (!root) {
+        throw std::runtime_error(root.error().ToString());
+    }
+    AnnotateTypes(*root);
+    ApplyColumnPruning(*root);
+    return RunPlan(*root);
+}
+
+std::vector<int64_t> ReadAllI64(TTestRuntime& runtime) {
+    std::vector<int64_t> values;
+    TRowSet out{};
+    while (runtime.Next(out)) {
+        const auto* data = reinterpret_cast<const int64_t*>(out.Columns[0].Data);
+        for (int64_t i = 0; i < out.RowCount; ++i) {
+            values.push_back(data[i]);
+        }
+        Release(&out);
+    }
+    return values;
+}
+
 } // namespace
 
 bool IsValid(const TColumn& column, int64_t row) {
@@ -61,6 +107,90 @@ bool IsValid(const TColumn& column, int64_t row) {
     }
     const int64_t bit = column.MaskBitOffset + row;
     return ((column.Mask[bit / 8] >> (bit % 8)) & 1) != 0;
+}
+
+TEST(SqlUnionE2E, UnionAllPreservesDuplicates) {
+    std::array<int64_t, 2> left = {1, 1};
+    std::array<int64_t, 1> right = {1};
+    std::array<TColumn, 1> leftCols = {
+        TColumn{.Data = reinterpret_cast<char*>(left.data())},
+    };
+    std::array<TColumn, 1> rightCols = {
+        TColumn{.Data = reinterpret_cast<char*>(right.data())},
+    };
+    TRowSet leftBatch{.Columns = leftCols.data(), .ColumnCount = 1, .RowCount = 2, .RefCount = 1};
+    TRowSet rightBatch{.Columns = rightCols.data(), .ColumnCount = 1, .RowCount = 1, .RefCount = 1};
+    TMockSource l({"a"}, {leftBatch});
+    TMockSource r({"a"}, {rightBatch});
+
+    auto plan = SqlPlan(
+        "select a from l union all select a from r;",
+        {{"l", &l}, {"r", &r}});
+    auto values = ReadAllI64(*plan);
+    std::sort(values.begin(), values.end());
+    EXPECT_EQ(values, (std::vector<int64_t>{1, 1, 1}));
+}
+
+TEST(SqlUnionE2E, BareUnionDeduplicatesRows) {
+    std::array<int64_t, 3> left = {1, 2, 2};
+    std::array<int64_t, 3> right = {2, 3, 3};
+    std::array<TColumn, 1> leftCols = {
+        TColumn{.Data = reinterpret_cast<char*>(left.data())},
+    };
+    std::array<TColumn, 1> rightCols = {
+        TColumn{.Data = reinterpret_cast<char*>(right.data())},
+    };
+    TRowSet leftBatch{.Columns = leftCols.data(), .ColumnCount = 1, .RowCount = 3, .RefCount = 1};
+    TRowSet rightBatch{.Columns = rightCols.data(), .ColumnCount = 1, .RowCount = 3, .RefCount = 1};
+    TMockSource l({"a"}, {leftBatch});
+    TMockSource r({"a"}, {rightBatch});
+
+    auto plan = SqlPlan(
+        "select a from l union select a from r;",
+        {{"l", &l}, {"r", &r}});
+    auto values = ReadAllI64(*plan);
+    std::sort(values.begin(), values.end());
+    EXPECT_EQ(values, (std::vector<int64_t>{1, 2, 3}));
+}
+
+TEST(SqlUnionE2E, BareUnionDeduplicatesNullRows) {
+    std::array<int64_t, 3> left = {1, 2, 0};
+    std::array<int64_t, 3> right = {2, 3, 0};
+    std::array<uint8_t, 1> leftMask = {0b00000011};
+    std::array<uint8_t, 1> rightMask = {0b00000011};
+    std::array<TColumn, 1> leftCols = {
+        TColumn{.Data = reinterpret_cast<char*>(left.data()), .Mask = leftMask.data()},
+    };
+    std::array<TColumn, 1> rightCols = {
+        TColumn{.Data = reinterpret_cast<char*>(right.data()), .Mask = rightMask.data()},
+    };
+    TRowSet leftBatch{.Columns = leftCols.data(), .ColumnCount = 1, .RowCount = 3, .RefCount = 1};
+    TRowSet rightBatch{.Columns = rightCols.data(), .ColumnCount = 1, .RowCount = 3, .RefCount = 1};
+    auto nullableI64 = std::make_shared<TNullable>(std::make_shared<TIntegerType>());
+    TMockSource l({"a"}, {nullableI64}, {leftBatch});
+    TMockSource r({"a"}, {nullableI64}, {rightBatch});
+
+    auto plan = SqlPlan(
+        "select a from l union select a from r;",
+        {{"l", &l}, {"r", &r}});
+
+    std::vector<int64_t> validValues;
+    int nullCount = 0;
+    TRowSet out{};
+    while (plan->Next(out)) {
+        const auto* data = reinterpret_cast<const int64_t*>(out.Columns[0].Data);
+        for (int64_t i = 0; i < out.RowCount; ++i) {
+            if (IsValid(out.Columns[0], i)) {
+                validValues.push_back(data[i]);
+            } else {
+                ++nullCount;
+            }
+        }
+        Release(&out);
+    }
+    std::sort(validValues.begin(), validValues.end());
+    EXPECT_EQ(validValues, (std::vector<int64_t>{1, 2, 3}));
+    EXPECT_EQ(nullCount, 1);
 }
 
 TEST(ProjectE2E, IdentZeroCopyPlusComputed) {

@@ -1,2 +1,2 @@
-Error: only UNION ALL is supported yet (UNION/INTERSECT/EXCEPT DISTINCT not supported)
+Error: only UNION and UNION ALL are supported yet (INTERSECT/EXCEPT not supported)
 
