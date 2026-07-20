@@ -1,0 +1,5 @@
+(rel join
+  (rel project (rel aggregate (rel project (rel source "t") (a a)) (keys a)) (a a))
+  (rel project (rel aggregate (rel project (rel source "s") (a a)) (keys a)) (a a))
+  ((a a))
+  (left_semi))

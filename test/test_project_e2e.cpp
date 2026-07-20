@@ -193,6 +193,68 @@ TEST(SqlUnionE2E, BareUnionDeduplicatesNullRows) {
     EXPECT_EQ(nullCount, 1);
 }
 
+TEST(SqlIntersectE2E, BareIntersectDeduplicatesRows) {
+    std::array<int64_t, 4> left = {1, 2, 2, 4};
+    std::array<int64_t, 4> right = {2, 2, 3, 4};
+    std::array<TColumn, 1> leftCols = {
+        TColumn{.Data = reinterpret_cast<char*>(left.data())},
+    };
+    std::array<TColumn, 1> rightCols = {
+        TColumn{.Data = reinterpret_cast<char*>(right.data())},
+    };
+    TRowSet leftBatch{.Columns = leftCols.data(), .ColumnCount = 1, .RowCount = 4, .RefCount = 1};
+    TRowSet rightBatch{.Columns = rightCols.data(), .ColumnCount = 1, .RowCount = 4, .RefCount = 1};
+    TMockSource l({"a"}, {leftBatch});
+    TMockSource r({"a"}, {rightBatch});
+
+    auto plan = SqlPlan(
+        "select a from l intersect select a from r;",
+        {{"l", &l}, {"r", &r}});
+    auto values = ReadAllI64(*plan);
+    std::sort(values.begin(), values.end());
+    EXPECT_EQ(values, (std::vector<int64_t>{2, 4}));
+}
+
+TEST(SqlIntersectE2E, BareIntersectDeduplicatesNullRows) {
+    std::array<int64_t, 4> left = {1, 2, 0, 0};
+    std::array<int64_t, 4> right = {2, 3, 0, 0};
+    std::array<uint8_t, 1> leftMask = {0b00000011};
+    std::array<uint8_t, 1> rightMask = {0b00000011};
+    std::array<TColumn, 1> leftCols = {
+        TColumn{.Data = reinterpret_cast<char*>(left.data()), .Mask = leftMask.data()},
+    };
+    std::array<TColumn, 1> rightCols = {
+        TColumn{.Data = reinterpret_cast<char*>(right.data()), .Mask = rightMask.data()},
+    };
+    TRowSet leftBatch{.Columns = leftCols.data(), .ColumnCount = 1, .RowCount = 4, .RefCount = 1};
+    TRowSet rightBatch{.Columns = rightCols.data(), .ColumnCount = 1, .RowCount = 4, .RefCount = 1};
+    auto nullableI64 = std::make_shared<TNullable>(std::make_shared<TIntegerType>());
+    TMockSource l({"a"}, {nullableI64}, {leftBatch});
+    TMockSource r({"a"}, {nullableI64}, {rightBatch});
+
+    auto plan = SqlPlan(
+        "select a from l intersect select a from r;",
+        {{"l", &l}, {"r", &r}});
+
+    std::vector<int64_t> validValues;
+    int nullCount = 0;
+    TRowSet out{};
+    while (plan->Next(out)) {
+        const auto* data = reinterpret_cast<const int64_t*>(out.Columns[0].Data);
+        for (int64_t i = 0; i < out.RowCount; ++i) {
+            if (IsValid(out.Columns[0], i)) {
+                validValues.push_back(data[i]);
+            } else {
+                ++nullCount;
+            }
+        }
+        Release(&out);
+    }
+    std::sort(validValues.begin(), validValues.end());
+    EXPECT_EQ(validValues, (std::vector<int64_t>{2}));
+    EXPECT_EQ(nullCount, 1);
+}
+
 TEST(ProjectE2E, IdentZeroCopyPlusComputed) {
     std::array<double, 3> x = {10.0, 20.0, 4.0};
     std::array<double, 3> z = {0.5, 0.25, 0.75};

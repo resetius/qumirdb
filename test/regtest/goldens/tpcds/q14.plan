@@ -1,2 +1,515 @@
-Error: only UNION and UNION ALL are supported yet (INTERSECT/EXCEPT not supported)
-
+(rel limit
+  (rel sort
+    (rel project
+      (rel aggregate
+        (rel project
+          (rel project
+            (rel union-all
+              (rel project
+                (rel filter
+                  (rel join
+                    (rel aggregate
+                      (rel project
+                        (rel filter
+                          (rel join
+                            (rel join
+                              (rel join (rel source "store_sales") (rel source "item") () (inner))
+                              (rel source "date_dim")
+                              ()
+                              (inner))
+                            (rel project
+                              (rel project
+                                (rel filter
+                                  (rel join
+                                    (rel source "item")
+                                    (rel join
+                                      (rel project
+                                        (rel aggregate
+                                          (rel join
+                                            (rel project
+                                              (rel aggregate
+                                                (rel project
+                                                  (rel filter
+                                                    (rel join
+                                                      (rel join
+                                                        (rel source "store_sales")
+                                                        (rel source "item" "iss")
+                                                        ()
+                                                        (inner))
+                                                      (rel source "date_dim" "d1")
+                                                      ()
+                                                      (inner))
+                                                    (&& (&& (&& (== ss_item_sk |iss.i_item_sk|)
+                                                          (== ss_sold_date_sk |d1.d_date_sk|))
+                                                        (<= 1998 |d1.d_year|))
+                                                      (<= |d1.d_year| (+ 1998 2))))
+                                                  (brand_id |iss.i_brand_id|)
+                                                  (class_id |iss.i_class_id|)
+                                                  (category_id |iss.i_category_id|))
+                                                (keys brand_id class_id category_id))
+                                              (brand_id brand_id)
+                                              (class_id class_id)
+                                              (category_id category_id))
+                                            (rel project
+                                              (rel aggregate
+                                                (rel project
+                                                  (rel filter
+                                                    (rel join
+                                                      (rel join
+                                                        (rel source "catalog_sales")
+                                                        (rel source "item" "ics")
+                                                        ()
+                                                        (inner))
+                                                      (rel source "date_dim" "d2")
+                                                      ()
+                                                      (inner))
+                                                    (&& (&& (&& (== cs_item_sk |ics.i_item_sk|)
+                                                          (== cs_sold_date_sk |d2.d_date_sk|))
+                                                        (<= 1998 |d2.d_year|))
+                                                      (<= |d2.d_year| (+ 1998 2))))
+                                                  (|ics.i_brand_id| |ics.i_brand_id|)
+                                                  (|ics.i_class_id| |ics.i_class_id|)
+                                                  (|ics.i_category_id| |ics.i_category_id|))
+                                                (keys |ics.i_brand_id| |ics.i_class_id| |ics.i_category_id|))
+                                              (|ics.i_brand_id| |ics.i_brand_id|)
+                                              (|ics.i_class_id| |ics.i_class_id|)
+                                              (|ics.i_category_id| |ics.i_category_id|))
+                                            ((brand_id |ics.i_brand_id|) (class_id |ics.i_class_id|) (category_id |ics.i_category_id|))
+                                            (left_semi))
+                                          (keys brand_id class_id category_id))
+                                        (brand_id brand_id)
+                                        (class_id class_id)
+                                        (category_id category_id))
+                                      (rel project
+                                        (rel aggregate
+                                          (rel project
+                                            (rel filter
+                                              (rel join
+                                                (rel join (rel source "web_sales") (rel source "item" "iws") () (inner))
+                                                (rel source "date_dim" "d3")
+                                                ()
+                                                (inner))
+                                              (&& (&& (&& (== ws_item_sk |iws.i_item_sk|)
+                                                    (== ws_sold_date_sk |d3.d_date_sk|))
+                                                  (<= 1998 |d3.d_year|))
+                                                (<= |d3.d_year| (+ 1998 2))))
+                                            (|iws.i_brand_id| |iws.i_brand_id|)
+                                            (|iws.i_class_id| |iws.i_class_id|)
+                                            (|iws.i_category_id| |iws.i_category_id|))
+                                          (keys |iws.i_brand_id| |iws.i_class_id| |iws.i_category_id|))
+                                        (|iws.i_brand_id| |iws.i_brand_id|)
+                                        (|iws.i_class_id| |iws.i_class_id|)
+                                        (|iws.i_category_id| |iws.i_category_id|))
+                                      ((brand_id |iws.i_brand_id|) (class_id |iws.i_class_id|) (category_id |iws.i_category_id|))
+                                      (left_semi))
+                                    ()
+                                    (inner))
+                                  (&& (&& (== i_brand_id brand_id) (== i_class_id class_id))
+                                    (== i_category_id category_id)))
+                                (ss_item_sk i_item_sk))
+                              (ss_item_sk ss_item_sk))
+                            ()
+                            (left_semi)
+                            (== ss_item_sk ss_item_sk))
+                          (&& (&& (&& (== ss_item_sk i_item_sk) (== ss_sold_date_sk d_date_sk)) (== d_year (+ 1998 2)))
+                            (== d_moy 11)))
+                        (i_brand_id i_brand_id)
+                        (i_class_id i_class_id)
+                        (i_category_id i_category_id)
+                        (arg_0 (* ss_quantity ss_list_price))
+                        (arg_1 (* ss_quantity ss_list_price)))
+                      (keys i_brand_id i_class_id i_category_id)
+                      (agg sum_0 sum arg_0)
+                      (agg count_1 count)
+                      (agg sum_2 sum arg_1))
+                    (rel project
+                      (rel project
+                        (rel aggregate
+                          (rel project
+                            (rel project
+                              (rel union-all
+                                (rel project
+                                  (rel filter
+                                    (rel join (rel source "store_sales") (rel source "date_dim") () (inner))
+                                    (&& (&& (== ss_sold_date_sk d_date_sk) (<= 1998 d_year)) (<= d_year (+ 1998 2))))
+                                  (quantity ss_quantity)
+                                  (list_price ss_list_price))
+                                (rel project
+                                  (rel filter
+                                    (rel join (rel source "catalog_sales") (rel source "date_dim") () (inner))
+                                    (&& (&& (== cs_sold_date_sk d_date_sk) (<= 1998 d_year)) (<= d_year (+ 1998 2))))
+                                  (quantity cs_quantity)
+                                  (list_price cs_list_price))
+                                (rel project
+                                  (rel filter
+                                    (rel join (rel source "web_sales") (rel source "date_dim") () (inner))
+                                    (&& (&& (== ws_sold_date_sk d_date_sk) (<= 1998 d_year)) (<= d_year (+ 1998 2))))
+                                  (quantity ws_quantity)
+                                  (list_price ws_list_price)))
+                              (|x.quantity| quantity)
+                              (|x.list_price| list_price))
+                            (arg_0 (* quantity list_price))
+                            (__group__ 1))
+                          (keys __group__)
+                          (agg sum_0 sum arg_0)
+                          (agg count_1 count))
+                        (average_sales (/ sum_0 (cast count_1 f64))))
+                      (__scalar_0__ average_sales))
+                    ()
+                    (inner))
+                  (> sum_2 __scalar_0__))
+                (channel (: (cast "store" <named StringView>) <named StringView>))
+                (i_brand_id i_brand_id)
+                (i_class_id i_class_id)
+                (i_category_id i_category_id)
+                (sales sum_0)
+                (number_sales count_1))
+              (rel project
+                (rel filter
+                  (rel join
+                    (rel aggregate
+                      (rel project
+                        (rel filter
+                          (rel join
+                            (rel join
+                              (rel join (rel source "catalog_sales") (rel source "item") () (inner))
+                              (rel source "date_dim")
+                              ()
+                              (inner))
+                            (rel project
+                              (rel project
+                                (rel filter
+                                  (rel join
+                                    (rel source "item")
+                                    (rel join
+                                      (rel project
+                                        (rel aggregate
+                                          (rel join
+                                            (rel project
+                                              (rel aggregate
+                                                (rel project
+                                                  (rel filter
+                                                    (rel join
+                                                      (rel join
+                                                        (rel source "store_sales")
+                                                        (rel source "item" "iss")
+                                                        ()
+                                                        (inner))
+                                                      (rel source "date_dim" "d1")
+                                                      ()
+                                                      (inner))
+                                                    (&& (&& (&& (== ss_item_sk |iss.i_item_sk|)
+                                                          (== ss_sold_date_sk |d1.d_date_sk|))
+                                                        (<= 1998 |d1.d_year|))
+                                                      (<= |d1.d_year| (+ 1998 2))))
+                                                  (brand_id |iss.i_brand_id|)
+                                                  (class_id |iss.i_class_id|)
+                                                  (category_id |iss.i_category_id|))
+                                                (keys brand_id class_id category_id))
+                                              (brand_id brand_id)
+                                              (class_id class_id)
+                                              (category_id category_id))
+                                            (rel project
+                                              (rel aggregate
+                                                (rel project
+                                                  (rel filter
+                                                    (rel join
+                                                      (rel join
+                                                        (rel source "catalog_sales")
+                                                        (rel source "item" "ics")
+                                                        ()
+                                                        (inner))
+                                                      (rel source "date_dim" "d2")
+                                                      ()
+                                                      (inner))
+                                                    (&& (&& (&& (== cs_item_sk |ics.i_item_sk|)
+                                                          (== cs_sold_date_sk |d2.d_date_sk|))
+                                                        (<= 1998 |d2.d_year|))
+                                                      (<= |d2.d_year| (+ 1998 2))))
+                                                  (|ics.i_brand_id| |ics.i_brand_id|)
+                                                  (|ics.i_class_id| |ics.i_class_id|)
+                                                  (|ics.i_category_id| |ics.i_category_id|))
+                                                (keys |ics.i_brand_id| |ics.i_class_id| |ics.i_category_id|))
+                                              (|ics.i_brand_id| |ics.i_brand_id|)
+                                              (|ics.i_class_id| |ics.i_class_id|)
+                                              (|ics.i_category_id| |ics.i_category_id|))
+                                            ((brand_id |ics.i_brand_id|) (class_id |ics.i_class_id|) (category_id |ics.i_category_id|))
+                                            (left_semi))
+                                          (keys brand_id class_id category_id))
+                                        (brand_id brand_id)
+                                        (class_id class_id)
+                                        (category_id category_id))
+                                      (rel project
+                                        (rel aggregate
+                                          (rel project
+                                            (rel filter
+                                              (rel join
+                                                (rel join (rel source "web_sales") (rel source "item" "iws") () (inner))
+                                                (rel source "date_dim" "d3")
+                                                ()
+                                                (inner))
+                                              (&& (&& (&& (== ws_item_sk |iws.i_item_sk|)
+                                                    (== ws_sold_date_sk |d3.d_date_sk|))
+                                                  (<= 1998 |d3.d_year|))
+                                                (<= |d3.d_year| (+ 1998 2))))
+                                            (|iws.i_brand_id| |iws.i_brand_id|)
+                                            (|iws.i_class_id| |iws.i_class_id|)
+                                            (|iws.i_category_id| |iws.i_category_id|))
+                                          (keys |iws.i_brand_id| |iws.i_class_id| |iws.i_category_id|))
+                                        (|iws.i_brand_id| |iws.i_brand_id|)
+                                        (|iws.i_class_id| |iws.i_class_id|)
+                                        (|iws.i_category_id| |iws.i_category_id|))
+                                      ((brand_id |iws.i_brand_id|) (class_id |iws.i_class_id|) (category_id |iws.i_category_id|))
+                                      (left_semi))
+                                    ()
+                                    (inner))
+                                  (&& (&& (== i_brand_id brand_id) (== i_class_id class_id))
+                                    (== i_category_id category_id)))
+                                (ss_item_sk i_item_sk))
+                              (ss_item_sk ss_item_sk))
+                            ()
+                            (left_semi)
+                            (== cs_item_sk ss_item_sk))
+                          (&& (&& (&& (== cs_item_sk i_item_sk) (== cs_sold_date_sk d_date_sk)) (== d_year (+ 1998 2)))
+                            (== d_moy 11)))
+                        (i_brand_id i_brand_id)
+                        (i_class_id i_class_id)
+                        (i_category_id i_category_id)
+                        (arg_0 (* cs_quantity cs_list_price))
+                        (arg_1 (* cs_quantity cs_list_price)))
+                      (keys i_brand_id i_class_id i_category_id)
+                      (agg sum_0 sum arg_0)
+                      (agg count_1 count)
+                      (agg sum_2 sum arg_1))
+                    (rel project
+                      (rel project
+                        (rel aggregate
+                          (rel project
+                            (rel project
+                              (rel union-all
+                                (rel project
+                                  (rel filter
+                                    (rel join (rel source "store_sales") (rel source "date_dim") () (inner))
+                                    (&& (&& (== ss_sold_date_sk d_date_sk) (<= 1998 d_year)) (<= d_year (+ 1998 2))))
+                                  (quantity ss_quantity)
+                                  (list_price ss_list_price))
+                                (rel project
+                                  (rel filter
+                                    (rel join (rel source "catalog_sales") (rel source "date_dim") () (inner))
+                                    (&& (&& (== cs_sold_date_sk d_date_sk) (<= 1998 d_year)) (<= d_year (+ 1998 2))))
+                                  (quantity cs_quantity)
+                                  (list_price cs_list_price))
+                                (rel project
+                                  (rel filter
+                                    (rel join (rel source "web_sales") (rel source "date_dim") () (inner))
+                                    (&& (&& (== ws_sold_date_sk d_date_sk) (<= 1998 d_year)) (<= d_year (+ 1998 2))))
+                                  (quantity ws_quantity)
+                                  (list_price ws_list_price)))
+                              (|x.quantity| quantity)
+                              (|x.list_price| list_price))
+                            (arg_0 (* quantity list_price))
+                            (__group__ 1))
+                          (keys __group__)
+                          (agg sum_0 sum arg_0)
+                          (agg count_1 count))
+                        (average_sales (/ sum_0 (cast count_1 f64))))
+                      (__scalar_0__ average_sales))
+                    ()
+                    (inner))
+                  (> sum_2 __scalar_0__))
+                (channel (: (cast "catalog" <named StringView>) <named StringView>))
+                (i_brand_id i_brand_id)
+                (i_class_id i_class_id)
+                (i_category_id i_category_id)
+                (sales sum_0)
+                (number_sales count_1))
+              (rel project
+                (rel filter
+                  (rel join
+                    (rel aggregate
+                      (rel project
+                        (rel filter
+                          (rel join
+                            (rel join
+                              (rel join (rel source "web_sales") (rel source "item") () (inner))
+                              (rel source "date_dim")
+                              ()
+                              (inner))
+                            (rel project
+                              (rel project
+                                (rel filter
+                                  (rel join
+                                    (rel source "item")
+                                    (rel join
+                                      (rel project
+                                        (rel aggregate
+                                          (rel join
+                                            (rel project
+                                              (rel aggregate
+                                                (rel project
+                                                  (rel filter
+                                                    (rel join
+                                                      (rel join
+                                                        (rel source "store_sales")
+                                                        (rel source "item" "iss")
+                                                        ()
+                                                        (inner))
+                                                      (rel source "date_dim" "d1")
+                                                      ()
+                                                      (inner))
+                                                    (&& (&& (&& (== ss_item_sk |iss.i_item_sk|)
+                                                          (== ss_sold_date_sk |d1.d_date_sk|))
+                                                        (<= 1998 |d1.d_year|))
+                                                      (<= |d1.d_year| (+ 1998 2))))
+                                                  (brand_id |iss.i_brand_id|)
+                                                  (class_id |iss.i_class_id|)
+                                                  (category_id |iss.i_category_id|))
+                                                (keys brand_id class_id category_id))
+                                              (brand_id brand_id)
+                                              (class_id class_id)
+                                              (category_id category_id))
+                                            (rel project
+                                              (rel aggregate
+                                                (rel project
+                                                  (rel filter
+                                                    (rel join
+                                                      (rel join
+                                                        (rel source "catalog_sales")
+                                                        (rel source "item" "ics")
+                                                        ()
+                                                        (inner))
+                                                      (rel source "date_dim" "d2")
+                                                      ()
+                                                      (inner))
+                                                    (&& (&& (&& (== cs_item_sk |ics.i_item_sk|)
+                                                          (== cs_sold_date_sk |d2.d_date_sk|))
+                                                        (<= 1998 |d2.d_year|))
+                                                      (<= |d2.d_year| (+ 1998 2))))
+                                                  (|ics.i_brand_id| |ics.i_brand_id|)
+                                                  (|ics.i_class_id| |ics.i_class_id|)
+                                                  (|ics.i_category_id| |ics.i_category_id|))
+                                                (keys |ics.i_brand_id| |ics.i_class_id| |ics.i_category_id|))
+                                              (|ics.i_brand_id| |ics.i_brand_id|)
+                                              (|ics.i_class_id| |ics.i_class_id|)
+                                              (|ics.i_category_id| |ics.i_category_id|))
+                                            ((brand_id |ics.i_brand_id|) (class_id |ics.i_class_id|) (category_id |ics.i_category_id|))
+                                            (left_semi))
+                                          (keys brand_id class_id category_id))
+                                        (brand_id brand_id)
+                                        (class_id class_id)
+                                        (category_id category_id))
+                                      (rel project
+                                        (rel aggregate
+                                          (rel project
+                                            (rel filter
+                                              (rel join
+                                                (rel join (rel source "web_sales") (rel source "item" "iws") () (inner))
+                                                (rel source "date_dim" "d3")
+                                                ()
+                                                (inner))
+                                              (&& (&& (&& (== ws_item_sk |iws.i_item_sk|)
+                                                    (== ws_sold_date_sk |d3.d_date_sk|))
+                                                  (<= 1998 |d3.d_year|))
+                                                (<= |d3.d_year| (+ 1998 2))))
+                                            (|iws.i_brand_id| |iws.i_brand_id|)
+                                            (|iws.i_class_id| |iws.i_class_id|)
+                                            (|iws.i_category_id| |iws.i_category_id|))
+                                          (keys |iws.i_brand_id| |iws.i_class_id| |iws.i_category_id|))
+                                        (|iws.i_brand_id| |iws.i_brand_id|)
+                                        (|iws.i_class_id| |iws.i_class_id|)
+                                        (|iws.i_category_id| |iws.i_category_id|))
+                                      ((brand_id |iws.i_brand_id|) (class_id |iws.i_class_id|) (category_id |iws.i_category_id|))
+                                      (left_semi))
+                                    ()
+                                    (inner))
+                                  (&& (&& (== i_brand_id brand_id) (== i_class_id class_id))
+                                    (== i_category_id category_id)))
+                                (ss_item_sk i_item_sk))
+                              (ss_item_sk ss_item_sk))
+                            ()
+                            (left_semi)
+                            (== ws_item_sk ss_item_sk))
+                          (&& (&& (&& (== ws_item_sk i_item_sk) (== ws_sold_date_sk d_date_sk)) (== d_year (+ 1998 2)))
+                            (== d_moy 11)))
+                        (i_brand_id i_brand_id)
+                        (i_class_id i_class_id)
+                        (i_category_id i_category_id)
+                        (arg_0 (* ws_quantity ws_list_price))
+                        (arg_1 (* ws_quantity ws_list_price)))
+                      (keys i_brand_id i_class_id i_category_id)
+                      (agg sum_0 sum arg_0)
+                      (agg count_1 count)
+                      (agg sum_2 sum arg_1))
+                    (rel project
+                      (rel project
+                        (rel aggregate
+                          (rel project
+                            (rel project
+                              (rel union-all
+                                (rel project
+                                  (rel filter
+                                    (rel join (rel source "store_sales") (rel source "date_dim") () (inner))
+                                    (&& (&& (== ss_sold_date_sk d_date_sk) (<= 1998 d_year)) (<= d_year (+ 1998 2))))
+                                  (quantity ss_quantity)
+                                  (list_price ss_list_price))
+                                (rel project
+                                  (rel filter
+                                    (rel join (rel source "catalog_sales") (rel source "date_dim") () (inner))
+                                    (&& (&& (== cs_sold_date_sk d_date_sk) (<= 1998 d_year)) (<= d_year (+ 1998 2))))
+                                  (quantity cs_quantity)
+                                  (list_price cs_list_price))
+                                (rel project
+                                  (rel filter
+                                    (rel join (rel source "web_sales") (rel source "date_dim") () (inner))
+                                    (&& (&& (== ws_sold_date_sk d_date_sk) (<= 1998 d_year)) (<= d_year (+ 1998 2))))
+                                  (quantity ws_quantity)
+                                  (list_price ws_list_price)))
+                              (|x.quantity| quantity)
+                              (|x.list_price| list_price))
+                            (arg_0 (* quantity list_price))
+                            (__group__ 1))
+                          (keys __group__)
+                          (agg sum_0 sum arg_0)
+                          (agg count_1 count))
+                        (average_sales (/ sum_0 (cast count_1 f64))))
+                      (__scalar_0__ average_sales))
+                    ()
+                    (inner))
+                  (> sum_2 __scalar_0__))
+                (channel (: (cast "web" <named StringView>) <named StringView>))
+                (i_brand_id i_brand_id)
+                (i_class_id i_class_id)
+                (i_category_id i_category_id)
+                (sales sum_0)
+                (number_sales count_1)))
+            (|y.channel| channel)
+            (|y.i_brand_id| i_brand_id)
+            (|y.i_class_id| i_class_id)
+            (|y.i_category_id| i_category_id)
+            (|y.sales| sales)
+            (|y.number_sales| number_sales))
+          (channel channel)
+          (i_brand_id i_brand_id)
+          (i_class_id i_class_id)
+          (i_category_id i_category_id)
+          (sales sales)
+          (number_sales number_sales))
+        (keys channel i_brand_id i_class_id i_category_id)
+        (set channel i_brand_id i_class_id i_category_id)
+        (set channel i_brand_id i_class_id)
+        (set channel i_brand_id)
+        (set channel)
+        (set)
+        (agg sum_0 sum sales)
+        (agg sum_1 sum number_sales))
+      (channel channel)
+      (i_brand_id i_brand_id)
+      (i_class_id i_class_id)
+      (i_category_id i_category_id)
+      (col4 sum_0)
+      (col5 sum_1))
+    (channel asc nulls-default)
+    (i_brand_id asc nulls-default)
+    (i_class_id asc nulls-default)
+    (i_category_id asc nulls-default))
+  (limit 100))
