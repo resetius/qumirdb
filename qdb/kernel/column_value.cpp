@@ -1,5 +1,6 @@
 #include <qdb/kernel/column_value.h>
 #include <qdb/kernel/gen.h>
+#include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
 
 #include <qumir/location.h>
@@ -24,6 +25,7 @@ TColumnValueAst BuildColumnValueAst(
     auto i32Type = std::make_shared<TIntegerType>(TIntegerType::I32);
     auto i64Type = std::make_shared<TIntegerType>();
     auto u8Type = std::make_shared<TIntegerType>(TIntegerType::U8);
+    auto u64Type = std::make_shared<TIntegerType>(TIntegerType::U64);
     auto boolType = std::make_shared<TBoolType>();
     auto ptrU8Type = std::make_shared<TPointerType>(u8Type);
     auto ident = [&](const std::string& name) -> TExprPtr {
@@ -51,7 +53,8 @@ TColumnValueAst BuildColumnValueAst(
 
     const bool nullable = IsNullableType(logicalType);
     auto valueType = nullable ? UnwrapNullableType(logicalType) : logicalType;
-    auto type = UnwrapNamedType(valueType);
+    const bool isBinIntValue = IsDecimalType(valueType) || IsBinIntStorageType(valueType);
+    auto type = isBinIntValue ? BinIntStorageType() : UnwrapNamedType(valueType);
     const std::string validName = temporaryPrefix + "_valid";
     const std::string valueName = temporaryPrefix + "_value";
     std::vector<TExprPtr> commonSetup;
@@ -70,8 +73,17 @@ TColumnValueAst BuildColumnValueAst(
         validity = number(true, boolType);
     }
 
-    if (TMaybeType<TIntegerType>(type) || TMaybeType<TFloatType>(type)) {
-        auto pointerType = std::make_shared<TPointerType>(valueType);
+    auto zeroBinInt = [&]() -> TExprPtr {
+        return std::make_shared<TStructConstructExpr>(loc, DecimalStorageType(),
+            std::vector<TExprPtr>{number(0, u64Type), number(0, u64Type)},
+            std::vector<std::string>{"Lo", "Hi"});
+    };
+
+    if (TMaybeType<TIntegerType>(type) || TMaybeType<TFloatType>(type) ||
+        isBinIntValue)
+    {
+        auto storageType = isBinIntValue ? BinIntStorageType() : valueType;
+        auto pointerType = std::make_shared<TPointerType>(storageType);
         auto data = cast(cast(field("Data"), i64Type), pointerType);
         const std::string dataName = temporaryPrefix + "_data";
         if (!nullable) {
@@ -82,14 +94,14 @@ TColumnValueAst BuildColumnValueAst(
                 },
                 .Value = index(ident(dataName), ident(rowName)),
                 .IsValid = std::move(validity),
-                .ValueType = valueType,
+                .ValueType = storageType,
             };
         }
         commonSetup.insert(commonSetup.end(), {
             std::make_shared<TVarStmt>(loc, dataName, pointerType),
-            std::make_shared<TVarStmt>(loc, valueName, valueType),
+            std::make_shared<TVarStmt>(loc, valueName, storageType),
             std::make_shared<TAssignExpr>(loc, valueName,
-                cast(number(0), valueType)),
+                isBinIntValue ? zeroBinInt() : cast(number(0), storageType)),
             std::make_shared<TIfExpr>(loc, ident(validName),
                 std::make_shared<TBlockExpr>(loc, std::vector<TExprPtr>{
                     std::make_shared<TAssignExpr>(loc, dataName,
@@ -102,7 +114,7 @@ TColumnValueAst BuildColumnValueAst(
             .Setup = std::move(commonSetup),
             .Value = ident(valueName),
             .IsValid = std::move(validity),
-            .ValueType = valueType,
+            .ValueType = storageType,
         };
     }
     if (TMaybeType<TBoolType>(type)) {

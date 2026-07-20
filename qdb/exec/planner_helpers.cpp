@@ -7,6 +7,7 @@
 #include <qdb/kernel/compiler.h>
 #include <qdb/kernel/annotate_type.h>
 #include <qdb/kernel/spec.h>
+#include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
 
 #include <qumir/parser/type.h>
@@ -27,6 +28,9 @@ namespace {
 // TStringView struct (16 bytes) per row; the executor post-converts those.
 size_t ProjectColumnWidth(const NQumir::NAst::TTypePtr& type) {
     using namespace NQumir::NAst;
+    if (IsDecimalType(type)) {
+        return 16;
+    }
     auto inner = UnwrapNamedType(UnwrapNullableType(type));
     if (auto integer = TMaybeType<TIntegerType>(inner)) {
         return static_cast<size_t>(integer.Cast()->BitWidth() / 8);
@@ -49,6 +53,9 @@ size_t ProjectColumnWidth(const NQumir::NAst::TTypePtr& type) {
 // column. StringView is resolved from the qumirdb source module before lowering.
 NQumir::NAst::TTypePtr ProjectJitType(const NQumir::NAst::TTypePtr& outType) {
     using namespace NQumir::NAst;
+    if (IsDecimalType(outType)) {
+        return DecimalStorageTypeFor(outType);
+    }
     if (TMaybeType<TStringType>(UnwrapNamedType(UnwrapNullableType(outType)))) {
         TTypePtr sv = std::make_shared<TNamedType>("StringView", nullptr);
         // Keep nullability so the project kernel emits the Nullable[StringView] split

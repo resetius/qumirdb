@@ -4,6 +4,7 @@
 #include <qdb/kernel/column_value.h>
 #include <qdb/kernel/finalize.h>
 #include <qdb/plan/clone_expr.h>
+#include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
 #include <qdb/kernel/aggregate_key.h>
 #include <qdb/kernel/gen.h>
@@ -171,6 +172,11 @@ bool SortKeyIsBool(const NQumir::NAst::TTypePtr& type) {
     using namespace NQumir::NAst;
     return static_cast<bool>(TMaybeType<TBoolType>(
         UnwrapNamedType(UnwrapNullableType(type))));
+}
+
+bool SortValueIsBinInt(const NQumir::NAst::TTypePtr& type) {
+    auto valueType = UnwrapNullableType(type);
+    return IsDecimalType(valueType) || IsBinIntStorageType(valueType);
 }
 
 NQumir::NAst::TExprPtr Int64Literal(int64_t value) {
@@ -754,6 +760,20 @@ NQumir::NAst::TExprPtr BuildSortMaterializeWrapperAst(
             }));
             continue;
         }
+        if (SortValueIsBinInt(type)) {
+            builder.Stmt(Oz::Call("sort_materialize_binint_column", {
+                Oz::Ident("store"),
+                Oz::Ident("row_ids"),
+                Oz::Ident("start"),
+                Oz::Ident("n"),
+                srcCol,
+                column(c),
+                Oz::Ident("out_rowset"),
+                Int64Literal(dataOwner),
+                Int64Literal(maskOwner),
+            }));
+            continue;
+        }
         auto coreType = SortCoreType(type);
         const int64_t width = MaterializeFixedWidth(type);
         if (!coreType || width == 0) {
@@ -1279,13 +1299,20 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
             }
             const std::string& name = ident.Cast()->Name;
             const auto type = requireField(name);
-            const auto unwrapped = UnwrapNamedType(UnwrapNullableType(type));
-            arg.IsFloat = static_cast<bool>(TMaybeType<TFloatType>(unwrapped));
-            if (!TMaybeType<TIntegerType>(unwrapped) && !arg.IsFloat) {
+            const auto valueType = UnwrapNullableType(type);
+            const bool isBinInt =
+                IsBinIntStorageType(valueType) || IsDecimalType(valueType);
+            const auto unwrapped = isBinInt ? valueType : UnwrapNamedType(valueType);
+            const bool isFloat = static_cast<bool>(TMaybeType<TFloatType>(unwrapped));
+            const bool isInteger = static_cast<bool>(TMaybeType<TIntegerType>(unwrapped));
+            if (!isInteger && !isFloat && !isBinInt) {
                 throw NQumir::TError(
                     "CompileAggregate: aggregate argument column '" + name +
-                    "' must be integer or f64");
+                    "' must be integer, f64, or BinInt");
             }
+            arg.ValueKind = isBinInt
+                ? NKernel::EAggValueKind::BinInt
+                : (isFloat ? NKernel::EAggValueKind::Float64 : NKernel::EAggValueKind::Int64);
             arg.IsNullable = IsNullableType(type);
             arg.ColumnIndex = columnIndex(name);
         }
@@ -1414,7 +1441,7 @@ TJoinKernels TKernelCompiler::CompileJoin(
         innerOutputType = *innerOutput;
         innerType = static_cast<TStructType*>(innerOutputType.get());
         leftFieldCount = leftType.Cast()->Fields.size();
-        residualPredicate = NKernel::ExpandNullable(
+        residualPredicate = NKernel::ExpandKernelExpr(
             residualPredicate, *innerType).first;
     }
 

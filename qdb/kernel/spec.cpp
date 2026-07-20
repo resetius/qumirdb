@@ -48,7 +48,7 @@ TOperatorKernelSpec BuildFilterKernelSpec(
     std::string entrypointName)
 {
     // Make NULL propagation explicit right before compilation (never in logical planning).
-    auto expanded = NKernel::ExpandNullable(predicate, inputType).first;
+    auto expanded = NKernel::ExpandKernelExpr(predicate, inputType).first;
     const auto refs = FindUnboundVars(expanded);
 
     std::vector<TKernelColumnRef> referenced;
@@ -92,7 +92,7 @@ TOperatorKernelSpec BuildProjectKernelSpec(
     std::vector<NQumir::NAst::TExprPtr> expanded;
     expanded.reserve(computedExprs.size());
     for (const auto& expr : computedExprs) {
-        expanded.push_back(NKernel::ExpandNullable(expr, inputType).first);
+        expanded.push_back(NKernel::ExpandKernelExpr(expr, inputType).first);
     }
 
     std::unordered_set<std::string> refs;
@@ -152,7 +152,7 @@ TOperatorKernelSpec BuildAggregateKernelSpec(
     aggregateSpecs.reserve(aggs.size());
     for (const auto& agg : aggs) {
         // Expand NULL propagation in the argument expression before compilation.
-        auto argExpr = agg.Arg ? NKernel::ExpandNullable(agg.Arg, inputType).first : agg.Arg;
+        auto argExpr = agg.Arg ? NKernel::ExpandKernelExpr(agg.Arg, inputType).first : agg.Arg;
         TKernelAggregateSpec spec{
             .Name = agg.Name,
             .Func = agg.Func,

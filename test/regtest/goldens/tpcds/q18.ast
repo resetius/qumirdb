@@ -14,25 +14,25 @@
         ca_county
       )
       (item as agg1
-        (call avg (: (cast cs_quantity <named DECIMAL>) <named DECIMAL>))
+        (call avg (: (cast cs_quantity <named DECIMAL [12 2]>) <named DECIMAL [12 2]>))
       )
       (item as agg2
-        (call avg (: (cast cs_list_price <named DECIMAL>) <named DECIMAL>))
+        (call avg (: (cast cs_list_price <named DECIMAL [12 2]>) <named DECIMAL [12 2]>))
       )
       (item as agg3
-        (call avg (: (cast cs_coupon_amt <named DECIMAL>) <named DECIMAL>))
+        (call avg (: (cast cs_coupon_amt <named DECIMAL [12 2]>) <named DECIMAL [12 2]>))
       )
       (item as agg4
-        (call avg (: (cast cs_sales_price <named DECIMAL>) <named DECIMAL>))
+        (call avg (: (cast cs_sales_price <named DECIMAL [12 2]>) <named DECIMAL [12 2]>))
       )
       (item as agg5
-        (call avg (: (cast cs_net_profit <named DECIMAL>) <named DECIMAL>))
+        (call avg (: (cast cs_net_profit <named DECIMAL [12 2]>) <named DECIMAL [12 2]>))
       )
       (item as agg6
-        (call avg (: (cast c_birth_year <named DECIMAL>) <named DECIMAL>))
+        (call avg (: (cast c_birth_year <named DECIMAL [12 2]>) <named DECIMAL [12 2]>))
       )
       (item as agg7
-        (call avg (: (cast |cd1.cd_dep_count| <named DECIMAL>) <named DECIMAL>))
+        (call avg (: (cast |cd1.cd_dep_count| <named DECIMAL [12 2]>) <named DECIMAL [12 2]>))
       )
     )
     (from

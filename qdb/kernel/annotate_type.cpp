@@ -1,6 +1,7 @@
 #include <qdb/kernel/annotate_type.h>
 
 #include <qdb/plan/clone_expr.h>
+#include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
 
 #include <qumir/error.h>
@@ -11,6 +12,7 @@
 #include <qumir/semantics/name_resolution/name_resolver.h>
 #include <qumir/semantics/transform/transform.h>
 
+#include <algorithm>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -46,6 +48,9 @@ TTypePtr ToQumirType(const TTypePtr& type) {
             std::vector<TGenericArg>{
                 TGenericArg::TypeArg(ToQumirType(UnwrapNullableType(type)))});
     }
+    if (IsDecimalType(type)) {
+        return DecimalStorageType();
+    }
     if (TMaybeType<TStringType>(type)) {
         return std::make_shared<TNamedType>("StringView", nullptr);
     }
@@ -56,6 +61,9 @@ TTypePtr ToQumirType(const TTypePtr& type) {
 // planner types.
 TTypePtr FromQumirType(const TTypePtr& type) {
     TTypePtr t = type;
+    if (IsDecimalType(t)) {
+        return t;
+    }
     if (auto named = TMaybeType<TNamedType>(t);
         named && named.Cast()->Name == "Nullable" && !named.Cast()->TypeArgs.empty())
     {
@@ -282,6 +290,20 @@ TTypePtr NullableQ(const TTypePtr& value) {
     return ToQumirType(std::make_shared<TNullable>(value));
 }
 
+std::string PlanTypeKey(const TTypePtr& type) {
+    if (!type) {
+        return "unknown";
+    }
+    if (auto decimal = DecimalSpecOfValueType(type)) {
+        return "Decimal::" + std::to_string(decimal->Precision) + "," +
+            std::to_string(decimal->Scale);
+    }
+    if (IsNullableType(type)) {
+        return "Nullable::" + PlanTypeKey(UnwrapNullableType(type));
+    }
+    return TypeKey(type);
+}
+
 // SQL null propagation: any nullable (or bare-NULL) operand makes the result Nullable.
 TTypePtr Propagate(std::initializer_list<TTypePtr> operands, const TTypePtr& R) {
     if (!R) {
@@ -297,6 +319,7 @@ TTypePtr Propagate(std::initializer_list<TTypePtr> operands, const TTypePtr& R) 
 
 bool IsInt(const TTypePtr& t) { return static_cast<bool>(TMaybeType<TIntegerType>(t)); }
 bool IsFloat(const TTypePtr& t) { return static_cast<bool>(TMaybeType<TFloatType>(t)); }
+bool IsDecimalValue(const TTypePtr& t) { return DecimalSpecOfValueType(t).has_value(); }
 bool IsIntLiteral(const TExprPtr& e) {
     auto n = TMaybeNode<TNumberExpr>(e);
     return n && !n.Cast()->IsFloat();
@@ -317,12 +340,93 @@ TTypePtr CommonNumeric(const TTypePtr& a, const TTypePtr& b) {
     return a;
 }
 
+[[noreturn]] void ThrowDecimalUnsupported(TOperator op, const char* detail) {
+    throw NQumir::TError(
+        "decimal operator '" + op.ToString() + "' is not supported: " + detail);
+}
+
+TTypePtr DecimalBinaryValueType(TOperator op, const TTypePtr& vl, const TTypePtr& vr) {
+    auto dl = DecimalSpecOfValueType(vl);
+    auto dr = DecimalSpecOfValueType(vr);
+    if (!dl && !dr) {
+        return nullptr;
+    }
+    if (IsComparison(op)) {
+        return std::make_shared<TBoolType>();
+    }
+    if (op == "/") {
+        if (dl && !dr && IsInt(vr)) {
+            return MakeDecimalType(*dl);
+        }
+        ThrowDecimalUnsupported(op, "only decimal / integer is implemented in qdb v1");
+    }
+    if (op == "%") {
+        ThrowDecimalUnsupported(op, "remainder on decimal values is not implemented");
+    }
+    if (op == "*" && dl && dr) {
+        ThrowDecimalUnsupported(op, "decimal * decimal is intentionally absent in v1");
+    }
+    if (op == "*") {
+        auto decimal = dl ? *dl : *dr;
+        const TTypePtr other = dl ? vr : vl;
+        if (!IsInt(other)) {
+            ThrowDecimalUnsupported(op, "only decimal * integer is implemented in v1");
+        }
+        return MakeDecimalType({
+            .Precision = std::min(MaxDecimalPrecision, decimal.Precision + 1),
+            .Scale = decimal.Scale,
+        });
+    }
+    if (op == "+" || op == "-") {
+        if (!dl) {
+            if (!IsInt(vl) && !IsFloat(vl)) {
+                ThrowDecimalUnsupported(op, "left operand cannot be converted to decimal");
+            }
+            return MakeDecimalType({
+                .Precision = std::min(MaxDecimalPrecision, dr->Precision + 1),
+                .Scale = dr->Scale,
+            });
+        }
+        if (!dr) {
+            if (!IsInt(vr) && !IsFloat(vr)) {
+                ThrowDecimalUnsupported(op, "right operand cannot be converted to decimal");
+            }
+            return MakeDecimalType({
+                .Precision = std::min(MaxDecimalPrecision, dl->Precision + 1),
+                .Scale = dl->Scale,
+            });
+        }
+        const int32_t scale = std::max(dl->Scale, dr->Scale);
+        const int32_t intDigits = std::max(
+            dl->Precision - dl->Scale,
+            dr->Precision - dr->Scale);
+        const int32_t precision = std::min(MaxDecimalPrecision, intDigits + scale + 1);
+        return MakeDecimalType({.Precision = precision, .Scale = scale});
+    }
+    ThrowDecimalUnsupported(op, "operator is not implemented for decimal values");
+}
+
 // Common value type of two CASE/`if` branches (SQL branch unification): numeric promotion
 // (i32 then, i64 else -> i64), otherwise assume the branches already agree.
 TTypePtr UnifyBranchTypes(const TTypePtr& a, const TTypePtr& b) {
     if (!a) return b ? UnwrapNullableType(b) : nullptr;
     if (!b) return UnwrapNullableType(a);
     TTypePtr va = UnwrapNullableType(a), vb = UnwrapNullableType(b);
+    auto da = DecimalSpecOfValueType(va);
+    auto db = DecimalSpecOfValueType(vb);
+    if (da || db) {
+        if (da && db) {
+            const int32_t scale = std::max(da->Scale, db->Scale);
+            const int32_t intDigits = std::max(
+                da->Precision - da->Scale,
+                db->Precision - db->Scale);
+            return MakeDecimalType({
+                .Precision = std::min(MaxDecimalPrecision, intDigits + scale),
+                .Scale = scale,
+            });
+        }
+        return MakeDecimalType(da ? *da : *db);
+    }
     if ((IsInt(va) || IsFloat(va)) && (IsInt(vb) || IsFloat(vb))) {
         return CommonNumeric(va, vb);
     }
@@ -355,6 +459,9 @@ TTypePtr BinaryValueType(TOperator op, const TExprPtr& le, const TExprPtr& re,
     }
     TTypePtr vl = UnwrapNamedType(ValueType(lt));
     TTypePtr vr = UnwrapNamedType(ValueType(rt));
+    if (auto decimal = DecimalBinaryValueType(op, ValueType(lt), ValueType(rt))) {
+        return decimal;
+    }
     if (op == "+" && (TMaybeType<TStringType>(vl) || TMaybeType<TStringType>(vr))) {
         return std::make_shared<TStringType>(); // string concatenation
     }
@@ -577,12 +684,12 @@ TExprPtr CoerceBranch(const TExprPtr& branch, const TTypePtr& branchType, bool i
     auto tv = ToQumirType(value);
     if (!branchType || !IsNullableType(branchType)) {
         TExprPtr v = branch;
-        if (branchType && TypeKey(branchType) != TypeKey(value)) {
+        if (branchType && PlanTypeKey(branchType) != PlanTypeKey(value)) {
             v = std::make_shared<TCastExpr>(loc, branch, tv); // widen plain value
         }
         return std::make_shared<TCastExpr>(v->Location, v, nq); // nullable_from_value
     }
-    if (TypeKey(UnwrapNullableType(branchType)) == TypeKey(value)) {
+    if (PlanTypeKey(UnwrapNullableType(branchType)) == PlanTypeKey(value)) {
         return branch; // already Nullable[value]
     }
     TExprPtr b = branch; // Nullable but narrower: widen the value under the validity guard
@@ -628,7 +735,7 @@ std::pair<TExprPtr, TTypePtr> ExpandCoalesce(const TCallExpr& node,
             return CoerceBranch(ref, t, /*isNull*/false, T, counter, loc); // -> Nullable[T]
         }
         TExprPtr val = IsNullableType(t) ? FieldOf(ref, "Value", loc) : CloneExpr(ref);
-        if (TypeKey(UnwrapNullableType(t)) != TypeKey(T)) {
+        if (PlanTypeKey(UnwrapNullableType(t)) != PlanTypeKey(T)) {
             val = std::make_shared<TCastExpr>(loc, val, tq); // widen to T
         }
         return val;
@@ -807,6 +914,328 @@ TTypePtr Expand(TExprPtr& e, const TStructType& inputType, uint64_t& counter) {
     return InferType(e, inputType);
 }
 
+using TTypeEnv = std::unordered_map<std::string, TTypePtr>;
+
+TTypePtr LookupIdentType(const std::string& name, const TStructType& schema,
+    const TTypeEnv& env)
+{
+    if (auto it = env.find(name); it != env.end()) {
+        return it->second;
+    }
+    for (const auto& [fieldName, type] : schema.Fields) {
+        if (fieldName == name) {
+            return type;
+        }
+    }
+    return nullptr;
+}
+
+TExprPtr Int64(TLocation loc, int64_t value) {
+    auto n = std::make_shared<TNumberExpr>(loc, value);
+    n->Type = std::make_shared<TIntegerType>();
+    return n;
+}
+
+TExprPtr Call(const std::string& name, std::vector<TExprPtr> args, TLocation loc) {
+    return std::make_shared<TCallExpr>(loc, Ident(name, loc), std::move(args));
+}
+
+TExprPtr CastToI64(TExprPtr expr, TLocation loc) {
+    return std::make_shared<TCastExpr>(loc, std::move(expr),
+        std::make_shared<TIntegerType>());
+}
+
+TExprPtr DecimalScaleLiteral(TLocation loc, int32_t scale) {
+    return Int64(loc, static_cast<int64_t>(scale));
+}
+
+TExprPtr DecimalValueAtScale(TExprPtr expr, const TTypePtr& type, int32_t targetScale,
+    TLocation loc)
+{
+    TTypePtr valueType = ValueType(type);
+    if (auto decimal = DecimalSpecOfValueType(valueType)) {
+        if (decimal->Scale == targetScale) {
+            return expr;
+        }
+        if (decimal->Scale > targetScale) {
+            throw NQumir::TError(
+                "decimal scale down cast is not implemented: " +
+                std::to_string(decimal->Scale) + " -> " + std::to_string(targetScale));
+        }
+        return Call("qdb_decimal_scale_up", {
+            std::move(expr),
+            DecimalScaleLiteral(loc, targetScale - decimal->Scale),
+        }, loc);
+    }
+    valueType = UnwrapNamedType(valueType);
+    if (IsInt(valueType)) {
+        return Call("qdb_decimal_from_i64", {
+            CastToI64(std::move(expr), loc),
+            DecimalScaleLiteral(loc, targetScale),
+        }, loc);
+    }
+    if (IsFloat(valueType)) {
+        return Call("qdb_decimal_from_f64", {
+            std::move(expr),
+            DecimalScaleLiteral(loc, targetScale),
+        }, loc);
+    }
+    throw NQumir::TError(
+        "cannot convert type '" + (type ? TypeDiagnosticName(type) : std::string("unknown")) +
+        "' to decimal");
+}
+
+int32_t DecimalCommonScale(const TTypePtr& left, const TTypePtr& right,
+    const TDecimalSpec& result)
+{
+    auto dl = DecimalSpecOfValueType(ValueType(left));
+    auto dr = DecimalSpecOfValueType(ValueType(right));
+    int32_t scale = result.Scale;
+    if (dl) {
+        scale = std::max(scale, dl->Scale);
+    }
+    if (dr) {
+        scale = std::max(scale, dr->Scale);
+    }
+    return scale;
+}
+
+TTypePtr ExpandDecimalNode(TExprPtr& e, const TStructType& inputType, TTypeEnv& env);
+
+TTypePtr ExpandDecimalBlock(TBlockExpr& node, const TStructType& inputType, TTypeEnv& env) {
+    TTypePtr last;
+    TTypeEnv local = env;
+    for (auto& stmt : node.Stmts) {
+        if (auto var = TMaybeNode<TVarStmt>(stmt)) {
+            TTypePtr initType;
+            if (var.Cast()->Init) {
+                initType = ExpandDecimalNode(var.Cast()->Init, inputType, local);
+            }
+            TTypePtr varType = var.Cast()->Type ? FromQumirType(var.Cast()->Type) : initType;
+            if (varType) {
+                local[var.Cast()->Name] = varType;
+            }
+            last = varType;
+            continue;
+        }
+        if (auto assign = TMaybeNode<TAssignExpr>(stmt)) {
+            last = ExpandDecimalNode(assign.Cast()->Value, inputType, local);
+            if (last) {
+                local[assign.Cast()->Name] = last;
+            }
+            continue;
+        }
+        last = ExpandDecimalNode(stmt, inputType, local);
+    }
+    return last;
+}
+
+TTypePtr ExpandDecimalNode(TExprPtr& e, const TStructType& inputType, TTypeEnv& env) {
+    if (!e || IsNullLiteral(e)) {
+        return nullptr;
+    }
+    if (TMaybeNode<TStringLiteralExpr>(e)) {
+        return std::make_shared<TStringType>();
+    }
+    if (auto num = TMaybeNode<TNumberExpr>(e)) {
+        return num.Cast()->Type ? num.Cast()->Type
+            : std::static_pointer_cast<TType>(std::make_shared<TIntegerType>());
+    }
+    if (auto id = TMaybeNode<TIdentExpr>(e)) {
+        return LookupIdentType(id.Cast()->Name, inputType, env);
+    }
+    if (auto fa = TMaybeNode<TFieldAccessExpr>(e)) {
+        auto node = fa.Cast();
+        TTypePtr objectType = ExpandDecimalNode(node->Object, inputType, env);
+        if (objectType && IsNullableType(objectType)) {
+            if (node->FieldName == "Value") {
+                return UnwrapNullableType(objectType);
+            }
+            if (node->FieldName == "Valid") {
+                return std::make_shared<TBoolType>();
+            }
+        }
+        auto structType = TMaybeType<TStructType>(UnwrapNamedType(objectType));
+        if (structType) {
+            for (const auto& [name, type] : structType.Cast()->Fields) {
+                if (name == node->FieldName) {
+                    return type;
+                }
+            }
+        }
+        return nullptr;
+    }
+    if (auto ifp = TMaybeNode<TIfExpr>(e)) {
+        auto node = ifp.Cast();
+        ExpandDecimalNode(node->Cond, inputType, env);
+        TTypePtr thenT = ExpandDecimalNode(node->Then, inputType, env);
+        TTypePtr elseT = node->Else ? ExpandDecimalNode(node->Else, inputType, env) : nullptr;
+        TTypePtr result = UnifyBranchTypes(thenT, elseT);
+        if (auto decimal = DecimalSpecOfValueType(result)) {
+            node->Then = DecimalValueAtScale(node->Then, thenT, decimal->Scale, node->Location);
+            if (node->Else) {
+                node->Else = DecimalValueAtScale(node->Else, elseT, decimal->Scale, node->Location);
+            }
+        }
+        bool nullable = !thenT || !elseT || IsNullableType(thenT) || IsNullableType(elseT);
+        return result && nullable
+            ? std::static_pointer_cast<TType>(std::make_shared<TNullable>(result))
+            : result;
+    }
+    if (auto bp = TMaybeNode<TBinaryExpr>(e)) {
+        auto node = bp.Cast();
+        TTypePtr lt = ExpandDecimalNode(node->Left, inputType, env);
+        TTypePtr rt = ExpandDecimalNode(node->Right, inputType, env);
+        const auto dl = DecimalSpecOfValueType(ValueType(lt));
+        const auto dr = DecimalSpecOfValueType(ValueType(rt));
+        if (!dl && !dr) {
+            return Propagate({lt, rt},
+                BinaryValueType(node->Operator, node->Left, node->Right, lt, rt));
+        }
+        TTypePtr result = BinaryValueType(node->Operator, node->Left, node->Right, lt, rt);
+        if (IsComparison(node->Operator)) {
+            TDecimalSpec spec = dl ? *dl : *dr;
+            const int32_t scale = DecimalCommonScale(lt, rt, spec);
+            node->Left = DecimalValueAtScale(node->Left, lt, scale, node->Location);
+            node->Right = DecimalValueAtScale(node->Right, rt, scale, node->Location);
+            return Propagate({lt, rt}, result);
+        }
+        auto resultDecimal = DecimalSpecOfValueType(result);
+        if (!resultDecimal) {
+            return Propagate({lt, rt}, result);
+        }
+        if (node->Operator == "+" || node->Operator == "-") {
+            const int32_t scale = DecimalCommonScale(lt, rt, *resultDecimal);
+            node->Left = DecimalValueAtScale(node->Left, lt, scale, node->Location);
+            node->Right = DecimalValueAtScale(node->Right, rt, scale, node->Location);
+            return Propagate({lt, rt}, result);
+        }
+        if (node->Operator == "*") {
+            if (dl && !dr) {
+                node->Left = DecimalValueAtScale(node->Left, lt, dl->Scale, node->Location);
+                node->Right = CastToI64(node->Right, node->Location);
+                e = Call("qdb_decimal_mul_i64", {
+                    std::move(node->Left),
+                    std::move(node->Right),
+                }, node->Location);
+                return Propagate({lt, rt}, result);
+            }
+            if (!dl && dr) {
+                node->Right = DecimalValueAtScale(node->Right, rt, dr->Scale, node->Location);
+                node->Left = CastToI64(node->Left, node->Location);
+                e = Call("qdb_decimal_mul_i64", {
+                    std::move(node->Right),
+                    std::move(node->Left),
+                }, node->Location);
+                return Propagate({lt, rt}, result);
+            }
+        }
+        if (node->Operator == "/") {
+            if (dl && !dr) {
+                node->Left = DecimalValueAtScale(node->Left, lt, dl->Scale, node->Location);
+                node->Right = CastToI64(node->Right, node->Location);
+                e = Call("qdb_decimal_div_i64", {
+                    std::move(node->Left),
+                    std::move(node->Right),
+                }, node->Location);
+                return Propagate({lt, rt}, result);
+            }
+        }
+        return Propagate({lt, rt}, result);
+    }
+    if (auto up = TMaybeNode<TUnaryExpr>(e)) {
+        auto node = up.Cast();
+        TTypePtr ot = ExpandDecimalNode(node->Operand, inputType, env);
+        if (auto decimal = DecimalSpecOfValueType(ValueType(ot))) {
+            if (node->Operator == "-") {
+                node->Operand = DecimalValueAtScale(
+                    node->Operand, ot, decimal->Scale, node->Location);
+                e = Call("qdb_decimal_neg", {std::move(node->Operand)}, node->Location);
+                return Propagate({ot}, MakeDecimalType(*decimal));
+            }
+            ThrowDecimalUnsupported(node->Operator, "unary operator is not implemented");
+        }
+        return Propagate({ot}, ResultTypeUnary(node->Operator, ot));
+    }
+    if (auto cp = TMaybeNode<TCastExpr>(e)) {
+        auto node = cp.Cast();
+        TTypePtr ot = ExpandDecimalNode(node->Operand, inputType, env);
+        TTypePtr target = FromQumirType(node->Type);
+        if (auto decimal = DecimalSpecOfValueType(target)) {
+            e = DecimalValueAtScale(node->Operand, ot, decimal->Scale, node->Location);
+            return MakeDecimalType(*decimal);
+        }
+        return Propagate({ot}, target);
+    }
+    if (auto cl = TMaybeNode<TCallExpr>(e)) {
+        auto node = cl.Cast();
+        std::vector<TTypePtr> argTypes;
+        argTypes.reserve(node->Args.size());
+        for (auto& arg : node->Args) {
+            argTypes.push_back(ExpandDecimalNode(arg, inputType, env));
+        }
+        if (auto cid = TMaybeNode<TIdentExpr>(node->Callee)) {
+            if (cid.Cast()->Name == "qdb_is_null" || cid.Cast()->Name == "qdb_is_true") {
+                return std::make_shared<TBoolType>();
+            }
+            if (cid.Cast()->Name == "coalesce") {
+                auto [value, allNullable] = CoalesceValueType(argTypes);
+                return value && allNullable
+                    ? std::static_pointer_cast<TType>(std::make_shared<TNullable>(value))
+                    : value;
+            }
+            if (cid.Cast()->Name.rfind("qdb_decimal_", 0) == 0) {
+                if (cid.Cast()->Name == "qdb_decimal_lt" ||
+                    cid.Cast()->Name == "qdb_decimal_le" ||
+                    cid.Cast()->Name == "qdb_decimal_gt" ||
+                    cid.Cast()->Name == "qdb_decimal_ge" ||
+                    cid.Cast()->Name == "qdb_decimal_eq" ||
+                    cid.Cast()->Name == "qdb_decimal_ne")
+                {
+                    return std::make_shared<TBoolType>();
+                }
+                return DecimalStorageType();
+            }
+        }
+        TTypePtr ret = InferType(e, inputType);
+        return ret;
+    }
+    if (auto blk = TMaybeNode<TBlockExpr>(e)) {
+        return ExpandDecimalBlock(*blk.Cast(), inputType, env);
+    }
+    if (auto var = TMaybeNode<TVarStmt>(e)) {
+        TTypePtr initType;
+        if (var.Cast()->Init) {
+            initType = ExpandDecimalNode(var.Cast()->Init, inputType, env);
+        }
+        TTypePtr varType = var.Cast()->Type ? FromQumirType(var.Cast()->Type) : initType;
+        if (varType) {
+            env[var.Cast()->Name] = varType;
+        }
+        return varType;
+    }
+    if (auto assign = TMaybeNode<TAssignExpr>(e)) {
+        TTypePtr valueType = ExpandDecimalNode(assign.Cast()->Value, inputType, env);
+        if (valueType) {
+            env[assign.Cast()->Name] = valueType;
+        }
+        return valueType;
+    }
+    for (auto* child : e->MutableChildren()) {
+        ExpandDecimalNode(*child, inputType, env);
+    }
+    return InferType(e, inputType);
+}
+
+std::pair<TExprPtr, TTypePtr> ExpandDecimal(const TExprPtr& expr,
+    const TStructType& inputType)
+{
+    TExprPtr e = CloneExpr(expr);
+    TTypeEnv env;
+    TTypePtr t = ExpandDecimalNode(e, inputType, env);
+    return {e, t ? t : InferType(e, inputType)};
+}
+
 } // namespace
 
 TTypePtr AnnotateExprType(const TExprPtr& expr, const TStructType& inputType) {
@@ -832,6 +1261,33 @@ bool ContainsNull(const TExprPtr& e) {
     }
     return false;
 }
+
+bool ContainsDecimalTypeRef(const TExprPtr& e) {
+    if (!e) {
+        return false;
+    }
+    if (IsDecimalType(e->Type)) {
+        return true;
+    }
+    if (auto cast = TMaybeNode<TCastExpr>(e); cast && IsDecimalType(cast.Cast()->Type)) {
+        return true;
+    }
+    for (const auto& child : e->Children()) {
+        if (ContainsDecimalTypeRef(child)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool SchemaHasDecimal(const TStructType& inputType) {
+    for (const auto& [_, type] : inputType.Fields) {
+        if (IsDecimalType(type)) {
+            return true;
+        }
+    }
+    return false;
+}
 } // namespace
 
 std::pair<TExprPtr, TTypePtr> ExpandNullable(const TExprPtr& expr, const TStructType& inputType) {
@@ -850,6 +1306,16 @@ std::pair<TExprPtr, TTypePtr> ExpandNullable(const TExprPtr& expr, const TStruct
     uint64_t counter = 0; // per-query temp-name counter (unique within this expansion)
     TTypePtr t = Expand(e, inputType, counter);
     return {e, t};
+}
+
+std::pair<TExprPtr, TTypePtr> ExpandKernelExpr(const TExprPtr& expr,
+    const TStructType& inputType)
+{
+    auto nullable = ExpandNullable(expr, inputType);
+    if (!SchemaHasDecimal(inputType) && !ContainsDecimalTypeRef(nullable.first)) {
+        return nullable;
+    }
+    return ExpandDecimal(nullable.first, inputType);
 }
 
 } // namespace NQdb::NKernel

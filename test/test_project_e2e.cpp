@@ -8,9 +8,11 @@
 
 #include "plan_runner.h"
 #include <qdb/io/io.h>
+#include <qdb/modules/qumirdb_runtime.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/passes/column_pruning.h>
 #include <qdb/plan/passes/typing.h>
+#include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
 #include <qdb/sexp/parser.h>
 
@@ -133,6 +135,158 @@ TEST(ProjectE2E, NormalizesBareNullIfBranchBeforeProjectKernel) {
     EXPECT_FALSE(IsValid(out.Columns[0], 3));
     EXPECT_EQ(maybeValue[0], values[0]);
     EXPECT_EQ(maybeValue[2], values[2]);
+    Release(&out);
+    EXPECT_FALSE(plan->Next(out));
+}
+
+TEST(ProjectE2E, DecimalProjectComputesWithBinIntStorage) {
+    std::array<qdb_bin_int, 3> amount = {{
+        {.Lo = 1000, .Hi = 0}, // 10.00
+        {.Lo = 1250, .Hi = 0}, // 12.50
+        {.Lo = 2500, .Hi = 0}, // 25.00
+    }};
+    std::array<TColumn, 1> cols = {
+        TColumn{.Data = reinterpret_cast<char*>(amount.data())},
+    };
+    TRowSet batch{.Columns = cols.data(), .ColumnCount = 1, .RowCount = 3, .RefCount = 1};
+    NQdb::TMockSource src({"amount"}, {std::make_shared<NQdb::TDecimal>(7, 2)}, {batch});
+
+    auto plan = Plan(
+        "(rel project (rel source \"L\") "
+        "(plus_one (+ amount 1)) "
+        "(twice (* amount 2)) "
+        "(half (/ amount 2)))",
+        src);
+
+    auto* outType = static_cast<TStructType*>(plan->OutputType().get());
+    ASSERT_EQ(outType->Fields.size(), 3u);
+    EXPECT_TRUE(NQdb::IsDecimalType(outType->Fields[0].second));
+    EXPECT_TRUE(NQdb::IsDecimalType(outType->Fields[1].second));
+    EXPECT_TRUE(NQdb::IsDecimalType(outType->Fields[2].second));
+
+    TRowSet out{};
+    ASSERT_TRUE(plan->Next(out));
+    ASSERT_EQ(out.ColumnCount, 3);
+    ASSERT_EQ(out.RowCount, 3);
+    const auto* plusOne = reinterpret_cast<const qdb_bin_int*>(out.Columns[0].Data);
+    const auto* twice = reinterpret_cast<const qdb_bin_int*>(out.Columns[1].Data);
+    const auto* half = reinterpret_cast<const qdb_bin_int*>(out.Columns[2].Data);
+    EXPECT_EQ(plusOne[0].Lo, 1100u);
+    EXPECT_EQ(plusOne[1].Lo, 1350u);
+    EXPECT_EQ(plusOne[2].Lo, 2600u);
+    EXPECT_EQ(twice[0].Lo, 2000u);
+    EXPECT_EQ(twice[1].Lo, 2500u);
+    EXPECT_EQ(twice[2].Lo, 5000u);
+    EXPECT_EQ(half[0].Lo, 500u);
+    EXPECT_EQ(half[1].Lo, 625u);
+    EXPECT_EQ(half[2].Lo, 1250u);
+    Release(&out);
+    EXPECT_FALSE(plan->Next(out));
+}
+
+TEST(ProjectE2E, DecimalAverageShapeDividesSumByCount) {
+    std::array<int64_t, 3> keys = {1, 1, 1};
+    std::array<qdb_bin_int, 3> amount = {{
+        {.Lo = 1000, .Hi = 0}, // 10.00
+        {.Lo = 2000, .Hi = 0}, // 20.00
+        {.Lo = 3000, .Hi = 0}, // 30.00
+    }};
+    std::array<TColumn, 2> cols = {
+        TColumn{.Data = reinterpret_cast<char*>(keys.data())},
+        TColumn{.Data = reinterpret_cast<char*>(amount.data())},
+    };
+    TRowSet batch{.Columns = cols.data(), .ColumnCount = 2, .RowCount = 3, .RefCount = 1};
+    NQdb::TMockSource src(
+        {"k", "amount"},
+        {std::make_shared<TIntegerType>(), std::make_shared<NQdb::TDecimal>(7, 2)},
+        {batch});
+
+    auto plan = Plan(
+        "(rel project "
+        "  (rel aggregate (rel source \"L\") (keys k) "
+        "    (agg s sum amount) (agg c count)) "
+        "  (k k) (avg (/ s c)))",
+        src);
+
+    auto* outType = static_cast<TStructType*>(plan->OutputType().get());
+    ASSERT_EQ(outType->Fields.size(), 2u);
+    EXPECT_TRUE(NQdb::IsDecimalType(outType->Fields[1].second));
+
+    TRowSet out{};
+    ASSERT_TRUE(plan->Next(out));
+    ASSERT_EQ(out.ColumnCount, 2);
+    ASSERT_EQ(out.RowCount, 1);
+    EXPECT_EQ(reinterpret_cast<const int64_t*>(out.Columns[0].Data)[0], 1);
+    const auto* avg = reinterpret_cast<const qdb_bin_int*>(out.Columns[1].Data);
+    EXPECT_EQ(avg[0].Lo, 2000u);
+    EXPECT_EQ(avg[0].Hi, 0u);
+    Release(&out);
+    EXPECT_FALSE(plan->Next(out));
+}
+
+TEST(ProjectE2E, NullableDecimalProjectPropagatesValidity) {
+    std::array<qdb_bin_int, 3> amount = {{
+        {.Lo = 1000, .Hi = 0}, // 10.00
+        {.Lo = 1250, .Hi = 0}, // NULL by mask
+        {.Lo = 2500, .Hi = 0}, // 25.00
+    }};
+    std::array<uint8_t, 1> mask = {0b00000101};
+    std::array<TColumn, 1> cols = {
+        TColumn{
+            .Data = reinterpret_cast<char*>(amount.data()),
+            .Mask = mask.data(),
+        },
+    };
+    TRowSet batch{.Columns = cols.data(), .ColumnCount = 1, .RowCount = 3, .RefCount = 1};
+    NQdb::TMockSource src(
+        {"amount"},
+        {std::make_shared<NQdb::TNullable>(std::make_shared<NQdb::TDecimal>(7, 2))},
+        {batch});
+
+    auto plan = Plan(
+        "(rel project (rel source \"L\") (plus_one (+ amount 1)))",
+        src);
+
+    auto* outType = static_cast<TStructType*>(plan->OutputType().get());
+    ASSERT_EQ(outType->Fields.size(), 1u);
+    ASSERT_TRUE(NQdb::IsNullableType(outType->Fields[0].second));
+    EXPECT_TRUE(NQdb::IsDecimalType(NQdb::UnwrapNullableType(outType->Fields[0].second)));
+
+    TRowSet out{};
+    ASSERT_TRUE(plan->Next(out));
+    ASSERT_EQ(out.ColumnCount, 1);
+    ASSERT_EQ(out.RowCount, 3);
+    ASSERT_NE(out.Columns[0].Mask, nullptr);
+    const auto* plusOne = reinterpret_cast<const qdb_bin_int*>(out.Columns[0].Data);
+    EXPECT_TRUE(IsValid(out.Columns[0], 0));
+    EXPECT_FALSE(IsValid(out.Columns[0], 1));
+    EXPECT_TRUE(IsValid(out.Columns[0], 2));
+    EXPECT_EQ(plusOne[0].Lo, 1100u);
+    EXPECT_EQ(plusOne[2].Lo, 2600u);
+    Release(&out);
+    EXPECT_FALSE(plan->Next(out));
+}
+
+TEST(FilterE2E, DecimalFilterAlignsIntegerLiteralScale) {
+    std::array<qdb_bin_int, 3> amount = {{
+        {.Lo = 1000, .Hi = 0}, // 10.00
+        {.Lo = 1250, .Hi = 0}, // 12.50
+        {.Lo = 2500, .Hi = 0}, // 25.00
+    }};
+    std::array<TColumn, 1> cols = {
+        TColumn{.Data = reinterpret_cast<char*>(amount.data())},
+    };
+    TRowSet batch{.Columns = cols.data(), .ColumnCount = 1, .RowCount = 3, .RefCount = 1};
+    NQdb::TMockSource src({"amount"}, {std::make_shared<NQdb::TDecimal>(7, 2)}, {batch});
+
+    auto plan = Plan("(rel filter (rel source \"L\") (> amount 12))", src);
+
+    TRowSet out{};
+    ASSERT_TRUE(plan->Next(out));
+    ASSERT_NE(out.Selection, nullptr);
+    EXPECT_EQ(
+        std::vector<uint8_t>(out.Selection, out.Selection + out.RowCount),
+        (std::vector<uint8_t>{0, 0xff, 0xff}));
     Release(&out);
     EXPECT_FALSE(plan->Next(out));
 }

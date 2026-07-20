@@ -9,15 +9,18 @@
 #include "plan_runner.h"
 #include <qdb/io/io.h>
 #include <qdb/kernel/compiler.h>
+#include <qdb/modules/qumirdb_runtime.h>
 #include <qdb/plan/ops/aggregate.h>
 #include <qdb/plan/ops/operator.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/passes/column_pruning.h>
 #include <qdb/plan/passes/typing.h>
 #include <qdb/sexp/parser.h>
+#include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
 
 #include <algorithm>
+#include <array>
 #include <memory>
 #include <map>
 #include <sstream>
@@ -205,6 +208,51 @@ TEST(AggregateE2E, SingleGroup) {
 
     TRowSet second{};
     EXPECT_FALSE(runtime->Next(second));
+}
+
+TEST(AggregateE2E, SumDecimalUsesBinIntState) {
+    std::array<int64_t, 5> keys = {1, 1, 2, 2, 1};
+    std::array<qdb_bin_int, 5> values = {{
+        {.Lo = 1000, .Hi = 0}, // 10.00
+        {.Lo = 250, .Hi = 0},  //  2.50
+        {.Lo = 3000, .Hi = 0}, // 30.00
+        {.Lo = 125, .Hi = 0},  //  1.25
+        {.Lo = 75, .Hi = 0},   //  0.75
+    }};
+    std::vector<TColumn> columns = {
+        TColumn{.Data = reinterpret_cast<char*>(keys.data())},
+        TColumn{.Data = reinterpret_cast<char*>(values.data())},
+    };
+    std::vector<TRowSet> batches = {TRowSet{
+        .Columns = columns.data(), .ColumnCount = 2, .RowCount = 5,
+        .Selection = nullptr, .RefCount = 1}};
+    NQdb::TMockSource source(
+        {"k", "v"}, std::move(batches),
+        {std::make_shared<TIntegerType>(),
+         std::make_shared<NQdb::TDecimal>(7, 2)});
+    auto root = ParsePlan(
+        "(rel aggregate (rel source \"data.parquet\") (keys k) (agg s sum v))",
+        source);
+    auto runtime = RunPlan(root);
+
+    TRowSet result{};
+    ASSERT_TRUE(runtime->Next(result));
+    ASSERT_EQ(result.ColumnCount, 2);
+    ASSERT_EQ(result.RowCount, 2);
+    EXPECT_EQ(result.Columns[1].Mask, nullptr);
+    auto* outKeys = reinterpret_cast<int64_t*>(result.Columns[0].Data);
+    auto* sums = reinterpret_cast<qdb_bin_int*>(result.Columns[1].Data);
+    for (int64_t row = 0; row < result.RowCount; ++row) {
+        if (outKeys[row] == 1) {
+            EXPECT_EQ(sums[row].Lo, 1325u);
+            EXPECT_EQ(sums[row].Hi, 0u);
+        } else {
+            ASSERT_EQ(outKeys[row], 2);
+            EXPECT_EQ(sums[row].Lo, 3125u);
+            EXPECT_EQ(sums[row].Hi, 0u);
+        }
+    }
+    Release(&result);
 }
 
 TEST(AggregateE2E, CompositeIntegerKeysProduceSeparateColumns) {

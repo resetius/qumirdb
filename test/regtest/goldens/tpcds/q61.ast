@@ -8,7 +8,9 @@
         total
       )
       (item
-        (* (/ (: (cast promotions <named DECIMAL>) <named DECIMAL>) (: (cast total <named DECIMAL>) <named DECIMAL>)) 100)
+        (* (/ (: (cast promotions <named DECIMAL [15 4]>) <named DECIMAL [15 4]>)
+            (: (cast total <named DECIMAL [15 4]>) <named DECIMAL [15 4]>))
+          100)
       )
     )
     (from

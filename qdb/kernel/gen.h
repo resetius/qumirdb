@@ -15,29 +15,47 @@
 namespace NQdb {
 namespace NKernel {
 
+enum class EAggValueKind {
+    Int64,
+    Float64,
+    BinInt,
+};
+
 // Per-reducer layout for the generic aggregation kernel. One TAggReducerInfo
 // per requested aggregate (same order/size as `funcs`/`aggs`); ValidBufIdx
 // (if >= 0) names an extra internal AggBuffers slot ("valid count") used to
 // skip NULL reducer arguments and to mark NULL output for sum/min/max when a
 // group has zero non-null contributions. NumAggBuffers is the total number of
-// AggBuffers slots the hash table must allocate (>= Reducers.size()); only
-// the first Reducers.size() slots are exposed to TAggregateFinalize's
-// outputBuffers.
+// physical AggBuffers slots the hash table must allocate.
+//
+// TODO(decimal): BinInt currently occupies two physical i64 state buffers
+// (Lo/Hi) because HashTable::AggBuffers is i64**. Replace this with width-aware
+// byte/typed state buffers once aggregate storage becomes generic.
 struct TAggReducerInfo {
     std::string Func;
     bool HasArg = false;            // agg.Arg != nullptr
     bool NeedsValidity = false;     // arg nullable && HasArg
     bool IsNullableOutput = false;  // NeedsValidity && Func in {sum,min,max}
+    int ValueBufIdx = -1;           // main value state buffer
+    int ExtraBufIdx = -1;           // high word for BinInt state, else -1
     int ValidBufIdx = -1;           // -1 if IsNullableOutput == false
-    bool IsFloat = false;           // arg f64 && HasArg && Func in {sum,min,max}
+    EAggValueKind ValueKind = EAggValueKind::Int64;
     int ArgColumnIndex = -1;        // input column index of this agg's arg; -1 = count(*)
+
+    bool IsFloat() const {
+        return ValueKind == EAggValueKind::Float64;
+    }
+
+    bool IsBinInt() const {
+        return ValueKind == EAggValueKind::BinInt;
+    }
 };
 
 // Per-aggregate argument column descriptor (parallel to funcs). ColumnIndex -1
 // means no argument (count(*)). Aggregates may reference different columns.
 struct TAggArg {
     int ColumnIndex = -1;
-    bool IsFloat = false;
+    EAggValueKind ValueKind = EAggValueKind::Int64;
     bool IsNullable = false;
 };
 

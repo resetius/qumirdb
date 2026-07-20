@@ -79,6 +79,49 @@
               (= data [i] (cast (: 0 i64) Value))))
           (= i (+ i (: 1 i64)))))))
 
+  (fun sort_materialize_binint_column
+       ((var store <ptr TRowSet>)
+        (var row_ids <ptr i64>)
+        (var start i64)
+        (var n i64)
+        (var src_col_idx i64)
+        (var out_col <ref TColumn>)
+        (var out <ref TRowSet>)
+        (var data_owner_idx i64)
+        (var mask_owner_idx i64))
+    (block
+      (var data =
+        (cast (call qdb_alloc (* n (: 16 i64)))
+              <ptr BinInt>))
+      (var mask =
+        (cast (call qdb_alloc (call sort_materialize_mask_bytes n)) <ptr u8>))
+      (call sort_materialize_record_owner out data_owner_idx (cast data <ptr i8>))
+      (call sort_materialize_record_owner out mask_owner_idx (cast mask <ptr i8>))
+      (field_assign out_col Data (cast data <ptr i8>))
+      (field_assign out_col DataBitOffset (: 0 i32))
+      (field_assign out_col Mask mask)
+      (field_assign out_col MaskBitOffset (: 0 i32))
+      (field_assign out_col Offsets (cast (: 0 i64) <ptr i64>))
+      (field_assign out_col OffsetWidth (: 0 u8))
+
+      (var zero =
+        (cast (struct ((Lo (: 0 u64)) (Hi (: 0 u64)))) BinInt))
+      (var witness = (cast (: 0 i64) <ptr BinInt>))
+      (var i i64)
+      (= i (: 0 i64))
+      (while (< i n)
+        (block
+          (var row_id = (index row_ids (+ start i)))
+          (var valid = (call sr_row_valid store row_id src_col_idx))
+          (call qdb_bitmap_set_valid mask i valid)
+          (if valid
+            (block
+              (= data [i]
+                 (call sr_load_fixed_key store row_id src_col_idx witness)))
+            (block
+              (= data [i] zero)))
+          (= i (+ i (: 1 i64)))))))
+
   (fun sort_materialize_bool_column
        ((var store <ptr TRowSet>)
         (var row_ids <ptr i64>)

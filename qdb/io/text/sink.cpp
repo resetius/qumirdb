@@ -1,7 +1,10 @@
 #include <qdb/io/text/sink.h>
+#include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
 
+#include <algorithm>
 #include <charconv>
+#include <cstring>
 #include <iomanip>
 #include <cstdio>
 #include <string_view>
@@ -72,6 +75,43 @@ std::string_view ToCharsView(std::ostream& out, T value, char* buffer, size_t si
     return std::string_view(buffer, static_cast<size_t>(tmp));
 }
 
+std::string UnsignedInt128ToString(unsigned __int128 value) {
+    if (value == 0) {
+        return "0";
+    }
+    std::string out;
+    while (value != 0) {
+        const unsigned digit = static_cast<unsigned>(value % 10);
+        out.push_back(static_cast<char>('0' + digit));
+        value /= 10;
+    }
+    std::reverse(out.begin(), out.end());
+    return out;
+}
+
+std::string FormatDecimal128(const char* data, int32_t scale) {
+    uint64_t lo = 0;
+    uint64_t hi = 0;
+    std::memcpy(&lo, data, sizeof(lo));
+    std::memcpy(&hi, data + sizeof(lo), sizeof(hi));
+    unsigned __int128 raw = static_cast<unsigned __int128>(lo) |
+        (static_cast<unsigned __int128>(hi) << 64);
+    const bool negative = (hi >> 63) != 0;
+    unsigned __int128 magnitude = negative ? (~raw + 1) : raw;
+    std::string digits = UnsignedInt128ToString(magnitude);
+    if (scale > 0) {
+        if (digits.size() <= static_cast<size_t>(scale)) {
+            digits.insert(digits.begin(),
+                static_cast<size_t>(scale) + 1 - digits.size(), '0');
+        }
+        digits.insert(digits.end() - scale, '.');
+    }
+    if (negative) {
+        digits.insert(digits.begin(), '-');
+    }
+    return digits;
+}
+
 std::string FormatCell(const TColumn& col, int32_t row, const TTypePtr& type) {
     if (IsMasked(col, row)) {
         return "NULL";
@@ -81,6 +121,9 @@ std::string FormatCell(const TColumn& col, int32_t row, const TTypePtr& type) {
     }
     char buf[64];
     const auto valueType = UnwrapNullableType(type);
+    if (auto decimal = DecimalSpecOfValueType(valueType)) {
+        return FormatDecimal128(col.Data + row * 16, decimal->Scale);
+    }
     if (auto t = TMaybeType<TIntegerType>(valueType)) {
         auto intType = t.Cast();
         const char* ptr = col.Data + row * (intType->BitWidth() / 8);
@@ -140,6 +183,11 @@ void WriteValue(std::ostream& out, const TColumn& col, int32_t row, const TTypeP
     }
 
     const auto valueType = UnwrapNullableType(type);
+    if (auto decimal = DecimalSpecOfValueType(valueType)) {
+        const auto formatted = FormatDecimal128(col.Data + row * 16, decimal->Scale);
+        out.write(formatted.data(), static_cast<std::streamsize>(formatted.size()));
+        return;
+    }
     if (auto t = TMaybeType<TIntegerType>(valueType)) {
         auto intType = t.Cast();
         const char* ptr = col.Data + row * (intType->BitWidth() / 8);
@@ -207,7 +255,8 @@ void WriteValue(std::ostream& out, const TColumn& col, int32_t row, const TTypeP
 
 bool IsNumeric(const TTypePtr& type) {
     const auto valueType = UnwrapNullableType(type);
-    return static_cast<bool>(TMaybeType<TIntegerType>(valueType)) ||
+    return IsDecimalType(valueType) ||
+           static_cast<bool>(TMaybeType<TIntegerType>(valueType)) ||
            static_cast<bool>(TMaybeType<TFloatType>(valueType));
 }
 

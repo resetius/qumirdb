@@ -3,6 +3,7 @@
 
 #include <qdb/io/schema.h>
 #include "plan_runner.h"
+#include <qdb/modules/qumirdb_runtime.h>
 #include <qdb/plan/build.h>
 #include <qdb/plan/ops/aggregate.h>
 #include <qdb/plan/ops/filter.h>
@@ -14,6 +15,7 @@
 #include <qdb/plan/passes/qualify_columns.h>
 #include <qdb/plan/passes/top_sort.h>
 #include <qdb/plan/passes/typing.h>
+#include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
 #include <qdb/sql/parser.h>
 
@@ -719,6 +721,61 @@ TEST(SortExec, SortAfterAggregate) {
         (std::vector<int64_t>{2, 1, 3}));
     EXPECT_EQ(std::vector<int64_t>(outS, outS + out.RowCount),
         (std::vector<int64_t>{17, 11, 4}));
+    Release(&out);
+}
+
+TEST(SortExec, MaterializesNullableDecimalPayload) {
+    using namespace NQumir::NAst;
+
+    int64_t keys[] = {2, 1, 3};
+    qdb_bin_int amounts[] = {
+        {.Lo = 2000, .Hi = 0},
+        {.Lo = 9999, .Hi = 9999}, // NULL by mask; output value is zeroed.
+        {.Lo = 3000, .Hi = 0},
+    };
+    uint8_t amountMask[] = {0b00000101};
+    std::vector<TColumn> columns = {
+        TColumn{.Data = reinterpret_cast<char*>(keys)},
+        TColumn{.Data = reinterpret_cast<char*>(amounts), .Mask = amountMask},
+    };
+    TRowSet batch{
+        .Columns = columns.data(),
+        .ColumnCount = 2,
+        .RowCount = 3,
+        .RefCount = 1,
+    };
+
+    auto i64 = std::make_shared<TIntegerType>();
+    auto decimal = std::make_shared<NQdb::TNullable>(
+        std::make_shared<NQdb::TDecimal>(7, 2));
+    NQdb::TMockSource source(
+        TMockColumns{},
+        {{"k", i64}, {"amount", decimal}},
+        {batch});
+
+    auto sourceOp = std::make_shared<TSourceOperator>(source, "t");
+    auto sort = std::make_shared<TSortOperator>(sourceOp, std::vector<TSortKey>{
+        {.Column = "k", .Direction = ESortDirection::Asc},
+    });
+
+    auto runtime = RunPlan(sort);
+
+    TRowSet out{};
+    ASSERT_TRUE(runtime->Next(out));
+    ASSERT_EQ(out.ColumnCount, 2);
+    ASSERT_EQ(out.RowCount, 3);
+    ASSERT_NE(out.Columns[1].Mask, nullptr);
+    auto* outKeys = reinterpret_cast<int64_t*>(out.Columns[0].Data);
+    auto* outAmounts = reinterpret_cast<qdb_bin_int*>(out.Columns[1].Data);
+    EXPECT_EQ(std::vector<int64_t>(outKeys, outKeys + out.RowCount),
+        (std::vector<int64_t>{1, 2, 3}));
+    EXPECT_FALSE(MaskBit(out.Columns[1], 0));
+    EXPECT_TRUE(MaskBit(out.Columns[1], 1));
+    EXPECT_TRUE(MaskBit(out.Columns[1], 2));
+    EXPECT_EQ(outAmounts[0].Lo, 0u);
+    EXPECT_EQ(outAmounts[0].Hi, 0u);
+    EXPECT_EQ(outAmounts[1].Lo, 2000u);
+    EXPECT_EQ(outAmounts[2].Lo, 3000u);
     Release(&out);
 }
 

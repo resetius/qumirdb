@@ -1,11 +1,13 @@
 #include <gtest/gtest.h>
 
 #include <qdb/kernel/annotate_type.h>
+#include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
 
 #include <qumir/error.h>
 #include <qumir/parser/core/lexer.h>
 #include <qumir/parser/core/parser.h>
+#include <qumir/parser/core/printer.h>
 #include <qumir/parser/type.h>
 
 #include <memory>
@@ -53,6 +55,10 @@ bool IsF64(const TTypePtr& t) { return static_cast<bool>(TMaybeType<TFloatType>(
 bool IsInt(const TTypePtr& t) { return static_cast<bool>(TMaybeType<TIntegerType>(t)); }
 bool IsBool(const TTypePtr& t) { return static_cast<bool>(TMaybeType<TBoolType>(t)); }
 bool IsNullable(const TTypePtr& t) { return NQdb::IsNullableType(t); }
+bool IsDecimal(const TTypePtr& t, int32_t precision, int32_t scale) {
+    auto spec = NQdb::DecimalSpecOf(t);
+    return spec && spec->Precision == precision && spec->Scale == scale;
+}
 
 TTypePtr NullableInner(const TTypePtr& t) {
     auto nullable = TMaybeType<NQdb::TNullable>(t).Cast();
@@ -124,6 +130,35 @@ TEST(ProjectType, NullableBoolMixedOverloadAnnotates) {
 
 TEST(ProjectType, NullableIsNullAnnotates) {
     EXPECT_TRUE(IsBool(AnnotateExprType(Parse("(call qdb_is_null a)"), NullableSchema())));
+}
+
+TEST(ProjectType, DecimalArithmeticAnnotates) {
+    TStructType sc({
+        {"amount", std::make_shared<NQdb::TDecimal>(7, 2)},
+        {"tax", std::make_shared<NQdb::TDecimal>(6, 3)},
+        {"qty", std::make_shared<TIntegerType>()},
+    });
+
+    EXPECT_TRUE(IsDecimal(AnnotateExprType(Parse("(+ amount tax)"), sc), 9, 3));
+    EXPECT_TRUE(IsDecimal(AnnotateExprType(Parse("(+ amount 1)"), sc), 8, 2));
+    EXPECT_TRUE(IsDecimal(AnnotateExprType(Parse("(* amount qty)"), sc), 8, 2));
+    EXPECT_TRUE(IsDecimal(AnnotateExprType(Parse("(/ amount qty)"), sc), 7, 2));
+    EXPECT_TRUE(IsBool(AnnotateExprType(Parse("(< amount tax)"), sc)));
+    EXPECT_THROW(AnnotateExprType(Parse("(* amount tax)"), sc), NQumir::TError);
+    EXPECT_THROW(AnnotateExprType(Parse("(/ amount tax)"), sc), NQumir::TError);
+}
+
+TEST(ProjectType, ExpandKernelExprErasesDecimalCasts) {
+    TStructType sc({
+        {"amount", std::make_shared<NQdb::TDecimal>(7, 2)},
+    });
+
+    auto [expr, type] = ExpandKernelExpr(Parse("(+ amount 1)"), sc);
+
+    EXPECT_TRUE(IsDecimal(type, 8, 2));
+    const std::string printed = NQumir::NAst::NCore::PrintAst(expr);
+    EXPECT_NE(printed.find("qdb_decimal_from_i64"), std::string::npos);
+    EXPECT_EQ(printed.find("DECIMAL"), std::string::npos);
 }
 
 TEST(ProjectType, ExpandNullableWrapsPlainSiblingOfNullableBranch) {
