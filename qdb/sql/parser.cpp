@@ -172,6 +172,7 @@
     | <case_expr>
     | "CAST" "(" <expr> "AS" <type_name> ")"
     | "EXISTS" "(" <select_stmt> ")"
+    | "GROUPING" "(" <expr> ")"
     | "(" <expr> ")"
     | "(" <select_stmt> ")"
 
@@ -429,6 +430,23 @@ std::expected<std::optional<std::string>, TError> opt_alias(TParserContext& ctx)
     return std::optional<std::string>{};
 }
 
+bool StartsQueryAfterOpenParen(TParserContext& ctx) {
+    // A table subquery is `("(" <select_stmt> ")")`, and <select_stmt> may
+    // start with nested parentheses via <query_primary>.
+    std::vector<TToken> consumed;
+    auto token = ctx.Stream.Next();
+    consumed.push_back(token);
+    while (IsOp(token, '(')) {
+        token = ctx.Stream.Next();
+        consumed.push_back(token);
+    }
+    const bool startsQuery = IsKeyword(token, "SELECT") || IsKeyword(token, "WITH");
+    for (auto it = consumed.rbegin(); it != consumed.rend(); ++it) {
+        ctx.Stream.Unget(*it);
+    }
+    return startsQuery;
+}
+
 template<class F>
 using TTask = std::invoke_result_t<F&, TParserContext&>;
 
@@ -532,9 +550,7 @@ TAstTask<TSqlNode> query_expr(TParserContext& ctx) {
                 : TSqlSetOp::EOp::Except;
 
             auto quantifierTok = ctx.Stream.Next();
-            ESetQuantifier quantifier = op == TSqlSetOp::EOp::Union
-                ? ESetQuantifier::Distinct
-                : ESetQuantifier::All;
+            ESetQuantifier quantifier = ESetQuantifier::Distinct;
             if (IsKeyword(quantifierTok, "ALL")) {
                 quantifier = ESetQuantifier::All;
             } else if (IsKeyword(quantifierTok, "DISTINCT")) {
@@ -934,11 +950,7 @@ TAstTask<TSqlTableRef> table_factor(TParserContext& ctx) {
     auto token = ctx.Stream.Next();
 
     if (IsOp(token, '(')) {
-        auto peek = ctx.Stream.Next();
-        bool isSubquery = IsKeyword(peek, "SELECT") || IsKeyword(peek, "WITH");
-        ctx.Stream.Unget(peek);
-
-        if (isSubquery) {
+        if (StartsQueryAfterOpenParen(ctx)) {
             auto sub = std::make_shared<TSqlSubqueryTable>();
             sub->Query = co_await select_stmt(ctx);
 
@@ -1354,6 +1366,22 @@ TAstExprTask primary_expr(TParserContext& ctx) {
     if (token.Type == TToken::Identifier) {
         ctx.Stream.Unget(token);
         co_return co_await function_call(ctx);
+    }
+
+    if (IsKeyword(token, "GROUPING")) {
+        auto next = ctx.Stream.Next();
+        if (!IsOp(next, '(')) {
+            co_return Error(next, "'(' expected after GROUPING");
+        }
+
+        auto e = co_await expr(ctx);
+
+        next = ctx.Stream.Next();
+        if (!IsOp(next, ')')) {
+            co_return Error(next, "')' expected after GROUPING argument");
+        }
+
+        co_return call(loc, "grouping", {std::move(e)});
     }
 
     if (IsKeyword(token, "CASE")) {
