@@ -54,6 +54,7 @@ qdb_bin_int qdb_decimal_sub(qdb_bin_int left, qdb_bin_int right);
 qdb_bin_int qdb_decimal_neg(qdb_bin_int value);
 qdb_bin_int qdb_decimal_mul_i64(qdb_bin_int left, int64_t right);
 qdb_bin_int qdb_decimal_div_i64(qdb_bin_int left, int64_t right);
+qdb_bin_int qdb_decimal_div(qdb_bin_int left, qdb_bin_int right);
 bool qdb_decimal_eq(qdb_bin_int left, qdb_bin_int right);
 bool qdb_decimal_ne(qdb_bin_int left, qdb_bin_int right);
 bool qdb_decimal_lt(qdb_bin_int left, qdb_bin_int right);

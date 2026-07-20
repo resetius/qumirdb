@@ -222,6 +222,8 @@
     (block (return (call qdb_decimal_mul_i64 right left))))
   (fun qdb_decimal_div_i64 ((var left BinInt) (var right i64)) -> BinInt
     (attrs extern (operator "/")) (block))
+  (fun qdb_decimal_div ((var left BinInt) (var right BinInt)) -> BinInt
+    (attrs extern (operator "/")) (block))
 
   (fun qdb_decimal_eq ((var left BinInt) (var right BinInt)) -> bool
     (attrs extern (operator "==")) (block))

@@ -287,7 +287,10 @@ bool IsLogical(TOperator op) { return op == "&&" || op == "||"; }
 
 TTypePtr ValueType(const TTypePtr& t) { return t ? UnwrapNullableType(t) : t; }
 TTypePtr NullableQ(const TTypePtr& value) {
-    return ToQumirType(std::make_shared<TNullable>(value));
+    auto nullable = std::make_shared<TNullable>(value);
+    return IsDecimalType(value)
+        ? std::static_pointer_cast<TType>(nullable)
+        : ToQumirType(nullable);
 }
 
 std::string PlanTypeKey(const TTypePtr& type) {
@@ -345,6 +348,22 @@ TTypePtr CommonNumeric(const TTypePtr& a, const TTypePtr& b) {
         "decimal operator '" + op.ToString() + "' is not supported: " + detail);
 }
 
+TDecimalSpec DecimalDivisionSpec(const TDecimalSpec& left, const TDecimalSpec& right) {
+    const int32_t scale = std::max(6, left.Scale + right.Precision + 1);
+    const int32_t intDigits = left.Precision - left.Scale + right.Scale;
+    const int32_t precision = intDigits + scale;
+    if (precision <= MaxDecimalPrecision) {
+        return {.Precision = precision, .Scale = scale};
+    }
+
+    // SQL decimal division keeps integral digits first and reduces fractional scale
+    // when precision would exceed DECIMAL(38, s).
+    return {
+        .Precision = MaxDecimalPrecision,
+        .Scale = std::max(0, MaxDecimalPrecision - intDigits),
+    };
+}
+
 TTypePtr DecimalBinaryValueType(TOperator op, const TTypePtr& vl, const TTypePtr& vr) {
     auto dl = DecimalSpecOfValueType(vl);
     auto dr = DecimalSpecOfValueType(vr);
@@ -355,10 +374,13 @@ TTypePtr DecimalBinaryValueType(TOperator op, const TTypePtr& vl, const TTypePtr
         return std::make_shared<TBoolType>();
     }
     if (op == "/") {
+        if (dl && dr) {
+            return MakeDecimalType(DecimalDivisionSpec(*dl, *dr));
+        }
         if (dl && !dr && IsInt(vr)) {
             return MakeDecimalType(*dl);
         }
-        ThrowDecimalUnsupported(op, "only decimal / integer is implemented in qdb v1");
+        ThrowDecimalUnsupported(op, "only decimal / decimal and decimal / integer are implemented in qdb v1");
     }
     if (op == "%") {
         ThrowDecimalUnsupported(op, "remainder on decimal values is not implemented");
@@ -1131,6 +1153,27 @@ TTypePtr ExpandDecimalNode(TExprPtr& e, const TStructType& inputType, TTypeEnv& 
             }
         }
         if (node->Operator == "/") {
+            if (dl && dr) {
+                node->Left = DecimalValueAtScale(node->Left, lt, dl->Scale, node->Location);
+                node->Right = DecimalValueAtScale(node->Right, rt, dr->Scale, node->Location);
+                const int32_t dividendScaleDelta =
+                    resultDecimal->Scale + dr->Scale - dl->Scale;
+                if (dividendScaleDelta < 0) {
+                    throw NQumir::TError(
+                        "decimal / decimal produced negative dividend scale delta");
+                }
+                if (dividendScaleDelta > 0) {
+                    node->Left = Call("qdb_decimal_scale_up", {
+                        std::move(node->Left),
+                        DecimalScaleLiteral(node->Location, dividendScaleDelta),
+                    }, node->Location);
+                }
+                e = Call("qdb_decimal_div", {
+                    std::move(node->Left),
+                    std::move(node->Right),
+                }, node->Location);
+                return Propagate({lt, rt}, result);
+            }
             if (dl && !dr) {
                 node->Left = DecimalValueAtScale(node->Left, lt, dl->Scale, node->Location);
                 node->Right = CastToI64(node->Right, node->Location);
@@ -1161,6 +1204,16 @@ TTypePtr ExpandDecimalNode(TExprPtr& e, const TStructType& inputType, TTypeEnv& 
         auto node = cp.Cast();
         TTypePtr ot = ExpandDecimalNode(node->Operand, inputType, env);
         TTypePtr target = FromQumirType(node->Type);
+        if (auto nullable = TMaybeType<TNullable>(target)) {
+            if (auto decimal = DecimalSpecOfValueType(nullable.Cast()->UnderlyingType)) {
+                if (ot && !IsBinIntStorageType(ot)) {
+                    node->Operand = DecimalValueAtScale(
+                        node->Operand, ot, decimal->Scale, node->Location);
+                }
+                node->Type = ToQumirType(target);
+                return target;
+            }
+        }
         if (auto decimal = DecimalSpecOfValueType(target)) {
             e = DecimalValueAtScale(node->Operand, ot, decimal->Scale, node->Location);
             return MakeDecimalType(*decimal);

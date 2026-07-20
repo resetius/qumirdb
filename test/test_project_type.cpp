@@ -136,6 +136,10 @@ TEST(ProjectType, DecimalArithmeticAnnotates) {
     TStructType sc({
         {"amount", std::make_shared<NQdb::TDecimal>(7, 2)},
         {"tax", std::make_shared<NQdb::TDecimal>(6, 3)},
+        {"sales", std::make_shared<NQdb::TDecimal>(17, 2)},
+        {"prev", std::make_shared<NQdb::TDecimal>(17, 2)},
+        {"wide", std::make_shared<NQdb::TDecimal>(38, 10)},
+        {"wide2", std::make_shared<NQdb::TDecimal>(38, 10)},
         {"qty", std::make_shared<TIntegerType>()},
     });
 
@@ -143,9 +147,11 @@ TEST(ProjectType, DecimalArithmeticAnnotates) {
     EXPECT_TRUE(IsDecimal(AnnotateExprType(Parse("(+ amount 1)"), sc), 8, 2));
     EXPECT_TRUE(IsDecimal(AnnotateExprType(Parse("(* amount qty)"), sc), 8, 2));
     EXPECT_TRUE(IsDecimal(AnnotateExprType(Parse("(/ amount qty)"), sc), 7, 2));
+    EXPECT_TRUE(IsDecimal(AnnotateExprType(Parse("(/ amount tax)"), sc), 17, 9));
+    EXPECT_TRUE(IsDecimal(AnnotateExprType(Parse("(/ sales prev)"), sc), 37, 20));
+    EXPECT_TRUE(IsDecimal(AnnotateExprType(Parse("(/ wide wide2)"), sc), 38, 0));
     EXPECT_TRUE(IsBool(AnnotateExprType(Parse("(< amount tax)"), sc)));
     EXPECT_THROW(AnnotateExprType(Parse("(* amount tax)"), sc), NQumir::TError);
-    EXPECT_THROW(AnnotateExprType(Parse("(/ amount tax)"), sc), NQumir::TError);
 }
 
 TEST(ProjectType, ExpandKernelExprErasesDecimalCasts) {
@@ -158,6 +164,25 @@ TEST(ProjectType, ExpandKernelExprErasesDecimalCasts) {
     EXPECT_TRUE(IsDecimal(type, 8, 2));
     const std::string printed = NQumir::NAst::NCore::PrintAst(expr);
     EXPECT_NE(printed.find("qdb_decimal_from_i64"), std::string::npos);
+    EXPECT_EQ(printed.find("DECIMAL"), std::string::npos);
+}
+
+TEST(ProjectType, ExpandKernelExprPreservesNullableDecimalComparisonWithFloat) {
+    auto i64 = std::make_shared<TIntegerType>();
+    TStructType sc({
+        {"a", std::make_shared<NQdb::TNullable>(i64)},
+        {"b", std::make_shared<NQdb::TNullable>(i64)},
+    });
+
+    auto [expr, type] = ExpandKernelExpr(Parse(
+        "(< (/ (cast a <named DECIMAL [17 2]>) "
+        "      (cast b <named DECIMAL [17 2]>)) 0.9)"), sc);
+
+    ASSERT_TRUE(IsNullable(type));
+    EXPECT_TRUE(IsBool(NullableInner(type)));
+    const std::string printed = NQumir::NAst::NCore::PrintAst(expr);
+    EXPECT_NE(printed.find("qdb_decimal_div"), std::string::npos);
+    EXPECT_NE(printed.find("qdb_decimal_from_f64"), std::string::npos);
     EXPECT_EQ(printed.find("DECIMAL"), std::string::npos);
 }
 
