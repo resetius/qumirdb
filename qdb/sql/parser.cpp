@@ -526,7 +526,7 @@ TAstTask<TSqlNode> query_term(TParserContext& ctx) {
         auto token = ctx.Stream.Next();
         if (IsKeyword(token, "INTERSECT")) {
             auto quantifierTok = ctx.Stream.Next();
-            ESetQuantifier quantifier = ESetQuantifier::All;
+            ESetQuantifier quantifier = ESetQuantifier::Distinct;
             if (IsKeyword(quantifierTok, "ALL")) {
                 quantifier = ESetQuantifier::All;
             } else if (IsKeyword(quantifierTok, "DISTINCT")) {

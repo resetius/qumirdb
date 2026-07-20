@@ -445,6 +445,22 @@ TOperatorPtr ApplyDistinct(TOperatorPtr projected, const std::vector<std::string
     return std::make_shared<TProjectOperator>(std::move(agg), std::move(passthrough));
 }
 
+std::expected<std::vector<std::string>, TError> OutputColumnNames(
+    const TOperatorPtr& op,
+    const std::string& context)
+{
+    auto* output = static_cast<NAst::TStructType*>(op->OutputColumns().get());
+    if (!output) {
+        return std::unexpected(TError(context + " output schema must be a struct"));
+    }
+    std::vector<std::string> names;
+    names.reserve(output->Fields.size());
+    for (const auto& [name, _] : output->Fields) {
+        names.push_back(name);
+    }
+    return names;
+}
+
 std::expected<TOperatorPtr, TError> BuildTableRef(
     const NSql::TSqlPtr<NSql::TSqlTableRef>& ref,
     const TTableSourceFactory& sources)
@@ -1333,49 +1349,88 @@ std::expected<TOperatorPtr, TError> BuildSetOp(
     const NSql::TSqlSetOp& setOp,
     const TTableSourceFactory& sources)
 {
-    if (setOp.Op != NSql::TSqlSetOp::EOp::Union) {
-        return std::unexpected(TError(
-            "only UNION and UNION ALL are supported yet (INTERSECT/EXCEPT not supported)"));
-    }
+    if (setOp.Op == NSql::TSqlSetOp::EOp::Union) {
+        // Flatten only a nested chain of the same UNION quantifier. Mixed chains such
+        // as `(a UNION b) UNION ALL c` must keep the inner DISTINCT boundary.
+        std::vector<TOperatorPtr> branches;
+        std::function<std::expected<void, TError>(const NSql::TSqlNodePtr&)> collect =
+            [&](const NSql::TSqlNodePtr& node) -> std::expected<void, TError> {
+            auto inner = NSql::TMaybeNode<NSql::TSqlSetOp>(node);
+            if (inner
+                && inner.Cast()->Op == NSql::TSqlSetOp::EOp::Union
+                && inner.Cast()->Quantifier == setOp.Quantifier)
+            {
+                if (auto l = collect(inner.Cast()->Left); !l) return l;
+                return collect(inner.Cast()->Right);
+            }
+            auto branch = BuildQueryBody(node, sources);
+            if (!branch) {
+                return std::unexpected(branch.error());
+            }
+            branches.push_back(std::move(*branch));
+            return {};
+        };
+        if (auto l = collect(setOp.Left); !l) return std::unexpected(l.error());
+        if (auto r = collect(setOp.Right); !r) return std::unexpected(r.error());
 
-    // Flatten only a nested chain of the same UNION quantifier. Mixed chains such
-    // as `(a UNION b) UNION ALL c` must keep the inner DISTINCT boundary.
-    std::vector<TOperatorPtr> branches;
-    std::function<std::expected<void, TError>(const NSql::TSqlNodePtr&)> collect =
-        [&](const NSql::TSqlNodePtr& node) -> std::expected<void, TError> {
-        auto inner = NSql::TMaybeNode<NSql::TSqlSetOp>(node);
-        if (inner
-            && inner.Cast()->Op == NSql::TSqlSetOp::EOp::Union
-            && inner.Cast()->Quantifier == setOp.Quantifier)
-        {
-            if (auto l = collect(inner.Cast()->Left); !l) return l;
-            return collect(inner.Cast()->Right);
+        auto unionAll = std::make_shared<TUnionAllOperator>(std::move(branches));
+        if (setOp.Quantifier == NSql::ESetQuantifier::All) {
+            return unionAll;
         }
-        auto branch = BuildQueryBody(node, sources);
-        if (!branch) {
-            return std::unexpected(branch.error());
+
+        auto outputNames = OutputColumnNames(unionAll, "UNION");
+        if (!outputNames) {
+            return std::unexpected(outputNames.error());
         }
-        branches.push_back(std::move(*branch));
-        return {};
-    };
-    if (auto l = collect(setOp.Left); !l) return std::unexpected(l.error());
-    if (auto r = collect(setOp.Right); !r) return std::unexpected(r.error());
-
-    auto unionAll = std::make_shared<TUnionAllOperator>(std::move(branches));
-    if (setOp.Quantifier == NSql::ESetQuantifier::All) {
-        return unionAll;
+        return ApplyDistinct(std::move(unionAll), *outputNames);
     }
 
-    auto* output = static_cast<NAst::TStructType*>(unionAll->OutputColumns().get());
-    if (!output) {
-        return std::unexpected(TError("UNION output schema must be a struct"));
+    if (setOp.Op == NSql::TSqlSetOp::EOp::Intersect) {
+        if (setOp.Quantifier == NSql::ESetQuantifier::All) {
+            return std::unexpected(TError("INTERSECT ALL is not supported yet"));
+        }
+
+        auto left = BuildQueryBody(setOp.Left, sources);
+        if (!left) {
+            return std::unexpected(left.error());
+        }
+        auto right = BuildQueryBody(setOp.Right, sources);
+        if (!right) {
+            return std::unexpected(right.error());
+        }
+
+        auto leftNames = OutputColumnNames(*left, "INTERSECT left branch");
+        if (!leftNames) {
+            return std::unexpected(leftNames.error());
+        }
+        auto rightNames = OutputColumnNames(*right, "INTERSECT right branch");
+        if (!rightNames) {
+            return std::unexpected(rightNames.error());
+        }
+        if (leftNames->size() != rightNames->size()) {
+            return std::unexpected(TError(
+                "INTERSECT branches must have the same number of columns"));
+        }
+
+        auto leftDistinct = ApplyDistinct(std::move(*left), *leftNames);
+        auto rightDistinct = ApplyDistinct(std::move(*right), *rightNames);
+
+        std::vector<std::pair<std::string, std::string>> keys;
+        keys.reserve(leftNames->size());
+        for (size_t i = 0; i < leftNames->size(); ++i) {
+            keys.emplace_back((*leftNames)[i], (*rightNames)[i]);
+        }
+
+        auto join = MakeJoin(
+            std::move(leftDistinct), std::move(rightDistinct),
+            std::move(keys), EJoinType::LeftSemi);
+        if (!join) {
+            return std::unexpected(join.error());
+        }
+        return *join;
     }
-    std::vector<std::string> outputNames;
-    outputNames.reserve(output->Fields.size());
-    for (const auto& [name, _] : output->Fields) {
-        outputNames.push_back(name);
-    }
-    return ApplyDistinct(std::move(unionAll), outputNames);
+
+    return std::unexpected(TError("EXCEPT is not supported yet"));
 }
 
 std::expected<TOperatorPtr, TError> BuildQuery(
