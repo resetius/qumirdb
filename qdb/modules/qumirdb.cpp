@@ -27,6 +27,7 @@ const void* const QumirDbRuntimeSymbolAnchors[] __attribute__((used)) = {
     reinterpret_cast<const void*>(&qdb_decimal_neg),
     reinterpret_cast<const void*>(&qdb_decimal_mul_i64),
     reinterpret_cast<const void*>(&qdb_decimal_div_i64),
+    reinterpret_cast<const void*>(&qdb_decimal_div),
     reinterpret_cast<const void*>(&qdb_decimal_eq),
     reinterpret_cast<const void*>(&qdb_decimal_ne),
     reinterpret_cast<const void*>(&qdb_decimal_lt),

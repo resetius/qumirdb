@@ -184,6 +184,52 @@ TEST(ProjectE2E, DecimalProjectComputesWithBinIntStorage) {
     EXPECT_FALSE(plan->Next(out));
 }
 
+TEST(ProjectE2E, DecimalDecimalDivisionComputesWithScaledBinIntStorage) {
+    std::array<qdb_bin_int, 3> amount = {{
+        {.Lo = 1000, .Hi = 0}, // 10.00
+        {.Lo = 1250, .Hi = 0}, // 12.50
+        {.Lo = 2500, .Hi = 0}, // 25.00
+    }};
+    std::array<qdb_bin_int, 3> divisor = {{
+        {.Lo = 200, .Hi = 0}, // 2.00
+        {.Lo = 250, .Hi = 0}, // 2.50
+        {.Lo = 500, .Hi = 0}, // 5.00
+    }};
+    std::array<TColumn, 2> cols = {
+        TColumn{.Data = reinterpret_cast<char*>(amount.data())},
+        TColumn{.Data = reinterpret_cast<char*>(divisor.data())},
+    };
+    TRowSet batch{.Columns = cols.data(), .ColumnCount = 2, .RowCount = 3, .RefCount = 1};
+    NQdb::TMockSource src(
+        {"amount", "divisor"},
+        {std::make_shared<NQdb::TDecimal>(7, 2),
+         std::make_shared<NQdb::TDecimal>(7, 2)},
+        {batch});
+
+    auto plan = Plan(
+        "(rel project (rel source \"L\") (ratio (/ amount divisor)))",
+        src);
+
+    auto* outType = static_cast<TStructType*>(plan->OutputType().get());
+    ASSERT_EQ(outType->Fields.size(), 1u);
+    auto spec = NQdb::DecimalSpecOf(outType->Fields[0].second);
+    ASSERT_TRUE(spec.has_value());
+    EXPECT_EQ(spec->Precision, 17);
+    EXPECT_EQ(spec->Scale, 10);
+
+    TRowSet out{};
+    ASSERT_TRUE(plan->Next(out));
+    ASSERT_EQ(out.ColumnCount, 1);
+    ASSERT_EQ(out.RowCount, 3);
+    const auto* ratio = reinterpret_cast<const qdb_bin_int*>(out.Columns[0].Data);
+    for (int i = 0; i < 3; ++i) {
+        EXPECT_EQ(ratio[i].Lo, 50000000000u);
+        EXPECT_EQ(ratio[i].Hi, 0u);
+    }
+    Release(&out);
+    EXPECT_FALSE(plan->Next(out));
+}
+
 TEST(ProjectE2E, DecimalAverageShapeDividesSumByCount) {
     std::array<int64_t, 3> keys = {1, 1, 1};
     std::array<qdb_bin_int, 3> amount = {{
@@ -287,6 +333,34 @@ TEST(FilterE2E, DecimalFilterAlignsIntegerLiteralScale) {
     EXPECT_EQ(
         std::vector<uint8_t>(out.Selection, out.Selection + out.RowCount),
         (std::vector<uint8_t>{0, 0xff, 0xff}));
+    Release(&out);
+    EXPECT_FALSE(plan->Next(out));
+}
+
+TEST(FilterE2E, NullableDecimalDivisionComparesWithFloatLiteral) {
+    std::array<int64_t, 3> a = {8, 10, 1};
+    std::array<int64_t, 3> b = {10, 10, 2};
+    std::array<uint8_t, 1> bMask = {0b00000011};
+    std::array<TColumn, 2> cols = {
+        TColumn{.Data = reinterpret_cast<char*>(a.data())},
+        TColumn{.Data = reinterpret_cast<char*>(b.data()), .Mask = bMask.data()},
+    };
+    TRowSet batch{.Columns = cols.data(), .ColumnCount = 2, .RowCount = 3, .RefCount = 1};
+    auto nullableI64 = std::make_shared<NQdb::TNullable>(std::make_shared<TIntegerType>());
+    NQdb::TMockSource src({"a", "b"}, {nullableI64, nullableI64}, {batch});
+
+    auto plan = Plan(
+        "(rel filter (rel source \"L\") "
+        "  (< (/ (cast a <named DECIMAL [17 2]>) "
+        "        (cast b <named DECIMAL [17 2]>)) 0.9))",
+        src);
+
+    TRowSet out{};
+    ASSERT_TRUE(plan->Next(out));
+    ASSERT_NE(out.Selection, nullptr);
+    EXPECT_EQ(
+        std::vector<uint8_t>(out.Selection, out.Selection + out.RowCount),
+        (std::vector<uint8_t>{0xff, 0, 0}));
     Release(&out);
     EXPECT_FALSE(plan->Next(out));
 }

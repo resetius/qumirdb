@@ -251,6 +251,10 @@ qdb_bin_int qdb_decimal_div_i64(qdb_bin_int left, int64_t right) {
     return FromI128(ToI128(left) / static_cast<__int128>(right));
 }
 
+qdb_bin_int qdb_decimal_div(qdb_bin_int left, qdb_bin_int right) {
+    return FromI128(ToI128(left) / ToI128(right));
+}
+
 bool qdb_decimal_eq(qdb_bin_int left, qdb_bin_int right) {
     return ToI128(left) == ToI128(right);
 }
