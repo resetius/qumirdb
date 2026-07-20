@@ -1,0 +1,12 @@
+(query
+  (select
+    (select-list
+      (item as s
+        (call stddev_samp (: (cast v <named DECIMAL [12 2]>) <named DECIMAL [12 2]>))
+      )
+    )
+    (from
+      (table t)
+    )
+  )
+)

@@ -9,6 +9,7 @@
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/ops/union.h>
 
+#include <qdb/kernel/annotate_type.h>
 #include <qdb/plan/clone_expr.h>
 #include <qdb/plan/passes/flatten_conjuncts.h>
 #include <qdb/plan/types/decimal.h>
@@ -48,7 +49,8 @@ std::string ToLower(std::string s) {
 }
 
 bool IsAggFunc(const std::string& name) {
-    static const std::set<std::string> funcs = {"sum", "count", "avg", "min", "max"};
+    static const std::set<std::string> funcs = {
+        "sum", "count", "avg", "min", "max", "stddev_samp"};
     return funcs.count(name) > 0;
 }
 
@@ -127,10 +129,49 @@ bool IsDecimalExprHint(const NAst::TExprPtr& expr) {
     return IsDecimalType(expr->Type);
 }
 
+NAst::TExprPtr CastF64(TLocation loc, NAst::TExprPtr expr) {
+    return std::make_shared<NAst::TCastExpr>(
+        std::move(loc), std::move(expr), std::make_shared<NAst::TFloatType>());
+}
+
+NAst::TExprPtr F64Literal(TLocation loc, double value) {
+    return std::make_shared<NAst::TNumberExpr>(std::move(loc), value);
+}
+
+NAst::TExprPtr Call(TLocation loc, std::string name, std::vector<NAst::TExprPtr> args) {
+    return std::make_shared<NAst::TCallExpr>(
+        loc, Ident(loc, std::move(name)), std::move(args));
+}
+
+NAst::TExprPtr Binary(
+    TLocation loc,
+    std::string op,
+    NAst::TExprPtr left,
+    NAst::TExprPtr right)
+{
+    return std::make_shared<NAst::TBinaryExpr>(
+        std::move(loc), NAst::TOperator(std::move(op)), std::move(left), std::move(right));
+}
+
+bool IsStddevSupportedType(const NAst::TTypePtr& type) {
+    auto value = NAst::UnwrapNamedType(UnwrapNullableType(type));
+    return NAst::TMaybeType<NAst::TIntegerType>(value) ||
+        NAst::TMaybeType<NAst::TFloatType>(value);
+}
+
+bool IsFloatType(const NAst::TTypePtr& type) {
+    return static_cast<bool>(
+        NAst::TMaybeType<NAst::TFloatType>(NAst::UnwrapNamedType(UnwrapNullableType(type))));
+}
+
 // Replaces aggregate calls in an expression with references to synthetic
 // aggregate output columns, collecting the corresponding specs.
 class TAggCollector {
 public:
+    explicit TAggCollector(const NAst::TStructType* inputSchema = nullptr)
+        : InputSchema_(inputSchema)
+    { }
+
     std::expected<NAst::TExprPtr, TError> Rewrite(NAst::TExprPtr expr) {
         if (!expr) {
             return expr;
@@ -166,6 +207,97 @@ public:
     }
 
 private:
+    std::expected<NAst::TTypePtr, TError> StddevArgType(
+        const TAggCall& agg,
+        TLocation loc) const
+    {
+        if (!agg.Arg || agg.Star) {
+            return std::unexpected(TError(loc, "stddev_samp requires one argument"));
+        }
+        if (IsDecimalExprHint(agg.Arg)) {
+            return std::unexpected(TError(loc, "stddev_samp(decimal) is not supported in qdb v1"));
+        }
+        if (auto cast = NAst::TMaybeNode<NAst::TCastExpr>(agg.Arg);
+            cast && (!InputSchema_ || InputSchema_->Fields.empty()))
+        {
+            if (!IsStddevSupportedType(cast.Cast()->Type)) {
+                return std::unexpected(TError(loc,
+                    "stddev_samp argument must be integer or f64 in qdb v1"));
+            }
+            return cast.Cast()->Type;
+        }
+        if (!InputSchema_ || InputSchema_->Fields.empty()) {
+            return NAst::TTypePtr{};
+        }
+
+        NAst::TTypePtr type;
+        try {
+            type = NKernel::AnnotateExprType(agg.Arg, *InputSchema_);
+        } catch (const TError& error) {
+            return std::unexpected(error);
+        }
+        if (IsDecimalType(type)) {
+            return std::unexpected(TError(loc, "stddev_samp(decimal) is not supported in qdb v1"));
+        }
+        if (!IsStddevSupportedType(type)) {
+            return std::unexpected(TError(loc,
+                "stddev_samp argument must be integer or f64 in qdb v1"));
+        }
+        return type;
+    }
+
+    std::expected<NAst::TExprPtr, TError> EmitStddevSamp(const TAggCall& agg, TLocation loc) {
+        auto type = StddevArgType(agg, loc);
+        if (!type) {
+            return std::unexpected(type.error());
+        }
+
+        const bool needsCast = *type && !IsFloatType(*type);
+        auto valueArg = [&](TLocation argLoc) -> NAst::TExprPtr {
+            auto arg = CloneExpr(agg.Arg);
+            return needsCast ? CastF64(std::move(argLoc), std::move(arg)) : arg;
+        };
+
+        std::string sumName = NextName("sum");
+        Specs_.push_back({
+            .Name = sumName,
+            .Func = "sum",
+            .Arg = valueArg(loc),
+        });
+
+        std::string sumSqName = NextName("sum");
+        auto squared = Binary(loc, "*", valueArg(loc), valueArg(loc));
+        Specs_.push_back({
+            .Name = sumSqName,
+            .Func = "sum",
+            .Arg = std::move(squared),
+        });
+
+        std::string countName = NextName("count");
+        Specs_.push_back({
+            .Name = countName,
+            .Func = "count",
+            .Arg = CloneExpr(agg.Arg),
+        });
+
+        auto count = Ident(loc, countName);
+        auto countF = CastF64(loc, Ident(loc, countName));
+        auto numerator = Binary(loc, "-",
+            Ident(loc, sumSqName),
+            Binary(loc, "/",
+                Binary(loc, "*", Ident(loc, sumName), Ident(loc, sumName)),
+                CastF64(loc, Ident(loc, countName))));
+        auto variance = Binary(loc, "/",
+            std::move(numerator),
+            Binary(loc, "-", std::move(countF), F64Literal(loc, 1.0)));
+        auto stddev = Call(loc, "qdb_sqrt", {std::move(variance)});
+        return std::make_shared<NAst::TIfExpr>(
+            loc,
+            Binary(loc, "<", std::move(count), std::make_shared<NAst::TNumberExpr>(loc, int64_t{2})),
+            Call(loc, "qdb_sql_null", {}),
+            std::move(stddev));
+    }
+
     std::expected<NAst::TExprPtr, TError> Emit(const TAggCall& agg, TLocation loc) {
         if (agg.Distinct) {
             if (agg.Func != "count") {
@@ -186,6 +318,10 @@ private:
         }
 
         HasNonDistinct_ = true;
+
+        if (agg.Func == "stddev_samp") {
+            return EmitStddevSamp(agg, loc);
+        }
 
         // avg has no aggregate kernel; express it as sum / count.
         if (agg.Func == "avg") {
@@ -216,6 +352,7 @@ private:
     }
 
     std::vector<TAggregateSpec> Specs_;
+    const NAst::TStructType* InputSchema_ = nullptr;
     int Counter_ = 0;
     std::optional<std::string> DistinctColumn_;
     bool HasNonDistinct_ = false;
@@ -1064,7 +1201,9 @@ std::expected<TOperatorPtr, TError> BuildSelect(
         return std::unexpected(TError("empty select list"));
     }
 
-    TAggCollector collector;
+    auto inputSchemaType = node->OutputColumns();
+    auto inputSchema = NAst::TMaybeType<NAst::TStructType>(inputSchemaType);
+    TAggCollector collector(inputSchema ? inputSchema.Cast().get() : nullptr);
     std::vector<TProjectionSpec> projections;
     for (size_t i = 0; i < select.SelectList->Items.size(); ++i) {
         const auto& item = select.SelectList->Items[i];

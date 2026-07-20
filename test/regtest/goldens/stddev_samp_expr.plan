@@ -1,0 +1,12 @@
+(rel project
+  (rel aggregate
+    (rel project (rel source "t") (k k) (arg_0 (+ a b)) (arg_1 (* (+ a b) (+ a b))) (arg_2 (+ a b)))
+    (keys k)
+    (agg sum_0 sum arg_0)
+    (agg sum_1 sum arg_1)
+    (agg count_2 count arg_2))
+  (k k)
+  (s (if
+      (< count_2 2)
+      (call qdb_sql_null)
+      (call qdb_sqrt (/ (- sum_1 (/ (* sum_0 sum_0) (cast count_2 f64))) (- (cast count_2 f64) 1))))))

@@ -1,2 +1,148 @@
-Error: `WHEN' expected in CASE @ Line: 4, Byte: 25, Column: 25
-
+(query
+  (with
+    (cte inv
+      (query
+        (select
+          (select-list
+            (item
+              w_warehouse_name
+            )
+            (item
+              w_warehouse_sk
+            )
+            (item
+              i_item_sk
+            )
+            (item
+              d_moy
+            )
+            (item
+              stdev
+            )
+            (item
+              mean
+            )
+            (item as cov
+              (if (call qdb_is_true (== mean 0)) (call qdb_sql_null) (/ stdev mean))
+            )
+          )
+          (from
+            (subquery-table as foo
+              (query
+                (select
+                  (select-list
+                    (item
+                      w_warehouse_name
+                    )
+                    (item
+                      w_warehouse_sk
+                    )
+                    (item
+                      i_item_sk
+                    )
+                    (item
+                      d_moy
+                    )
+                    (item as stdev
+                      (call stddev_samp inv_quantity_on_hand)
+                    )
+                    (item as mean
+                      (call avg inv_quantity_on_hand)
+                    )
+                  )
+                  (from
+                    (table inventory)
+                    (table item)
+                    (table warehouse)
+                    (table date_dim)
+                  )
+                  (where
+                    (&& (&& (&& (== inv_item_sk i_item_sk) (== inv_warehouse_sk w_warehouse_sk)) (== inv_date_sk d_date_sk))
+                      (== d_year 1998))
+                  )
+                  (group-by
+                    w_warehouse_name
+                    w_warehouse_sk
+                    i_item_sk
+                    d_moy
+                  )
+                )
+              )
+            )
+          )
+          (where
+            (> (if (call qdb_is_true (== mean 0)) 0 (/ stdev mean)) 1)
+          )
+        )
+      )
+    )
+  )
+  (select
+    (select-list
+      (item
+        |inv1.w_warehouse_sk|
+      )
+      (item
+        |inv1.i_item_sk|
+      )
+      (item
+        |inv1.d_moy|
+      )
+      (item
+        |inv1.mean|
+      )
+      (item
+        |inv1.cov|
+      )
+      (item
+        |inv2.w_warehouse_sk|
+      )
+      (item
+        |inv2.i_item_sk|
+      )
+      (item
+        |inv2.d_moy|
+      )
+      (item
+        |inv2.mean|
+      )
+      (item
+        |inv2.cov|
+      )
+    )
+    (from
+      (table inv as inv1)
+      (table inv as inv2)
+    )
+    (where
+      (&& (&& (&& (== |inv1.i_item_sk| |inv2.i_item_sk|) (== |inv1.w_warehouse_sk| |inv2.w_warehouse_sk|)) (== |inv1.d_moy| 4))
+        (== |inv2.d_moy| (+ 4 1)))
+    )
+  )
+  (order-by
+    (order asc
+      |inv1.w_warehouse_sk|
+    )
+    (order asc
+      |inv1.i_item_sk|
+    )
+    (order asc
+      |inv1.d_moy|
+    )
+    (order asc
+      |inv1.mean|
+    )
+    (order asc
+      |inv1.cov|
+    )
+    (order asc
+      |inv2.d_moy|
+    )
+    (order asc
+      |inv2.mean|
+    )
+    (order asc
+      |inv2.cov|
+    )
+  )
+)
