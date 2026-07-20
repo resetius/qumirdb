@@ -1385,9 +1385,13 @@ std::expected<TOperatorPtr, TError> BuildSetOp(
         return ApplyDistinct(std::move(unionAll), *outputNames);
     }
 
-    if (setOp.Op == NSql::TSqlSetOp::EOp::Intersect) {
+    if (setOp.Op == NSql::TSqlSetOp::EOp::Intersect
+        || setOp.Op == NSql::TSqlSetOp::EOp::Except)
+    {
+        const bool isIntersect = setOp.Op == NSql::TSqlSetOp::EOp::Intersect;
+        const std::string opName = isIntersect ? "INTERSECT" : "EXCEPT";
         if (setOp.Quantifier == NSql::ESetQuantifier::All) {
-            return std::unexpected(TError("INTERSECT ALL is not supported yet"));
+            return std::unexpected(TError(opName + " ALL is not supported yet"));
         }
 
         auto left = BuildQueryBody(setOp.Left, sources);
@@ -1399,17 +1403,17 @@ std::expected<TOperatorPtr, TError> BuildSetOp(
             return std::unexpected(right.error());
         }
 
-        auto leftNames = OutputColumnNames(*left, "INTERSECT left branch");
+        auto leftNames = OutputColumnNames(*left, opName + " left branch");
         if (!leftNames) {
             return std::unexpected(leftNames.error());
         }
-        auto rightNames = OutputColumnNames(*right, "INTERSECT right branch");
+        auto rightNames = OutputColumnNames(*right, opName + " right branch");
         if (!rightNames) {
             return std::unexpected(rightNames.error());
         }
         if (leftNames->size() != rightNames->size()) {
             return std::unexpected(TError(
-                "INTERSECT branches must have the same number of columns"));
+                opName + " branches must have the same number of columns"));
         }
 
         auto leftDistinct = ApplyDistinct(std::move(*left), *leftNames);
@@ -1423,14 +1427,15 @@ std::expected<TOperatorPtr, TError> BuildSetOp(
 
         auto join = MakeJoin(
             std::move(leftDistinct), std::move(rightDistinct),
-            std::move(keys), EJoinType::LeftSemi);
+            std::move(keys),
+            isIntersect ? EJoinType::LeftSemi : EJoinType::LeftAnti);
         if (!join) {
             return std::unexpected(join.error());
         }
         return *join;
     }
 
-    return std::unexpected(TError("EXCEPT is not supported yet"));
+    return std::unexpected(TError("unsupported set operation"));
 }
 
 std::expected<TOperatorPtr, TError> BuildQuery(
