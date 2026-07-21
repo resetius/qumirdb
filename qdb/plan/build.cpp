@@ -922,7 +922,14 @@ std::expected<TOperatorPtr, TError> DecorrelateIn(
     if (!project || project.Cast()->Projections().size() != 1) {
         return std::unexpected(TError("IN subquery must return exactly one column"));
     }
-    auto column = Ident(subquery.Operand->Location, project.Cast()->Projections()[0].Name);
+    // Rename the subquery's output to a synthetic name so the residual's two sides
+    // never share a name: otherwise `x IN (SELECT x …)` yields `x == x`, which
+    // qualification cannot bind to the left side and key extraction drops entirely,
+    // leaving a keyless (unschedulable, condition-less) semi-join. The name is
+    // internal — a semi/anti join exposes only its left side.
+    auto& spec = project.Cast()->MutableProjections()[0];
+    spec.Name = "__qdb_in__" + spec.Name;
+    auto column = Ident(subquery.Operand->Location, spec.Name);
     auto residual = std::make_shared<NAst::TBinaryExpr>(
         subquery.Operand->Location, NAst::TOperator("=="), subquery.Operand, std::move(column));
     return std::make_shared<TJoinOperator>(

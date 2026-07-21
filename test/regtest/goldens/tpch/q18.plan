@@ -13,10 +13,10 @@
               (rel filter
                 (rel aggregate (rel source "lineitem") (keys l_orderkey) (agg sum_0 sum l_quantity))
                 (> sum_0 315))
-              (l_orderkey l_orderkey))
+              (__qdb_in__l_orderkey l_orderkey))
             ()
             (left_semi)
-            (== o_orderkey l_orderkey))
+            (== o_orderkey __qdb_in__l_orderkey))
           (&& (== c_custkey o_custkey) (== o_orderkey l_orderkey)))
         (keys c_name c_custkey o_orderkey o_orderdate o_totalprice)
         (agg sum_0 sum l_quantity))
