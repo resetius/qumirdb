@@ -64,23 +64,29 @@ query_enabled() {
     return 1
 }
 
-# Run qdb; append full output to LOG_FILE, echo "<seconds_float> <rc>" on stdout.
+# Run qdb, splitting the two streams: result rows (stdout) -> RESULT_FILE, and
+# diagnostics/timing/errors (stderr) plus the OK/FAILED status -> LOG_FILE. Echoes
+# "<seconds_float> <rc>" on stdout. qdb prints "Returned N rows in X seconds" and any
+# error to stderr, so the timing is parsed from the stderr stream.
 run_query() {
     local label="$1"; shift
-    local out_file rc seconds
+    local out_file err_file rc seconds
     out_file="$(mktemp "$tmpdir/qdb_output.XXXXXX")"
+    err_file="$(mktemp "$tmpdir/qdb_stderr.XXXXXX")"
     set +e
-    "$QDB_BIN" "$@" > "$out_file" 2>&1
+    "$QDB_BIN" "$@" > "$out_file" 2> "$err_file"
     rc=$?
     set -e
+    printf '\n=== %s (rc=%s) ===\n' "$label" "$rc" >> "$RESULT_FILE"
+    cat "$out_file" >> "$RESULT_FILE"
     printf '\n=== %s (rc=%s) ===\n' "$label" "$rc" >> "$LOG_FILE"
-    cat "$out_file" >> "$LOG_FILE"
+    cat "$err_file" >> "$LOG_FILE"
     printf '\n' >> "$LOG_FILE"
     seconds=$(
         sed -nE \
             -e 's/.*Returned [0-9]+ rows in ([0-9]+([.][0-9]+)?) seconds.*/\1/p' \
             -e 's/.*Processed [0-9]+ rowsets in ([0-9]+([.][0-9]+)?).*/\1/p' \
-            "$out_file" | tail -n 1
+            "$err_file" | tail -n 1
     )
     seconds="${seconds:-0}"
     echo "$seconds $rc"
@@ -95,8 +101,10 @@ for scale in "${SCALES[@]}"; do
     sf_num="${scale#pq}"
     data_dir="$BASE_DIR/$scale"
 
-    LOG_FILE="$OUT_DIR/tpcds_sql_sf${sf_num}.log"
+    LOG_FILE="$OUT_DIR/tpcds_sql_sf${sf_num}.log"       # status + errors (analyze this)
+    RESULT_FILE="$OUT_DIR/tpcds_sql_sf${sf_num}.results" # query result rows
     : > "$LOG_FILE"
+    : > "$RESULT_FILE"
 
     echo "[qdb] tpcds scale=$sf_num parquet=$data_dir" | tee -a "$LOG_FILE" >&2
 
@@ -128,5 +136,5 @@ for scale in "${SCALES[@]}"; do
     done
 
     printf "Total: %ss,  Failed: %s\n" "$total_s" "$failed"
-    echo "[qdb] log: $LOG_FILE" >&2
+    echo "[qdb] log: $LOG_FILE  results: $RESULT_FILE" >&2
 done
