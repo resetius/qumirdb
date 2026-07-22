@@ -1269,9 +1269,14 @@ NQumir::NAst::TExprPtr GenProjectKernelAst(
     }
 
     auto rowSetRefType = std::make_shared<TReferenceType>(rowSetType);
+    // `__arena__` is the string-concat scratch arena (opaque TStringArena*). It is
+    // always passed even when unused; qdb_string_concat(__arena__, …) references it.
+    auto ptrI8Type = std::make_shared<TPointerType>(
+        std::make_shared<TIntegerType>(TIntegerType::I8));
     std::vector<TParam> params = {
         std::make_shared<TVarStmt>(loc, "rowSet", rowSetRefType),
         std::make_shared<TVarStmt>(loc, "out", ptrPtrU8Type),
+        std::make_shared<TVarStmt>(loc, "__arena__", ptrI8Type),
     };
 
     std::vector<TExprPtr> bodyStmts;

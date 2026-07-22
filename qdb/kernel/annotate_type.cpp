@@ -563,6 +563,13 @@ TTypePtr InferType(const TExprPtr& e, const TStructType& schema) {
             return allNullable
                 ? std::static_pointer_cast<TType>(std::make_shared<TNullable>(v)) : v;
         }
+        if (name == "strcat") {
+            bool nullable = false;
+            for (const auto& t : at) nullable = nullable || !t || IsNullableType(t);
+            TTypePtr s = std::make_shared<TStringType>();
+            return nullable
+                ? std::static_pointer_cast<TType>(std::make_shared<TNullable>(s)) : s;
+        }
         TTypePtr ret = Context().ExternReturnType(name);
         bool nullable = false;
         for (const auto& t : at) nullable = nullable || !t || IsNullableType(t);
@@ -891,6 +898,33 @@ TTypePtr Expand(TExprPtr& e, const TStructType& inputType, uint64_t& counter) {
             auto [expr, type] = ExpandCoalesce(*node, inputType, counter);
             e = expr;
             return type;
+        }
+        if (name == "strcat") {
+            // `strcat(a, b)` (parser lowering of `a || b`) → the runtime call
+            // `qdb_string_concat(__arena__, a, b)`. __arena__ is a placeholder the
+            // codegen binds to the kernel's scratch arena. Null-strict: NULL if either
+            // operand is NULL (SQL `NULL || x = NULL`).
+            std::vector<std::pair<TExprPtr, bool>> ops;
+            for (auto& arg : node->Args) {
+                auto t = Expand(arg, inputType, counter);
+                ops.emplace_back(arg, !t || IsNullableType(t));
+            }
+            TLocation loc = node->Location;
+            auto apply = [loc](std::vector<TExprPtr> a) -> TExprPtr {
+                std::vector<TExprPtr> callArgs = { std::make_shared<TIdentExpr>(loc, "__arena__") };
+                for (auto& x : a) callArgs.push_back(std::move(x));
+                return std::make_shared<TCallExpr>(loc,
+                    std::make_shared<TIdentExpr>(loc, "qdb_string_concat"), std::move(callArgs));
+            };
+            TTypePtr R = std::make_shared<TStringType>();
+            bool anyNull = false;
+            for (const auto& [expr, nullable] : ops) anyNull = anyNull || nullable;
+            if (!anyNull) {
+                e = apply({node->Args[0], node->Args[1]});
+                return R;
+            }
+            e = BuildNullStrict(ops, apply, R, counter, loc);
+            return std::make_shared<TNullable>(R);
         }
         std::vector<TTypePtr> argTypes;
         for (auto& arg : node->Args) {
@@ -1315,6 +1349,23 @@ bool ContainsNull(const TExprPtr& e) {
     return false;
 }
 
+// Calls that Expand always rewrites into other constructs (coalesce → if-chain,
+// strcat → qdb_string_concat), independent of nullability — so the fast path must not
+// skip Expand when one is present.
+bool ContainsMustExpandCall(const TExprPtr& e) {
+    if (!e) return false;
+    if (auto call = TMaybeNode<TCallExpr>(e)) {
+        if (auto id = TMaybeNode<TIdentExpr>(call.Cast()->Callee)) {
+            const std::string& name = id.Cast()->Name;
+            if (name == "coalesce" || name == "strcat") return true;
+        }
+    }
+    for (const auto& child : e->Children()) {
+        if (ContainsMustExpandCall(child)) return true;
+    }
+    return false;
+}
+
 bool ContainsDecimalTypeRef(const TExprPtr& e) {
     if (!e) {
         return false;
@@ -1350,7 +1401,7 @@ std::pair<TExprPtr, TTypePtr> ExpandNullable(const TExprPtr& expr, const TStruct
     for (const auto& [name, type] : inputType.Fields) {
         if (IsNullableType(type)) { anyNullable = true; break; }
     }
-    if (!anyNullable && !ContainsNull(expr)) {
+    if (!anyNullable && !ContainsNull(expr) && !ContainsMustExpandCall(expr)) {
         return {expr, InferType(expr, inputType)};
     }
     // Rewrite a clone — this runs at kernel build on the plan's shared expression, which

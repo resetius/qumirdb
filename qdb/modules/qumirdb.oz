@@ -185,6 +185,11 @@
   (fun qdb_substring ((var str StringView) (var start i32) (var length i32)) -> StringView
        (attrs extern) (block))
 
+  ;; SQL `l || r` string concatenation. arena is an opaque TStringArena* the executor
+  ;; passes into the kernel; ExpandNullable inserts it as the first argument.
+  (fun qdb_string_concat ((var arena <ptr i8>) (var l StringView) (var r StringView)) -> StringView
+       (attrs extern) (block))
+
   (fun substr ((var str StringView) (var start i32) (var length i32)) -> StringView
        (attrs (extern qdb_substring)) (block))
 

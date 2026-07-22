@@ -1,2 +1,195 @@
-Error: expected ')' after subquery @ Line: 71, Byte: 18, Column: 18
-
+(query
+  (with
+    (cte ssr
+      (query
+        (select
+          (select-list
+            (item as store_id
+              s_store_id
+            )
+            (item as sales
+              (call sum ss_ext_sales_price)
+            )
+            (item as returns
+              (call sum (call coalesce sr_return_amt 0))
+            )
+            (item as profit
+              (call sum (- ss_net_profit (call coalesce sr_net_loss 0)))
+            )
+          )
+          (from
+            (join left
+              (table store_sales)
+              (table store_returns)
+              (on
+                (&& (== ss_item_sk sr_item_sk) (== ss_ticket_number sr_ticket_number))
+              )
+            )
+            (table date_dim)
+            (table store)
+            (table item)
+            (table promotion)
+          )
+          (where
+            (&& (&& (&& (&& (&& (&& (== ss_sold_date_sk d_date_sk)
+                        (&& (<= (: (cast (: (cast "1998-08-04" <named StringView>) <named StringView>) <named DATE>) <named DATE>)
+                            d_date)
+                          (<= d_date
+                            (+ (: (cast (: (cast "1998-08-04" <named StringView>) <named StringView>) <named DATE>) <named DATE>)
+                              (: 30 i32)))))
+                      (== ss_store_sk s_store_sk))
+                    (== ss_item_sk i_item_sk))
+                  (> i_current_price 50))
+                (== ss_promo_sk p_promo_sk))
+              (== p_channel_tv (: (cast "N" <named StringView>) <named StringView>)))
+          )
+          (group-by
+            s_store_id
+          )
+        )
+      )
+    )
+    (cte csr
+      (query
+        (select
+          (select-list
+            (item as catalog_page_id
+              cp_catalog_page_id
+            )
+            (item as sales
+              (call sum cs_ext_sales_price)
+            )
+            (item as returns
+              (call sum (call coalesce cr_return_amount 0))
+            )
+            (item as profit
+              (call sum (- cs_net_profit (call coalesce cr_net_loss 0)))
+            )
+          )
+          (from
+            (join left
+              (table catalog_sales)
+              (table catalog_returns)
+              (on
+                (&& (== cs_item_sk cr_item_sk) (== cs_order_number cr_order_number))
+              )
+            )
+            (table date_dim)
+            (table catalog_page)
+            (table item)
+            (table promotion)
+          )
+          (where
+            (&& (&& (&& (&& (&& (&& (== cs_sold_date_sk d_date_sk)
+                        (&& (<= (: (cast (: (cast "1998-08-04" <named StringView>) <named StringView>) <named DATE>) <named DATE>)
+                            d_date)
+                          (<= d_date
+                            (+ (: (cast (: (cast "1998-08-04" <named StringView>) <named StringView>) <named DATE>) <named DATE>)
+                              (: 30 i32)))))
+                      (== cs_catalog_page_sk cp_catalog_page_sk))
+                    (== cs_item_sk i_item_sk))
+                  (> i_current_price 50))
+                (== cs_promo_sk p_promo_sk))
+              (== p_channel_tv (: (cast "N" <named StringView>) <named StringView>)))
+          )
+          (group-by
+            cp_catalog_page_id
+          )
+        )
+      )
+    )
+    (cte wsr
+      (query
+        (select
+          (select-list
+            (item
+              web_site_id
+            )
+            (item as sales
+              (call sum ws_ext_sales_price)
+            )
+            (item as returns
+              (call sum (call coalesce wr_return_amt 0))
+            )
+            (item as profit
+              (call sum (- ws_net_profit (call coalesce wr_net_loss 0)))
+            )
+          )
+          (from
+            (join left
+              (table web_sales)
+              (table web_returns)
+              (on
+                (&& (== ws_item_sk wr_item_sk) (== ws_order_number wr_order_number))
+              )
+            )
+            (table date_dim)
+            (table web_site)
+            (table item)
+            (table promotion)
+          )
+          (where
+            (&& (&& (&& (&& (&& (&& (== ws_sold_date_sk d_date_sk)
+                        (&& (<= (: (cast (: (cast "1998-08-04" <named StringView>) <named StringView>) <named DATE>) <named DATE>)
+                            d_date)
+                          (<= d_date
+                            (+ (: (cast (: (cast "1998-08-04" <named StringView>) <named StringView>) <named DATE>) <named DATE>)
+                              (: 30 i32)))))
+                      (== ws_web_site_sk web_site_sk))
+                    (== ws_item_sk i_item_sk))
+                  (> i_current_price 50))
+                (== ws_promo_sk p_promo_sk))
+              (== p_channel_tv (: (cast "N" <named StringView>) <named StringView>)))
+          )
+          (group-by
+            web_site_id
+          )
+        )
+      )
+    )
+  )
+  (select
+    (select-list
+      (item
+        channel
+      )
+      (item
+        id
+      )
+      (item as sales
+        (call sum sales)
+      )
+      (item as returns
+        (call sum returns)
+      )
+      (item as profit
+        (call sum profit)
+      )
+    )
+    (from
+      (subquery-table as x
+        (query
+          (unknown-body)
+        )
+      )
+    )
+    (group-by
+      (rollup
+        (block
+          channel
+          id)
+      )
+    )
+  )
+  (order-by
+    (order asc
+      channel
+    )
+    (order asc
+      id
+    )
+  )
+  (limit
+    100
+  )
+)

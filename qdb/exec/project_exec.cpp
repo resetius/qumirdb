@@ -1,5 +1,6 @@
 #include <qdb/exec/project_exec.h>
 #include <qdb/modules/qumirdb_types.h>
+#include <qdb/modules/qumirdb_runtime.h>
 
 #include <cstring>
 #include <utility>
@@ -63,7 +64,11 @@ TUnaryStreamProcess MakeProjectProcess(
                     outBuffers[numComputed + k] = data->MaskBuffers[k].data();
                 }
             }
-            computeDispatch(&rowSet, outBuffers.data());
+            // Scratch for strings the kernel produces (e.g. `||` concatenation). It must
+            // outlive the kernel *and* the string post-processing below, which copies the
+            // bytes into owned StringData — a local here does exactly that.
+            TStringArena arena;
+            computeDispatch(&rowSet, outBuffers.data(), &arena);
 
             // Post-process string computed columns: convert TStringView array
             // (ptr + size per row) into a proper offset-based string TColumn.

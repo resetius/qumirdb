@@ -1090,10 +1090,10 @@ TKernelCompiler::TProjectDispatch TKernelCompiler::CompileProject(
         "project", {"<project>"}, std::move(kernelAst), literalStorage);
     FinishKernelDiagnostics(Diagnostics_);
 
-    using TProjectFn = void(*)(void*, void**);
+    using TProjectFn = void(*)(void*, void**, void*);
     return [slot = kernel.Slot, storage = kernel.Storage](
-               TRowSet* in, void** outBuffers) {
-        reinterpret_cast<TProjectFn>(slot->Fns[0])(in, outBuffers);
+               TRowSet* in, void** outBuffers, void* arena) {
+        reinterpret_cast<TProjectFn>(slot->Fns[0])(in, outBuffers, arena);
     };
 }
 

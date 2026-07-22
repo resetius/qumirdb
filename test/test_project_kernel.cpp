@@ -69,7 +69,7 @@ TEST(CompileProject, ComputesF64AndI64Columns) {
     std::array<double, 3> outDisc{};
     std::array<int64_t, 3> outBumped{};
     std::array<void*, 2> outBuffers = {outDisc.data(), outBumped.data()};
-    dispatch(&batch, outBuffers.data());
+    dispatch(&batch, outBuffers.data(), nullptr);
 
     for (int i = 0; i < 3; ++i) {
         EXPECT_DOUBLE_EQ(outDisc[i], p[i] * (1.0 - d[i]));
@@ -96,7 +96,7 @@ TEST(CompileProject, CompilesFromKernelSpec) {
     std::array<int64_t, 3> output{};
     std::array<void*, 1> outBuffers = {output.data()};
 
-    dispatch(&batch, outBuffers.data());
+    dispatch(&batch, outBuffers.data(), nullptr);
 
     EXPECT_EQ(output, (std::array<int64_t, 3>{11, 12, 13}));
 }
@@ -126,7 +126,7 @@ TEST(CompileProject, CastsIntegerIfBranchesBeforeLoweringPhi) {
     std::array<int64_t, 3> output{};
     std::array<void*, 1> outBuffers = {output.data()};
 
-    dispatch(&batch, outBuffers.data());
+    dispatch(&batch, outBuffers.data(), nullptr);
 
     EXPECT_EQ(output, (std::array<int64_t, 3>{11, 0, 33}));
 }
