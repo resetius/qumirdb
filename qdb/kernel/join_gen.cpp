@@ -5,6 +5,7 @@
 #include <qdb/kernel/column_value.h>
 #include <qdb/kernel/gen.h>
 #include <qdb/plan/types/nullable.h>
+#include <qdb/plan/types/decimal.h>
 
 #include <qumir/error.h>
 
@@ -1041,6 +1042,10 @@ std::vector<TJoinOutputColumn> BuildJoinOutputColumns(
     bool includeRight)
 {
     auto classify = [](const TTypePtr& type, TJoinOutputColumn& col) {
+        if (DecimalSpecOfValueType(UnwrapNullableType(type))) {
+            col.FixedWidth = 16; // qdb_bin_int (128-bit)
+            return;
+        }
         auto inner = UnwrapNamedType(UnwrapNullableType(type));
         if (auto integer = TMaybeType<TIntegerType>(inner)) {
             col.FixedWidth = integer.Cast()->BitWidth() / 8;
@@ -1400,8 +1405,13 @@ NQumir::NAst::TExprPtr GenJoinMaterializeAst(
                 read.push_back(Oz::Assign(validName, value.IsValid));
                 read.push_back(Oz::Assign(valueName, value.Value));
                 loop.push_back(Oz::Var(valueName, value.ValueType));
-                loop.push_back(Oz::Assign(valueName,
-                    Oz::Cast(number(0), value.ValueType)));
+                // Null-pad default. A decimal's storage is the 128-bit BinInt struct,
+                // which can't be built with `cast(0, …)`; use a zero BinInt instead.
+                const bool isDecimal =
+                    DecimalSpecOfValueType(UnwrapNullableType(col.Type)).has_value();
+                loop.push_back(Oz::Assign(valueName, isDecimal
+                    ? Oz::Call("qdb_decimal_from_i64", {number(0), number(0)})
+                    : Oz::Cast(number(0), value.ValueType)));
                 loop.push_back(Oz::If(
                     Oz::Unary(TOperator("!"), Oz::Ident(side + "_null")),
                     Oz::Block(std::move(read))));

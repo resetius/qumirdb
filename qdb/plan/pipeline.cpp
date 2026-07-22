@@ -43,6 +43,8 @@ void ApplyPlanPasses(TOperatorPtr& plan, TPlanPassOptions options) {
     AnnotateTypes(plan); // re-annotate: semi pushdown restructured joins
     plan = ApplyTopSort(plan);
     AnnotateTypes(plan); // re-annotate: top-sort replaces limit(sort(...))
+    CoerceSetOpBranches(plan); stage("CoerceSetOpBranches");
+    AnnotateTypes(plan); // re-annotate: coercion added cast projections on union branches
     ApplyColumnPruning(plan); stage("ApplyColumnPruning");
 
     EstimateStats(plan);
