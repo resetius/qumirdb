@@ -67,6 +67,9 @@ NQumir::NAst::TTypePtr ProjectJitType(const NQumir::NAst::TTypePtr& outType) {
 
 bool IsRadixSortableType(const NQumir::NAst::TTypePtr& type) {
     using namespace NQumir::NAst;
+    if (DecimalSpecOfValueType(UnwrapNullableType(type))) {
+        return true; // 128-bit decimal: two-word radix (sort_binint_rowids)
+    }
     auto inner = UnwrapNamedType(UnwrapNullableType(type));
     return static_cast<bool>(TMaybeType<TIntegerType>(inner)) ||
         static_cast<bool>(TMaybeType<TFloatType>(inner)) ||
@@ -259,6 +262,9 @@ TUnaryRuntimeProcess BuildProjectRuntimeProcess(
 // Radix key byte width: integer width, or 8 for f64.
 int32_t RadixKeyWidthBytes(const NQumir::NAst::TTypePtr& type) {
     using namespace NQumir::NAst;
+    if (DecimalSpecOfValueType(UnwrapNullableType(type))) {
+        return 16; // qdb_bin_int (128-bit)
+    }
     auto inner = UnwrapNamedType(UnwrapNullableType(type));
     if (auto integer = TMaybeType<TIntegerType>(inner)) {
         return static_cast<int32_t>(integer.Cast()->BitWidth() / 8);

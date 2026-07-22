@@ -230,6 +230,199 @@
             store column_idx row_ids work counts n digit desc nulls_first type_witness)
           (= digit (+ digit (: 8 i64)))))))
 
+  ;; BinInt (128-bit decimal) radix key for one 64-bit half. A signed 128-bit value
+  ;; orders as (Hi signed, Lo unsigned): flip Hi's sign bit, leave Lo as-is. Radix is
+  ;; stable + LSD, so sorting by Lo first and Hi last makes Hi the primary key.
+  (fun sr_binint_radix_key
+       ((var store <ptr TRowSet>)
+        (var row_id i64)
+        (var column_idx i64)
+        (var use_hi bool)) -> u64
+    (block
+      (var witness = (cast (: 0 i64) <ptr BinInt>))
+      (var v = (call sr_load_fixed_key store row_id column_idx witness))
+      (if use_hi
+        (block (return (^ (field v Hi) (<< (: 1 u64) (: 63 u64))))))
+      (return (field v Lo))))
+
+  (fun sort_binint_rowids_count_pass
+       ((var store <ptr TRowSet>)
+        (var column_idx i64)
+        (var row_ids <ptr i64>)
+        (var work <ptr i64>)
+        (var counts <ptr u32>)
+        (var n i64)
+        (var digit i64)
+        (var desc bool)
+        (var use_hi bool))
+    (block
+      (var i i64)
+      (= i (: 0 i64))
+      (while (< i (: 256 i64))
+        (block
+          (= counts [i] (: 0 u32))
+          (= i (+ i (: 1 i64)))))
+
+      (= i (: 0 i64))
+      (while (< i n)
+        (block
+          (var row = (index row_ids i))
+          (var bucket = (call qumir_radix_digit
+            (call sr_binint_radix_key store row column_idx use_hi) digit))
+          (if desc
+            (block (= bucket (- (: 255 u32) bucket))))
+          (var bucket_index = (cast bucket i64))
+          (= counts [bucket_index] (+ (index counts bucket_index) (: 1 u32)))
+          (= i (+ i (: 1 i64)))))
+
+      (= i (: 1 i64))
+      (while (< i (: 256 i64))
+        (block
+          (= counts [i] (+ (index counts i) (index counts (- i (: 1 i64)))))
+          (= i (+ i (: 1 i64)))))
+
+      (= i n)
+      (while (> i (: 0 i64))
+        (block
+          (= i (- i (: 1 i64)))
+          (var row = (index row_ids i))
+          (var bucket = (call qumir_radix_digit
+            (call sr_binint_radix_key store row column_idx use_hi) digit))
+          (if desc
+            (block (= bucket (- (: 255 u32) bucket))))
+          (var bucket_index = (cast bucket i64))
+          (var place = (- (index counts bucket_index) (: 1 u32)))
+          (= work [(cast place i64)] row)
+          (= counts [bucket_index] place)))
+
+      (= i (: 0 i64))
+      (while (< i n)
+        (block
+          (= row_ids [i] (index work i))
+          (= i (+ i (: 1 i64)))))))
+
+  (fun sort_binint_rowids
+       ((var store <ptr TRowSet>)
+        (var column_idx i64)
+        (var row_ids <ptr i64>)
+        (var work <ptr i64>)
+        (var counts <ptr u32>)
+        (var n i64)
+        (var desc bool))
+    (block
+      (var digit i64)
+      (= digit (: 0 i64))
+      (while (< digit (: 64 i64))
+        (block
+          (call sort_binint_rowids_count_pass
+            store column_idx row_ids work counts n digit desc #f)
+          (= digit (+ digit (: 8 i64)))))
+      (= digit (: 0 i64))
+      (while (< digit (: 64 i64))
+        (block
+          (call sort_binint_rowids_count_pass
+            store column_idx row_ids work counts n digit desc #t)
+          (= digit (+ digit (: 8 i64)))))))
+
+  (fun sort_binint_rowids_count_pass_nullable
+       ((var store <ptr TRowSet>)
+        (var column_idx i64)
+        (var row_ids <ptr i64>)
+        (var work <ptr i64>)
+        (var counts <ptr u32>)
+        (var n i64)
+        (var digit i64)
+        (var desc bool)
+        (var nulls_first bool)
+        (var use_hi bool))
+    (block
+      (var i i64)
+      (= i (: 0 i64))
+      (while (< i (: 257 i64))
+        (block
+          (= counts [i] (: 0 u32))
+          (= i (+ i (: 1 i64)))))
+
+      (= i (: 0 i64))
+      (while (< i n)
+        (block
+          (var row = (index row_ids i))
+          (var bucket i64)
+          (if (! (call sr_row_valid store row column_idx))
+            (block
+              (if nulls_first
+                (block (= bucket (: 0 i64)))
+                (block (= bucket (: 256 i64)))))
+            (block
+              (var digit_bucket = (cast (call qumir_radix_digit
+                (call sr_binint_radix_key store row column_idx use_hi) digit) i64))
+              (if desc
+                (block (= digit_bucket (- (: 255 i64) digit_bucket))))
+              (if nulls_first
+                (block (= bucket (+ digit_bucket (: 1 i64))))
+                (block (= bucket digit_bucket)))))
+          (= counts [bucket] (+ (index counts bucket) (: 1 u32)))
+          (= i (+ i (: 1 i64)))))
+
+      (= i (: 1 i64))
+      (while (< i (: 257 i64))
+        (block
+          (= counts [i] (+ (index counts i) (index counts (- i (: 1 i64)))))
+          (= i (+ i (: 1 i64)))))
+
+      (= i n)
+      (while (> i (: 0 i64))
+        (block
+          (= i (- i (: 1 i64)))
+          (var row = (index row_ids i))
+          (var bucket i64)
+          (if (! (call sr_row_valid store row column_idx))
+            (block
+              (if nulls_first
+                (block (= bucket (: 0 i64)))
+                (block (= bucket (: 256 i64)))))
+            (block
+              (var digit_bucket = (cast (call qumir_radix_digit
+                (call sr_binint_radix_key store row column_idx use_hi) digit) i64))
+              (if desc
+                (block (= digit_bucket (- (: 255 i64) digit_bucket))))
+              (if nulls_first
+                (block (= bucket (+ digit_bucket (: 1 i64))))
+                (block (= bucket digit_bucket)))))
+          (var place = (- (index counts bucket) (: 1 u32)))
+          (= work [(cast place i64)] row)
+          (= counts [bucket] place)))
+
+      (= i (: 0 i64))
+      (while (< i n)
+        (block
+          (= row_ids [i] (index work i))
+          (= i (+ i (: 1 i64)))))))
+
+  (fun sort_binint_rowids_nullable
+       ((var store <ptr TRowSet>)
+        (var column_idx i64)
+        (var row_ids <ptr i64>)
+        (var work <ptr i64>)
+        (var counts <ptr u32>)
+        (var n i64)
+        (var desc bool)
+        (var nulls_first bool))
+    (block
+      (var digit i64)
+      (= digit (: 0 i64))
+      (while (< digit (: 64 i64))
+        (block
+          (call sort_binint_rowids_count_pass_nullable
+            store column_idx row_ids work counts n digit desc nulls_first #f)
+          (= digit (+ digit (: 8 i64)))))
+      (= digit (: 0 i64))
+      (while (< digit (: 64 i64))
+        (block
+          (call sort_binint_rowids_count_pass_nullable
+            store column_idx row_ids work counts n digit desc nulls_first #t)
+          (= digit (+ digit (: 8 i64)))))))
+
   (fun sort_bool_rowids_count_pass
        ((var store <ptr TRowSet>)
         (var column_idx i64)
