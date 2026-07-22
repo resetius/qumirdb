@@ -245,6 +245,25 @@ NQumir::NAst::TExprPtr BuildRowIdSortCall(
             std::move(args));
     }
 
+    if (SortValueIsBinInt(key.Type)) {
+        // 128-bit decimal: two-word radix (Lo then Hi) inside sort_binint_rowids.
+        std::vector<TExprPtr> args{
+            Oz::Ident(storeName),
+            std::move(columnIndex),
+            Oz::Ident("row_ids"),
+            Oz::Ident("work"),
+            Oz::Ident("counts"),
+            Oz::Ident("n"),
+            std::move(desc),
+        };
+        if (nullable) {
+            args.push_back(std::move(nullsFirst));
+        }
+        return Oz::Call(
+            nullable ? "sort_binint_rowids_nullable" : "sort_binint_rowids",
+            std::move(args));
+    }
+
     auto coreType = SortCoreType(key.Type);
     const int64_t keyBits = SortRadixKeyBits(key.Type);
     if (!coreType || keyBits == 0) {
