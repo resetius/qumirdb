@@ -145,6 +145,11 @@ int64_t qdb_string_view_sql_like(qdb_string_view str, qdb_string_view pattern)
 // string-runtime symbol not linked into JIT kernels). This cast wraps the literal's
 // char* as a StringView directly, so nullable string comparisons work without it.
 qdb_string_view qdb_lit_to_sv(const char* lit) {
+    // An empty string literal ('') is lowered with a null char*; strlen(null) would
+    // crash, so treat null as the empty string.
+    if (!lit) {
+        return {nullptr, 0};
+    }
     return {
         reinterpret_cast<const uint8_t*>(lit),
         static_cast<int64_t>(std::strlen(lit))
