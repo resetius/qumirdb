@@ -1,2 +1,163 @@
-Error: expected ')' after subquery @ Line: 55, Byte: 13, Column: 13
-
+(query
+  (select
+    (select-list
+      (item
+        w_warehouse_name
+      )
+      (item
+        w_warehouse_sq_ft
+      )
+      (item
+        w_city
+      )
+      (item
+        w_county
+      )
+      (item
+        w_state
+      )
+      (item
+        w_country
+      )
+      (item
+        ship_carriers
+      )
+      (item
+        year
+      )
+      (item as jan_sales
+        (call sum jan_sales)
+      )
+      (item as feb_sales
+        (call sum feb_sales)
+      )
+      (item as mar_sales
+        (call sum mar_sales)
+      )
+      (item as apr_sales
+        (call sum apr_sales)
+      )
+      (item as may_sales
+        (call sum may_sales)
+      )
+      (item as jun_sales
+        (call sum jun_sales)
+      )
+      (item as jul_sales
+        (call sum jul_sales)
+      )
+      (item as aug_sales
+        (call sum aug_sales)
+      )
+      (item as sep_sales
+        (call sum sep_sales)
+      )
+      (item as oct_sales
+        (call sum oct_sales)
+      )
+      (item as nov_sales
+        (call sum nov_sales)
+      )
+      (item as dec_sales
+        (call sum dec_sales)
+      )
+      (item as jan_sales_per_sq_foot
+        (call sum (/ jan_sales w_warehouse_sq_ft))
+      )
+      (item as feb_sales_per_sq_foot
+        (call sum (/ feb_sales w_warehouse_sq_ft))
+      )
+      (item as mar_sales_per_sq_foot
+        (call sum (/ mar_sales w_warehouse_sq_ft))
+      )
+      (item as apr_sales_per_sq_foot
+        (call sum (/ apr_sales w_warehouse_sq_ft))
+      )
+      (item as may_sales_per_sq_foot
+        (call sum (/ may_sales w_warehouse_sq_ft))
+      )
+      (item as jun_sales_per_sq_foot
+        (call sum (/ jun_sales w_warehouse_sq_ft))
+      )
+      (item as jul_sales_per_sq_foot
+        (call sum (/ jul_sales w_warehouse_sq_ft))
+      )
+      (item as aug_sales_per_sq_foot
+        (call sum (/ aug_sales w_warehouse_sq_ft))
+      )
+      (item as sep_sales_per_sq_foot
+        (call sum (/ sep_sales w_warehouse_sq_ft))
+      )
+      (item as oct_sales_per_sq_foot
+        (call sum (/ oct_sales w_warehouse_sq_ft))
+      )
+      (item as nov_sales_per_sq_foot
+        (call sum (/ nov_sales w_warehouse_sq_ft))
+      )
+      (item as dec_sales_per_sq_foot
+        (call sum (/ dec_sales w_warehouse_sq_ft))
+      )
+      (item as jan_net
+        (call sum jan_net)
+      )
+      (item as feb_net
+        (call sum feb_net)
+      )
+      (item as mar_net
+        (call sum mar_net)
+      )
+      (item as apr_net
+        (call sum apr_net)
+      )
+      (item as may_net
+        (call sum may_net)
+      )
+      (item as jun_net
+        (call sum jun_net)
+      )
+      (item as jul_net
+        (call sum jul_net)
+      )
+      (item as aug_net
+        (call sum aug_net)
+      )
+      (item as sep_net
+        (call sum sep_net)
+      )
+      (item as oct_net
+        (call sum oct_net)
+      )
+      (item as nov_net
+        (call sum nov_net)
+      )
+      (item as dec_net
+        (call sum dec_net)
+      )
+    )
+    (from
+      (subquery-table as x
+        (query
+          (unknown-body)
+        )
+      )
+    )
+    (group-by
+      w_warehouse_name
+      w_warehouse_sq_ft
+      w_city
+      w_county
+      w_state
+      w_country
+      ship_carriers
+      year
+    )
+  )
+  (order-by
+    (order asc
+      w_warehouse_name
+    )
+  )
+  (limit
+    100
+  )
+)

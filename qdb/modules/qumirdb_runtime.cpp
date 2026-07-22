@@ -42,6 +42,23 @@ __int128 Pow10I128(int64_t scale) {
 
 } // namespace
 
+char* TStringArena::Alloc(int64_t size) {
+    if (size <= 0) {
+        return nullptr;
+    }
+    // 64 KiB blocks; a single request larger than that gets its own exact block.
+    constexpr int64_t kBlockSize = int64_t{1} << 16;
+    if (Blocks_.empty() ||
+        Used_ + size > static_cast<int64_t>(Blocks_.back().size()))
+    {
+        Blocks_.emplace_back(static_cast<size_t>(std::max(size, kBlockSize)));
+        Used_ = 0;
+    }
+    char* ptr = Blocks_.back().data() + Used_;
+    Used_ += size;
+    return ptr;
+}
+
 extern "C" {
 
 void* qdb_alloc(int64_t size) {
@@ -144,6 +161,21 @@ qdb_string_view qdb_substring(qdb_string_view str, int32_t start, int32_t length
     if (len < 0) len = 0;
     if (offset + len > str.Size) len = str.Size - offset;
     return {str.Data + offset, len};
+}
+
+qdb_string_view qdb_string_concat(void* arena, qdb_string_view left, qdb_string_view right) {
+    const int64_t size = left.Size + right.Size;
+    if (size <= 0) {
+        return {nullptr, 0};
+    }
+    char* dst = static_cast<TStringArena*>(arena)->Alloc(size);
+    if (left.Size > 0) {
+        std::memcpy(dst, left.Data, static_cast<size_t>(left.Size));
+    }
+    if (right.Size > 0) {
+        std::memcpy(dst + left.Size, right.Data, static_cast<size_t>(right.Size));
+    }
+    return {reinterpret_cast<const uint8_t*>(dst), size};
 }
 
 // Howard Hinnant's date algorithm: https://howardhinnant.github.io/date_algorithms.html

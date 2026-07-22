@@ -1,2 +1,177 @@
-Error: expected ')' after subquery @ Line: 103, Byte: 18, Column: 18
-
+(query
+  (with
+    (cte ssr
+      (query
+        (select
+          (select-list
+            (item
+              s_store_id
+            )
+            (item as sales
+              (call sum sales_price)
+            )
+            (item as profit
+              (call sum profit)
+            )
+            (item as returns
+              (call sum return_amt)
+            )
+            (item as profit_loss
+              (call sum net_loss)
+            )
+          )
+          (from
+            (subquery-table as salesreturns
+              (query
+                (unknown-body)
+              )
+            )
+            (table date_dim)
+            (table store)
+          )
+          (where
+            (&& (&& (== date_sk d_date_sk)
+                (&& (<= (: (cast (: (cast "1998-08-04" <named StringView>) <named StringView>) <named DATE>) <named DATE>) d_date)
+                  (<= d_date
+                    (+ (: (cast (: (cast "1998-08-04" <named StringView>) <named StringView>) <named DATE>) <named DATE>)
+                      (: 14 i32)))))
+              (== store_sk s_store_sk))
+          )
+          (group-by
+            s_store_id
+          )
+        )
+      )
+    )
+    (cte csr
+      (query
+        (select
+          (select-list
+            (item
+              cp_catalog_page_id
+            )
+            (item as sales
+              (call sum sales_price)
+            )
+            (item as profit
+              (call sum profit)
+            )
+            (item as returns
+              (call sum return_amt)
+            )
+            (item as profit_loss
+              (call sum net_loss)
+            )
+          )
+          (from
+            (subquery-table as salesreturns
+              (query
+                (unknown-body)
+              )
+            )
+            (table date_dim)
+            (table catalog_page)
+          )
+          (where
+            (&& (&& (== date_sk d_date_sk)
+                (&& (<= (: (cast (: (cast "1998-08-04" <named StringView>) <named StringView>) <named DATE>) <named DATE>) d_date)
+                  (<= d_date
+                    (+ (: (cast (: (cast "1998-08-04" <named StringView>) <named StringView>) <named DATE>) <named DATE>)
+                      (: 14 i32)))))
+              (== page_sk cp_catalog_page_sk))
+          )
+          (group-by
+            cp_catalog_page_id
+          )
+        )
+      )
+    )
+    (cte wsr
+      (query
+        (select
+          (select-list
+            (item
+              web_site_id
+            )
+            (item as sales
+              (call sum sales_price)
+            )
+            (item as profit
+              (call sum profit)
+            )
+            (item as returns
+              (call sum return_amt)
+            )
+            (item as profit_loss
+              (call sum net_loss)
+            )
+          )
+          (from
+            (subquery-table as salesreturns
+              (query
+                (unknown-body)
+              )
+            )
+            (table date_dim)
+            (table web_site)
+          )
+          (where
+            (&& (&& (== date_sk d_date_sk)
+                (&& (<= (: (cast (: (cast "1998-08-04" <named StringView>) <named StringView>) <named DATE>) <named DATE>) d_date)
+                  (<= d_date
+                    (+ (: (cast (: (cast "1998-08-04" <named StringView>) <named StringView>) <named DATE>) <named DATE>)
+                      (: 14 i32)))))
+              (== wsr_web_site_sk web_site_sk))
+          )
+          (group-by
+            web_site_id
+          )
+        )
+      )
+    )
+  )
+  (select
+    (select-list
+      (item
+        channel
+      )
+      (item
+        id
+      )
+      (item as sales
+        (call sum sales)
+      )
+      (item as returns
+        (call sum returns)
+      )
+      (item as profit
+        (call sum profit)
+      )
+    )
+    (from
+      (subquery-table as x
+        (query
+          (unknown-body)
+        )
+      )
+    )
+    (group-by
+      (rollup
+        (block
+          channel
+          id)
+      )
+    )
+  )
+  (order-by
+    (order asc
+      channel
+    )
+    (order asc
+      id
+    )
+  )
+  (limit
+    100
+  )
+)

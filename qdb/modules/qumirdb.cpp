@@ -15,6 +15,7 @@ const void* const QumirDbRuntimeSymbolAnchors[] __attribute__((used)) = {
     reinterpret_cast<const void*>(&qdb_filter_string_compare),
     reinterpret_cast<const void*>(&qdb_string_view_sql_like),
     reinterpret_cast<const void*>(&qdb_substring),
+    reinterpret_cast<const void*>(&qdb_string_concat),
     reinterpret_cast<const void*>(&qdb_date_year),
     reinterpret_cast<const void*>(&qdb_sql_date),
     reinterpret_cast<const void*>(&qdb_sql_interval),

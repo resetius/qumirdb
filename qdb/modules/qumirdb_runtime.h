@@ -2,6 +2,22 @@
 
 #include <cstdint>
 #include <string_view>
+#include <vector>
+
+// Chunked bump arena for strings produced during kernel evaluation (e.g. `||`
+// concatenation via qdb_string_concat). It never moves bytes it has already handed
+// out — new blocks are appended, existing blocks stay put — so every StringView it
+// returns stays valid for the whole batch, until the executor copies the bytes into
+// the owned output column. One instance lives per kernel invocation (owned by the
+// executor) and frees all blocks on destruction.
+class TStringArena {
+public:
+    char* Alloc(int64_t size);
+
+private:
+    std::vector<std::vector<char>> Blocks_;
+    int64_t Used_ = 0; // bytes used in the last block
+};
 
 extern "C" {
 
@@ -33,6 +49,12 @@ int64_t qdb_string_view_sql_like(qdb_string_view str, qdb_string_view pattern);
 qdb_string_view qdb_lit_to_sv(const char* lit);
 
 qdb_string_view qdb_substring(qdb_string_view str, int32_t start, int32_t length);
+
+// SQL `left || right` string concatenation. `arena` is a TStringArena* (opaque here);
+// the concatenated bytes are bump-allocated from it so the returned view outlives the
+// kernel row loop. Null propagation is handled by the caller (ExpandNullable), so this
+// is unconditional: it always concatenates both operands.
+qdb_string_view qdb_string_concat(void* arena, qdb_string_view left, qdb_string_view right);
 
 // Returns the Gregorian year for a date given as days since 1970-01-01.
 int32_t qdb_date_year(int32_t days);

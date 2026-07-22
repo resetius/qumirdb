@@ -238,7 +238,8 @@ public:
     // writes outBuffers[k][i] = <expr_k>. outBuffers has one pointer per computed
     // projection, each to a caller-owned buffer of RowCount * sizeof(computed
     // type). Only computed (non-ident) columns go through this kernel.
-    using TProjectDispatch = std::function<void(TRowSet* in, void** outBuffers)>;
+    using TProjectDispatch =
+        std::function<void(TRowSet* in, void** outBuffers, void* arena)>;
 
     using TSortRadixCompositeDispatch = std::function<int64_t(
         TRowSet* store, int64_t* rowIds, int64_t* work, uint32_t* counts,

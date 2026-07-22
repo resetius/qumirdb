@@ -138,16 +138,19 @@
 <comparison_expr> ::=
     <add_expr>
     [
-        <comparison_op> <add_expr>
+        <comparison_op> <concat_expr>
       | "IS" [ "NOT" ] "NULL"
       | [ "NOT" ] "IN" "(" <expr_list_or_subquery> ")"
-      | [ "NOT" ] "BETWEEN" <add_expr> "AND" <add_expr>
-      | [ "NOT" ] "LIKE" <add_expr>
+      | [ "NOT" ] "BETWEEN" <concat_expr> "AND" <concat_expr>
+      | [ "NOT" ] "LIKE" <concat_expr>
     ]
 
 <comparison_op> ::=
       "=" | "<>" | "!="
     | "<" | "<=" | ">" | ">="
+
+<concat_expr> ::=
+    <add_expr> { "||" <add_expr> }
 
 <add_expr> ::=
     <mul_expr> { ( "+" | "-" ) <mul_expr> }
@@ -500,6 +503,7 @@ TAstExprTask or_expr(TParserContext& ctx);
 TAstExprTask and_expr(TParserContext& ctx);
 TAstExprTask not_expr(TParserContext& ctx);
 TAstExprTask comparison_expr(TParserContext& ctx);
+TAstExprTask concat_expr(TParserContext& ctx);
 TAstExprTask add_expr(TParserContext& ctx);
 TAstExprTask mul_expr(TParserContext& ctx);
 TAstExprTask unary_expr(TParserContext& ctx);
@@ -1166,7 +1170,7 @@ TAstExprTask not_expr(TParserContext& ctx) {
 }
 
 TAstExprTask comparison_expr(TParserContext& ctx) {
-    auto ret = co_await add_expr(ctx);
+    auto ret = co_await concat_expr(ctx);
     auto token = ctx.Stream.Next();
     static std::vector<std::pair<TOperator, TOperator>> sql2qumir = {
         {"="_op, "=="_op},
@@ -1180,7 +1184,7 @@ TAstExprTask comparison_expr(TParserContext& ctx) {
 
     for (auto [from, to] : sql2qumir) {
         if (IsOp(token, from)) {
-            co_return binary(token.Location, to, ret, co_await add_expr(ctx));
+            co_return binary(token.Location, to, ret, co_await concat_expr(ctx));
         }
     }
 
@@ -1228,19 +1232,19 @@ TAstExprTask comparison_expr(TParserContext& ctx) {
             ret = BuildInListPredicate(loc, std::move(ret), block->Stmts);
         }
     } else if (IsKeyword(opToken, "BETWEEN")) {
-        auto left = co_await add_expr(ctx);
+        auto left = co_await concat_expr(ctx);
         auto next = ctx.Stream.Next();
         if (!IsKeyword(next, "AND")) {
             co_return Error(next, "`AND' expected");
         }
-        auto right = co_await add_expr(ctx);
+        auto right = co_await concat_expr(ctx);
         // left <= ret && ret <= right
         ret = binary(loc, "&&"_op,
             binary(loc, "<="_op, left, ret),
             binary(loc, "<="_op, ret, right));
     } else if (IsKeyword(opToken, "LIKE")) {
         ret = call(loc, "qdb_string_view_sql_like",
-            {ret, co_await add_expr(ctx)});
+            {ret, co_await concat_expr(ctx)});
     } else {
         // nothing matched: restore the consumed token(s) in reverse order
         if (negative) {
@@ -1252,6 +1256,25 @@ TAstExprTask comparison_expr(TParserContext& ctx) {
 
     if (negative) {
         ret = unary(loc, "!"_op, ret);
+    }
+    co_return ret;
+}
+
+// `a || b` is string concatenation. It shares the `||` token with logical OR, so
+// instead of a binary op (which collides with OR's operator string) it lowers to a
+// `strcat(a, b)` pseudo-call: the typer types it as StringView and ExpandNullable
+// rewrites it into the real qdb_string_concat runtime call.
+TAstExprTask concat_expr(TParserContext& ctx) {
+    auto ret = co_await add_expr(ctx);
+    auto loc = ret->Location;
+    while (true) {
+        auto token = ctx.Stream.Next();
+        if (!IsOp(token, "||"_op)) {
+            ctx.Stream.Unget(token);
+            break;
+        }
+        auto rhs = co_await add_expr(ctx);
+        ret = call(loc, "strcat", {std::move(ret), std::move(rhs)});
     }
     co_return ret;
 }
