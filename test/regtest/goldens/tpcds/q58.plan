@@ -1,10 +1,10 @@
 (rel limit
-  (rel project
-    (rel sort
-      (rel project
-        (rel filter
+  (rel sort
+    (rel project
+      (rel filter
+        (rel join
           (rel join
-            (rel join
+            (rel project
               (rel project
                 (rel aggregate
                   (rel filter
@@ -35,6 +35,9 @@
                   (agg sum_0 sum ss_ext_sales_price))
                 (item_id i_item_id)
                 (ss_item_rev sum_0))
+              (|ss_items.item_id| item_id)
+              (|ss_items.ss_item_rev| ss_item_rev))
+            (rel project
               (rel project
                 (rel aggregate
                   (rel filter
@@ -65,8 +68,11 @@
                   (agg sum_0 sum cs_ext_sales_price))
                 (item_id i_item_id)
                 (cs_item_rev sum_0))
-              ()
-              (inner))
+              (|cs_items.item_id| item_id)
+              (|cs_items.cs_item_rev| cs_item_rev))
+            ()
+            (inner))
+          (rel project
             (rel project
               (rel aggregate
                 (rel filter
@@ -97,39 +103,32 @@
                 (agg sum_0 sum ws_ext_sales_price))
               (item_id i_item_id)
               (ws_item_rev sum_0))
-            ()
-            (inner))
-          (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (== |ss_items.item_id| |cs_items.item_id|)
-                                    (== |ss_items.item_id| |ws_items.item_id|))
-                                  (<= (* 0.90000000000000002 cs_item_rev) ss_item_rev))
-                                (<= ss_item_rev (* 1.1000000000000001 cs_item_rev)))
-                              (<= (* 0.90000000000000002 ws_item_rev) ss_item_rev))
-                            (<= ss_item_rev (* 1.1000000000000001 ws_item_rev)))
-                          (<= (* 0.90000000000000002 ss_item_rev) cs_item_rev))
-                        (<= cs_item_rev (* 1.1000000000000001 ss_item_rev)))
-                      (<= (* 0.90000000000000002 ws_item_rev) cs_item_rev))
-                    (<= cs_item_rev (* 1.1000000000000001 ws_item_rev)))
-                  (<= (* 0.90000000000000002 ss_item_rev) ws_item_rev))
-                (<= ws_item_rev (* 1.1000000000000001 ss_item_rev)))
-              (<= (* 0.90000000000000002 cs_item_rev) ws_item_rev))
-            (<= ws_item_rev (* 1.1000000000000001 cs_item_rev))))
-        (|ss_items.item_id| |ss_items.item_id|)
-        (ss_item_rev ss_item_rev)
-        (ss_dev (* (/ ss_item_rev (/ (+ (+ ss_item_rev cs_item_rev) ws_item_rev) 3)) 100))
-        (cs_item_rev cs_item_rev)
-        (cs_dev (* (/ cs_item_rev (/ (+ (+ ss_item_rev cs_item_rev) ws_item_rev) 3)) 100))
-        (ws_item_rev ws_item_rev)
-        (ws_dev (* (/ ws_item_rev (/ (+ (+ ss_item_rev cs_item_rev) ws_item_rev) 3)) 100))
-        (average (/ (+ (+ ss_item_rev cs_item_rev) ws_item_rev) 3))
-        (__sort_0 item_id))
-      (__sort_0 asc nulls-default)
-      (ss_item_rev asc nulls-default))
-    (|ss_items.item_id| |ss_items.item_id|)
-    (ss_item_rev ss_item_rev)
-    (ss_dev ss_dev)
-    (cs_item_rev cs_item_rev)
-    (cs_dev cs_dev)
-    (ws_item_rev ws_item_rev)
-    (ws_dev ws_dev)
-    (average average))
+            (|ws_items.item_id| item_id)
+            (|ws_items.ws_item_rev| ws_item_rev))
+          ()
+          (inner))
+        (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (== |ss_items.item_id| |cs_items.item_id|)
+                                  (== |ss_items.item_id| |ws_items.item_id|))
+                                (<= (* 0.90000000000000002 cs_item_rev) ss_item_rev))
+                              (<= ss_item_rev (* 1.1000000000000001 cs_item_rev)))
+                            (<= (* 0.90000000000000002 ws_item_rev) ss_item_rev))
+                          (<= ss_item_rev (* 1.1000000000000001 ws_item_rev)))
+                        (<= (* 0.90000000000000002 ss_item_rev) cs_item_rev))
+                      (<= cs_item_rev (* 1.1000000000000001 ss_item_rev)))
+                    (<= (* 0.90000000000000002 ws_item_rev) cs_item_rev))
+                  (<= cs_item_rev (* 1.1000000000000001 ws_item_rev)))
+                (<= (* 0.90000000000000002 ss_item_rev) ws_item_rev))
+              (<= ws_item_rev (* 1.1000000000000001 ss_item_rev)))
+            (<= (* 0.90000000000000002 cs_item_rev) ws_item_rev))
+          (<= ws_item_rev (* 1.1000000000000001 cs_item_rev))))
+      (item_id |ss_items.item_id|)
+      (ss_item_rev ss_item_rev)
+      (ss_dev (* (/ ss_item_rev (/ (+ (+ ss_item_rev cs_item_rev) ws_item_rev) 3)) 100))
+      (cs_item_rev cs_item_rev)
+      (cs_dev (* (/ cs_item_rev (/ (+ (+ ss_item_rev cs_item_rev) ws_item_rev) 3)) 100))
+      (ws_item_rev ws_item_rev)
+      (ws_dev (* (/ ws_item_rev (/ (+ (+ ss_item_rev cs_item_rev) ws_item_rev) 3)) 100))
+      (average (/ (+ (+ ss_item_rev cs_item_rev) ws_item_rev) 3)))
+    (item_id asc nulls-default)
+    (ss_item_rev asc nulls-default))
   (limit 100))
