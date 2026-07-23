@@ -5,34 +5,40 @@
         (rel join
           (rel source "supplier")
           (rel project
-            (rel aggregate
-              (rel project
-                (rel filter
-                  (rel source "lineitem")
-                  (&& (>= l_shipdate (: 9190 i32)) (< l_shipdate (+ (: 9190 i32) (: 90 i32)))))
-                (l_suppkey l_suppkey)
-                (arg_0 (* l_extendedprice (- 1 l_discount))))
-              (keys l_suppkey)
-              (agg sum_0 sum arg_0))
-            (supplier_no l_suppkey)
-            (total_revenue sum_0))
+            (rel project
+              (rel aggregate
+                (rel project
+                  (rel filter
+                    (rel source "lineitem")
+                    (&& (>= l_shipdate (: 9190 i32)) (< l_shipdate (+ (: 9190 i32) (: 90 i32)))))
+                  (l_suppkey l_suppkey)
+                  (arg_0 (* l_extendedprice (- 1 l_discount))))
+                (keys l_suppkey)
+                (agg sum_0 sum arg_0))
+              (supplier_no l_suppkey)
+              (total_revenue sum_0))
+            (|revenue0.supplier_no| supplier_no)
+            (|revenue0.total_revenue| total_revenue))
           ()
           (inner))
         (rel project
           (rel aggregate
             (rel project
               (rel project
-                (rel aggregate
-                  (rel project
-                    (rel filter
-                      (rel source "lineitem")
-                      (&& (>= l_shipdate (: 9190 i32)) (< l_shipdate (+ (: 9190 i32) (: 90 i32)))))
-                    (l_suppkey l_suppkey)
-                    (arg_0 (* l_extendedprice (- 1 l_discount))))
-                  (keys l_suppkey)
-                  (agg sum_0 sum arg_0))
-                (supplier_no l_suppkey)
-                (total_revenue sum_0))
+                (rel project
+                  (rel aggregate
+                    (rel project
+                      (rel filter
+                        (rel source "lineitem")
+                        (&& (>= l_shipdate (: 9190 i32)) (< l_shipdate (+ (: 9190 i32) (: 90 i32)))))
+                      (l_suppkey l_suppkey)
+                      (arg_0 (* l_extendedprice (- 1 l_discount))))
+                    (keys l_suppkey)
+                    (agg sum_0 sum arg_0))
+                  (supplier_no l_suppkey)
+                  (total_revenue sum_0))
+                (|revenue0.supplier_no| supplier_no)
+                (|revenue0.total_revenue| total_revenue))
               (total_revenue total_revenue)
               (__group__ 1))
             (keys __group__)

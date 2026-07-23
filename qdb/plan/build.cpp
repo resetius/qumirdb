@@ -373,7 +373,13 @@ std::string ItemName(const NSql::TSqlSelectItem& item, size_t index) {
         return *item.Alias;
     }
     if (auto ident = NAst::TMaybeNode<NAst::TIdentExpr>(item.Expr)) {
-        return ident.Cast()->Name;
+        // `SELECT t.col` (no alias) yields a column named `col` (unqualified), per SQL.
+        // Keeping the `t.` prefix breaks later references to the bare name — notably CTE
+        // columns referenced as `<cte>.col` / bare `col`, whose equi-joins then fail to
+        // extract keys (keyless cross joins).
+        const std::string& name = ident.Cast()->Name;
+        auto dot = name.rfind('.');
+        return dot == std::string::npos ? name : name.substr(dot + 1);
     }
     return "col" + std::to_string(index);
 }
@@ -749,15 +755,18 @@ std::expected<TOperatorPtr, TError> BuildTableRef(
         if (!source) {
             return std::unexpected(source.error());
         }
-        if (node->Alias) {
-            if (auto sourceOp = TMaybeOp<TSourceOperator>(*source)) {
+        if (auto sourceOp = TMaybeOp<TSourceOperator>(*source)) {
+            if (node->Alias) {
                 sourceOp.Cast()->SetAlias(*node->Alias);
-            } else {
-                // A CTE inlined as a subplan: qualify its columns by the alias.
-                return AliasSubplan(std::move(*source), *node->Alias);
             }
+            return *source;
         }
-        return *source;
+        // A CTE inlined as a subplan: qualify its columns by the reference alias, or —
+        // when referenced bare — by the CTE name, so `<cte>.col` references resolve
+        // (otherwise the inlined columns stay bare and equi-joins over them drop their
+        // keys, producing keyless cross joins).
+        return AliasSubplan(
+            std::move(*source), node->Alias ? *node->Alias : node->Name.back());
     }
 
     if (auto sub = NSql::TMaybeNode<NSql::TSqlSubqueryTable>(ref)) {
