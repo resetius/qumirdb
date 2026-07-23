@@ -1,2 +1,183 @@
-Error: expected ')' after subquery @ Line: 4, Byte: 38, Column: 38
-
+(query
+  (select
+    (select-list
+      (item
+        |asceding.rnk|
+      )
+      (item as best_performing
+        |i1.i_product_name|
+      )
+      (item as worst_performing
+        |i2.i_product_name|
+      )
+    )
+    (from
+      (subquery-table as asceding
+        (query
+          (select
+            (select-list
+              (star *)
+            )
+            (from
+              (subquery-table as v11
+                (query
+                  (select
+                    (select-list
+                      (item
+                        item_sk
+                      )
+                      (item as rnk
+                        (window (call rank) (over (order-by (order asc rank_col))))
+                      )
+                    )
+                    (from
+                      (subquery-table as v1
+                        (query
+                          (select
+                            (select-list
+                              (item as item_sk
+                                ss_item_sk
+                              )
+                              (item as rank_col
+                                (call avg ss_net_profit)
+                              )
+                            )
+                            (from
+                              (table store_sales as ss1)
+                            )
+                            (where
+                              (== ss_store_sk 2)
+                            )
+                            (group-by
+                              ss_item_sk
+                            )
+                            (having
+                              (> (call avg ss_net_profit)
+                                (* 0.90000000000000002
+                                  (subquery scalar (query
+                                (select
+                                  (select-list
+                                    (item as rank_col
+                                      (call avg ss_net_profit)
+                                    )
+                                  )
+                                  (from
+                                    (table store_sales)
+                                  )
+                                  (where
+                                    (&& (== ss_store_sk 2) (call qdb_is_null ss_hdemo_sk))
+                                  )
+                                  (group-by
+                                    ss_store_sk
+                                  )
+                                )
+                              )
+                              )))
+                            )
+                          )
+                        )
+                      )
+                    )
+                  )
+                )
+              )
+            )
+            (where
+              (< rnk 11)
+            )
+          )
+        )
+      )
+      (subquery-table as descending
+        (query
+          (select
+            (select-list
+              (star *)
+            )
+            (from
+              (subquery-table as v21
+                (query
+                  (select
+                    (select-list
+                      (item
+                        item_sk
+                      )
+                      (item as rnk
+                        (window (call rank) (over (order-by (order desc rank_col))))
+                      )
+                    )
+                    (from
+                      (subquery-table as v2
+                        (query
+                          (select
+                            (select-list
+                              (item as item_sk
+                                ss_item_sk
+                              )
+                              (item as rank_col
+                                (call avg ss_net_profit)
+                              )
+                            )
+                            (from
+                              (table store_sales as ss1)
+                            )
+                            (where
+                              (== ss_store_sk 2)
+                            )
+                            (group-by
+                              ss_item_sk
+                            )
+                            (having
+                              (> (call avg ss_net_profit)
+                                (* 0.90000000000000002
+                                  (subquery scalar (query
+                                (select
+                                  (select-list
+                                    (item as rank_col
+                                      (call avg ss_net_profit)
+                                    )
+                                  )
+                                  (from
+                                    (table store_sales)
+                                  )
+                                  (where
+                                    (&& (== ss_store_sk 2) (call qdb_is_null ss_hdemo_sk))
+                                  )
+                                  (group-by
+                                    ss_store_sk
+                                  )
+                                )
+                              )
+                              )))
+                            )
+                          )
+                        )
+                      )
+                    )
+                  )
+                )
+              )
+            )
+            (where
+              (< rnk 11)
+            )
+          )
+        )
+      )
+      (table item as i1)
+      (table item as i2)
+    )
+    (where
+      (&& (&& (== |asceding.rnk| |descending.rnk|) (== |i1.i_item_sk| |asceding.item_sk|))
+        (== |i2.i_item_sk| |descending.item_sk|))
+    )
+  )
+  (order-by
+    (order asc
+      |asceding.rnk|
+    )
+  )
+  (limit
+    100
+  )
+)

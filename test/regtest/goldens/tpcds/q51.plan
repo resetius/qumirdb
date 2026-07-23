@@ -1,2 +1,2 @@
-Error: expected ')' after CTE query @ Line: 6, Byte: 11, Column: 11
+Error: window functions are not supported in plans yet
 

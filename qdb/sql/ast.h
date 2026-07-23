@@ -150,6 +150,145 @@ struct TSqlSelectList : TSqlNode {
     std::vector<TSqlPtr<TSqlSelectItem>> Items;
 };
 
+struct TSqlFrameBound : TSqlNode {
+    static constexpr const char* NodeId = "FrameBound";
+    std::string_view NodeName() const override { return NodeId; }
+
+    enum class EType {
+        UnboundedPreceding,
+        Preceding,
+        CurrentRow,
+        Following,
+        UnboundedFollowing
+    };
+    EType Type;
+
+    // optional expression for PRECEDING / FOLLOWING
+    NQumir::NAst::TExprPtr Expr;
+
+    explicit TSqlFrameBound(EType type, NQumir::NAst::TExprPtr expr)
+        : Type(type)
+        , Expr(std::move(expr))
+    { }
+};
+
+struct TSqlWindowFrame : TSqlNode {
+    static constexpr const char* NodeId = "WindowFrame";
+    std::string_view NodeName() const override { return NodeId; }
+
+    enum class EType {
+        Rows,
+        Range
+    };
+    EType Type;
+
+    TSqlPtr<TSqlFrameBound> Start;
+    TSqlPtr<TSqlFrameBound> End; // optional; defaults to CURRENT ROW
+
+    explicit TSqlWindowFrame(EType type, TSqlPtr<TSqlFrameBound> start, TSqlPtr<TSqlFrameBound> end)
+        : Type(type)
+        , Start(std::move(start))
+        , End(std::move(end))
+    {}
+};
+
+struct TSqlWindowSpec : TSqlNode {
+    static constexpr const char* NodeId = "WindowSpec";
+    std::string_view NodeName() const override { return NodeId; }
+
+    // optional "PARTITION" "BY" <expr_list>
+    NQumir::NAst::TExprPtr PartitionBy;
+    // optional
+    TSqlPtr<TSqlOrder> OrderBy;
+    // optionla
+    TSqlPtr<TSqlWindowFrame> Frame;
+
+    explicit TSqlWindowSpec(
+        NQumir::NAst::TExprPtr partitionBy,
+        TSqlPtr<TSqlOrder> orderBy,
+        TSqlPtr<TSqlWindowFrame> frame)
+        : PartitionBy(std::move(partitionBy))
+        , OrderBy(std::move(orderBy))
+        , Frame(std::move(frame))
+    {}
+};
+
+struct TWindowExpr : NQumir::NAst::TExpr {
+    static constexpr const char* NodeId = "WindowExpr";
+
+    NQumir::NAst::TExprPtr Expr;
+    TSqlPtr<TSqlWindowSpec> WindowSpec;
+
+    explicit TWindowExpr(NQumir::NAst::TExprPtr expr, TSqlPtr<TSqlWindowSpec> spec)
+        : Expr(std::move(expr))
+        , WindowSpec(std::move(spec))
+    { }
+
+    std::vector<NQumir::NAst::TExprPtr> Children() const override {
+        std::vector<NQumir::NAst::TExprPtr> children;
+        if (Expr) {
+            children.push_back(Expr);
+        }
+        if (WindowSpec) {
+            if (WindowSpec->PartitionBy) {
+                children.push_back(WindowSpec->PartitionBy);
+            }
+            if (WindowSpec->OrderBy) {
+                for (const auto& item : WindowSpec->OrderBy->Items) {
+                    if (item && item->Expr) {
+                        children.push_back(item->Expr);
+                    }
+                }
+            }
+            if (WindowSpec->Frame) {
+                if (WindowSpec->Frame->Start && WindowSpec->Frame->Start->Expr) {
+                    children.push_back(WindowSpec->Frame->Start->Expr);
+                }
+                if (WindowSpec->Frame->End && WindowSpec->Frame->End->Expr) {
+                    children.push_back(WindowSpec->Frame->End->Expr);
+                }
+            }
+        }
+        return children;
+    }
+
+    std::vector<NQumir::NAst::TExprPtr*> MutableChildren() override {
+        std::vector<NQumir::NAst::TExprPtr*> children;
+        if (Expr) {
+            children.push_back(&Expr);
+        }
+        if (WindowSpec) {
+            if (WindowSpec->PartitionBy) {
+                children.push_back(&WindowSpec->PartitionBy);
+            }
+            if (WindowSpec->OrderBy) {
+                for (auto& item : WindowSpec->OrderBy->Items) {
+                    if (item && item->Expr) {
+                        children.push_back(&item->Expr);
+                    }
+                }
+            }
+            if (WindowSpec->Frame) {
+                if (WindowSpec->Frame->Start && WindowSpec->Frame->Start->Expr) {
+                    children.push_back(&WindowSpec->Frame->Start->Expr);
+                }
+                if (WindowSpec->Frame->End && WindowSpec->Frame->End->Expr) {
+                    children.push_back(&WindowSpec->Frame->End->Expr);
+                }
+            }
+        }
+        return children;
+    }
+
+    const std::string_view NodeName() const override {
+        return NodeId;
+    }
+
+    void Accept(NQumir::NAst::IVisitor& visitor) override {
+        visitor.VisitOtherwise(*this);
+    }
+};
+
 struct TSqlRollUp : TSqlNode {
     static constexpr const char* NodeId = "RollUp";
     std::string_view NodeName() const override { return NodeId; }

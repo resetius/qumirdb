@@ -1,2 +1,145 @@
-Error: expected ')' after subquery @ Line: 12, Byte: 25, Column: 25
-
+(query
+  (select
+    (select-list
+      (star *)
+    )
+    (from
+      (subquery-table as dw2
+        (query
+          (select
+            (select-list
+              (item
+                i_category
+              )
+              (item
+                i_class
+              )
+              (item
+                i_brand
+              )
+              (item
+                i_product_name
+              )
+              (item
+                d_year
+              )
+              (item
+                d_qoy
+              )
+              (item
+                d_moy
+              )
+              (item
+                s_store_id
+              )
+              (item
+                sumsales
+              )
+              (item as rk
+                (window (call rank) (over (partition-by (block i_category)) (order-by (order desc sumsales))))
+              )
+            )
+            (from
+              (subquery-table as dw1
+                (query
+                  (select
+                    (select-list
+                      (item
+                        i_category
+                      )
+                      (item
+                        i_class
+                      )
+                      (item
+                        i_brand
+                      )
+                      (item
+                        i_product_name
+                      )
+                      (item
+                        d_year
+                      )
+                      (item
+                        d_qoy
+                      )
+                      (item
+                        d_moy
+                      )
+                      (item
+                        s_store_id
+                      )
+                      (item as sumsales
+                        (call sum (call coalesce (* ss_sales_price ss_quantity) 0))
+                      )
+                    )
+                    (from
+                      (table store_sales)
+                      (table date_dim)
+                      (table store)
+                      (table item)
+                    )
+                    (where
+                      (&& (&& (&& (== ss_sold_date_sk d_date_sk) (== ss_item_sk i_item_sk)) (== ss_store_sk s_store_sk))
+                        (&& (<= 1212 d_month_seq) (<= d_month_seq (+ 1212 11))))
+                    )
+                    (group-by
+                      (rollup
+                        (block
+                          i_category
+                          i_class
+                          i_brand
+                          i_product_name
+                          d_year
+                          d_qoy
+                          d_moy
+                          s_store_id)
+                      )
+                    )
+                  )
+                )
+              )
+            )
+          )
+        )
+      )
+    )
+    (where
+      (<= rk 100)
+    )
+  )
+  (order-by
+    (order asc
+      i_category
+    )
+    (order asc
+      i_class
+    )
+    (order asc
+      i_brand
+    )
+    (order asc
+      i_product_name
+    )
+    (order asc
+      d_year
+    )
+    (order asc
+      d_qoy
+    )
+    (order asc
+      d_moy
+    )
+    (order asc
+      s_store_id
+    )
+    (order asc
+      sumsales
+    )
+    (order asc
+      rk
+    )
+  )
+  (limit
+    100
+  )
+)

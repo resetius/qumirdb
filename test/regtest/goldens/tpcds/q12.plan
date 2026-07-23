@@ -1,2 +1,2 @@
-Error: expected ';' or end of file @ Line: 9, Byte: 10, Column: 10
+Error: window functions are not supported in plans yet
 

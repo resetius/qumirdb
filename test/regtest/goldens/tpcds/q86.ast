@@ -1,2 +1,60 @@
-Error: expected ';' or end of file @ Line: 7, Byte: 16, Column: 16
-
+(query
+  (select
+    (select-list
+      (item as total_sum
+        (call sum ws_net_paid)
+      )
+      (item
+        i_category
+      )
+      (item
+        i_class
+      )
+      (item as lochierarchy
+        (+ (call grouping i_category) (call grouping i_class))
+      )
+      (item as rank_within_parent
+        (window
+          (call rank)
+          (over
+            (partition-by
+              (block
+                (+ (call grouping i_category) (call grouping i_class))
+                (if (call qdb_is_true (== (call grouping i_class) 0)) i_category)))
+            (order-by
+              (order desc
+                (call sum ws_net_paid)))))
+      )
+    )
+    (from
+      (table web_sales)
+      (table date_dim as d1)
+      (table item)
+    )
+    (where
+      (&& (&& (&& (<= 1212 |d1.d_month_seq|) (<= |d1.d_month_seq| (+ 1212 11))) (== |d1.d_date_sk| ws_sold_date_sk))
+        (== i_item_sk ws_item_sk))
+    )
+    (group-by
+      (rollup
+        (block
+          i_category
+          i_class)
+      )
+    )
+  )
+  (order-by
+    (order desc
+      lochierarchy
+    )
+    (order asc
+      (if (call qdb_is_true (== lochierarchy 0)) i_category)
+    )
+    (order asc
+      rank_within_parent
+    )
+  )
+  (limit
+    100
+  )
+)

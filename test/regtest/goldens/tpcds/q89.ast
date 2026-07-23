@@ -1,2 +1,96 @@
-Error: expected ')' after subquery @ Line: 9, Byte: 9, Column: 9
-
+(query
+  (select
+    (select-list
+      (star *)
+    )
+    (from
+      (subquery-table as tmp1
+        (query
+          (select
+            (select-list
+              (item
+                i_category
+              )
+              (item
+                i_class
+              )
+              (item
+                i_brand
+              )
+              (item
+                s_store_name
+              )
+              (item
+                s_company_name
+              )
+              (item
+                d_moy
+              )
+              (item as sum_sales
+                (call sum ss_sales_price)
+              )
+              (item as avg_monthly_sales
+                (window
+                  (call avg (call sum ss_sales_price))
+                  (over
+                    (partition-by
+                      (block
+                        i_category
+                        i_brand
+                        s_store_name
+                        s_company_name))))
+              )
+            )
+            (from
+              (table item)
+              (table store_sales)
+              (table date_dim)
+              (table store)
+            )
+            (where
+              (&& (&& (&& (&& (== ss_item_sk i_item_sk) (== ss_sold_date_sk d_date_sk)) (== ss_store_sk s_store_sk)) (== d_year 2000))
+                (|| (&& (|| (|| (== i_category (: (cast "Home" <named StringView>) <named StringView>))
+                        (== i_category (: (cast "Books" <named StringView>) <named StringView>)))
+                      (== i_category (: (cast "Electronics" <named StringView>) <named StringView>)))
+                    (|| (|| (== i_class (: (cast "wallpaper" <named StringView>) <named StringView>))
+                        (== i_class (: (cast "parenting" <named StringView>) <named StringView>)))
+                      (== i_class (: (cast "musical" <named StringView>) <named StringView>))))
+                  (&& (|| (|| (== i_category (: (cast "Shoes" <named StringView>) <named StringView>))
+                        (== i_category (: (cast "Jewelry" <named StringView>) <named StringView>)))
+                      (== i_category (: (cast "Men" <named StringView>) <named StringView>)))
+                    (|| (|| (== i_class (: (cast "womens" <named StringView>) <named StringView>))
+                        (== i_class (: (cast "birdal" <named StringView>) <named StringView>)))
+                      (== i_class (: (cast "pants" <named StringView>) <named StringView>))))))
+            )
+            (group-by
+              i_category
+              i_class
+              i_brand
+              s_store_name
+              s_company_name
+              d_moy
+            )
+          )
+        )
+      )
+    )
+    (where
+      (> (if
+          (call qdb_is_true (!= avg_monthly_sales 0))
+          (/ (call abs (- sum_sales avg_monthly_sales)) avg_monthly_sales)
+          (call qdb_sql_null))
+        0.10000000000000001)
+    )
+  )
+  (order-by
+    (order asc
+      (- sum_sales avg_monthly_sales)
+    )
+    (order asc
+      s_store_name
+    )
+  )
+  (limit
+    100
+  )
+)

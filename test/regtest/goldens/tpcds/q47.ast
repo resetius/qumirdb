@@ -1,2 +1,154 @@
-Error: expected ')' after CTE query @ Line: 8, Byte: 10, Column: 10
-
+(query
+  (with
+    (cte v1
+      (query
+        (select
+          (select-list
+            (item
+              i_category
+            )
+            (item
+              i_brand
+            )
+            (item
+              s_store_name
+            )
+            (item
+              s_company_name
+            )
+            (item
+              d_year
+            )
+            (item
+              d_moy
+            )
+            (item as sum_sales
+              (call sum ss_sales_price)
+            )
+            (item as avg_monthly_sales
+              (window
+                (call avg (call sum ss_sales_price))
+                (over
+                  (partition-by
+                    (block
+                      i_category
+                      i_brand
+                      s_store_name
+                      s_company_name
+                      d_year))))
+            )
+            (item as rn
+              (window
+                (call rank)
+                (over
+                  (partition-by
+                    (block
+                      i_category
+                      i_brand
+                      s_store_name
+                      s_company_name))
+                  (order-by
+                    (order asc
+                      d_year)
+                    (order asc
+                      d_moy))))
+            )
+          )
+          (from
+            (table item)
+            (table store_sales)
+            (table date_dim)
+            (table store)
+          )
+          (where
+            (&& (&& (&& (== ss_item_sk i_item_sk) (== ss_sold_date_sk d_date_sk)) (== ss_store_sk s_store_sk))
+              (|| (|| (== d_year 2000) (&& (== d_year (- 2000 1)) (== d_moy 12))) (&& (== d_year (+ 2000 1)) (== d_moy 1))))
+          )
+          (group-by
+            i_category
+            i_brand
+            s_store_name
+            s_company_name
+            d_year
+            d_moy
+          )
+        )
+      )
+    )
+    (cte v2
+      (query
+        (select
+          (select-list
+            (item
+              |v1.i_category|
+            )
+            (item
+              |v1.i_brand|
+            )
+            (item
+              |v1.d_year|
+            )
+            (item
+              |v1.d_moy|
+            )
+            (item
+              |v1.avg_monthly_sales|
+            )
+            (item
+              |v1.sum_sales|
+            )
+            (item as psum
+              |v1_lag.sum_sales|
+            )
+            (item as nsum
+              |v1_lead.sum_sales|
+            )
+          )
+          (from
+            (table v1)
+            (table v1 as v1_lag)
+            (table v1 as v1_lead)
+          )
+          (where
+            (&& (&& (&& (&& (&& (&& (&& (&& (&& (== |v1.i_category| |v1_lag.i_category|) (== |v1.i_category| |v1_lead.i_category|))
+                            (== |v1.i_brand| |v1_lag.i_brand|))
+                          (== |v1.i_brand| |v1_lead.i_brand|))
+                        (== |v1.s_store_name| |v1_lag.s_store_name|))
+                      (== |v1.s_store_name| |v1_lead.s_store_name|))
+                    (== |v1.s_company_name| |v1_lag.s_company_name|))
+                  (== |v1.s_company_name| |v1_lead.s_company_name|))
+                (== |v1.rn| (+ |v1_lag.rn| 1)))
+              (== |v1.rn| (- |v1_lead.rn| 1)))
+          )
+        )
+      )
+    )
+  )
+  (select
+    (select-list
+      (star *)
+    )
+    (from
+      (table v2)
+    )
+    (where
+      (&& (&& (== d_year 2000) (> avg_monthly_sales 0))
+        (> (if
+            (call qdb_is_true (> avg_monthly_sales 0))
+            (/ (call abs (- sum_sales avg_monthly_sales)) avg_monthly_sales)
+            (call qdb_sql_null))
+          0.10000000000000001))
+    )
+  )
+  (order-by
+    (order asc
+      (- sum_sales avg_monthly_sales)
+    )
+    (order asc
+      nsum
+    )
+  )
+  (limit
+    100
+  )
+)

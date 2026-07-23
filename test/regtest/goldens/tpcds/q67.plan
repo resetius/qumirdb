@@ -1,2 +1,2 @@
-Error: expected ')' after subquery @ Line: 12, Byte: 25, Column: 25
+Error: window functions are not supported in plans yet
 
