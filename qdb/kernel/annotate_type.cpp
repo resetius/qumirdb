@@ -542,6 +542,11 @@ TTypePtr InferType(const TExprPtr& e, const TStructType& schema) {
     if (auto cst = TMaybeNode<TCastExpr>(e)) {
         auto node =cst.Cast();
         TTypePtr ot = InferType(node->Operand, schema);
+        // A cast whose target is itself nullable (e.g. the UNION-branch coercion
+        // `cast(i32, Nullable[i32])`) is Nullable[base] regardless of the operand.
+        if (IsNullableType(node->Type)) {
+            return std::make_shared<TNullable>(UnwrapNullableType(node->Type));
+        }
         return Propagate({ot}, FromQumirType(node->Type));
     }
     if (auto call = TMaybeNode<TCallExpr>(e)) {
@@ -875,12 +880,35 @@ TTypePtr Expand(TExprPtr& e, const TStructType& inputType, uint64_t& counter) {
     if (auto cp = TMaybeNode<TCastExpr>(e)) {
         auto node = cp.Cast();
         TTypePtr ot = Expand(node->Operand, inputType, counter);
-        TTypePtr target = FromQumirType(node->Type);
+        // `target` is the (non-nullable) value type; a nullable cast target contributes
+        // nullability separately (BuildNullStrict / nullable_from_value wrap it once).
+        TTypePtr target = IsNullableType(node->Type)
+            ? UnwrapNullableType(node->Type)
+            : FromQumirType(node->Type);
         if (!ot || !IsNullableType(ot)) {
+            // Non-nullable operand cast to a nullable target (e.g. a UNION-branch
+            // coercion `cast(i32, Nullable[i32])`): emit nullable_from_value. The cast
+            // target must be the qumir Nullable type — a raw planner TNullable does not
+            // compile — and the value is widened to the target base if needed. (Checked
+            // on the raw node->Type: FromQumirType strips the qdb TNullable.)
+            if (ot && IsNullableType(node->Type)) {
+                TTypePtr base = UnwrapNullableType(node->Type);
+                TExprPtr val = node->Operand;
+                if (PlanTypeKey(UnwrapNullableType(ot)) != PlanTypeKey(base)) {
+                    // Base conversion targets the planner base type so ExpandDecimal can
+                    // still turn a float/int → decimal cast into qdb_decimal_from_*.
+                    val = std::make_shared<TCastExpr>(node->Location, val, base);
+                }
+                e = std::make_shared<TCastExpr>(node->Location, val, ToQumirType(node->Type));
+                return std::make_shared<TNullable>(base);
+            }
             return ot ? target : nullptr;
         }
         TExprPtr operand = node->Operand;
-        TTypePtr tt = node->Type;
+        // BuildNullStrict already re-wraps the result in Nullable[target], so the inner
+        // cast targets the planner base value type (kept planner-typed so ExpandDecimal
+        // can still lower a decimal conversion).
+        TTypePtr tt = target;
         e = BuildNullStrict({{operand, true}},
             [tt, node](std::vector<TExprPtr> a) {
                 return std::make_shared<TCastExpr>(node->Location, a[0], tt);
@@ -1349,9 +1377,9 @@ bool ContainsNull(const TExprPtr& e) {
     return false;
 }
 
-// Calls that Expand always rewrites into other constructs (coalesce → if-chain,
-// strcat → qdb_string_concat), independent of nullability — so the fast path must not
-// skip Expand when one is present.
+// Constructs Expand always rewrites regardless of nullability — the fast path must not
+// skip Expand when one is present: coalesce → if-chain, strcat → qdb_string_concat, and a
+// cast to a nullable target → nullable_from_value (the raw planner TNullable won't compile).
 bool ContainsMustExpandCall(const TExprPtr& e) {
     if (!e) return false;
     if (auto call = TMaybeNode<TCallExpr>(e)) {
@@ -1359,6 +1387,9 @@ bool ContainsMustExpandCall(const TExprPtr& e) {
             const std::string& name = id.Cast()->Name;
             if (name == "coalesce" || name == "strcat") return true;
         }
+    }
+    if (auto cast = TMaybeNode<TCastExpr>(e)) {
+        if (IsNullableType(cast.Cast()->Type)) return true;
     }
     for (const auto& child : e->Children()) {
         if (ContainsMustExpandCall(child)) return true;
