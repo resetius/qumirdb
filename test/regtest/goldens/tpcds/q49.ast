@@ -1,2 +1,45 @@
-Error: expected ')' after subquery @ Line: 14, Byte: 15, Column: 15
-
+(query
+  (select
+    (select-list
+      (item
+        channel
+      )
+      (item
+        item
+      )
+      (item
+        return_ratio
+      )
+      (item
+        return_rank
+      )
+      (item
+        currency_rank
+      )
+    )
+    (from
+      (subquery-table
+        (query
+          (unknown-body)
+        )
+      )
+    )
+  )
+  (order-by
+    (order asc
+      1
+    )
+    (order asc
+      4
+    )
+    (order asc
+      5
+    )
+    (order asc
+      2
+    )
+  )
+  (limit
+    100
+  )
+)

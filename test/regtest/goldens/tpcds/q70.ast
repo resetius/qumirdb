@@ -1,2 +1,101 @@
-Error: expected ';' or end of file @ Line: 7, Byte: 16, Column: 16
-
+(query
+  (select
+    (select-list
+      (item as total_sum
+        (call sum ss_net_profit)
+      )
+      (item
+        s_state
+      )
+      (item
+        s_county
+      )
+      (item as lochierarchy
+        (+ (call grouping s_state) (call grouping s_county))
+      )
+      (item as rank_within_parent
+        (window
+          (call rank)
+          (over
+            (partition-by
+              (block
+                (+ (call grouping s_state) (call grouping s_county))
+                (if (call qdb_is_true (== (call grouping s_county) 0)) s_state)))
+            (order-by
+              (order desc
+                (call sum ss_net_profit)))))
+      )
+    )
+    (from
+      (table store_sales)
+      (table date_dim as d1)
+      (table store)
+    )
+    (where
+      (&& (&& (&& (&& (<= 1212 |d1.d_month_seq|) (<= |d1.d_month_seq| (+ 1212 11))) (== |d1.d_date_sk| ss_sold_date_sk))
+          (== s_store_sk ss_store_sk))
+        (subquery in s_state (query
+        (select
+          (select-list
+            (item
+              s_state
+            )
+          )
+          (from
+            (subquery-table as tmp1
+              (query
+                (select
+                  (select-list
+                    (item as s_state
+                      s_state
+                    )
+                    (item as ranking
+                      (window (call rank) (over (partition-by (block s_state)) (order-by (order desc (call sum ss_net_profit)))))
+                    )
+                  )
+                  (from
+                    (table store_sales)
+                    (table store)
+                    (table date_dim)
+                  )
+                  (where
+                    (&& (&& (&& (<= 1212 d_month_seq) (<= d_month_seq (+ 1212 11))) (== d_date_sk ss_sold_date_sk))
+                      (== s_store_sk ss_store_sk))
+                  )
+                  (group-by
+                    s_state
+                  )
+                )
+              )
+            )
+          )
+          (where
+            (<= ranking 5)
+          )
+        )
+      )
+      ))
+    )
+    (group-by
+      (rollup
+        (block
+          s_state
+          s_county)
+      )
+    )
+  )
+  (order-by
+    (order desc
+      lochierarchy
+    )
+    (order asc
+      (if (call qdb_is_true (== lochierarchy 0)) s_state)
+    )
+    (order asc
+      rank_within_parent
+    )
+  )
+  (limit
+    100
+  )
+)

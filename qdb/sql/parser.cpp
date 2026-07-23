@@ -164,9 +164,31 @@
 
 <postfix_expr> ::=
     <primary_expr>
+    [ "OVER" <window_spec> ]
     {
         "::" <type_name>
     }
+
+<window_spec> ::=
+    "("
+        [ "PARTITION" "BY" <expr_list> ]
+        [ <order_by_clause> ]
+        [ <window_frame> ]
+    ")"
+
+<window_frame> ::=
+    ( "ROWS" | "RANGE" )
+    (
+        <frame_bound>
+      | "BETWEEN" <frame_bound> "AND" <frame_bound>
+    )
+
+<frame_bound> ::=
+      "UNBOUNDED" "PRECEDING"
+    | "UNBOUNDED" "FOLLOWING"
+    | "CURRENT" "ROW"
+    | <expr> "PRECEDING"
+    | <expr> "FOLLOWING"
 
 <primary_expr> ::=
       <literal>
@@ -292,6 +314,16 @@ std::string ToLowerStr(std::string s) {
         c = std::tolower(c);
     }
     return s;
+}
+
+bool IsWord(const TToken& tok, const std::string& word) {
+    if (tok.Type == TToken::Keyword) {
+        return tok.Name == word;
+    }
+    if (tok.Type == TToken::Identifier) {
+        return tok.Name == ToLowerStr(word);
+    }
+    return false;
 }
 
 bool IsIntervalUnit(const std::string& name) {
@@ -492,6 +524,9 @@ TAstTask<TSqlTableRef> table_ref(TParserContext& ctx);
 TAstTask<TSqlTableRef> table_factor(TParserContext& ctx);
 TAstTask<TJoinCondition> join_condition(TParserContext& ctx);
 TAstTask<TIdentList> ident_list(TParserContext& ctx);
+TAstTask<TSqlWindowFrame> window_frame(TParserContext& ctx);
+TAstTask<TSqlWindowSpec> window_spec(TParserContext& ctx);
+TAstTask<TSqlFrameBound> frame_bound(TParserContext& ctx);
 TAstExprTask limit_clause(TParserContext& ctx);
 TAstExprTask offset_clause(TParserContext& ctx);
 TAstExprTask where_clause(TParserContext& ctx);
@@ -1314,10 +1349,115 @@ TAstExprTask postfix_expr(TParserContext& ctx) {
         return false;
     };
 
+    auto token = ctx.Stream.Next();
+    TSqlPtr<TSqlWindowSpec> windowSpec;
+    if (IsWord(token, "OVER")
+        && NQumir::NAst::TMaybeNode<NQumir::NAst::TCallExpr>(ret))
+    {
+        auto open = ctx.Stream.Next();
+        if (IsOp(open, '(')) {
+            ctx.Stream.Unget(open);
+            windowSpec = co_await window_spec(ctx);
+        } else {
+            ctx.Stream.Unget(open);
+            ctx.Stream.Unget(token);
+        }
+    } else {
+        ctx.Stream.Unget(token);
+    }
+
+    if (windowSpec) {
+        ret = std::make_shared<TWindowExpr>(std::move(ret), std::move(windowSpec));
+    }
+
     while (isCast()) {
         ret = cast(loc, ret, co_await type_name(ctx));
     }
     co_return ret;
+}
+
+TAstTask<TSqlWindowSpec> window_spec(TParserContext& ctx) {
+    auto token = ctx.Stream.Next();
+    if (!IsOp(token, '(')) {
+        co_return Error(token, "'(' expected after `OVER'");
+    }
+
+    auto partitionBy = co_await TryKeywords(expr_list, ctx, {"PARTITION", "BY"});
+    auto orderBy = co_await TryKeywords(order_by_clause, ctx, {"ORDER", "BY"});
+    auto frame = co_await window_frame(ctx);
+    token = ctx.Stream.Next();
+    if (!IsOp(token, ')')) {
+        co_return Error(token, "')' expected in window specification");
+    }
+
+    co_return std::make_shared<TSqlWindowSpec>(
+        std::move(partitionBy),
+        std::move(orderBy),
+        std::move(frame)
+    );
+}
+
+TAstTask<TSqlWindowFrame> window_frame(TParserContext& ctx) {
+    auto token = ctx.Stream.Next();
+    TSqlWindowFrame::EType frameType;
+    if (IsWord(token, "ROWS")) {
+        frameType = TSqlWindowFrame::EType::Rows;
+    } else if (IsWord(token, "RANGE")) {
+        frameType = TSqlWindowFrame::EType::Range;
+    } else {
+        ctx.Stream.Unget(token);
+        co_return nullptr;
+    }
+    token = ctx.Stream.Next();
+    if (IsKeyword(token, "BETWEEN")) {
+        auto start = co_await frame_bound(ctx);
+        auto andTok = ctx.Stream.Next();
+        if (!IsKeyword(andTok, "AND")) {
+            co_return Error(andTok, "`AND' expected in window frame");
+        }
+        auto end = co_await frame_bound(ctx);
+        co_return std::make_shared<TSqlWindowFrame>(frameType, std::move(start), std::move(end));
+    } else {
+        ctx.Stream.Unget(token);
+        co_return std::make_shared<TSqlWindowFrame>(
+            frameType, co_await frame_bound(ctx), nullptr
+        );
+    }
+}
+
+TAstTask<TSqlFrameBound> frame_bound(TParserContext& ctx) {
+    auto token = ctx.Stream.Next();
+    if (IsWord(token, "UNBOUNDED")) {
+        auto next = ctx.Stream.Next();
+        if (IsWord(next, "PRECEDING")) {
+            co_return std::make_shared<TSqlFrameBound>(TSqlFrameBound::EType::UnboundedPreceding, nullptr);
+        } else if (IsWord(next, "FOLLOWING")) {
+            co_return std::make_shared<TSqlFrameBound>(TSqlFrameBound::EType::UnboundedFollowing, nullptr);
+        } else {
+            ctx.Stream.Unget(next);
+            ctx.Stream.Unget(token);
+        }
+    } else if (IsWord(token, "CURRENT")) {
+        auto next = ctx.Stream.Next();
+        if (IsWord(next, "ROW")) {
+            co_return std::make_shared<TSqlFrameBound>(TSqlFrameBound::EType::CurrentRow, nullptr);
+        } else {
+            ctx.Stream.Unget(next);
+            ctx.Stream.Unget(token);
+        }
+    } else {
+        ctx.Stream.Unget(token);
+    }
+
+    auto e = co_await expr(ctx);
+    token = ctx.Stream.Next();
+    if (IsWord(token, "PRECEDING")) {
+        co_return std::make_shared<TSqlFrameBound>(TSqlFrameBound::EType::Preceding, std::move(e));
+    } else if (IsWord(token, "FOLLOWING")) {
+        co_return std::make_shared<TSqlFrameBound>(TSqlFrameBound::EType::Following, std::move(e));
+    } else {
+        co_return Error(token, "`PRECEDING' or `FOLLOWING' expected after expression");
+    }
 }
 
 TAstExprTask primary_expr(TParserContext& ctx) {

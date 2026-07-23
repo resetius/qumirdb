@@ -1,2 +1,69 @@
-Error: expected ';' or end of file @ Line: 7, Byte: 16, Column: 16
-
+(query
+  (select
+    (select-list
+      (item as gross_margin
+        (/ (call sum ss_net_profit) (call sum ss_ext_sales_price))
+      )
+      (item
+        i_category
+      )
+      (item
+        i_class
+      )
+      (item as lochierarchy
+        (+ (call grouping i_category) (call grouping i_class))
+      )
+      (item as rank_within_parent
+        (window
+          (call rank)
+          (over
+            (partition-by
+              (block
+                (+ (call grouping i_category) (call grouping i_class))
+                (if (call qdb_is_true (== (call grouping i_class) 0)) i_category)))
+            (order-by
+              (order asc
+                (/ (call sum ss_net_profit) (call sum ss_ext_sales_price))))))
+      )
+    )
+    (from
+      (table store_sales)
+      (table date_dim as d1)
+      (table item)
+      (table store)
+    )
+    (where
+      (&& (&& (&& (&& (== |d1.d_year| 2000) (== |d1.d_date_sk| ss_sold_date_sk)) (== i_item_sk ss_item_sk))
+          (== s_store_sk ss_store_sk))
+        (|| (|| (|| (|| (|| (|| (|| (== s_state (: (cast "TN" <named StringView>) <named StringView>))
+                      (== s_state (: (cast "TN" <named StringView>) <named StringView>)))
+                    (== s_state (: (cast "TN" <named StringView>) <named StringView>)))
+                  (== s_state (: (cast "TN" <named StringView>) <named StringView>)))
+                (== s_state (: (cast "TN" <named StringView>) <named StringView>)))
+              (== s_state (: (cast "TN" <named StringView>) <named StringView>)))
+            (== s_state (: (cast "TN" <named StringView>) <named StringView>)))
+          (== s_state (: (cast "TN" <named StringView>) <named StringView>))))
+    )
+    (group-by
+      (rollup
+        (block
+          i_category
+          i_class)
+      )
+    )
+  )
+  (order-by
+    (order desc
+      lochierarchy
+    )
+    (order asc
+      (if (call qdb_is_true (== lochierarchy 0)) i_category)
+    )
+    (order asc
+      rank_within_parent
+    )
+  )
+  (limit
+    100
+  )
+)

@@ -680,6 +680,119 @@ std::expected<TOperatorPtr, TError> BuildQuery(
     const NSql::TSqlQuery& query,
     const TTableSourceFactory& sources);
 
+bool HasWindowExpr(const NAst::TExprPtr& expr);
+bool HasWindowExpr(const NSql::TSqlQuery& query);
+bool HasWindowExpr(const NSql::TSqlNodePtr& node);
+
+bool HasWindowExpr(const NSql::TSqlPtr<NSql::TSqlOrder>& order) {
+    if (!order) {
+        return false;
+    }
+    for (const auto& item : order->Items) {
+        if (item && HasWindowExpr(item->Expr)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool HasWindowExpr(const NAst::TExprPtr& expr) {
+    if (!expr) {
+        return false;
+    }
+    if (NAst::TMaybeNode<NSql::TWindowExpr>(expr)) {
+        return true;
+    }
+    if (auto sub = NAst::TMaybeNode<NSql::TSubqueryExpr>(expr)) {
+        if (sub.Cast()->Query && HasWindowExpr(*sub.Cast()->Query)) {
+            return true;
+        }
+    }
+    for (const auto& child : expr->Children()) {
+        if (HasWindowExpr(child)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool HasWindowExpr(const NSql::TSqlQuery& query) {
+    if (query.WithClause) {
+        for (const auto& cte : query.WithClause->Ctes) {
+            if (cte && cte->Query && HasWindowExpr(*cte->Query)) {
+                return true;
+            }
+        }
+    }
+    return HasWindowExpr(query.Body)
+        || HasWindowExpr(query.OrderBy)
+        || HasWindowExpr(query.Limit)
+        || HasWindowExpr(query.Offset);
+}
+
+bool HasWindowExpr(const NSql::TSqlNodePtr& node) {
+    if (!node) {
+        return false;
+    }
+    if (auto query = NSql::TMaybeNode<NSql::TSqlQuery>(node)) {
+        return HasWindowExpr(*query.Cast());
+    }
+    if (auto select = NSql::TMaybeNode<NSql::TSqlSelect>(node)) {
+        auto s = select.Cast();
+        if (s->SelectList) {
+            for (const auto& item : s->SelectList->Items) {
+                if (item && !item->Star && HasWindowExpr(item->Expr)) {
+                    return true;
+                }
+            }
+        }
+        if (s->From) {
+            for (const auto& item : s->From->Items) {
+                if (HasWindowExpr(std::static_pointer_cast<NSql::TSqlNode>(item))) {
+                    return true;
+                }
+            }
+        }
+        if (s->GroupBy) {
+            for (const auto& item : s->GroupBy->Items) {
+                if (HasWindowExpr(item)) {
+                    return true;
+                }
+            }
+        }
+        return HasWindowExpr(s->Where) || HasWindowExpr(s->Having);
+    }
+    if (auto setOp = NSql::TMaybeNode<NSql::TSqlSetOp>(node)) {
+        return HasWindowExpr(setOp.Cast()->Left) || HasWindowExpr(setOp.Cast()->Right);
+    }
+    if (auto sub = NSql::TMaybeNode<NSql::TSqlSubqueryTable>(node)) {
+        return sub.Cast()->Query && HasWindowExpr(*sub.Cast()->Query);
+    }
+    if (auto join = NSql::TMaybeNode<NSql::TSqlJoin>(node)) {
+        auto j = join.Cast();
+        return HasWindowExpr(std::static_pointer_cast<NSql::TSqlNode>(j->Left))
+            || HasWindowExpr(std::static_pointer_cast<NSql::TSqlNode>(j->Right))
+            || (j->Condition && HasWindowExpr(j->Condition->On));
+    }
+    if (auto exprOrList = NSql::TMaybeNode<NSql::TSqlGroupingExprOrList>(node)) {
+        return HasWindowExpr(exprOrList.Cast()->Exprs);
+    }
+    if (auto rollup = NSql::TMaybeNode<NSql::TSqlRollUp>(node)) {
+        return HasWindowExpr(rollup.Cast()->Exprs);
+    }
+    if (auto cube = NSql::TMaybeNode<NSql::TSqlCube>(node)) {
+        return HasWindowExpr(cube.Cast()->Exprs);
+    }
+    if (auto groupingSet = NSql::TMaybeNode<NSql::TSqlGroupingSet>(node)) {
+        for (const auto& item : groupingSet.Cast()->Items) {
+            if (HasWindowExpr(item)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 // Renames a built sub-plan's output columns to the given list (CTE column lists
 // and derived-table column aliases). The sub-plan's top must be a projection.
 std::expected<TOperatorPtr, TError> ApplyColumnAliases(
@@ -1910,6 +2023,9 @@ std::expected<TOperatorPtr, TError> BuildQuery(
     const NSql::TSqlQuery& query,
     const TTableSourceFactory& sources)
 {
+    if (HasWindowExpr(query)) {
+        return std::unexpected(TError("window functions are not supported in plans yet"));
+    }
     if (!query.WithClause) {
         auto plan = BuildQueryBody(query.Body, sources);
         if (!plan) {

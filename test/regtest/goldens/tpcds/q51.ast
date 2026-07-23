@@ -1,2 +1,188 @@
-Error: expected ')' after CTE query @ Line: 6, Byte: 11, Column: 11
-
+(query
+  (with
+    (cte web_v1
+      (query
+        (select
+          (select-list
+            (item as item_sk
+              ws_item_sk
+            )
+            (item
+              d_date
+            )
+            (item as cume_sales
+              (window
+                (call sum (call sum ws_sales_price))
+                (over
+                  (partition-by
+                    (block
+                      ws_item_sk))
+                  (order-by
+                    (order asc
+                      d_date))
+                  (rows
+                    (between
+                      (unbounded-preceding)
+                      (current-row)))))
+            )
+          )
+          (from
+            (table web_sales)
+            (table date_dim)
+          )
+          (where
+            (&& (&& (== ws_sold_date_sk d_date_sk) (&& (<= 1212 d_month_seq) (<= d_month_seq (+ 1212 11))))
+              (! (call qdb_is_null ws_item_sk)))
+          )
+          (group-by
+            ws_item_sk
+            d_date
+          )
+        )
+      )
+    )
+    (cte store_v1
+      (query
+        (select
+          (select-list
+            (item as item_sk
+              ss_item_sk
+            )
+            (item
+              d_date
+            )
+            (item as cume_sales
+              (window
+                (call sum (call sum ss_sales_price))
+                (over
+                  (partition-by
+                    (block
+                      ss_item_sk))
+                  (order-by
+                    (order asc
+                      d_date))
+                  (rows
+                    (between
+                      (unbounded-preceding)
+                      (current-row)))))
+            )
+          )
+          (from
+            (table store_sales)
+            (table date_dim)
+          )
+          (where
+            (&& (&& (== ss_sold_date_sk d_date_sk) (&& (<= 1212 d_month_seq) (<= d_month_seq (+ 1212 11))))
+              (! (call qdb_is_null ss_item_sk)))
+          )
+          (group-by
+            ss_item_sk
+            d_date
+          )
+        )
+      )
+    )
+  )
+  (select
+    (select-list
+      (star *)
+    )
+    (from
+      (subquery-table as y
+        (query
+          (select
+            (select-list
+              (item
+                item_sk
+              )
+              (item
+                d_date
+              )
+              (item
+                web_sales
+              )
+              (item
+                store_sales
+              )
+              (item as web_cumulative
+                (window
+                  (call max web_sales)
+                  (over
+                    (partition-by
+                      (block
+                        item_sk))
+                    (order-by
+                      (order asc
+                        d_date))
+                    (rows
+                      (between
+                        (unbounded-preceding)
+                        (current-row)))))
+              )
+              (item as store_cumulative
+                (window
+                  (call max store_sales)
+                  (over
+                    (partition-by
+                      (block
+                        item_sk))
+                    (order-by
+                      (order asc
+                        d_date))
+                    (rows
+                      (between
+                        (unbounded-preceding)
+                        (current-row)))))
+              )
+            )
+            (from
+              (subquery-table as x
+                (query
+                  (select
+                    (select-list
+                      (item as item_sk
+                        (if (call qdb_is_true (! (call qdb_is_null |web.item_sk|))) |web.item_sk| |store.item_sk|)
+                      )
+                      (item as d_date
+                        (if (call qdb_is_true (! (call qdb_is_null |web.d_date|))) |web.d_date| |store.d_date|)
+                      )
+                      (item as web_sales
+                        |web.cume_sales|
+                      )
+                      (item as store_sales
+                        |store.cume_sales|
+                      )
+                    )
+                    (from
+                      (join full
+                        (table web_v1 as web)
+                        (table store_v1 as store)
+                        (on
+                          (&& (== |web.item_sk| |store.item_sk|) (== |web.d_date| |store.d_date|))
+                        )
+                      )
+                    )
+                  )
+                )
+              )
+            )
+          )
+        )
+      )
+    )
+    (where
+      (> web_cumulative store_cumulative)
+    )
+  )
+  (order-by
+    (order asc
+      item_sk
+    )
+    (order asc
+      d_date
+    )
+  )
+  (limit
+    100
+  )
+)

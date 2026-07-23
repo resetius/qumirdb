@@ -1,2 +1,92 @@
-Error: expected ')' after subquery @ Line: 5, Byte: 44, Column: 44
-
+(query
+  (select
+    (select-list
+      (star *)
+    )
+    (from
+      (subquery-table as tmp1
+        (query
+          (select
+            (select-list
+              (item
+                i_manager_id
+              )
+              (item as sum_sales
+                (call sum ss_sales_price)
+              )
+              (item as avg_monthly_sales
+                (window (call avg (call sum ss_sales_price)) (over (partition-by (block i_manager_id))))
+              )
+            )
+            (from
+              (table item)
+              (table store_sales)
+              (table date_dim)
+              (table store)
+            )
+            (where
+              (&& (&& (&& (&& (== ss_item_sk i_item_sk) (== ss_sold_date_sk d_date_sk)) (== ss_store_sk s_store_sk))
+                  (|| (|| (|| (|| (|| (|| (|| (|| (|| (|| (|| (== d_month_seq 1212) (== d_month_seq (+ 1212 1))) (== d_month_seq (+ 1212 2)))
+                                    (== d_month_seq (+ 1212 3)))
+                                  (== d_month_seq (+ 1212 4)))
+                                (== d_month_seq (+ 1212 5)))
+                              (== d_month_seq (+ 1212 6)))
+                            (== d_month_seq (+ 1212 7)))
+                          (== d_month_seq (+ 1212 8)))
+                        (== d_month_seq (+ 1212 9)))
+                      (== d_month_seq (+ 1212 10)))
+                    (== d_month_seq (+ 1212 11))))
+                (|| (&& (&& (|| (|| (== i_category (: (cast "Books" <named StringView>) <named StringView>))
+                          (== i_category (: (cast "Children" <named StringView>) <named StringView>)))
+                        (== i_category (: (cast "Electronics" <named StringView>) <named StringView>)))
+                      (|| (|| (|| (== i_class (: (cast "personal" <named StringView>) <named StringView>))
+                            (== i_class (: (cast "portable" <named StringView>) <named StringView>)))
+                          (== i_class (: (cast "reference" <named StringView>) <named StringView>)))
+                        (== i_class (: (cast "self-help" <named StringView>) <named StringView>))))
+                    (|| (|| (|| (== i_brand (: (cast "scholaramalgamalg #14" <named StringView>) <named StringView>))
+                          (== i_brand (: (cast "scholaramalgamalg #7" <named StringView>) <named StringView>)))
+                        (== i_brand (: (cast "exportiunivamalg #9" <named StringView>) <named StringView>)))
+                      (== i_brand (: (cast "scholaramalgamalg #9" <named StringView>) <named StringView>))))
+                  (&& (&& (|| (|| (== i_category (: (cast "Women" <named StringView>) <named StringView>))
+                          (== i_category (: (cast "Music" <named StringView>) <named StringView>)))
+                        (== i_category (: (cast "Men" <named StringView>) <named StringView>)))
+                      (|| (|| (|| (== i_class (: (cast "accessories" <named StringView>) <named StringView>))
+                            (== i_class (: (cast "classical" <named StringView>) <named StringView>)))
+                          (== i_class (: (cast "fragrances" <named StringView>) <named StringView>)))
+                        (== i_class (: (cast "pants" <named StringView>) <named StringView>))))
+                    (|| (|| (|| (== i_brand (: (cast "amalgimporto #1" <named StringView>) <named StringView>))
+                          (== i_brand (: (cast "edu packscholar #1" <named StringView>) <named StringView>)))
+                        (== i_brand (: (cast "exportiimporto #1" <named StringView>) <named StringView>)))
+                      (== i_brand (: (cast "importoamalg #1" <named StringView>) <named StringView>))))))
+            )
+            (group-by
+              i_manager_id
+              d_moy
+            )
+          )
+        )
+      )
+    )
+    (where
+      (> (if
+          (call qdb_is_true (> avg_monthly_sales 0))
+          (/ (call abs (- sum_sales avg_monthly_sales)) avg_monthly_sales)
+          (call qdb_sql_null))
+        0.10000000000000001)
+    )
+  )
+  (order-by
+    (order asc
+      i_manager_id
+    )
+    (order asc
+      avg_monthly_sales
+    )
+    (order asc
+      sum_sales
+    )
+  )
+  (limit
+    100
+  )
+)

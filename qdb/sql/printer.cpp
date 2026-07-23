@@ -17,20 +17,150 @@ std::string KindName(TSubqueryExpr::EKind kind) {
     switch (kind) {
         case TSubqueryExpr::EKind::Scalar: return "scalar";
         case TSubqueryExpr::EKind::Exists: return "exists";
-        case TSubqueryExpr::EKind::In:     return "in";
+        case TSubqueryExpr::EKind::In: return "in";
     }
     return "?";
 }
 
+std::string FrameTypeName(TSqlWindowFrame::EType type) {
+    switch (type) {
+        case TSqlWindowFrame::EType::Rows: return "rows";
+        case TSqlWindowFrame::EType::Range: return "range";
+    }
+    return "?";
+}
+
+std::string FrameBoundName(TSqlFrameBound::EType type) {
+    switch (type) {
+        case TSqlFrameBound::EType::UnboundedPreceding: return "unbounded-preceding";
+        case TSqlFrameBound::EType::Preceding: return "preceding";
+        case TSqlFrameBound::EType::CurrentRow: return "current-row";
+        case TSqlFrameBound::EType::Following: return "following";
+        case TSqlFrameBound::EType::UnboundedFollowing: return "unbounded-following";
+    }
+    return "?";
+}
+
+std::string NullOrderName(TSqlOrderItem::ENullOrder nullOrder) {
+    switch (nullOrder) {
+        case TSqlOrderItem::ENullOrder::Default: return "";
+        case TSqlOrderItem::ENullOrder::First: return " nulls-first";
+        case TSqlOrderItem::ENullOrder::Last: return " nulls-last";
+    }
+    return "";
+}
+
+void PrintWindowFrameBound(
+    const TSqlPtr<TSqlFrameBound>& bound,
+    NCore::TPrinter& p,
+    NCore::TPrintFrame frame)
+{
+    auto& out = p.GetOut();
+    if (!bound) {
+        out << "(null)";
+        return;
+    }
+    out << '(' << FrameBoundName(bound->Type);
+    if (bound->Expr) {
+        p.Separator(frame.Level + 1);
+        p.PrintExpr(bound->Expr, frame.AllowTypeWrap, frame.Level + 1);
+    }
+    out << ')';
+}
+
+void PrintWindowFrame(
+    const TSqlPtr<TSqlWindowFrame>& windowFrame,
+    NCore::TPrinter& p,
+    NCore::TPrintFrame frame)
+{
+    auto& out = p.GetOut();
+    if (!windowFrame) {
+        return;
+    }
+    out << '(' << FrameTypeName(windowFrame->Type);
+    p.Separator(frame.Level + 1);
+    if (windowFrame->End) {
+        out << "(between";
+        p.Separator(frame.Level + 2);
+        PrintWindowFrameBound(windowFrame->Start, p, {frame.AllowTypeWrap, frame.Level + 2});
+        p.Separator(frame.Level + 2);
+        PrintWindowFrameBound(windowFrame->End, p, {frame.AllowTypeWrap, frame.Level + 2});
+        out << ')';
+    } else {
+        PrintWindowFrameBound(windowFrame->Start, p, {frame.AllowTypeWrap, frame.Level + 1});
+    }
+    out << ')';
+}
+
+void PrintWindowOrderItem(
+    const TSqlPtr<TSqlOrderItem>& item,
+    NCore::TPrinter& p,
+    NCore::TPrintFrame frame)
+{
+    auto& out = p.GetOut();
+    std::string head = item->Desc ? "(order desc" : "(order asc";
+    head += NullOrderName(item->NullOrder);
+    out << head;
+    p.Separator(frame.Level + 1);
+    p.PrintExpr(item->Expr, frame.AllowTypeWrap, frame.Level + 1);
+    out << ')';
+}
+
+void PrintWindowSpec(
+    const TSqlPtr<TSqlWindowSpec>& spec,
+    NCore::TPrinter& p,
+    NCore::TPrintFrame frame)
+{
+    auto& out = p.GetOut();
+    out << "(over";
+    if (spec) {
+        if (spec->PartitionBy) {
+            p.Separator(frame.Level + 1);
+            out << "(partition-by";
+            p.Separator(frame.Level + 2);
+            p.PrintExpr(spec->PartitionBy, frame.AllowTypeWrap, frame.Level + 2);
+            out << ')';
+        }
+        if (spec->OrderBy) {
+            p.Separator(frame.Level + 1);
+            out << "(order-by";
+            for (const auto& item : spec->OrderBy->Items) {
+                p.Separator(frame.Level + 2);
+                PrintWindowOrderItem(item, p, {frame.AllowTypeWrap, frame.Level + 2});
+            }
+            out << ')';
+        }
+        if (spec->Frame) {
+            p.Separator(frame.Level + 1);
+            PrintWindowFrame(spec->Frame, p, {frame.AllowTypeWrap, frame.Level + 1});
+        }
+    }
+    out << ')';
+}
+
+void PrintWindowExpr(
+    TWindowExpr& window,
+    NCore::TPrinter& p,
+    NCore::TPrintFrame frame)
+{
+    auto& out = p.GetOut();
+    out << "(window";
+    p.Separator(frame.Level + 1);
+    p.PrintExpr(window.Expr, frame.AllowTypeWrap, frame.Level + 1);
+    p.Separator(frame.Level + 1);
+    PrintWindowSpec(window.WindowSpec, p, {frame.AllowTypeWrap, frame.Level + 1});
+    out << ')';
+}
+
 std::string JoinTypeName(ESqlJoinType type) {
     switch (type) {
-        case ESqlJoinType::Inner:     return "inner";
-        case ESqlJoinType::Left:      return "left";
-        case ESqlJoinType::Right:     return "right";
-        case ESqlJoinType::LeftSemi:  return "left-semi";
+        case ESqlJoinType::Inner: return "inner";
+        case ESqlJoinType::Left: return "left";
+        case ESqlJoinType::Right: return "right";
+        case ESqlJoinType::LeftSemi: return "left-semi";
         case ESqlJoinType::RightSemi: return "right-semi";
-        case ESqlJoinType::Full:      return "full";
-        case ESqlJoinType::Cross:     return "cross";
+        case ESqlJoinType::Full: return "full";
+        case ESqlJoinType::Cross: return "cross";
     }
     return "?";
 }
@@ -73,6 +203,10 @@ struct TSqlPrinter {
                 }
                 out << ' ' << PrintAst(std::static_pointer_cast<TSqlNode>(sub.Query));
                 out << ')';
+            };
+        opts.NodePrinters[TWindowExpr::NodeId] =
+            [](NQumir::NAst::TExpr& node, NCore::TPrinter& p, NCore::TPrintFrame frame) {
+                PrintWindowExpr(static_cast<TWindowExpr&>(node), p, frame);
             };
         return opts;
     }

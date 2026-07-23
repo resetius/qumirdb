@@ -102,6 +102,8 @@ static const std::unordered_set<std::string> Keywords = {
     "CUBE",
     "GROUPING",
     "SETS",
+
+    "PARTITION",
 };
 
 } // namespace
