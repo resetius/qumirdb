@@ -7,6 +7,7 @@
 #include <qdb/plan/ops/project.h>
 #include <qdb/plan/ops/sort.h>
 #include <qdb/plan/ops/source.h>
+#include <qdb/plan/ops/union.h>
 
 #include <qumir/parser/ast.h>
 #include <qumir/parser/type.h>
@@ -265,6 +266,21 @@ std::shared_ptr<TStructType> QualifyColumnsImpl(const TOperatorPtr& op) {
             outFields.emplace_back(spec.Name, nullptr);
         }
         return std::make_shared<TStructType>(std::move(outFields));
+    }
+
+    // ── Union ─────────────────────────────────────────────────────────────────
+    // Qualify every branch; the union's output schema follows the first branch
+    // (set-op columns are positional). Returning a non-null schema here is what
+    // lets a semi-join above a decorrelated EXISTS-in-OR keep a valid right
+    // schema — otherwise the join returns null and its ancestors stop qualifying.
+    if (auto maybe = TMaybeOp<TUnionAllOperator>(op)) {
+        auto un = maybe.Cast();
+        std::shared_ptr<TStructType> first;
+        for (auto& branch : un->MutableInputs()) {
+            auto branchSchema = QualifyColumnsImpl(branch);
+            if (!first) first = branchSchema;
+        }
+        return first;
     }
 
     // Unknown operator — recurse children to qualify sources beneath it.
