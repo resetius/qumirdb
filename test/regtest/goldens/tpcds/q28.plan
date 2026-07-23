@@ -1,2 +1,222 @@
-Error: mixing DISTINCT and non-DISTINCT aggregates is not supported
-
+(rel limit
+  (rel project
+    (rel join
+      (rel join
+        (rel join
+          (rel join
+            (rel join
+              (rel project
+                (rel project
+                  (rel aggregate
+                    (rel project
+                      (rel aggregate
+                        (rel filter
+                          (rel source "store_sales")
+                          (&& (&& (<= 0 ss_quantity) (<= ss_quantity 5))
+                            (|| (|| (&& (<= 11 ss_list_price) (<= ss_list_price (+ 11 10)))
+                                (&& (<= 460 ss_coupon_amt) (<= ss_coupon_amt (+ 460 1000))))
+                              (&& (<= 14 ss_wholesale_cost) (<= ss_wholesale_cost (+ 14 20))))))
+                        (keys ss_list_price)
+                        (agg partial_sum_0 sum ss_list_price)
+                        (agg partial_count_1 count ss_list_price)
+                        (agg partial_count_2 count ss_list_price))
+                      (partial_sum_0 partial_sum_0)
+                      (partial_count_1 partial_count_1)
+                      (partial_count_2 partial_count_2)
+                      (ss_list_price ss_list_price)
+                      (__group__ 1))
+                    (keys __group__)
+                    (agg sum_0 sum partial_sum_0)
+                    (agg count_1 sum partial_count_1)
+                    (agg count_2 sum partial_count_2)
+                    (agg count_3 count ss_list_price))
+                  (b1_lp (/ sum_0 (cast count_1 f64)))
+                  (b1_cnt count_2)
+                  (b1_cntd count_3))
+                (|b1.b1_lp| b1_lp)
+                (|b1.b1_cnt| b1_cnt)
+                (|b1.b1_cntd| b1_cntd))
+              (rel project
+                (rel project
+                  (rel aggregate
+                    (rel project
+                      (rel aggregate
+                        (rel filter
+                          (rel source "store_sales")
+                          (&& (&& (<= 6 ss_quantity) (<= ss_quantity 10))
+                            (|| (|| (&& (<= 91 ss_list_price) (<= ss_list_price (+ 91 10)))
+                                (&& (<= 1430 ss_coupon_amt) (<= ss_coupon_amt (+ 1430 1000))))
+                              (&& (<= 32 ss_wholesale_cost) (<= ss_wholesale_cost (+ 32 20))))))
+                        (keys ss_list_price)
+                        (agg partial_sum_0 sum ss_list_price)
+                        (agg partial_count_1 count ss_list_price)
+                        (agg partial_count_2 count ss_list_price))
+                      (partial_sum_0 partial_sum_0)
+                      (partial_count_1 partial_count_1)
+                      (partial_count_2 partial_count_2)
+                      (ss_list_price ss_list_price)
+                      (__group__ 1))
+                    (keys __group__)
+                    (agg sum_0 sum partial_sum_0)
+                    (agg count_1 sum partial_count_1)
+                    (agg count_2 sum partial_count_2)
+                    (agg count_3 count ss_list_price))
+                  (b2_lp (/ sum_0 (cast count_1 f64)))
+                  (b2_cnt count_2)
+                  (b2_cntd count_3))
+                (|b2.b2_lp| b2_lp)
+                (|b2.b2_cnt| b2_cnt)
+                (|b2.b2_cntd| b2_cntd))
+              ()
+              (inner))
+            (rel project
+              (rel project
+                (rel aggregate
+                  (rel project
+                    (rel aggregate
+                      (rel filter
+                        (rel source "store_sales")
+                        (&& (&& (<= 11 ss_quantity) (<= ss_quantity 15))
+                          (|| (|| (&& (<= 66 ss_list_price) (<= ss_list_price (+ 66 10)))
+                              (&& (<= 920 ss_coupon_amt) (<= ss_coupon_amt (+ 920 1000))))
+                            (&& (<= 4 ss_wholesale_cost) (<= ss_wholesale_cost (+ 4 20))))))
+                      (keys ss_list_price)
+                      (agg partial_sum_0 sum ss_list_price)
+                      (agg partial_count_1 count ss_list_price)
+                      (agg partial_count_2 count ss_list_price))
+                    (partial_sum_0 partial_sum_0)
+                    (partial_count_1 partial_count_1)
+                    (partial_count_2 partial_count_2)
+                    (ss_list_price ss_list_price)
+                    (__group__ 1))
+                  (keys __group__)
+                  (agg sum_0 sum partial_sum_0)
+                  (agg count_1 sum partial_count_1)
+                  (agg count_2 sum partial_count_2)
+                  (agg count_3 count ss_list_price))
+                (b3_lp (/ sum_0 (cast count_1 f64)))
+                (b3_cnt count_2)
+                (b3_cntd count_3))
+              (|b3.b3_lp| b3_lp)
+              (|b3.b3_cnt| b3_cnt)
+              (|b3.b3_cntd| b3_cntd))
+            ()
+            (inner))
+          (rel project
+            (rel project
+              (rel aggregate
+                (rel project
+                  (rel aggregate
+                    (rel filter
+                      (rel source "store_sales")
+                      (&& (&& (<= 16 ss_quantity) (<= ss_quantity 20))
+                        (|| (|| (&& (<= 142 ss_list_price) (<= ss_list_price (+ 142 10)))
+                            (&& (<= 3054 ss_coupon_amt) (<= ss_coupon_amt (+ 3054 1000))))
+                          (&& (<= 80 ss_wholesale_cost) (<= ss_wholesale_cost (+ 80 20))))))
+                    (keys ss_list_price)
+                    (agg partial_sum_0 sum ss_list_price)
+                    (agg partial_count_1 count ss_list_price)
+                    (agg partial_count_2 count ss_list_price))
+                  (partial_sum_0 partial_sum_0)
+                  (partial_count_1 partial_count_1)
+                  (partial_count_2 partial_count_2)
+                  (ss_list_price ss_list_price)
+                  (__group__ 1))
+                (keys __group__)
+                (agg sum_0 sum partial_sum_0)
+                (agg count_1 sum partial_count_1)
+                (agg count_2 sum partial_count_2)
+                (agg count_3 count ss_list_price))
+              (b4_lp (/ sum_0 (cast count_1 f64)))
+              (b4_cnt count_2)
+              (b4_cntd count_3))
+            (|b4.b4_lp| b4_lp)
+            (|b4.b4_cnt| b4_cnt)
+            (|b4.b4_cntd| b4_cntd))
+          ()
+          (inner))
+        (rel project
+          (rel project
+            (rel aggregate
+              (rel project
+                (rel aggregate
+                  (rel filter
+                    (rel source "store_sales")
+                    (&& (&& (<= 21 ss_quantity) (<= ss_quantity 25))
+                      (|| (|| (&& (<= 135 ss_list_price) (<= ss_list_price (+ 135 10)))
+                          (&& (<= 14180 ss_coupon_amt) (<= ss_coupon_amt (+ 14180 1000))))
+                        (&& (<= 38 ss_wholesale_cost) (<= ss_wholesale_cost (+ 38 20))))))
+                  (keys ss_list_price)
+                  (agg partial_sum_0 sum ss_list_price)
+                  (agg partial_count_1 count ss_list_price)
+                  (agg partial_count_2 count ss_list_price))
+                (partial_sum_0 partial_sum_0)
+                (partial_count_1 partial_count_1)
+                (partial_count_2 partial_count_2)
+                (ss_list_price ss_list_price)
+                (__group__ 1))
+              (keys __group__)
+              (agg sum_0 sum partial_sum_0)
+              (agg count_1 sum partial_count_1)
+              (agg count_2 sum partial_count_2)
+              (agg count_3 count ss_list_price))
+            (b5_lp (/ sum_0 (cast count_1 f64)))
+            (b5_cnt count_2)
+            (b5_cntd count_3))
+          (|b5.b5_lp| b5_lp)
+          (|b5.b5_cnt| b5_cnt)
+          (|b5.b5_cntd| b5_cntd))
+        ()
+        (inner))
+      (rel project
+        (rel project
+          (rel aggregate
+            (rel project
+              (rel aggregate
+                (rel filter
+                  (rel source "store_sales")
+                  (&& (&& (<= 26 ss_quantity) (<= ss_quantity 30))
+                    (|| (|| (&& (<= 28 ss_list_price) (<= ss_list_price (+ 28 10)))
+                        (&& (<= 2513 ss_coupon_amt) (<= ss_coupon_amt (+ 2513 1000))))
+                      (&& (<= 42 ss_wholesale_cost) (<= ss_wholesale_cost (+ 42 20))))))
+                (keys ss_list_price)
+                (agg partial_sum_0 sum ss_list_price)
+                (agg partial_count_1 count ss_list_price)
+                (agg partial_count_2 count ss_list_price))
+              (partial_sum_0 partial_sum_0)
+              (partial_count_1 partial_count_1)
+              (partial_count_2 partial_count_2)
+              (ss_list_price ss_list_price)
+              (__group__ 1))
+            (keys __group__)
+            (agg sum_0 sum partial_sum_0)
+            (agg count_1 sum partial_count_1)
+            (agg count_2 sum partial_count_2)
+            (agg count_3 count ss_list_price))
+          (b6_lp (/ sum_0 (cast count_1 f64)))
+          (b6_cnt count_2)
+          (b6_cntd count_3))
+        (|b6.b6_lp| b6_lp)
+        (|b6.b6_cnt| b6_cnt)
+        (|b6.b6_cntd| b6_cntd))
+      ()
+      (inner))
+    (b1_lp |b1.b1_lp|)
+    (b1_cnt |b1.b1_cnt|)
+    (b1_cntd |b1.b1_cntd|)
+    (b2_lp |b2.b2_lp|)
+    (b2_cnt |b2.b2_cnt|)
+    (b2_cntd |b2.b2_cntd|)
+    (b3_lp |b3.b3_lp|)
+    (b3_cnt |b3.b3_cnt|)
+    (b3_cntd |b3.b3_cntd|)
+    (b4_lp |b4.b4_lp|)
+    (b4_cnt |b4.b4_cnt|)
+    (b4_cntd |b4.b4_cntd|)
+    (b5_lp |b5.b5_lp|)
+    (b5_cnt |b5.b5_cnt|)
+    (b5_cntd |b5.b5_cntd|)
+    (b6_lp |b6.b6_lp|)
+    (b6_cnt |b6.b6_cnt|)
+    (b6_cntd |b6.b6_cntd|))
+  (limit 100))

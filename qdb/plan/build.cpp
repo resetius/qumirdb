@@ -313,6 +313,7 @@ private:
             }
             DistinctColumn_ = column;
             std::string name = NextName("count");
+            DistinctSpecNames_.insert(name);
             Specs_.push_back({ .Name = name, .Func = "count", .Arg = agg.Arg });
             return Ident(loc, name);
         }
@@ -323,12 +324,13 @@ private:
             return EmitStddevSamp(agg, loc);
         }
 
-        // avg has no aggregate kernel; express it as sum / count.
+        // avg has no aggregate kernel; express it as sum / count. The count is over the
+        // argument (not count(*)): SQL avg(x) ignores rows where x IS NULL.
         if (agg.Func == "avg") {
             std::string sumName = NextName("sum");
             Specs_.push_back({ .Name = sumName, .Func = "sum", .Arg = agg.Arg });
             std::string countName = NextName("count");
-            Specs_.push_back({ .Name = countName, .Func = "count", .Arg = nullptr });
+            Specs_.push_back({ .Name = countName, .Func = "count", .Arg = CloneExpr(agg.Arg) });
 
             NAst::TExprPtr count = Ident(loc, countName);
             if (!IsDecimalExprHint(agg.Arg)) {
@@ -355,7 +357,15 @@ private:
     const NAst::TStructType* InputSchema_ = nullptr;
     int Counter_ = 0;
     std::optional<std::string> DistinctColumn_;
+    std::set<std::string> DistinctSpecNames_;
     bool HasNonDistinct_ = false;
+
+public:
+    // Names of the aggregate specs realized as COUNT(DISTINCT); the rest are
+    // non-distinct. Used to split into two aggregations when both are present.
+    bool IsDistinctSpec(const std::string& name) const {
+        return DistinctSpecNames_.count(name) != 0;
+    }
 };
 
 std::string ItemName(const NSql::TSqlSelectItem& item, size_t index) {
@@ -1169,40 +1179,52 @@ std::expected<TOperatorPtr, TError> BuildSelect(
     if (!select.From) {
         return std::unexpected(TError("SELECT without FROM is not supported yet"));
     }
-    auto base = BuildFrom(*select.From, sources);
+    int scalarCounter = 0;
+    // Builds the pre-aggregate input (FROM + joins + WHERE). Called once per
+    // aggregation branch so a mixed DISTINCT/non-DISTINCT split gets independent
+    // subtrees (there is no deep operator clone; rebuilding from the AST is the
+    // simplest way to duplicate the input).
+    auto buildInput = [&]() -> std::expected<TOperatorPtr, TError> {
+        auto base = BuildFrom(*select.From, sources);
+        if (!base) {
+            return std::unexpected(base.error());
+        }
+        TOperatorPtr node = *base;
+        if (select.Where) {
+            std::vector<NAst::TExprPtr> conjuncts;
+            FlattenConjuncts(select.Where, conjuncts);
+
+            std::vector<NAst::TExprPtr> residual;
+            for (const auto& conjunct : conjuncts) {
+                if (auto decorrelation = AsDecorrelation(conjunct)) {
+                    auto joined = decorrelation->IsIn
+                        ? DecorrelateIn(node, *decorrelation->Subquery, decorrelation->Type, sources)
+                        : DecorrelateExists(node, *decorrelation->Subquery, decorrelation->Type, sources);
+                    if (!joined) {
+                        return std::unexpected(joined.error());
+                    }
+                    node = std::move(*joined);
+                } else {
+                    auto rewritten = ExtractScalarSubqueries(conjunct, node, sources, scalarCounter);
+                    if (!rewritten) {
+                        return std::unexpected(rewritten.error());
+                    }
+                    residual.push_back(std::move(*rewritten));
+                }
+            }
+
+            if (!residual.empty()) {
+                node = std::make_shared<TFilterOperator>(std::move(node), Conjoin(residual));
+            }
+        }
+        return node;
+    };
+
+    auto base = buildInput();
     if (!base) {
         return std::unexpected(base.error());
     }
     TOperatorPtr node = *base;
-    int scalarCounter = 0;
-
-    if (select.Where) {
-        std::vector<NAst::TExprPtr> conjuncts;
-        FlattenConjuncts(select.Where, conjuncts);
-
-        std::vector<NAst::TExprPtr> residual;
-        for (const auto& conjunct : conjuncts) {
-            if (auto decorrelation = AsDecorrelation(conjunct)) {
-                auto joined = decorrelation->IsIn
-                    ? DecorrelateIn(node, *decorrelation->Subquery, decorrelation->Type, sources)
-                    : DecorrelateExists(node, *decorrelation->Subquery, decorrelation->Type, sources);
-                if (!joined) {
-                    return std::unexpected(joined.error());
-                }
-                node = std::move(*joined);
-            } else {
-                auto rewritten = ExtractScalarSubqueries(conjunct, node, sources, scalarCounter);
-                if (!rewritten) {
-                    return std::unexpected(rewritten.error());
-                }
-                residual.push_back(std::move(*rewritten));
-            }
-        }
-
-        if (!residual.empty()) {
-            node = std::make_shared<TFilterOperator>(std::move(node), Conjoin(residual));
-        }
-    }
 
     if (!select.SelectList) {
         return std::unexpected(TError("empty select list"));
@@ -1346,24 +1368,56 @@ std::expected<TOperatorPtr, TError> BuildSelect(
     }
 
     if (auto distinctColumn = collector.DistinctColumn()) {
-        if (collector.HasNonDistinct()) {
-            return std::unexpected(
-                TError("mixing DISTINCT and non-DISTINCT aggregates is not supported"));
-        }
         if (!computedKeys.empty()) {
             return std::unexpected(
                 TError("GROUP BY on an expression with COUNT(DISTINCT) is not supported yet"));
         }
+        // Inner grouping keys: the group keys plus the distinct column, so each distinct
+        // value is one inner group (the dedup the hand plans use).
         std::vector<std::string> dedupKeys = keys;
         if (std::find(dedupKeys.begin(), dedupKeys.end(), *distinctColumn) == dedupKeys.end()) {
             dedupKeys.push_back(*distinctColumn);
         }
-        node = std::make_shared<TAggregateOperator>(
-            std::move(node), std::move(dedupKeys), std::vector<TAggregateSpec>{});
+
+        if (collector.HasNonDistinct()) {
+            // Mixed DISTINCT + non-DISTINCT (single distinct column): one input scan, a
+            // double aggregation with partials. The inner (grouped by group keys ∪ col)
+            // computes the non-distinct aggregates per (group, distinct value); the outer
+            // (grouped by group keys) merges them — sum→sum, count→sum, min/max→min/max —
+            // alongside count(col) for the distinct. No join, no input clone.
+            std::vector<TAggregateSpec> innerSpecs;
+            std::vector<TAggregateSpec> outerSpecs;
+            for (auto& spec : specs) {
+                if (collector.IsDistinctSpec(spec.Name)) {
+                    // col is an inner group key; count(col) in the outer counts distinct
+                    // non-null values.
+                    outerSpecs.push_back(std::move(spec));
+                    continue;
+                }
+                if (spec.Arg && !NAst::TMaybeNode<NAst::TIdentExpr>(spec.Arg)) {
+                    return std::unexpected(TError(
+                        "mixing DISTINCT with a computed aggregate argument is not supported"));
+                }
+                const std::string innerName = "partial_" + spec.Name;
+                const std::string mergeFunc = spec.Func == "count" ? "sum" : spec.Func;
+                innerSpecs.push_back({ .Name = innerName, .Func = spec.Func, .Arg = std::move(spec.Arg) });
+                outerSpecs.push_back({ .Name = spec.Name, .Func = mergeFunc, .Arg = Ident({}, innerName) });
+            }
+            node = std::make_shared<TAggregateOperator>(
+                std::move(node), std::move(dedupKeys), std::move(innerSpecs));
+            // The normal construction below builds the OUTER aggregate over `node`
+            // (the inner result) with these merge specs, grouped by the group keys.
+            specs = std::move(outerSpecs);
+        } else {
+            // Lone count(distinct): dedup, then count over the deduped rows below.
+            node = std::make_shared<TAggregateOperator>(
+                std::move(node), std::move(dedupKeys), std::vector<TAggregateSpec>{});
+        }
     }
 
     // A global aggregate (no GROUP BY) still needs a grouping-key descriptor, so
     // synthesize a constant key column and group by it, as the hand-written plans do.
+    {
     bool global = keys.empty();
 
     // The aggregate executor requires column-reference arguments, so materialize
@@ -1419,6 +1473,7 @@ std::expected<TOperatorPtr, TError> BuildSelect(
         aggregate->MutableGroupingSets() = std::move(groupingSets);
     }
     node = aggregate;
+    }
     if (having) {
         auto rewritten = ExtractScalarSubqueries(having, node, sources, scalarCounter);
         if (!rewritten) {
