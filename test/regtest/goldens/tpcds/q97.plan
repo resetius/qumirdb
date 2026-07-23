@@ -4,21 +4,27 @@
       (rel project
         (rel join
           (rel project
-            (rel aggregate
-              (rel filter
-                (rel join (rel source "store_sales") (rel source "date_dim") () (inner))
-                (&& (&& (== ss_sold_date_sk d_date_sk) (<= 1212 d_month_seq)) (<= d_month_seq (+ 1212 11))))
-              (keys ss_customer_sk ss_item_sk))
-            (customer_sk ss_customer_sk)
-            (item_sk ss_item_sk))
+            (rel project
+              (rel aggregate
+                (rel filter
+                  (rel join (rel source "store_sales") (rel source "date_dim") () (inner))
+                  (&& (&& (== ss_sold_date_sk d_date_sk) (<= 1212 d_month_seq)) (<= d_month_seq (+ 1212 11))))
+                (keys ss_customer_sk ss_item_sk))
+              (customer_sk ss_customer_sk)
+              (item_sk ss_item_sk))
+            (|ssci.customer_sk| customer_sk)
+            (|ssci.item_sk| item_sk))
           (rel project
-            (rel aggregate
-              (rel filter
-                (rel join (rel source "catalog_sales") (rel source "date_dim") () (inner))
-                (&& (&& (== cs_sold_date_sk d_date_sk) (<= 1212 d_month_seq)) (<= d_month_seq (+ 1212 11))))
-              (keys cs_bill_customer_sk cs_item_sk))
-            (customer_sk cs_bill_customer_sk)
-            (item_sk cs_item_sk))
+            (rel project
+              (rel aggregate
+                (rel filter
+                  (rel join (rel source "catalog_sales") (rel source "date_dim") () (inner))
+                  (&& (&& (== cs_sold_date_sk d_date_sk) (<= 1212 d_month_seq)) (<= d_month_seq (+ 1212 11))))
+                (keys cs_bill_customer_sk cs_item_sk))
+              (customer_sk cs_bill_customer_sk)
+              (item_sk cs_item_sk))
+            (|csci.customer_sk| customer_sk)
+            (|csci.item_sk| item_sk))
           ()
           (full)
           (&& (== |ssci.customer_sk| |csci.customer_sk|) (== |ssci.item_sk| |csci.item_sk|)))

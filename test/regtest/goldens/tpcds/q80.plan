@@ -7,60 +7,65 @@
             (rel union-all
               (rel project
                 (rel project
-                  (rel aggregate
-                    (rel project
-                      (rel filter
-                        (rel join
+                  (rel project
+                    (rel aggregate
+                      (rel project
+                        (rel filter
                           (rel join
                             (rel join
                               (rel join
                                 (rel join
-                                  (rel source "store_sales")
-                                  (rel source "store_returns")
+                                  (rel join
+                                    (rel source "store_sales")
+                                    (rel source "store_returns")
+                                    ()
+                                    (left)
+                                    (&& (== ss_item_sk sr_item_sk) (== ss_ticket_number sr_ticket_number)))
+                                  (rel source "date_dim")
                                   ()
-                                  (left)
-                                  (&& (== ss_item_sk sr_item_sk) (== ss_ticket_number sr_ticket_number)))
-                                (rel source "date_dim")
+                                  (inner))
+                                (rel source "store")
                                 ()
                                 (inner))
-                              (rel source "store")
+                              (rel source "item")
                               ()
                               (inner))
-                            (rel source "item")
+                            (rel source "promotion")
                             ()
                             (inner))
-                          (rel source "promotion")
-                          ()
-                          (inner))
-                        (&& (&& (&& (&& (&& (&& (&& (== ss_sold_date_sk d_date_sk)
-                                      (<= (: (cast
-                                            (: (cast "1998-08-04" <named StringView>) <named StringView>)
+                          (&& (&& (&& (&& (&& (&& (&& (== ss_sold_date_sk d_date_sk)
+                                        (<= (: (cast
+                                              (: (cast "1998-08-04" <named StringView>) <named StringView>)
+                                              <named DATE>)
                                             <named DATE>)
-                                          <named DATE>)
-                                        d_date))
-                                    (<= d_date
-                                      (+ (: (cast
-                                            (: (cast "1998-08-04" <named StringView>) <named StringView>)
+                                          d_date))
+                                      (<= d_date
+                                        (+ (: (cast
+                                              (: (cast "1998-08-04" <named StringView>) <named StringView>)
+                                              <named DATE>)
                                             <named DATE>)
-                                          <named DATE>)
-                                        (: 30 i32))))
-                                  (== ss_store_sk s_store_sk))
-                                (== ss_item_sk i_item_sk))
-                              (> i_current_price 50))
-                            (== ss_promo_sk p_promo_sk))
-                          (== p_channel_tv (: (cast "N" <named StringView>) <named StringView>))))
-                      (s_store_id s_store_id)
-                      (ss_ext_sales_price ss_ext_sales_price)
-                      (arg_0 (call coalesce sr_return_amt 0))
-                      (arg_1 (- ss_net_profit (call coalesce sr_net_loss 0))))
-                    (keys s_store_id)
-                    (agg sum_0 sum ss_ext_sales_price)
-                    (agg sum_1 sum arg_0)
-                    (agg sum_2 sum arg_1))
-                  (store_id s_store_id)
-                  (sales sum_0)
-                  (returns sum_1)
-                  (profit sum_2))
+                                          (: 30 i32))))
+                                    (== ss_store_sk s_store_sk))
+                                  (== ss_item_sk i_item_sk))
+                                (> i_current_price 50))
+                              (== ss_promo_sk p_promo_sk))
+                            (== p_channel_tv (: (cast "N" <named StringView>) <named StringView>))))
+                        (s_store_id s_store_id)
+                        (ss_ext_sales_price ss_ext_sales_price)
+                        (arg_0 (call coalesce sr_return_amt 0))
+                        (arg_1 (- ss_net_profit (call coalesce sr_net_loss 0))))
+                      (keys s_store_id)
+                      (agg sum_0 sum ss_ext_sales_price)
+                      (agg sum_1 sum arg_0)
+                      (agg sum_2 sum arg_1))
+                    (store_id s_store_id)
+                    (sales sum_0)
+                    (returns sum_1)
+                    (profit sum_2))
+                  (|ssr.store_id| store_id)
+                  (|ssr.sales| sales)
+                  (|ssr.returns| returns)
+                  (|ssr.profit| profit))
                 (channel (: (cast "store channel" <named StringView>) <named StringView>))
                 (id (call strcat (: (cast "store" <named StringView>) <named StringView>) store_id))
                 (sales sales)
@@ -68,60 +73,65 @@
                 (profit profit))
               (rel project
                 (rel project
-                  (rel aggregate
-                    (rel project
-                      (rel filter
-                        (rel join
+                  (rel project
+                    (rel aggregate
+                      (rel project
+                        (rel filter
                           (rel join
                             (rel join
                               (rel join
                                 (rel join
-                                  (rel source "catalog_sales")
-                                  (rel source "catalog_returns")
+                                  (rel join
+                                    (rel source "catalog_sales")
+                                    (rel source "catalog_returns")
+                                    ()
+                                    (left)
+                                    (&& (== cs_item_sk cr_item_sk) (== cs_order_number cr_order_number)))
+                                  (rel source "date_dim")
                                   ()
-                                  (left)
-                                  (&& (== cs_item_sk cr_item_sk) (== cs_order_number cr_order_number)))
-                                (rel source "date_dim")
+                                  (inner))
+                                (rel source "catalog_page")
                                 ()
                                 (inner))
-                              (rel source "catalog_page")
+                              (rel source "item")
                               ()
                               (inner))
-                            (rel source "item")
+                            (rel source "promotion")
                             ()
                             (inner))
-                          (rel source "promotion")
-                          ()
-                          (inner))
-                        (&& (&& (&& (&& (&& (&& (&& (== cs_sold_date_sk d_date_sk)
-                                      (<= (: (cast
-                                            (: (cast "1998-08-04" <named StringView>) <named StringView>)
+                          (&& (&& (&& (&& (&& (&& (&& (== cs_sold_date_sk d_date_sk)
+                                        (<= (: (cast
+                                              (: (cast "1998-08-04" <named StringView>) <named StringView>)
+                                              <named DATE>)
                                             <named DATE>)
-                                          <named DATE>)
-                                        d_date))
-                                    (<= d_date
-                                      (+ (: (cast
-                                            (: (cast "1998-08-04" <named StringView>) <named StringView>)
+                                          d_date))
+                                      (<= d_date
+                                        (+ (: (cast
+                                              (: (cast "1998-08-04" <named StringView>) <named StringView>)
+                                              <named DATE>)
                                             <named DATE>)
-                                          <named DATE>)
-                                        (: 30 i32))))
-                                  (== cs_catalog_page_sk cp_catalog_page_sk))
-                                (== cs_item_sk i_item_sk))
-                              (> i_current_price 50))
-                            (== cs_promo_sk p_promo_sk))
-                          (== p_channel_tv (: (cast "N" <named StringView>) <named StringView>))))
-                      (cp_catalog_page_id cp_catalog_page_id)
-                      (cs_ext_sales_price cs_ext_sales_price)
-                      (arg_0 (call coalesce cr_return_amount 0))
-                      (arg_1 (- cs_net_profit (call coalesce cr_net_loss 0))))
-                    (keys cp_catalog_page_id)
-                    (agg sum_0 sum cs_ext_sales_price)
-                    (agg sum_1 sum arg_0)
-                    (agg sum_2 sum arg_1))
-                  (catalog_page_id cp_catalog_page_id)
-                  (sales sum_0)
-                  (returns sum_1)
-                  (profit sum_2))
+                                          (: 30 i32))))
+                                    (== cs_catalog_page_sk cp_catalog_page_sk))
+                                  (== cs_item_sk i_item_sk))
+                                (> i_current_price 50))
+                              (== cs_promo_sk p_promo_sk))
+                            (== p_channel_tv (: (cast "N" <named StringView>) <named StringView>))))
+                        (cp_catalog_page_id cp_catalog_page_id)
+                        (cs_ext_sales_price cs_ext_sales_price)
+                        (arg_0 (call coalesce cr_return_amount 0))
+                        (arg_1 (- cs_net_profit (call coalesce cr_net_loss 0))))
+                      (keys cp_catalog_page_id)
+                      (agg sum_0 sum cs_ext_sales_price)
+                      (agg sum_1 sum arg_0)
+                      (agg sum_2 sum arg_1))
+                    (catalog_page_id cp_catalog_page_id)
+                    (sales sum_0)
+                    (returns sum_1)
+                    (profit sum_2))
+                  (|csr.catalog_page_id| catalog_page_id)
+                  (|csr.sales| sales)
+                  (|csr.returns| returns)
+                  (|csr.profit| profit))
                 (channel (: (cast "catalog channel" <named StringView>) <named StringView>))
                 (id (call strcat (: (cast "catalog_page" <named StringView>) <named StringView>) catalog_page_id))
                 (sales sales)
@@ -129,60 +139,65 @@
                 (profit profit))
               (rel project
                 (rel project
-                  (rel aggregate
-                    (rel project
-                      (rel filter
-                        (rel join
+                  (rel project
+                    (rel aggregate
+                      (rel project
+                        (rel filter
                           (rel join
                             (rel join
                               (rel join
                                 (rel join
-                                  (rel source "web_sales")
-                                  (rel source "web_returns")
+                                  (rel join
+                                    (rel source "web_sales")
+                                    (rel source "web_returns")
+                                    ()
+                                    (left)
+                                    (&& (== ws_item_sk wr_item_sk) (== ws_order_number wr_order_number)))
+                                  (rel source "date_dim")
                                   ()
-                                  (left)
-                                  (&& (== ws_item_sk wr_item_sk) (== ws_order_number wr_order_number)))
-                                (rel source "date_dim")
+                                  (inner))
+                                (rel source "web_site")
                                 ()
                                 (inner))
-                              (rel source "web_site")
+                              (rel source "item")
                               ()
                               (inner))
-                            (rel source "item")
+                            (rel source "promotion")
                             ()
                             (inner))
-                          (rel source "promotion")
-                          ()
-                          (inner))
-                        (&& (&& (&& (&& (&& (&& (&& (== ws_sold_date_sk d_date_sk)
-                                      (<= (: (cast
-                                            (: (cast "1998-08-04" <named StringView>) <named StringView>)
+                          (&& (&& (&& (&& (&& (&& (&& (== ws_sold_date_sk d_date_sk)
+                                        (<= (: (cast
+                                              (: (cast "1998-08-04" <named StringView>) <named StringView>)
+                                              <named DATE>)
                                             <named DATE>)
-                                          <named DATE>)
-                                        d_date))
-                                    (<= d_date
-                                      (+ (: (cast
-                                            (: (cast "1998-08-04" <named StringView>) <named StringView>)
+                                          d_date))
+                                      (<= d_date
+                                        (+ (: (cast
+                                              (: (cast "1998-08-04" <named StringView>) <named StringView>)
+                                              <named DATE>)
                                             <named DATE>)
-                                          <named DATE>)
-                                        (: 30 i32))))
-                                  (== ws_web_site_sk web_site_sk))
-                                (== ws_item_sk i_item_sk))
-                              (> i_current_price 50))
-                            (== ws_promo_sk p_promo_sk))
-                          (== p_channel_tv (: (cast "N" <named StringView>) <named StringView>))))
-                      (web_site_id web_site_id)
-                      (ws_ext_sales_price ws_ext_sales_price)
-                      (arg_0 (call coalesce wr_return_amt 0))
-                      (arg_1 (- ws_net_profit (call coalesce wr_net_loss 0))))
-                    (keys web_site_id)
-                    (agg sum_0 sum ws_ext_sales_price)
-                    (agg sum_1 sum arg_0)
-                    (agg sum_2 sum arg_1))
-                  (web_site_id web_site_id)
-                  (sales sum_0)
-                  (returns sum_1)
-                  (profit sum_2))
+                                          (: 30 i32))))
+                                    (== ws_web_site_sk web_site_sk))
+                                  (== ws_item_sk i_item_sk))
+                                (> i_current_price 50))
+                              (== ws_promo_sk p_promo_sk))
+                            (== p_channel_tv (: (cast "N" <named StringView>) <named StringView>))))
+                        (web_site_id web_site_id)
+                        (ws_ext_sales_price ws_ext_sales_price)
+                        (arg_0 (call coalesce wr_return_amt 0))
+                        (arg_1 (- ws_net_profit (call coalesce wr_net_loss 0))))
+                      (keys web_site_id)
+                      (agg sum_0 sum ws_ext_sales_price)
+                      (agg sum_1 sum arg_0)
+                      (agg sum_2 sum arg_1))
+                    (web_site_id web_site_id)
+                    (sales sum_0)
+                    (returns sum_1)
+                    (profit sum_2))
+                  (|wsr.web_site_id| web_site_id)
+                  (|wsr.sales| sales)
+                  (|wsr.returns| returns)
+                  (|wsr.profit| profit))
                 (channel (: (cast "web channel" <named StringView>) <named StringView>))
                 (id (call strcat (: (cast "web_site" <named StringView>) <named StringView>) web_site_id))
                 (sales sales)

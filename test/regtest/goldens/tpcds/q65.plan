@@ -52,7 +52,7 @@
           (== i_item_sk |sc.ss_item_sk|)))
       (s_store_name s_store_name)
       (i_item_desc i_item_desc)
-      (|sc.revenue| |sc.revenue|)
+      (revenue |sc.revenue|)
       (i_current_price i_current_price)
       (i_wholesale_cost i_wholesale_cost)
       (i_brand i_brand))
