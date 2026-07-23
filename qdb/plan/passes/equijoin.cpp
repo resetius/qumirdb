@@ -14,6 +14,7 @@
 #include "flatten_conjuncts.h"
 #include "flatten_disjuncts.h"
 
+#include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -325,6 +326,17 @@ TOperatorPtr ProcessJoin(std::shared_ptr<TJoinOperator> join, TContext ctx)
                 left.push_back(col);
             } else if (rightCols.count(col)) {
                 right.push_back(col);
+            } else {
+                // The column is part of an equi-join class but exists in neither
+                // input schema — it cannot become a key nor be pushed to a child,
+                // so the edge would be silently dropped (turning the join into an
+                // accidental cross product). This means an upstream column stayed
+                // unqualified/unresolved; fail loudly instead of producing a plan
+                // that materializes a cartesian.
+                throw std::runtime_error(
+                    "ExtractEquiJoins: equi-join column '" + col +
+                    "' is absent from both join inputs (unqualified or unresolved "
+                    "column); the join edge would be dropped");
             }
         }
 

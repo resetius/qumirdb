@@ -12,6 +12,7 @@
 #include <qdb/kernel/annotate_type.h>
 #include <qdb/plan/clone_expr.h>
 #include <qdb/plan/passes/flatten_conjuncts.h>
+#include <qdb/plan/passes/flatten_disjuncts.h>
 #include <qdb/plan/types/decimal.h>
 
 #include <qumir/parser/ast.h>
@@ -1039,6 +1040,87 @@ void RenameIdents(
     }
 }
 
+// A conjunct that is a disjunction of positive EXISTS subqueries (`exists(A) OR
+// exists(B) [OR …]`). Returns the EXISTS subqueries, or empty if the shape doesn't match.
+std::vector<std::shared_ptr<NSql::TSubqueryExpr>> AsExistsOrDisjunction(
+    const NAst::TExprPtr& conjunct)
+{
+    std::vector<NAst::TExprPtr> disjuncts;
+    FlattenDisjuncts(conjunct, disjuncts);
+    if (disjuncts.size() < 2) {
+        return {};
+    }
+    std::vector<std::shared_ptr<NSql::TSubqueryExpr>> existsList;
+    for (const auto& d : disjuncts) {
+        auto sub = NAst::TMaybeNode<NSql::TSubqueryExpr>(d);
+        if (!sub || sub.Cast()->Kind != NSql::TSubqueryExpr::EKind::Exists) {
+            return {};
+        }
+        existsList.push_back(sub.Cast());
+    }
+    return existsList;
+}
+
+// `exists(A) OR exists(B) OR …`, where every EXISTS is correlated to the SAME outer
+// column by a single equality, is equivalent to `outer IN (A_key UNION ALL B_key …)`:
+// a row satisfies the OR iff its outer key matches any branch. Each branch's correlation
+// is neutralized and its inner key projected under a common name; the union feeds one
+// left-semi join. Returns nullopt when the shape isn't supported (caller falls back).
+std::expected<std::optional<TOperatorPtr>, TError> DecorrelateExistsOr(
+    TOperatorPtr left,
+    const std::vector<std::shared_ptr<NSql::TSubqueryExpr>>& existsList,
+    const TTableSourceFactory& sources)
+{
+    std::optional<std::string> outerKey;
+    std::vector<TOperatorPtr> branches;
+    for (const auto& sub : existsList) {
+        auto maybeSelect = NSql::TMaybeNode<NSql::TSqlSelect>(sub->Query->Body);
+        if (!maybeSelect) {
+            return std::optional<TOperatorPtr>{};
+        }
+        auto select = maybeSelect.Cast();
+        if (sub->Query->WithClause || select->GroupBy || select->Having || !select->From
+            || !select->Where || HasSubquery(select->Where))
+        {
+            return std::optional<TOperatorPtr>{};
+        }
+        std::unordered_set<std::string> local;
+        for (const auto& item : select->From->Items) {
+            CollectLocalColumns(item, sources, local);
+        }
+        std::vector<std::pair<std::string, std::string>> corrs;
+        CollectCorrelations(select->Where, local, corrs);
+        std::set<std::pair<std::string, std::string>> uniq(corrs.begin(), corrs.end());
+        if (uniq.size() != 1) {
+            return std::optional<TOperatorPtr>{}; // need exactly one correlation
+        }
+        const auto& [outer, inner] = *uniq.begin();
+        if (!outerKey) {
+            outerKey = outer;
+        } else if (*outerKey != outer) {
+            return std::optional<TOperatorPtr>{}; // branches must share the outer key
+        }
+        auto body = BuildFrom(*select->From, sources);
+        if (!body) {
+            return std::unexpected(body.error());
+        }
+        auto where = CloneExpr(select->Where);
+        RenameIdents(where, {{outer, inner}}); // correlation -> inner=inner (tautology)
+        TOperatorPtr filtered = std::make_shared<TFilterOperator>(std::move(*body), std::move(where));
+        std::vector<TProjectionSpec> projs{
+            { .Name = "__exists_key__", .Expression = Ident(sub->Location, inner) }};
+        branches.push_back(std::make_shared<TProjectOperator>(
+            std::move(filtered), std::move(projs)));
+    }
+    auto un = std::make_shared<TUnionAllOperator>(std::move(branches));
+    // Keyed left-semi (not a residual) so cost-based join reordering, which runs before
+    // equi-key extraction, sees this as an equi-join and does not cross-join around it.
+    std::vector<TJoinKey> keys{ TJoinKey{ *outerKey, "__exists_key__" } };
+    return std::optional<TOperatorPtr>{std::make_shared<TJoinOperator>(
+        std::move(left), std::move(un), std::move(keys),
+        EJoinType::LeftSemi, nullptr)};
+}
+
 // True if any identifier leaf is not a local column (a leftover outer reference not
 // covered by a correlation equality — that shape we cannot decorrelate).
 bool HasUnmappedOuter(
@@ -1213,13 +1295,24 @@ std::expected<TOperatorPtr, TError> BuildSelect(
                         return std::unexpected(joined.error());
                     }
                     node = std::move(*joined);
-                } else {
-                    auto rewritten = ExtractScalarSubqueries(conjunct, node, sources, scalarCounter);
-                    if (!rewritten) {
-                        return std::unexpected(rewritten.error());
-                    }
-                    residual.push_back(std::move(*rewritten));
+                    continue;
                 }
+                if (auto existsList = AsExistsOrDisjunction(conjunct); !existsList.empty()) {
+                    auto joined = DecorrelateExistsOr(node, existsList, sources);
+                    if (!joined) {
+                        return std::unexpected(joined.error());
+                    }
+                    if (*joined) {
+                        node = std::move(**joined);
+                        continue;
+                    }
+                    // Unsupported EXISTS-OR shape: fall through to the residual path.
+                }
+                auto rewritten = ExtractScalarSubqueries(conjunct, node, sources, scalarCounter);
+                if (!rewritten) {
+                    return std::unexpected(rewritten.error());
+                }
+                residual.push_back(std::move(*rewritten));
             }
 
             if (!residual.empty()) {
