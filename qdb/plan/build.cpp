@@ -1281,6 +1281,59 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
     }
     if (auto sub = NAst::TMaybeNode<NSql::TSubqueryExpr>(expr)) {
         auto scalar = sub.Cast();
+        if (scalar->Kind == NSql::TSubqueryExpr::EKind::In) {
+            // An uncorrelated IN-subquery nested inside a boolean expression (e.g. one
+            // side of an OR) cannot be a semi-join — that would drop rows the OR keeps.
+            // Rewrite it as a mark join: LEFT-join `node` to the DISTINCT subquery on
+            // the IN key, then replace `x IN (subquery)` with `marker IS NOT NULL`.
+            if (!scalar->Operand || HasSubquery(scalar->Operand)) {
+                return std::unexpected(TError("unsupported IN operand"));
+            }
+            // Only uncorrelated IN is supported here: a correlated body would leave
+            // outer columns unbound in the standalone subquery plan. (`!local.empty()`
+            // avoids misfiring on empty-schema mock builds — see the scalar guard.)
+            if (auto sel = NSql::TMaybeNode<NSql::TSqlSelect>(scalar->Query->Body);
+                sel && sel.Cast()->From && sel.Cast()->Where)
+            {
+                std::unordered_set<std::string> local;
+                for (const auto& item : sel.Cast()->From->Items) {
+                    CollectLocalColumns(item, sources, local);
+                }
+                if (!local.empty() && HasUnmappedOuter(sel.Cast()->Where, local)) {
+                    return std::unexpected(TError(
+                        "correlated IN subquery in a boolean expression is not supported"));
+                }
+            }
+            auto plan = BuildQuery(*scalar->Query, sources);
+            if (!plan) {
+                return std::unexpected(plan.error());
+            }
+            auto project = TMaybeOp<TProjectOperator>(*plan);
+            if (!project || project.Cast()->Projections().size() != 1) {
+                return std::unexpected(TError("IN subquery must return exactly one column"));
+            }
+            std::string markName = "__in_mark_" + std::to_string(counter++) + "__";
+            project.Cast()->MutableProjections()[0].Name = markName;
+            // Dedup so each outer row matches at most one right row (no duplication).
+            auto distinct = ApplyDistinct(*plan, { markName });
+            // Left join null-extends `markName` to NULL on non-match — the marker.
+            std::vector<TJoinKey> keys;
+            NAst::TExprPtr residual;
+            if (auto ident = NAst::TMaybeNode<NAst::TIdentExpr>(scalar->Operand)) {
+                keys.push_back(TJoinKey{ ident.Cast()->Name, markName });
+            } else {
+                residual = std::make_shared<NAst::TBinaryExpr>(
+                    scalar->Operand->Location, NAst::TOperator("=="),
+                    scalar->Operand, Ident(scalar->Operand->Location, markName));
+            }
+            node = std::make_shared<TJoinOperator>(
+                std::move(node), std::move(distinct), std::move(keys),
+                EJoinType::Left, std::move(residual));
+            // Replace `x IN (subquery)` with `!(qdb_is_null(marker))`.
+            return std::make_shared<NAst::TUnaryExpr>(
+                expr->Location, NAst::TOperator("!"),
+                Call(expr->Location, "qdb_is_null", { Ident(expr->Location, markName) }));
+        }
         if (scalar->Kind != NSql::TSubqueryExpr::EKind::Scalar) {
             return std::unexpected(TError("subquery is not supported in this position"));
         }
