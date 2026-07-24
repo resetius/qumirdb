@@ -17,6 +17,8 @@ The queries are the same set mirrored in `test/regtest/cases/tpcds/` (q01–q99)
 ./run_tpcds.sh /path/to/tpcds            # all discovered scales
 ./run_tpcds.sh /path/to/tpcds 1          # scale factor 1 only
 ./run_tpcds.sh /path/to/tpcds 1 6,19,42  # a subset of queries
+./run_tpcds.sh /path/to/tpcds 1 14       # all split parts for q14
+./run_tpcds.sh /path/to/tpcds 1 14_1     # one split query part
 
 # threaded execution
 QDB_ARGS='--scheduler threaded --scheduler-workers 4' ./run_tpcds.sh /path/to/tpcds 1
