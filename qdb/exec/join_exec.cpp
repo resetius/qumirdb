@@ -30,7 +30,8 @@ TInnerJoinProcessor::TInnerJoinProcessor(
 }
 
 bool TInnerJoinProcessor::IsOuter() const {
-    return JoinType_ == EJoinType::Left || JoinType_ == EJoinType::Right;
+    return JoinType_ == EJoinType::Left || JoinType_ == EJoinType::Right
+        || JoinType_ == EJoinType::Full;
 }
 
 bool TInnerJoinProcessor::IsSemiAnti() const {

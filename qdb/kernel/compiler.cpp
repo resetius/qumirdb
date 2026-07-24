@@ -1684,10 +1684,11 @@ TJoinKernels TKernelCompiler::CompileJoin(
 
     const bool isSemiAnti = (type == EJoinType::LeftSemi || type == EJoinType::LeftAnti);
     const bool isResidualSemiAnti = isSemiAnti && static_cast<bool>(residualPredicate);
-    const bool isOuter = (type == EJoinType::Left || type == EJoinType::Right);
+    const bool isOuter =
+        (type == EJoinType::Left || type == EJoinType::Right || type == EJoinType::Full);
     if (!isSemiAnti && !isOuter && type != EJoinType::Inner) {
         throw NQumir::TError(
-            "CompileJoin: only Inner, Left, Right, LeftSemi, and LeftAnti join types are supported");
+            "CompileJoin: only Inner, Left, Right, Full, LeftSemi, and LeftAnti join types are supported");
     }
 
     // Unified key descriptor (reuses the aggregation key machinery). Throws on
