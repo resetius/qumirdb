@@ -150,6 +150,7 @@ struct TConfig {
     TFormatSpec Format;
     bool Verbose = false;
     bool EnableCbo = true;
+    bool Timing = false;
     NQdb::NScheduler::TSettings Scheduler;
 };
 
@@ -260,6 +261,9 @@ int RunQuery(ESyntax syntax, std::istream& in, const TConfig& config) {
     bool explain = StripExplain(text);
     std::istringstream stream(text);
 
+    // Phase 1 — planner pipeline: parse + BuildPlan + ApplyPlanPasses. Timed
+    // separately from execution; reported only under --timing (see below).
+    auto planStart = std::chrono::steady_clock::now();
     std::expected<NQdb::TOperatorPtr, NQumir::TError> plan;
     if (syntax == ESyntax::Sql) {
         auto factory = [&](std::string_view table)
@@ -283,6 +287,7 @@ int RunQuery(ESyntax syntax, std::istream& in, const TConfig& config) {
     }
 
     NQdb::ApplyPlanPasses(*plan, {.EnableCbo = config.EnableCbo});
+    auto planElapsed = std::chrono::steady_clock::now() - planStart;
 
     if (config.Verbose) {
         std::cerr << "========== LOGICAL PLAN ==========\n";
@@ -312,11 +317,18 @@ int RunQuery(ESyntax syntax, std::istream& in, const TConfig& config) {
         NQdb::PrintRuntimePlan(*diagnostics, *plan);
     }
 
+    // Phase 2 — kernel compilation (non-LLVM): kernel-AST generation happens
+    // eagerly inside lowering.
+    auto buildStart = std::chrono::steady_clock::now();
     auto lowered = NQdb::NScheduler::LowerPlanToGraph(
         *plan, config.Scheduler, diagnostics);
-    // JIT the kernels up front so the reported query time excludes kernel
-    // compilation (RunPlanIntoSink's own finalize pass is then a no-op).
+    auto buildElapsed = std::chrono::steady_clock::now() - buildStart;
+    // Phase 3 — kernel compilation (LLVM): JIT the kernels up front so the
+    // reported query time excludes kernel compilation (RunPlanIntoSink's own
+    // finalize pass is then a no-op).
+    auto llvmStart = std::chrono::steady_clock::now();
     NQdb::JitFinalizeKernels(lowered.Kernels, diagnostics);
+    auto llvmElapsed = std::chrono::steady_clock::now() - llvmStart;
 
     std::vector<std::string> outputNames;
     std::vector<NQdb::TColumnSchema> outputColumns;
@@ -342,6 +354,15 @@ int RunQuery(ESyntax syntax, std::istream& in, const TConfig& config) {
     }
     counting.Flush();
     auto elapsed = std::chrono::steady_clock::now() - start;
+    // Per-phase compile timings, kept out of the execution total above.
+    if (config.Timing) {
+        std::cerr << "Planning: "
+                  << std::chrono::duration<double>(planElapsed).count() << " seconds\n"
+                  << "KernelBuild: "
+                  << std::chrono::duration<double>(buildElapsed).count() << " seconds\n"
+                  << "JitLLVM: "
+                  << std::chrono::duration<double>(llvmElapsed).count() << " seconds\n";
+    }
     std::cerr << "Returned " << counting.Rows() << " rows in "
               << std::chrono::duration<double>(elapsed).count() << " seconds\n";
     return 0;
@@ -519,6 +540,7 @@ void PrintHelp() {
         "  --shuffle-target-bytes <n>   Target bytes per materialized shuffle batch\n"
         "  --nocbo                      Disable cost-based join reordering\n"
         "  --verbose                    Print the logical and runtime plans\n"
+        "  --timing                     Print per-phase timings (planning, kernel build, LLVM)\n"
         "  --help|-h                    Show this help message\n"
         "\n"
         "Without -i, qdb starts an interactive SQL prompt (statements end with ';').\n";
@@ -675,6 +697,8 @@ int main(int argc, char** argv) {
             config.EnableCbo = false;
         } else if (!std::strcmp(argv[i], "--verbose")) {
             config.Verbose = true;
+        } else if (!std::strcmp(argv[i], "--timing")) {
+            config.Timing = true;
         } else if (!std::strcmp(argv[i], "--help") || !std::strcmp(argv[i], "-h")) {
             PrintHelp();
             return 0;
