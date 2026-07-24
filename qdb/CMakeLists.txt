@@ -51,6 +51,7 @@ add_library(qumirdb
     kernel/lib.cpp
     kernel/compiler.cpp
     kernel/finalize.cpp
+    kernel/finalize_dedup.cpp
     exec/filter_exec.cpp
     exec/project_exec.cpp
     exec/aggregate_exec.cpp

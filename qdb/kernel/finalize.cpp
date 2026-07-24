@@ -1,9 +1,14 @@
 #include <qdb/kernel/finalize.h>
 
 #include <qdb/kernel/compiler.h>
+#include <qdb/kernel/finalize_dedup.h>
 
+#include <cstddef>
+#include <memory>
 #include <ostream>
 #include <stdexcept>
+#include <string>
+#include <utility>
 
 namespace NQdb {
 
@@ -11,6 +16,8 @@ void JitFinalizeKernels(
     std::span<TGeneratedKernel> kernels,
     std::ostream* diagnostics)
 {
+    TKernelDedupCache dedup;
+
     for (auto& kernel : kernels) {
         if (!kernel.Slot) {
             throw std::logic_error(
@@ -19,6 +26,12 @@ void JitFinalizeKernels(
         if (kernel.Slot->Runner) {
             continue; // already bound
         }
+
+        std::string dedupKey = MakeKernelDedupKey(kernel);
+        if (dedup.TryBind(kernel, dedupKey, diagnostics)) {
+            continue;
+        }
+
         if (diagnostics) {
             *diagnostics << "\n========== RUNTIME FINALIZE: " << kernel.Name
                          << " (" << kernel.Stage << ") ==========\n";
@@ -46,7 +59,11 @@ void JitFinalizeKernels(
             kernel.Slot->Fns[i] = it->second;
         }
         kernel.Slot->Runner = std::move(runner);
+
+        dedup.Store(std::move(dedupKey), kernel);
     }
+
+    dedup.PrintSummary(diagnostics);
 }
 
 } // namespace NQdb
