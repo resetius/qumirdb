@@ -1365,8 +1365,10 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
             // Correlation present but not liftable to an equi-key (a non-equality
             // correlation, or an equality that isn't ident==ident): the outer column
             // would be left unbound in the subquery. Fail loudly rather than silently
-            // cross-joining and dropping rows.
-            if (HasUnmappedOuter(sel->Where, local)) {
+            // cross-joining and dropping rows. Only when `local` is known (non-empty):
+            // if the subquery's own columns couldn't be resolved (e.g. an unschema'd
+            // source), every ident looks "outer" and we must not misfire — fall back.
+            if (!local.empty() && HasUnmappedOuter(sel->Where, local)) {
                 return std::unexpected(TError(
                     "unsupported correlated scalar subquery "
                     "(correlation must be an equality between subquery and outer columns)"));
@@ -1406,6 +1408,23 @@ std::expected<TOperatorPtr, TError> BuildSelect(
         return std::unexpected(TError("SELECT without FROM is not supported yet"));
     }
     int scalarCounter = 0;
+    // Extracts scalar subqueries out of a finished projection list, broadcasting
+    // each onto `n` (uncorrelated → keyless cross join; correlated → decorrelated
+    // left join). Shares scalarCounter with the WHERE/HAVING extraction so the
+    // __scalar_N__ names stay unique. Called just before the final project so the
+    // broadcast joins attach above any aggregate (matching HAVING).
+    auto extractProjectionSubqueries =
+        [&](std::vector<TProjectionSpec>& projs, TOperatorPtr& n)
+        -> std::expected<void, TError> {
+        for (auto& p : projs) {
+            auto rewritten = ExtractScalarSubqueries(p.Expression, n, sources, scalarCounter);
+            if (!rewritten) {
+                return std::unexpected(rewritten.error());
+            }
+            p.Expression = std::move(*rewritten);
+        }
+        return {};
+    };
     // Builds the pre-aggregate input (FROM + joins + WHERE). Called once per
     // aggregation branch so a mixed DISTINCT/non-DISTINCT split gets independent
     // subtrees (there is no deep operator clone; rebuilding from the AST is the
@@ -1492,9 +1511,6 @@ std::expected<TOperatorPtr, TError> BuildSelect(
             }
             continue;
         }
-        if (HasSubquery(item->Expr)) {
-            return std::unexpected(TError("subqueries are not supported yet"));
-        }
         std::string name = ItemName(*item, i);
         auto expr = collector.Rewrite(item->Expr);
         if (!expr) {
@@ -1531,6 +1547,9 @@ std::expected<TOperatorPtr, TError> BuildSelect(
         }
         if (having) {
             return std::unexpected(TError("HAVING requires aggregation"));
+        }
+        if (auto ok = extractProjectionSubqueries(projections, node); !ok) {
+            return std::unexpected(ok.error());
         }
         TOperatorPtr projected =
             std::make_shared<TProjectOperator>(std::move(node), std::move(projections));
@@ -1717,6 +1736,9 @@ std::expected<TOperatorPtr, TError> BuildSelect(
             return std::unexpected(rewritten.error());
         }
         node = std::make_shared<TFilterOperator>(std::move(node), std::move(*rewritten));
+    }
+    if (auto ok = extractProjectionSubqueries(projections, node); !ok) {
+        return std::unexpected(ok.error());
     }
     TOperatorPtr projected =
         std::make_shared<TProjectOperator>(std::move(node), std::move(projections));

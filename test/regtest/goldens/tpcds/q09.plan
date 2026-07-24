@@ -1,2 +1,194 @@
-Error: subqueries are not supported yet
-
+(rel project
+  (rel join
+    (rel join
+      (rel join
+        (rel join
+          (rel join
+            (rel join
+              (rel join
+                (rel join
+                  (rel join
+                    (rel join
+                      (rel join
+                        (rel join
+                          (rel join
+                            (rel join
+                              (rel join
+                                (rel filter (rel source "reason") (== r_reason_sk 1))
+                                (rel project
+                                  (rel aggregate
+                                    (rel project
+                                      (rel filter
+                                        (rel source "store_sales")
+                                        (&& (<= 1 ss_quantity) (<= ss_quantity 20)))
+                                      (__group__ 1))
+                                    (keys __group__)
+                                    (agg count_0 count))
+                                  (__scalar_0__ count_0))
+                                ()
+                                (inner))
+                              (rel project
+                                (rel aggregate
+                                  (rel project
+                                    (rel filter (rel source "store_sales") (&& (<= 1 ss_quantity) (<= ss_quantity 20)))
+                                    (ss_ext_discount_amt ss_ext_discount_amt)
+                                    (__group__ 1))
+                                  (keys __group__)
+                                  (agg sum_0 sum ss_ext_discount_amt)
+                                  (agg count_1 count ss_ext_discount_amt))
+                                (__scalar_1__ (/ sum_0 (cast count_1 f64))))
+                              ()
+                              (inner))
+                            (rel project
+                              (rel aggregate
+                                (rel project
+                                  (rel filter (rel source "store_sales") (&& (<= 1 ss_quantity) (<= ss_quantity 20)))
+                                  (ss_net_profit ss_net_profit)
+                                  (__group__ 1))
+                                (keys __group__)
+                                (agg sum_0 sum ss_net_profit)
+                                (agg count_1 count ss_net_profit))
+                              (__scalar_2__ (/ sum_0 (cast count_1 f64))))
+                            ()
+                            (inner))
+                          (rel project
+                            (rel aggregate
+                              (rel project
+                                (rel filter (rel source "store_sales") (&& (<= 21 ss_quantity) (<= ss_quantity 40)))
+                                (__group__ 1))
+                              (keys __group__)
+                              (agg count_0 count))
+                            (__scalar_3__ count_0))
+                          ()
+                          (inner))
+                        (rel project
+                          (rel aggregate
+                            (rel project
+                              (rel filter (rel source "store_sales") (&& (<= 21 ss_quantity) (<= ss_quantity 40)))
+                              (ss_ext_discount_amt ss_ext_discount_amt)
+                              (__group__ 1))
+                            (keys __group__)
+                            (agg sum_0 sum ss_ext_discount_amt)
+                            (agg count_1 count ss_ext_discount_amt))
+                          (__scalar_4__ (/ sum_0 (cast count_1 f64))))
+                        ()
+                        (inner))
+                      (rel project
+                        (rel aggregate
+                          (rel project
+                            (rel filter (rel source "store_sales") (&& (<= 21 ss_quantity) (<= ss_quantity 40)))
+                            (ss_net_profit ss_net_profit)
+                            (__group__ 1))
+                          (keys __group__)
+                          (agg sum_0 sum ss_net_profit)
+                          (agg count_1 count ss_net_profit))
+                        (__scalar_5__ (/ sum_0 (cast count_1 f64))))
+                      ()
+                      (inner))
+                    (rel project
+                      (rel aggregate
+                        (rel project
+                          (rel filter (rel source "store_sales") (&& (<= 41 ss_quantity) (<= ss_quantity 60)))
+                          (__group__ 1))
+                        (keys __group__)
+                        (agg count_0 count))
+                      (__scalar_6__ count_0))
+                    ()
+                    (inner))
+                  (rel project
+                    (rel aggregate
+                      (rel project
+                        (rel filter (rel source "store_sales") (&& (<= 41 ss_quantity) (<= ss_quantity 60)))
+                        (ss_ext_discount_amt ss_ext_discount_amt)
+                        (__group__ 1))
+                      (keys __group__)
+                      (agg sum_0 sum ss_ext_discount_amt)
+                      (agg count_1 count ss_ext_discount_amt))
+                    (__scalar_7__ (/ sum_0 (cast count_1 f64))))
+                  ()
+                  (inner))
+                (rel project
+                  (rel aggregate
+                    (rel project
+                      (rel filter (rel source "store_sales") (&& (<= 41 ss_quantity) (<= ss_quantity 60)))
+                      (ss_net_profit ss_net_profit)
+                      (__group__ 1))
+                    (keys __group__)
+                    (agg sum_0 sum ss_net_profit)
+                    (agg count_1 count ss_net_profit))
+                  (__scalar_8__ (/ sum_0 (cast count_1 f64))))
+                ()
+                (inner))
+              (rel project
+                (rel aggregate
+                  (rel project
+                    (rel filter (rel source "store_sales") (&& (<= 61 ss_quantity) (<= ss_quantity 80)))
+                    (__group__ 1))
+                  (keys __group__)
+                  (agg count_0 count))
+                (__scalar_9__ count_0))
+              ()
+              (inner))
+            (rel project
+              (rel aggregate
+                (rel project
+                  (rel filter (rel source "store_sales") (&& (<= 61 ss_quantity) (<= ss_quantity 80)))
+                  (ss_ext_discount_amt ss_ext_discount_amt)
+                  (__group__ 1))
+                (keys __group__)
+                (agg sum_0 sum ss_ext_discount_amt)
+                (agg count_1 count ss_ext_discount_amt))
+              (__scalar_10__ (/ sum_0 (cast count_1 f64))))
+            ()
+            (inner))
+          (rel project
+            (rel aggregate
+              (rel project
+                (rel filter (rel source "store_sales") (&& (<= 61 ss_quantity) (<= ss_quantity 80)))
+                (ss_net_profit ss_net_profit)
+                (__group__ 1))
+              (keys __group__)
+              (agg sum_0 sum ss_net_profit)
+              (agg count_1 count ss_net_profit))
+            (__scalar_11__ (/ sum_0 (cast count_1 f64))))
+          ()
+          (inner))
+        (rel project
+          (rel aggregate
+            (rel project
+              (rel filter (rel source "store_sales") (&& (<= 81 ss_quantity) (<= ss_quantity 100)))
+              (__group__ 1))
+            (keys __group__)
+            (agg count_0 count))
+          (__scalar_12__ count_0))
+        ()
+        (inner))
+      (rel project
+        (rel aggregate
+          (rel project
+            (rel filter (rel source "store_sales") (&& (<= 81 ss_quantity) (<= ss_quantity 100)))
+            (ss_ext_discount_amt ss_ext_discount_amt)
+            (__group__ 1))
+          (keys __group__)
+          (agg sum_0 sum ss_ext_discount_amt)
+          (agg count_1 count ss_ext_discount_amt))
+        (__scalar_13__ (/ sum_0 (cast count_1 f64))))
+      ()
+      (inner))
+    (rel project
+      (rel aggregate
+        (rel project
+          (rel filter (rel source "store_sales") (&& (<= 81 ss_quantity) (<= ss_quantity 100)))
+          (ss_net_profit ss_net_profit)
+          (__group__ 1))
+        (keys __group__)
+        (agg sum_0 sum ss_net_profit)
+        (agg count_1 count ss_net_profit))
+      (__scalar_14__ (/ sum_0 (cast count_1 f64))))
+    ()
+    (inner))
+  (bucket1 (if (call qdb_is_true (> __scalar_0__ 25437)) __scalar_1__ __scalar_2__))
+  (bucket2 (if (call qdb_is_true (> __scalar_3__ 22746)) __scalar_4__ __scalar_5__))
+  (bucket3 (if (call qdb_is_true (> __scalar_6__ 9387)) __scalar_7__ __scalar_8__))
+  (bucket4 (if (call qdb_is_true (> __scalar_9__ 10098)) __scalar_10__ __scalar_11__))
+  (bucket5 (if (call qdb_is_true (> __scalar_12__ 18213)) __scalar_13__ __scalar_14__)))
