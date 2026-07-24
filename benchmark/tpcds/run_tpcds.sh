@@ -15,7 +15,7 @@ usage() {
     echo "Usage: $0 <base_dir> [scale] [query_filter]"
     echo "  base_dir      — directory containing pq1/, pq10/, pq100/ subdirs with parquet files"
     echo "  scale         — scale factor number: 1, 10, or 100 (default: all discovered)"
-    echo "  query_filter  — optional comma-separated list of query numbers to run (e.g. 6,19,42)"
+    echo "  query_filter  — optional comma-separated list of query ids to run (e.g. 6,19,42,14_1,q23_2)"
     echo "Env:"
     echo "  QDB_ARGS      — extra arguments passed to qdb, e.g. '--scheduler threaded --scheduler-workers 4'"
     exit 1
@@ -56,11 +56,28 @@ fi
 query_enabled() {
     local n="$1"
     [[ -z "$QUERY_FILTER" ]] && return 0
-    # match with and without leading zeros (6 == 06)
-    case ",$QUERY_FILTER," in
-        *,"$n",*) return 0;;
-        *,"$((10#$n))",*) return 0;;
-    esac
+    local filter query_id
+    query_id="${n#q}"
+    IFS=',' read -r -a filter <<< "$QUERY_FILTER"
+    for f in "${filter[@]}"; do
+        f="${f#q}"
+        if [[ "$f" == "$query_id" ]]; then
+            return 0
+        fi
+        # A numeric filter also matches split query parts (14 == 14_1, 14_2).
+        if [[ "$f" =~ ^0*[0-9]+$ && "$query_id" =~ ^0*[0-9]+_[0-9]+$ ]]; then
+            local query_base="${query_id%%_*}"
+            if [[ "$((10#$f))" -eq "$((10#$query_base))" ]]; then
+                return 0
+            fi
+        fi
+        # match numeric ids with and without leading zeros (6 == 06)
+        if [[ "$f" =~ ^0*[0-9]+$ && "$query_id" =~ ^0*[0-9]+$ ]]; then
+            if [[ "$((10#$f))" -eq "$((10#$query_id))" ]]; then
+                return 0
+            fi
+        fi
+    done
     return 1
 }
 
