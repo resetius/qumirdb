@@ -455,12 +455,13 @@ public:
             if (join->Keys().empty()) {
                 return CrossScalarLanes(*join);
             }
-            // Inner, left/right outer, and left semi/anti equi-joins are
+            // Inner, left/right/full outer, and left semi/anti equi-joins are
             // hash-partitionable (matches co-locate by key).
             const bool supportedType =
                 join->JoinType() == EJoinType::Inner ||
                 join->JoinType() == EJoinType::Left ||
                 join->JoinType() == EJoinType::Right ||
+                join->JoinType() == EJoinType::Full ||
                 join->JoinType() == EJoinType::LeftSemi ||
                 join->JoinType() == EJoinType::LeftAnti;
             if (!supportedType) {

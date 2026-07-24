@@ -788,22 +788,29 @@ NQumir::NAst::TExprPtr GenJoinDispatchAst(
         return processRight();
     };
 
-    auto rightOuterFinalize = [&]() -> TExprPtr {
-        return Oz::Block({
-            Oz::Var("ok", boolType),
+    // ok = jt_finalize_outer(own, opp, pairs); if !ok return #f;
+    // Emits `own`'s rows that had no `opp` match as pairs (own_rowid, -1).
+    auto callFinalizeOuter =
+        [&](const char* own, const char* opp) -> std::vector<TExprPtr> {
+        return {
             Oz::Assign("ok", Oz::Call("jt_finalize_outer", {
-                Oz::Ident("right"),
-                Oz::Ident("left"),
+                Oz::Ident(own),
+                Oz::Ident(opp),
                 Oz::Ident("pairs"),
             })),
             Oz::If(
                 Oz::Unary(TOperator("!"), Oz::Ident("ok")),
                 Oz::Block({boolReturn(false)})),
-            Oz::Var("data", ptrI64Type),
+        };
+    };
+
+    // Swap the two row-ids of every pair in [start, pairs.Count), turning
+    // right-unmatched pairs (right_rowid, -1) into canonical (-1, right_rowid)
+    // = (left=null, right) order the materializer expects.
+    auto swapPairsFrom = [&](TExprPtr start) -> std::vector<TExprPtr> {
+        return {
             Oz::Assign("data", Oz::Field("pairs", "Data")),
-            Oz::Var("i", i64Type),
-            Oz::Assign("i", number(0)),
-            Oz::Var("tmp", i64Type),
+            Oz::Assign("i", std::move(start)),
             Oz::While(
                 Oz::Bin(TOperator("<"), Oz::Ident("i"), Oz::Field("pairs", "Count")),
                 Oz::Block({
@@ -818,8 +825,44 @@ NQumir::NAst::TExprPtr GenJoinDispatchAst(
                         Oz::Ident("tmp")),
                     Oz::Assign("i", Oz::Add(Oz::Ident("i"), number(1))),
                 })),
-            boolReturn(true),
-        });
+        };
+    };
+
+    // Local scratch declarations shared by the outer-finalize blocks below.
+    auto outerFinalizeVars = [&]() -> std::vector<TExprPtr> {
+        return {
+            Oz::Var("ok", boolType),
+            Oz::Var("data", ptrI64Type),
+            Oz::Var("i", i64Type),
+            Oz::Var("tmp", i64Type),
+        };
+    };
+
+    auto rightOuterFinalize = [&]() -> TExprPtr {
+        std::vector<TExprPtr> stmts = outerFinalizeVars();
+        auto fin = callFinalizeOuter("right", "left");
+        stmts.insert(stmts.end(), fin.begin(), fin.end());
+        auto swap = swapPairsFrom(number(0));
+        stmts.insert(stmts.end(), swap.begin(), swap.end());
+        stmts.push_back(boolReturn(true));
+        return Oz::Block(std::move(stmts));
+    };
+
+    // FULL OUTER: emit left-unmatched (already in (left, -1) order) then
+    // right-unmatched (appended as (right, -1)); swap only the appended tail
+    // [n, Count) so it reads (-1, right).
+    auto fullOuterFinalize = [&]() -> TExprPtr {
+        std::vector<TExprPtr> stmts = outerFinalizeVars();
+        stmts.push_back(Oz::Var("n", i64Type));
+        auto finLeft = callFinalizeOuter("left", "right");
+        stmts.insert(stmts.end(), finLeft.begin(), finLeft.end());
+        stmts.push_back(Oz::Assign("n", Oz::Field("pairs", "Count")));
+        auto finRight = callFinalizeOuter("right", "left");
+        stmts.insert(stmts.end(), finRight.begin(), finRight.end());
+        auto swap = swapPairsFrom(Oz::Ident("n"));
+        stmts.insert(stmts.end(), swap.begin(), swap.end());
+        stmts.push_back(boolReturn(true));
+        return Oz::Block(std::move(stmts));
     };
 
     auto finalize = [&]() -> TExprPtr {
@@ -848,6 +891,9 @@ NQumir::NAst::TExprPtr GenJoinDispatchAst(
         }
         if (type == EJoinType::Right) {
             return rightOuterFinalize();
+        }
+        if (type == EJoinType::Full) {
+            return fullOuterFinalize();
         }
         return boolReturn(true);
     };
