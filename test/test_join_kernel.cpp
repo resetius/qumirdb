@@ -403,10 +403,14 @@ TEST(CompileJoin, AcceptsStringKeyAndRejectsUnsupportedSpecs) {
 
     TStructType leftType({{"lk", i64()}});
     TStructType rightType({{"rk", i64()}});
-    // Unsupported join type (Full not implemented yet).
+    // FULL OUTER is supported (left- + right-unmatched finalize).
     auto fullSpec = NKernel::BuildJoinKernelSpec(
         leftType, rightType, {{"lk", "rk"}}, EJoinType::Full);
-    EXPECT_THROW(compiler.CompileJoin(fullSpec), NQumir::TError);
+    EXPECT_NO_THROW(compiler.CompileJoin(fullSpec));
+    // Unsupported join type (RightSemi is not implemented yet).
+    auto rightSemiSpec = NKernel::BuildJoinKernelSpec(
+        leftType, rightType, {{"lk", "rk"}}, EJoinType::RightSemi);
+    EXPECT_THROW(compiler.CompileJoin(rightSemiSpec), NQumir::TError);
     // Missing column.
     EXPECT_THROW(NKernel::BuildJoinKernelSpec(
         leftType, rightType, {{"missing", "rk"}}, EJoinType::Inner),
