@@ -1079,16 +1079,28 @@ void CollectLocalColumns(
     if (auto table = NSql::TMaybeNode<NSql::TSqlTableName>(ref)) {
         auto node = table.Cast();
         if (auto src = sources(TableName(node->Name))) {
+            // Qualify by the table's alias (or its name), so a local column of
+            // `item j` (`j.i_category`) is distinguishable from an outer column
+            // of another alias of the same table (`i.i_category`); a bare name
+            // is also kept for unqualified references.
+            const std::string prefix =
+                node->Alias ? *node->Alias : node->Name.back();
             if (auto source = TMaybeOp<TSourceOperator>(*src)) {
-                // Qualify by the table's alias (or its name), so a local column of
-                // `item j` (`j.i_category`) is distinguishable from an outer column
-                // of another alias of the same table (`i.i_category`); a bare name
-                // is also kept for unqualified references.
-                const std::string prefix =
-                    node->Alias ? *node->Alias : node->Name.back();
                 for (const auto& col : source.Cast()->GetSource().Schema().Columns) {
                     out.insert(std::string(col.Name));
                     out.insert(prefix + "." + std::string(col.Name));
+                }
+            } else if (auto* schema =
+                           static_cast<NAst::TStructType*>((*src)->OutputColumns().get())) {
+                // CTE / subquery table inlined as a subplan: its columns are the
+                // subplan's output (projection) names; qualify them by the reference
+                // alias exactly as AliasSubplan does, so a correlated `ctr2.ctr_state`
+                // matches the outer `ctr1.ctr_state`.
+                for (const auto& [name, _] : schema->Fields) {
+                    auto dot = name.rfind('.');
+                    std::string bare = dot != std::string::npos ? name.substr(dot + 1) : name;
+                    out.insert(bare);
+                    out.insert(prefix + "." + bare);
                 }
             }
         }
@@ -1348,6 +1360,16 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
                 node = std::make_shared<TJoinOperator>(
                     std::move(node), *plan, std::move(joinKeys), EJoinType::Left, nullptr);
                 return Ident(expr->Location, std::move(scalarName));
+            }
+
+            // Correlation present but not liftable to an equi-key (a non-equality
+            // correlation, or an equality that isn't ident==ident): the outer column
+            // would be left unbound in the subquery. Fail loudly rather than silently
+            // cross-joining and dropping rows.
+            if (HasUnmappedOuter(sel->Where, local)) {
+                return std::unexpected(TError(
+                    "unsupported correlated scalar subquery "
+                    "(correlation must be an equality between subquery and outer columns)"));
             }
         }
 
