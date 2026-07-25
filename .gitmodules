@@ -1,6 +1,7 @@
 [submodule "externals/qumir"]
 	path = externals/qumir
 	url = ../qumir.git
+	branch = kernel-dedup-stage1
 [submodule "externals/coroio"]
 	path = externals/coroio
 	url = https://github.com/resetius/coroio.git

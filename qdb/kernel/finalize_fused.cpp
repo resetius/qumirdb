@@ -131,6 +131,29 @@ void RewriteCalls(
     }
 }
 
+void CollectLocalCalls(
+    const TExprPtr& expr,
+    const std::unordered_set<std::string>& localNames,
+    std::unordered_set<std::string>& calls)
+{
+    if (!expr) {
+        return;
+    }
+
+    if (auto call = TMaybeNode<TCallExpr>(expr)) {
+        if (auto callee = TMaybeNode<TIdentExpr>(call.Cast()->Callee)) {
+            const auto& name = callee.Cast()->Name;
+            if (localNames.contains(name)) {
+                calls.insert(name);
+            }
+        }
+    }
+
+    for (const auto& child : expr->Children()) {
+        CollectLocalCalls(child, localNames, calls);
+    }
+}
+
 std::string FunctionSignatureKey(const TFunDecl& fun) {
     std::string key;
     key += "generics(";
@@ -332,18 +355,17 @@ private:
             groups[name].push_back(fun.Cast());
         }
 
-        if (MustPrefixKernelFunctions(names, groups)) {
-            for (const auto& name : names) {
-                renames[name] = prefix + name;
-                for (const auto& fun : groups[name]) {
-                    includeFunctions.insert(fun.get());
-                }
-            }
-            return;
-        }
-
+        auto renameNames = FunctionNamesToRename(names, groups);
         for (const auto& name : names) {
             auto& functions = groups[name];
+            if (renameNames.contains(name)) {
+                renames[name] = prefix + name;
+                for (const auto& fun : functions) {
+                    includeFunctions.insert(fun.get());
+                }
+                continue;
+            }
+
             for (const auto& fun : functions) {
                 const std::string signature = FunctionSignatureKey(*fun);
                 const std::string key = PrintDecl(fun);
@@ -360,16 +382,44 @@ private:
         }
     }
 
-    bool MustPrefixKernelFunctions(
+    std::unordered_set<std::string> FunctionNamesToRename(
         const std::vector<std::string>& names,
         const std::unordered_map<std::string, std::vector<std::shared_ptr<TFunDecl>>>& groups) const
     {
+        std::unordered_set<std::string> localNames(names.begin(), names.end());
+        std::unordered_map<std::string, std::unordered_set<std::string>> callsByName;
         for (const auto& name : names) {
-            if (MustRenameFunctionGroup(name, groups.at(name))) {
-                return true;
+            auto& calls = callsByName[name];
+            for (const auto& fun : groups.at(name)) {
+                CollectLocalCalls(fun, localNames, calls);
             }
         }
-        return false;
+
+        std::unordered_set<std::string> renameNames;
+        for (const auto& name : names) {
+            if (MustRenameFunctionGroup(name, groups.at(name))) {
+                renameNames.insert(name);
+            }
+        }
+
+        bool changed = true;
+        while (changed) {
+            changed = false;
+            for (const auto& name : names) {
+                if (renameNames.contains(name)) {
+                    continue;
+                }
+                const auto& calls = callsByName.at(name);
+                if (std::ranges::any_of(calls, [&](const std::string& callee) {
+                    return renameNames.contains(callee);
+                })) {
+                    renameNames.insert(name);
+                    changed = true;
+                }
+            }
+        }
+
+        return renameNames;
     }
 
     bool MustRenameFunctionGroup(

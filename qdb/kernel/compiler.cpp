@@ -19,6 +19,7 @@
 #include <qumir/parser/core/printer.h>
 
 #include <algorithm>
+#include <cstdlib>
 #include <span>
 #include <stdexcept>
 #include <unordered_map>
@@ -115,6 +116,14 @@ NQumir::TLLVMRunnerOptions KernelRunnerOptions() {
     opts.ResolveCoreInput = true;
     opts.AllowOverloads = true;
     opts.OptLevel = 3;
+    if (const char* optLevel = std::getenv("QDB_KERNEL_LLVM_OPT_LEVEL")) {
+        char* end = nullptr;
+        long parsed = std::strtol(optLevel, &end, 10);
+        if (end != optLevel && *end == '\0' && parsed >= 0 && parsed <= 4) {
+            opts.OptLevel = static_cast<int>(parsed);
+        }
+    }
+    opts.RunDefiniteAssignment = false;
     opts.ModuleFiles = {std::string(QDB_SOURCE_DIR) + "/modules/qumirdb.oz"};
     return opts;
 }
