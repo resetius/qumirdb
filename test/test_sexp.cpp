@@ -8,6 +8,7 @@
 #include <qdb/plan/ops/project.h>
 #include <qdb/plan/ops/sort.h>
 #include <qdb/plan/ops/source.h>
+#include <qdb/plan/ops/window.h>
 #include <qdb/sexp/parser.h>
 #include <qdb/sexp/printer.h>
 
@@ -194,6 +195,72 @@ TEST(SexpParser, AggregatePrintRoundtrip) {
     EXPECT_EQ(agg.Aggs()[1].Name, "s");
     EXPECT_EQ(agg.Aggs()[1].Func, "sum");
     EXPECT_NE(agg.Aggs()[1].Arg, nullptr);
+
+    auto printed = PrintAst(std::static_pointer_cast<TExpr>(expr), MakePrintOpts());
+    EXPECT_EQ(printed, input);
+}
+
+TEST(SexpParser, WindowPrintRoundtrip) {
+    NQdb::TMockSource src({"a", "b", "c", "y"});
+    auto sourceOp = std::make_shared<TSourceOperator>(src);
+
+    const std::string input =
+        "(rel window (rel source \"data.parquet\") (partition a b) "
+        "(order (c desc nulls-default)) "
+        "(frame range (start unbounded-preceding) (end current-row)) "
+        "(fn w_0 rank) (fn w_1 sum y))";
+
+    TRelParserOptions opts;
+    opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
+    sourceOp = std::make_shared<TSourceOperator>(src, std::string(path));
+    return sourceOp;
+};
+    auto p = MakeParser(std::move(opts));
+
+    auto expr = Parse(p, input);
+    ASSERT_NE(expr, nullptr);
+    ASSERT_EQ(static_cast<IOperator&>(*expr).RelName(), TWindowOperator::OpId);
+
+    auto& window = static_cast<TWindowOperator&>(*expr);
+    ASSERT_EQ(window.PartitionKeys().size(), 2u);
+    EXPECT_EQ(window.PartitionKeys()[0], "a");
+    EXPECT_EQ(window.PartitionKeys()[1], "b");
+    ASSERT_EQ(window.OrderKeys().size(), 1u);
+    EXPECT_EQ(window.OrderKeys()[0].Column, "c");
+    EXPECT_EQ(window.OrderKeys()[0].Direction, ESortDirection::Desc);
+    ASSERT_TRUE(window.Frame().has_value());
+    EXPECT_EQ(window.Frame()->Mode, EWindowFrameMode::Range);
+    EXPECT_EQ(window.Frame()->Start.Kind, EFrameBoundKind::UnboundedPreceding);
+    EXPECT_EQ(window.Frame()->End.Kind, EFrameBoundKind::CurrentRow);
+    ASSERT_EQ(window.Functions().size(), 2u);
+    EXPECT_EQ(window.Functions()[0].Func, "rank");
+    EXPECT_EQ(window.Functions()[0].Arg, nullptr);
+    EXPECT_EQ(window.Functions()[1].Func, "sum");
+    EXPECT_NE(window.Functions()[1].Arg, nullptr);
+
+    auto printed = PrintAst(std::static_pointer_cast<TExpr>(expr), MakePrintOpts());
+    EXPECT_EQ(printed, input);
+}
+
+TEST(SexpParser, WindowNoFrameRoundtrip) {
+    NQdb::TMockSource src({"a"});
+    auto sourceOp = std::make_shared<TSourceOperator>(src);
+
+    const std::string input = "(rel window (rel source \"data.parquet\") (fn w_0 rank))";
+
+    TRelParserOptions opts;
+    opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
+    sourceOp = std::make_shared<TSourceOperator>(src, std::string(path));
+    return sourceOp;
+};
+    auto p = MakeParser(std::move(opts));
+
+    auto expr = Parse(p, input);
+    ASSERT_NE(expr, nullptr);
+    auto& window = static_cast<TWindowOperator&>(*expr);
+    EXPECT_TRUE(window.PartitionKeys().empty());
+    EXPECT_TRUE(window.OrderKeys().empty());
+    EXPECT_FALSE(window.Frame().has_value());
 
     auto printed = PrintAst(std::static_pointer_cast<TExpr>(expr), MakePrintOpts());
     EXPECT_EQ(printed, input);

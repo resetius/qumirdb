@@ -7,6 +7,7 @@
 #include <qdb/plan/ops/project.h>
 #include <qdb/plan/ops/sort.h>
 #include <qdb/plan/ops/source.h>
+#include <qdb/plan/ops/window.h>
 
 #include <optional>
 
@@ -53,6 +54,21 @@ std::optional<ESortNulls> ParseSortNulls(std::string_view name) {
     if (name == "nulls-default") return ESortNulls::Default;
     if (name == "nulls-first") return ESortNulls::First;
     if (name == "nulls-last") return ESortNulls::Last;
+    return std::nullopt;
+}
+
+std::optional<EWindowFrameMode> ParseFrameMode(std::string_view name) {
+    if (name == "rows") return EWindowFrameMode::Rows;
+    if (name == "range") return EWindowFrameMode::Range;
+    return std::nullopt;
+}
+
+std::optional<EFrameBoundKind> ParseFrameBoundKind(std::string_view name) {
+    if (name == "unbounded-preceding") return EFrameBoundKind::UnboundedPreceding;
+    if (name == "preceding") return EFrameBoundKind::Preceding;
+    if (name == "current-row") return EFrameBoundKind::CurrentRow;
+    if (name == "following") return EFrameBoundKind::Following;
+    if (name == "unbounded-following") return EFrameBoundKind::UnboundedFollowing;
     return std::nullopt;
 }
 
@@ -322,6 +338,120 @@ TNodeParserMap MakeRelParsers(TRelParserOptions options) {
 
             co_return std::make_shared<TJoinOperator>(
                 std::move(left), std::move(right), std::move(keys), type, std::move(filter));
+        }
+
+        if (*relName == TWindowOperator::OpId) {
+            auto inputExpr = co_await h.Expr();
+            auto input = std::static_pointer_cast<IOperator>(inputExpr);
+            std::vector<std::string> partitionKeys;
+            std::vector<TSortKey> orderKeys;
+            std::optional<TWindowFrame> frame;
+            std::vector<TWindowFunc> funcs;
+
+            while (true) {
+                auto tok = h.Next();
+                if (IParseHandle::IsOp(tok, ')')) break;
+                if (!IParseHandle::IsOp(tok, '(')) {
+                    co_return IParseHandle::MakeError(tok, "expected '(' in (rel window ...)");
+                }
+                auto sectionTok = h.Next();
+                auto section = ReadIdentifier(h, sectionTok);
+                if (!section) {
+                    co_return IParseHandle::MakeError(sectionTok, "expected window section name");
+                }
+
+                if (*section == "partition") {
+                    while (true) {
+                        auto keyTok = h.Next();
+                        if (IParseHandle::IsOp(keyTok, ')')) break;
+                        if (keyTok.Type != TToken::Identifier) {
+                            co_return IParseHandle::MakeError(keyTok, "expected partition key column");
+                        }
+                        partitionKeys.push_back(keyTok.Name);
+                    }
+                } else if (*section == "order") {
+                    while (true) {
+                        auto keyTok = h.Next();
+                        if (IParseHandle::IsOp(keyTok, ')')) break;
+                        if (!IParseHandle::IsOp(keyTok, '(')) {
+                            co_return IParseHandle::MakeError(keyTok, "expected '(' before window order key");
+                        }
+                        auto colTok = h.Next();
+                        auto colName = ReadIdentifier(h, colTok);
+                        if (!colName) {
+                            co_return IParseHandle::MakeError(colTok, "expected order key column");
+                        }
+                        auto dirTok = h.Next();
+                        auto dirName = ReadIdentifier(h, dirTok);
+                        auto direction = dirName ? ParseSortDirection(*dirName) : std::nullopt;
+                        if (!direction) {
+                            co_return IParseHandle::MakeError(dirTok, "expected sort direction");
+                        }
+                        auto nullsTok = h.Next();
+                        auto nullsName = ReadIdentifier(h, nullsTok);
+                        auto nulls = nullsName ? ParseSortNulls(*nullsName) : std::nullopt;
+                        if (!nulls) {
+                            co_return IParseHandle::MakeError(nullsTok, "expected sort nulls mode");
+                        }
+                        co_await h.Take(')');
+                        orderKeys.push_back({*colName, *direction, *nulls});
+                    }
+                } else if (*section == "frame") {
+                    auto modeTok = h.Next();
+                    auto modeName = ReadIdentifier(h, modeTok);
+                    auto mode = modeName ? ParseFrameMode(*modeName) : std::nullopt;
+                    if (!mode) {
+                        co_return IParseHandle::MakeError(modeTok, "expected window frame mode");
+                    }
+                    TWindowFrame parsed;
+                    parsed.Mode = *mode;
+                    // Two bounds: (start <kind> <expr>?) (end <kind> <expr>?)
+                    for (int side = 0; side < 2; ++side) {
+                        co_await h.Take('(');
+                        h.Next(); // bound tag: 'start' / 'end' (positional)
+                        auto kindTok = h.Next();
+                        auto kindName = ReadIdentifier(h, kindTok);
+                        auto kind = kindName ? ParseFrameBoundKind(*kindName) : std::nullopt;
+                        if (!kind) {
+                            co_return IParseHandle::MakeError(kindTok, "expected frame bound kind");
+                        }
+                        TFrameBound bound;
+                        bound.Kind = *kind;
+                        auto next = h.Next();
+                        if (!IParseHandle::IsOp(next, ')')) {
+                            h.Unget(next);
+                            bound.Offset = co_await h.Expr();
+                            co_await h.Take(')');
+                        }
+                        (side == 0 ? parsed.Start : parsed.End) = std::move(bound);
+                    }
+                    co_await h.Take(')');
+                    frame = std::move(parsed);
+                } else if (*section == "fn") {
+                    auto nameTok = h.Next();
+                    if (nameTok.Type != TToken::Identifier) {
+                        co_return IParseHandle::MakeError(nameTok, "expected window function output name");
+                    }
+                    auto funcTok = h.Next();
+                    if (funcTok.Type != TToken::Identifier) {
+                        co_return IParseHandle::MakeError(funcTok, "expected window function name");
+                    }
+                    TExprPtr arg;
+                    auto closeTok = h.Next();
+                    if (!IParseHandle::IsOp(closeTok, ')')) {
+                        h.Unget(closeTok);
+                        arg = co_await h.Expr();
+                        co_await h.Take(')');
+                    }
+                    funcs.push_back({nameTok.Name, funcTok.Name, std::move(arg)});
+                } else {
+                    co_return IParseHandle::MakeError(sectionTok, "unknown window section: " + *section);
+                }
+            }
+
+            co_return std::make_shared<TWindowOperator>(
+                std::move(input), std::move(partitionKeys), std::move(orderKeys),
+                std::move(frame), std::move(funcs));
         }
 
         co_return IParseHandle::MakeError(nameTok, "unknown rel operator: " + *relName);
