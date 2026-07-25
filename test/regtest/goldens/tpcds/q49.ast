@@ -20,7 +20,273 @@
     (from
       (subquery-table
         (query
-          (unknown-body)
+          (union distinct
+            (union distinct
+              (select
+                (select-list
+                  (item as channel
+                    (: (cast "web" <named StringView>) <named StringView>)
+                  )
+                  (item
+                    |web.item|
+                  )
+                  (item
+                    |web.return_ratio|
+                  )
+                  (item
+                    |web.return_rank|
+                  )
+                  (item
+                    |web.currency_rank|
+                  )
+                )
+                (from
+                  (subquery-table as web
+                    (query
+                      (select
+                        (select-list
+                          (item
+                            item
+                          )
+                          (item
+                            return_ratio
+                          )
+                          (item
+                            currency_ratio
+                          )
+                          (item as return_rank
+                            (window (call rank) (over (order-by (order asc return_ratio)) (range (between (unbounded-preceding) (current-row)))))
+                          )
+                          (item as currency_rank
+                            (window (call rank) (over (order-by (order asc currency_ratio)) (range (between (unbounded-preceding) (current-row)))))
+                          )
+                        )
+                        (from
+                          (subquery-table as in_web
+                            (query
+                              (select
+                                (select-list
+                                  (item as item
+                                    |ws.ws_item_sk|
+                                  )
+                                  (item as return_ratio
+                                    (/ (: (cast (call sum (call coalesce |wr.wr_return_quantity| 0)) <named DECIMAL [15 4]>) <named DECIMAL [15 4]>)
+                                      (: (cast (call sum (call coalesce |ws.ws_quantity| 0)) <named DECIMAL [15 4]>) <named DECIMAL [15 4]>))
+                                  )
+                                  (item as currency_ratio
+                                    (/ (: (cast (call sum (call coalesce |wr.wr_return_amt| 0)) <named DECIMAL [15 4]>) <named DECIMAL [15 4]>)
+                                      (: (cast (call sum (call coalesce |ws.ws_net_paid| 0)) <named DECIMAL [15 4]>) <named DECIMAL [15 4]>))
+                                  )
+                                )
+                                (from
+                                  (join left
+                                    (table web_sales as ws)
+                                    (table web_returns as wr)
+                                    (on
+                                      (&& (== |ws.ws_order_number| |wr.wr_order_number|) (== |ws.ws_item_sk| |wr.wr_item_sk|))
+                                    )
+                                  )
+                                  (table date_dim)
+                                )
+                                (where
+                                  (&& (&& (&& (&& (&& (&& (> |wr.wr_return_amt| 10000) (> |ws.ws_net_profit| 1)) (> |ws.ws_net_paid| 0)) (> |ws.ws_quantity| 0))
+                                        (== ws_sold_date_sk d_date_sk))
+                                      (== d_year 2000))
+                                    (== d_moy 12))
+                                )
+                                (group-by
+                                  |ws.ws_item_sk|
+                                )
+                              )
+                            )
+                          )
+                        )
+                      )
+                    )
+                  )
+                )
+                (where
+                  (|| (<= |web.return_rank| 10) (<= |web.currency_rank| 10))
+                )
+              )
+              (select
+                (select-list
+                  (item as channel
+                    (: (cast "catalog" <named StringView>) <named StringView>)
+                  )
+                  (item
+                    |catalog.item|
+                  )
+                  (item
+                    |catalog.return_ratio|
+                  )
+                  (item
+                    |catalog.return_rank|
+                  )
+                  (item
+                    |catalog.currency_rank|
+                  )
+                )
+                (from
+                  (subquery-table as catalog
+                    (query
+                      (select
+                        (select-list
+                          (item
+                            item
+                          )
+                          (item
+                            return_ratio
+                          )
+                          (item
+                            currency_ratio
+                          )
+                          (item as return_rank
+                            (window (call rank) (over (order-by (order asc return_ratio)) (range (between (unbounded-preceding) (current-row)))))
+                          )
+                          (item as currency_rank
+                            (window (call rank) (over (order-by (order asc currency_ratio)) (range (between (unbounded-preceding) (current-row)))))
+                          )
+                        )
+                        (from
+                          (subquery-table as in_cat
+                            (query
+                              (select
+                                (select-list
+                                  (item as item
+                                    |cs.cs_item_sk|
+                                  )
+                                  (item as return_ratio
+                                    (/ (: (cast (call sum (call coalesce |cr.cr_return_quantity| 0)) <named DECIMAL [15 4]>) <named DECIMAL [15 4]>)
+                                      (: (cast (call sum (call coalesce |cs.cs_quantity| 0)) <named DECIMAL [15 4]>) <named DECIMAL [15 4]>))
+                                  )
+                                  (item as currency_ratio
+                                    (/ (: (cast (call sum (call coalesce |cr.cr_return_amount| 0)) <named DECIMAL [15 4]>) <named DECIMAL [15 4]>)
+                                      (: (cast (call sum (call coalesce |cs.cs_net_paid| 0)) <named DECIMAL [15 4]>) <named DECIMAL [15 4]>))
+                                  )
+                                )
+                                (from
+                                  (join left
+                                    (table catalog_sales as cs)
+                                    (table catalog_returns as cr)
+                                    (on
+                                      (&& (== |cs.cs_order_number| |cr.cr_order_number|) (== |cs.cs_item_sk| |cr.cr_item_sk|))
+                                    )
+                                  )
+                                  (table date_dim)
+                                )
+                                (where
+                                  (&& (&& (&& (&& (&& (&& (> |cr.cr_return_amount| 10000) (> |cs.cs_net_profit| 1)) (> |cs.cs_net_paid| 0))
+                                          (> |cs.cs_quantity| 0))
+                                        (== cs_sold_date_sk d_date_sk))
+                                      (== d_year 2000))
+                                    (== d_moy 12))
+                                )
+                                (group-by
+                                  |cs.cs_item_sk|
+                                )
+                              )
+                            )
+                          )
+                        )
+                      )
+                    )
+                  )
+                )
+                (where
+                  (|| (<= |catalog.return_rank| 10) (<= |catalog.currency_rank| 10))
+                )
+              )
+            )
+            (select
+              (select-list
+                (item as channel
+                  (: (cast "store" <named StringView>) <named StringView>)
+                )
+                (item
+                  |store.item|
+                )
+                (item
+                  |store.return_ratio|
+                )
+                (item
+                  |store.return_rank|
+                )
+                (item
+                  |store.currency_rank|
+                )
+              )
+              (from
+                (subquery-table as store
+                  (query
+                    (select
+                      (select-list
+                        (item
+                          item
+                        )
+                        (item
+                          return_ratio
+                        )
+                        (item
+                          currency_ratio
+                        )
+                        (item as return_rank
+                          (window (call rank) (over (order-by (order asc return_ratio)) (range (between (unbounded-preceding) (current-row)))))
+                        )
+                        (item as currency_rank
+                          (window (call rank) (over (order-by (order asc currency_ratio)) (range (between (unbounded-preceding) (current-row)))))
+                        )
+                      )
+                      (from
+                        (subquery-table as in_store
+                          (query
+                            (select
+                              (select-list
+                                (item as item
+                                  |sts.ss_item_sk|
+                                )
+                                (item as return_ratio
+                                  (/ (: (cast (call sum (call coalesce |sr.sr_return_quantity| 0)) <named DECIMAL [15 4]>) <named DECIMAL [15 4]>)
+                                    (: (cast (call sum (call coalesce |sts.ss_quantity| 0)) <named DECIMAL [15 4]>) <named DECIMAL [15 4]>))
+                                )
+                                (item as currency_ratio
+                                  (/ (: (cast (call sum (call coalesce |sr.sr_return_amt| 0)) <named DECIMAL [15 4]>) <named DECIMAL [15 4]>)
+                                    (: (cast (call sum (call coalesce |sts.ss_net_paid| 0)) <named DECIMAL [15 4]>) <named DECIMAL [15 4]>))
+                                )
+                              )
+                              (from
+                                (join left
+                                  (table store_sales as sts)
+                                  (table store_returns as sr)
+                                  (on
+                                    (&& (== |sts.ss_ticket_number| |sr.sr_ticket_number|) (== |sts.ss_item_sk| |sr.sr_item_sk|))
+                                  )
+                                )
+                                (table date_dim)
+                              )
+                              (where
+                                (&& (&& (&& (&& (&& (&& (> |sr.sr_return_amt| 10000) (> |sts.ss_net_profit| 1)) (> |sts.ss_net_paid| 0))
+                                        (> |sts.ss_quantity| 0))
+                                      (== ss_sold_date_sk d_date_sk))
+                                    (== d_year 2000))
+                                  (== d_moy 12))
+                              )
+                              (group-by
+                                |sts.ss_item_sk|
+                              )
+                            )
+                          )
+                        )
+                      )
+                    )
+                  )
+                )
+              )
+              (where
+                (|| (<= |store.return_rank| 10) (<= |store.currency_rank| 10))
+              )
+            )
+          )
         )
       )
     )

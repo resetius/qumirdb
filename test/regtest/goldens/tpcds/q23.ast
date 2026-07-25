@@ -125,7 +125,88 @@
     (from
       (subquery-table
         (query
-          (unknown-body)
+          (union all
+            (select
+              (select-list
+                (item as sales
+                  (* cs_quantity cs_list_price)
+                )
+              )
+              (from
+                (table catalog_sales)
+                (table date_dim)
+              )
+              (where
+                (&& (&& (&& (&& (== d_year 1999) (== d_moy 1)) (== cs_sold_date_sk d_date_sk))
+                    (subquery in cs_item_sk (query
+                  (select
+                    (select-list
+                      (item
+                        item_sk
+                      )
+                    )
+                    (from
+                      (table frequent_ss_items)
+                    )
+                  )
+                )
+                ))
+                  (subquery in cs_bill_customer_sk (query
+                  (select
+                    (select-list
+                      (item
+                        c_customer_sk
+                      )
+                    )
+                    (from
+                      (table best_ss_customer)
+                    )
+                  )
+                )
+                ))
+              )
+            )
+            (select
+              (select-list
+                (item as sales
+                  (* ws_quantity ws_list_price)
+                )
+              )
+              (from
+                (table web_sales)
+                (table date_dim)
+              )
+              (where
+                (&& (&& (&& (&& (== d_year 1999) (== d_moy 1)) (== ws_sold_date_sk d_date_sk))
+                    (subquery in ws_item_sk (query
+                  (select
+                    (select-list
+                      (item
+                        item_sk
+                      )
+                    )
+                    (from
+                      (table frequent_ss_items)
+                    )
+                  )
+                )
+                ))
+                  (subquery in ws_bill_customer_sk (query
+                  (select
+                    (select-list
+                      (item
+                        c_customer_sk
+                      )
+                    )
+                    (from
+                      (table best_ss_customer)
+                    )
+                  )
+                )
+                ))
+              )
+            )
+          )
         )
       )
     )

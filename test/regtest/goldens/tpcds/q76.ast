@@ -26,7 +26,100 @@
     (from
       (subquery-table as foo
         (query
-          (unknown-body)
+          (union all
+            (union all
+              (select
+                (select-list
+                  (item as channel
+                    (: (cast "store" <named StringView>) <named StringView>)
+                  )
+                  (item as col_name
+                    (: (cast "ss_addr_sk" <named StringView>) <named StringView>)
+                  )
+                  (item
+                    d_year
+                  )
+                  (item
+                    d_qoy
+                  )
+                  (item
+                    i_category
+                  )
+                  (item as ext_sales_price
+                    ss_ext_sales_price
+                  )
+                )
+                (from
+                  (table store_sales)
+                  (table item)
+                  (table date_dim)
+                )
+                (where
+                  (&& (&& (call qdb_is_null ss_addr_sk) (== ss_sold_date_sk d_date_sk)) (== ss_item_sk i_item_sk))
+                )
+              )
+              (select
+                (select-list
+                  (item as channel
+                    (: (cast "web" <named StringView>) <named StringView>)
+                  )
+                  (item as col_name
+                    (: (cast "ws_web_page_sk" <named StringView>) <named StringView>)
+                  )
+                  (item
+                    d_year
+                  )
+                  (item
+                    d_qoy
+                  )
+                  (item
+                    i_category
+                  )
+                  (item as ext_sales_price
+                    ws_ext_sales_price
+                  )
+                )
+                (from
+                  (table web_sales)
+                  (table item)
+                  (table date_dim)
+                )
+                (where
+                  (&& (&& (call qdb_is_null ws_web_page_sk) (== ws_sold_date_sk d_date_sk)) (== ws_item_sk i_item_sk))
+                )
+              )
+            )
+            (select
+              (select-list
+                (item as channel
+                  (: (cast "catalog" <named StringView>) <named StringView>)
+                )
+                (item as col_name
+                  (: (cast "cs_warehouse_sk" <named StringView>) <named StringView>)
+                )
+                (item
+                  d_year
+                )
+                (item
+                  d_qoy
+                )
+                (item
+                  i_category
+                )
+                (item as ext_sales_price
+                  cs_ext_sales_price
+                )
+              )
+              (from
+                (table catalog_sales)
+                (table item)
+                (table date_dim)
+              )
+              (where
+                (&& (&& (call qdb_is_null cs_warehouse_sk) (== cs_sold_date_sk d_date_sk)) (== cs_item_sk i_item_sk))
+              )
+            )
+          )
         )
       )
     )

@@ -8,7 +8,79 @@
     (from
       (subquery-table as hot_cust
         (query
-          (unknown-body)
+          (intersect distinct
+            (intersect distinct
+              (select distinct
+                (select-list
+                  (item
+                    c_last_name
+                  )
+                  (item
+                    c_first_name
+                  )
+                  (item
+                    d_date
+                  )
+                )
+                (from
+                  (table store_sales)
+                  (table date_dim)
+                  (table customer)
+                )
+                (where
+                  (&& (&& (== |store_sales.ss_sold_date_sk| |date_dim.d_date_sk|)
+                      (== |store_sales.ss_customer_sk| |customer.c_customer_sk|))
+                    (&& (<= 1212 d_month_seq) (<= d_month_seq (+ 1212 11))))
+                )
+              )
+              (select distinct
+                (select-list
+                  (item
+                    c_last_name
+                  )
+                  (item
+                    c_first_name
+                  )
+                  (item
+                    d_date
+                  )
+                )
+                (from
+                  (table catalog_sales)
+                  (table date_dim)
+                  (table customer)
+                )
+                (where
+                  (&& (&& (== |catalog_sales.cs_sold_date_sk| |date_dim.d_date_sk|)
+                      (== |catalog_sales.cs_bill_customer_sk| |customer.c_customer_sk|))
+                    (&& (<= 1212 d_month_seq) (<= d_month_seq (+ 1212 11))))
+                )
+              )
+            )
+            (select distinct
+              (select-list
+                (item
+                  c_last_name
+                )
+                (item
+                  c_first_name
+                )
+                (item
+                  d_date
+                )
+              )
+              (from
+                (table web_sales)
+                (table date_dim)
+                (table customer)
+              )
+              (where
+                (&& (&& (== |web_sales.ws_sold_date_sk| |date_dim.d_date_sk|)
+                    (== |web_sales.ws_bill_customer_sk| |customer.c_customer_sk|))
+                  (&& (<= 1212 d_month_seq) (<= d_month_seq (+ 1212 11))))
+              )
+            )
+          )
         )
       )
     )

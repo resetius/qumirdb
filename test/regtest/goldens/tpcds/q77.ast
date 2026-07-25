@@ -214,7 +214,89 @@
     (from
       (subquery-table as x
         (query
-          (unknown-body)
+          (union all
+            (union all
+              (select
+                (select-list
+                  (item as channel
+                    (: (cast "store channel" <named StringView>) <named StringView>)
+                  )
+                  (item as id
+                    |ss.s_store_sk|
+                  )
+                  (item
+                    sales
+                  )
+                  (item as returns
+                    (call coalesce returns 0)
+                  )
+                  (item as profit
+                    (- profit (call coalesce profit_loss 0))
+                  )
+                )
+                (from
+                  (join left
+                    (table ss)
+                    (table sr)
+                    (on
+                      (== |ss.s_store_sk| |sr.s_store_sk|)
+                    )
+                  )
+                )
+              )
+              (select
+                (select-list
+                  (item as channel
+                    (: (cast "catalog channel" <named StringView>) <named StringView>)
+                  )
+                  (item as id
+                    cs_call_center_sk
+                  )
+                  (item
+                    sales
+                  )
+                  (item
+                    returns
+                  )
+                  (item as profit
+                    (- profit profit_loss)
+                  )
+                )
+                (from
+                  (table cs)
+                  (table cr)
+                )
+              )
+            )
+            (select
+              (select-list
+                (item as channel
+                  (: (cast "web channel" <named StringView>) <named StringView>)
+                )
+                (item as id
+                  |ws.wp_web_page_sk|
+                )
+                (item
+                  sales
+                )
+                (item as returns
+                  (call coalesce returns 0)
+                )
+                (item as profit
+                  (- profit (call coalesce profit_loss 0))
+                )
+              )
+              (from
+                (join left
+                  (table ws)
+                  (table wr)
+                  (on
+                    (== |ws.wp_web_page_sk| |wr.wp_web_page_sk|)
+                  )
+                )
+              )
+            )
+          )
         )
       )
     )
