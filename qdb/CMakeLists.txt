@@ -17,6 +17,7 @@ add_library(qumirdb
     plan/ops/union.cpp
     plan/ops/sort.cpp
     plan/ops/limit.cpp
+    plan/ops/window.cpp
     sexp/printer.cpp
     sexp/parser.cpp
     sql/ast.cpp

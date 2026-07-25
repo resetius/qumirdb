@@ -23,7 +23,19 @@
               (call sum cs_sales_price)
             )
             (item as avg_monthly_sales
-              (window (call avg (call sum cs_sales_price)) (over (partition-by (block i_category i_brand cc_name d_year))))
+              (window
+                (call avg (call sum cs_sales_price))
+                (over
+                  (partition-by
+                    (block
+                      i_category
+                      i_brand
+                      cc_name
+                      d_year))
+                  (range
+                    (between
+                      (unbounded-preceding)
+                      (unbounded-following)))))
             )
             (item as rn
               (window
@@ -38,7 +50,11 @@
                     (order asc
                       d_year)
                     (order asc
-                      d_moy))))
+                      d_moy))
+                  (range
+                    (between
+                      (unbounded-preceding)
+                      (current-row)))))
             )
           )
           (from

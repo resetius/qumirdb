@@ -52,6 +52,19 @@ struct IOperator : NQumir::NAst::TExpr {
 
 using TOperatorPtr = std::shared_ptr<IOperator>;
 
+inline NQumir::NAst::TTypePtr FieldType(
+    const NQumir::NAst::TStructType* structType, const std::string& name) {
+    if (!structType) {
+        return nullptr;
+    }
+    for (const auto& [fieldName, type] : structType->Fields) {
+        if (fieldName == name) {
+            return type;
+        }
+    }
+    return nullptr;
+}
+
 // Analogous to TMaybeNode<T> in qumir.
 // Checks NodeName() == "Rel" AND RelName() == T::OpId.
 template<typename T>

@@ -1,2 +1,76 @@
-Error: window functions are not supported in plans yet
-
+(rel limit
+  (rel sort
+    (rel project
+      (rel filter
+        (rel project
+          (rel project
+            (rel window
+              (rel aggregate
+                (rel filter
+                  (rel join
+                    (rel join
+                      (rel join (rel source "item") (rel source "store_sales") () (inner))
+                      (rel source "date_dim")
+                      ()
+                      (inner))
+                    (rel source "store")
+                    ()
+                    (inner))
+                  (&& (&& (&& (&& (== ss_item_sk i_item_sk) (== ss_sold_date_sk d_date_sk)) (== ss_store_sk s_store_sk))
+                      (|| (|| (|| (|| (|| (|| (|| (|| (|| (|| (|| (== d_month_seq 1212) (== d_month_seq (+ 1212 1)))
+                                          (== d_month_seq (+ 1212 2)))
+                                        (== d_month_seq (+ 1212 3)))
+                                      (== d_month_seq (+ 1212 4)))
+                                    (== d_month_seq (+ 1212 5)))
+                                  (== d_month_seq (+ 1212 6)))
+                                (== d_month_seq (+ 1212 7)))
+                              (== d_month_seq (+ 1212 8)))
+                            (== d_month_seq (+ 1212 9)))
+                          (== d_month_seq (+ 1212 10)))
+                        (== d_month_seq (+ 1212 11))))
+                    (|| (&& (&& (|| (|| (== i_category (: (cast "Books" <named StringView>) <named StringView>))
+                              (== i_category (: (cast "Children" <named StringView>) <named StringView>)))
+                            (== i_category (: (cast "Electronics" <named StringView>) <named StringView>)))
+                          (|| (|| (|| (== i_class (: (cast "personal" <named StringView>) <named StringView>))
+                                (== i_class (: (cast "portable" <named StringView>) <named StringView>)))
+                              (== i_class (: (cast "reference" <named StringView>) <named StringView>)))
+                            (== i_class (: (cast "self-help" <named StringView>) <named StringView>))))
+                        (|| (|| (|| (== i_brand (: (cast "scholaramalgamalg #14" <named StringView>) <named StringView>))
+                              (== i_brand (: (cast "scholaramalgamalg #7" <named StringView>) <named StringView>)))
+                            (== i_brand (: (cast "exportiunivamalg #9" <named StringView>) <named StringView>)))
+                          (== i_brand (: (cast "scholaramalgamalg #9" <named StringView>) <named StringView>))))
+                      (&& (&& (|| (|| (== i_category (: (cast "Women" <named StringView>) <named StringView>))
+                              (== i_category (: (cast "Music" <named StringView>) <named StringView>)))
+                            (== i_category (: (cast "Men" <named StringView>) <named StringView>)))
+                          (|| (|| (|| (== i_class (: (cast "accessories" <named StringView>) <named StringView>))
+                                (== i_class (: (cast "classical" <named StringView>) <named StringView>)))
+                              (== i_class (: (cast "fragrances" <named StringView>) <named StringView>)))
+                            (== i_class (: (cast "pants" <named StringView>) <named StringView>))))
+                        (|| (|| (|| (== i_brand (: (cast "amalgimporto #1" <named StringView>) <named StringView>))
+                              (== i_brand (: (cast "edu packscholar #1" <named StringView>) <named StringView>)))
+                            (== i_brand (: (cast "exportiimporto #1" <named StringView>) <named StringView>)))
+                          (== i_brand (: (cast "importoamalg #1" <named StringView>) <named StringView>)))))))
+                (keys i_manager_id d_moy)
+                (agg sum_0 sum ss_sales_price)
+                (agg sum_1 sum ss_sales_price))
+              (partition i_manager_id)
+              (frame range (start unbounded-preceding) (end unbounded-following))
+              (fn w_0 avg sum_1))
+            (i_manager_id i_manager_id)
+            (sum_sales sum_0)
+            (avg_monthly_sales w_0))
+          (|tmp1.i_manager_id| i_manager_id)
+          (|tmp1.sum_sales| sum_sales)
+          (|tmp1.avg_monthly_sales| avg_monthly_sales))
+        (> (if
+            (call qdb_is_true (> avg_monthly_sales 0))
+            (/ (call abs (- sum_sales avg_monthly_sales)) avg_monthly_sales)
+            (call qdb_sql_null))
+          0.10000000000000001))
+      (i_manager_id |tmp1.i_manager_id|)
+      (sum_sales |tmp1.sum_sales|)
+      (avg_monthly_sales |tmp1.avg_monthly_sales|))
+    (i_manager_id asc nulls-default)
+    (avg_monthly_sales asc nulls-default)
+    (sum_sales asc nulls-default))
+  (limit 100))

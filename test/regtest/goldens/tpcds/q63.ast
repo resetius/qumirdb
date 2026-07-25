@@ -15,7 +15,16 @@
                 (call sum ss_sales_price)
               )
               (item as avg_monthly_sales
-                (window (call avg (call sum ss_sales_price)) (over (partition-by (block i_manager_id))))
+                (window
+                  (call avg (call sum ss_sales_price))
+                  (over
+                    (partition-by
+                      (block
+                        i_manager_id))
+                    (range
+                      (between
+                        (unbounded-preceding)
+                        (unbounded-following)))))
               )
             )
             (from

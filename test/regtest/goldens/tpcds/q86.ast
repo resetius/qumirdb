@@ -23,7 +23,11 @@
                 (if (call qdb_is_true (== (call grouping i_class) 0)) i_category)))
             (order-by
               (order desc
-                (call sum ws_net_paid)))))
+                (call sum ws_net_paid)))
+            (range
+              (between
+                (unbounded-preceding)
+                (current-row)))))
       )
     )
     (from

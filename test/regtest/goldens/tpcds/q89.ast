@@ -38,7 +38,11 @@
                         i_category
                         i_brand
                         s_store_name
-                        s_company_name))))
+                        s_company_name))
+                    (range
+                      (between
+                        (unbounded-preceding)
+                        (unbounded-following)))))
               )
             )
             (from

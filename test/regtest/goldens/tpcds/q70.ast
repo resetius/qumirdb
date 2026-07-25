@@ -23,7 +23,11 @@
                 (if (call qdb_is_true (== (call grouping s_county) 0)) s_state)))
             (order-by
               (order desc
-                (call sum ss_net_profit)))))
+                (call sum ss_net_profit)))
+            (range
+              (between
+                (unbounded-preceding)
+                (current-row)))))
       )
     )
     (from
@@ -50,7 +54,19 @@
                       s_state
                     )
                     (item as ranking
-                      (window (call rank) (over (partition-by (block s_state)) (order-by (order desc (call sum ss_net_profit)))))
+                      (window
+                        (call rank)
+                        (over
+                          (partition-by
+                            (block
+                              s_state))
+                          (order-by
+                            (order desc
+                              (call sum ss_net_profit)))
+                          (range
+                            (between
+                              (unbounded-preceding)
+                              (current-row)))))
                     )
                   )
                   (from

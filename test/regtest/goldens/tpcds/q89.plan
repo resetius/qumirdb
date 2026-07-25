@@ -1,2 +1,80 @@
-Error: window functions are not supported in plans yet
-
+(rel limit
+  (rel project
+    (rel sort
+      (rel project
+        (rel filter
+          (rel project
+            (rel project
+              (rel window
+                (rel aggregate
+                  (rel filter
+                    (rel join
+                      (rel join
+                        (rel join (rel source "item") (rel source "store_sales") () (inner))
+                        (rel source "date_dim")
+                        ()
+                        (inner))
+                      (rel source "store")
+                      ()
+                      (inner))
+                    (&& (&& (&& (&& (== ss_item_sk i_item_sk) (== ss_sold_date_sk d_date_sk)) (== ss_store_sk s_store_sk))
+                        (== d_year 2000))
+                      (|| (&& (|| (|| (== i_category (: (cast "Home" <named StringView>) <named StringView>))
+                              (== i_category (: (cast "Books" <named StringView>) <named StringView>)))
+                            (== i_category (: (cast "Electronics" <named StringView>) <named StringView>)))
+                          (|| (|| (== i_class (: (cast "wallpaper" <named StringView>) <named StringView>))
+                              (== i_class (: (cast "parenting" <named StringView>) <named StringView>)))
+                            (== i_class (: (cast "musical" <named StringView>) <named StringView>))))
+                        (&& (|| (|| (== i_category (: (cast "Shoes" <named StringView>) <named StringView>))
+                              (== i_category (: (cast "Jewelry" <named StringView>) <named StringView>)))
+                            (== i_category (: (cast "Men" <named StringView>) <named StringView>)))
+                          (|| (|| (== i_class (: (cast "womens" <named StringView>) <named StringView>))
+                              (== i_class (: (cast "birdal" <named StringView>) <named StringView>)))
+                            (== i_class (: (cast "pants" <named StringView>) <named StringView>)))))))
+                  (keys i_category i_class i_brand s_store_name s_company_name d_moy)
+                  (agg sum_0 sum ss_sales_price)
+                  (agg sum_1 sum ss_sales_price))
+                (partition i_category i_brand s_store_name s_company_name)
+                (frame range (start unbounded-preceding) (end unbounded-following))
+                (fn w_0 avg sum_1))
+              (i_category i_category)
+              (i_class i_class)
+              (i_brand i_brand)
+              (s_store_name s_store_name)
+              (s_company_name s_company_name)
+              (d_moy d_moy)
+              (sum_sales sum_0)
+              (avg_monthly_sales w_0))
+            (|tmp1.i_category| i_category)
+            (|tmp1.i_class| i_class)
+            (|tmp1.i_brand| i_brand)
+            (|tmp1.s_store_name| s_store_name)
+            (|tmp1.s_company_name| s_company_name)
+            (|tmp1.d_moy| d_moy)
+            (|tmp1.sum_sales| sum_sales)
+            (|tmp1.avg_monthly_sales| avg_monthly_sales))
+          (> (if
+              (call qdb_is_true (!= avg_monthly_sales 0))
+              (/ (call abs (- sum_sales avg_monthly_sales)) avg_monthly_sales)
+              (call qdb_sql_null))
+            0.10000000000000001))
+        (i_category |tmp1.i_category|)
+        (i_class |tmp1.i_class|)
+        (i_brand |tmp1.i_brand|)
+        (s_store_name |tmp1.s_store_name|)
+        (s_company_name |tmp1.s_company_name|)
+        (d_moy |tmp1.d_moy|)
+        (sum_sales |tmp1.sum_sales|)
+        (avg_monthly_sales |tmp1.avg_monthly_sales|)
+        (__sort_0 (- sum_sales avg_monthly_sales)))
+      (__sort_0 asc nulls-default)
+      (s_store_name asc nulls-default))
+    (i_category i_category)
+    (i_class i_class)
+    (i_brand i_brand)
+    (s_store_name s_store_name)
+    (s_company_name s_company_name)
+    (d_moy d_moy)
+    (sum_sales sum_sales)
+    (avg_monthly_sales avg_monthly_sales))
+  (limit 100))

@@ -1,2 +1,86 @@
-Error: window functions are not supported in plans yet
-
+(rel limit
+  (rel project
+    (rel sort
+      (rel project
+        (rel window
+          (rel project
+            (rel aggregate
+              (rel project
+                (rel filter
+                  (rel join
+                    (rel join
+                      (rel join (rel source "store_sales") (rel source "date_dim" "d1") () (inner))
+                      (rel source "store")
+                      ()
+                      (inner))
+                    (rel project
+                      (rel filter
+                        (rel project
+                          (rel project
+                            (rel window
+                              (rel aggregate
+                                (rel filter
+                                  (rel join
+                                    (rel join (rel source "store_sales") (rel source "store") () (inner))
+                                    (rel source "date_dim")
+                                    ()
+                                    (inner))
+                                  (&& (&& (&& (<= 1212 d_month_seq) (<= d_month_seq (+ 1212 11)))
+                                      (== d_date_sk ss_sold_date_sk))
+                                    (== s_store_sk ss_store_sk)))
+                                (keys s_state)
+                                (agg sum_0 sum ss_net_profit))
+                              (partition s_state)
+                              (order (sum_0 desc nulls-default))
+                              (frame range (start unbounded-preceding) (end current-row))
+                              (fn w_0 rank))
+                            (s_state s_state)
+                            (ranking w_0))
+                          (|tmp1.s_state| s_state)
+                          (|tmp1.ranking| ranking))
+                        (<= ranking 5))
+                      (__qdb_in__s_state s_state))
+                    ()
+                    (left_semi)
+                    (== s_state __qdb_in__s_state))
+                  (&& (&& (&& (<= 1212 |d1.d_month_seq|) (<= |d1.d_month_seq| (+ 1212 11)))
+                      (== |d1.d_date_sk| ss_sold_date_sk))
+                    (== s_store_sk ss_store_sk)))
+                (s_state s_state)
+                (s_county s_county)
+                (ss_net_profit ss_net_profit))
+              (keys s_state s_county)
+              (set s_state s_county)
+              (set s_state)
+              (set)
+              (agg sum_0 sum ss_net_profit)
+              (agg sum_1 sum ss_net_profit))
+            (s_state s_state)
+            (s_county s_county)
+            (sum_0 sum_0)
+            (sum_1 sum_1)
+            (wk_0 (+ (if (== __grouping_id__ (: 2 i32)) 1 0)
+                (if (== __grouping_id__ (: 1 i32)) 1 (if (== __grouping_id__ (: 2 i32)) 1 0))))
+            (wk_1 (if
+                (call qdb_is_true (== (if (== __grouping_id__ (: 1 i32)) 1 (if (== __grouping_id__ (: 2 i32)) 1 0)) 0))
+                s_state)))
+          (partition wk_0 wk_1)
+          (order (sum_1 desc nulls-default))
+          (frame range (start unbounded-preceding) (end current-row))
+          (fn w_0 rank))
+        (total_sum sum_0)
+        (s_state s_state)
+        (s_county s_county)
+        (lochierarchy (+ (if (== __grouping_id__ (: 2 i32)) 1 0)
+            (if (== __grouping_id__ (: 1 i32)) 1 (if (== __grouping_id__ (: 2 i32)) 1 0))))
+        (rank_within_parent w_0)
+        (__sort_0 (if (call qdb_is_true (== lochierarchy 0)) s_state)))
+      (lochierarchy desc nulls-default)
+      (__sort_0 asc nulls-default)
+      (rank_within_parent asc nulls-default))
+    (total_sum total_sum)
+    (s_state s_state)
+    (s_county s_county)
+    (lochierarchy lochierarchy)
+    (rank_within_parent rank_within_parent))
+  (limit 100))

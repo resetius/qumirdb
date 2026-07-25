@@ -36,7 +36,19 @@
                 sumsales
               )
               (item as rk
-                (window (call rank) (over (partition-by (block i_category)) (order-by (order desc sumsales))))
+                (window
+                  (call rank)
+                  (over
+                    (partition-by
+                      (block
+                        i_category))
+                    (order-by
+                      (order desc
+                        sumsales))
+                    (range
+                      (between
+                        (unbounded-preceding)
+                        (current-row)))))
               )
             )
             (from

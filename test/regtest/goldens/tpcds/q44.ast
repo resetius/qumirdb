@@ -27,7 +27,7 @@
                         item_sk
                       )
                       (item as rnk
-                        (window (call rank) (over (order-by (order asc rank_col))))
+                        (window (call rank) (over (order-by (order asc rank_col)) (range (between (unbounded-preceding) (current-row)))))
                       )
                     )
                     (from
@@ -103,7 +103,7 @@
                         item_sk
                       )
                       (item as rnk
-                        (window (call rank) (over (order-by (order desc rank_col))))
+                        (window (call rank) (over (order-by (order desc rank_col)) (range (between (unbounded-preceding) (current-row)))))
                       )
                     )
                     (from

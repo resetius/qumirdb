@@ -17,18 +17,6 @@ using namespace NQumir::NAst;
 
 namespace {
 
-TTypePtr FieldType(const TStructType* inputStruct, const std::string& name) {
-    if (!inputStruct) {
-        return nullptr;
-    }
-    for (const auto& [fieldName, type] : inputStruct->Fields) {
-        if (fieldName == name) {
-            return type;
-        }
-    }
-    return nullptr;
-}
-
 TTypePtr AggResultType(const std::string& func, const TTypePtr& argType) {
     if (func == "count") {
         return std::make_shared<TIntegerType>(); // i64

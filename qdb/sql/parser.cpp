@@ -1390,6 +1390,19 @@ TAstTask<TSqlWindowSpec> window_spec(TParserContext& ctx) {
         co_return Error(token, "')' expected in window specification");
     }
 
+    // Materialize the default frame (RANGE UNBOUNDED PRECEDING AND ...): the end
+    // is CURRENT ROW when ORDER BY is present, otherwise UNBOUNDED FOLLOWING (the
+    // whole partition).
+    if (!frame) {
+        auto end = orderBy
+            ? std::make_shared<TSqlFrameBound>(TSqlFrameBound::EType::CurrentRow, nullptr)
+            : std::make_shared<TSqlFrameBound>(TSqlFrameBound::EType::UnboundedFollowing, nullptr);
+        frame = std::make_shared<TSqlWindowFrame>(
+            TSqlWindowFrame::EType::Range,
+            std::make_shared<TSqlFrameBound>(TSqlFrameBound::EType::UnboundedPreceding, nullptr),
+            std::move(end));
+    }
+
     co_return std::make_shared<TSqlWindowSpec>(
         std::move(partitionBy),
         std::move(orderBy),
