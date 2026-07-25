@@ -322,7 +322,6 @@ TTypePtr Propagate(std::initializer_list<TTypePtr> operands, const TTypePtr& R) 
 
 bool IsInt(const TTypePtr& t) { return static_cast<bool>(TMaybeType<TIntegerType>(t)); }
 bool IsFloat(const TTypePtr& t) { return static_cast<bool>(TMaybeType<TFloatType>(t)); }
-bool IsDecimalValue(const TTypePtr& t) { return DecimalSpecOfValueType(t).has_value(); }
 bool IsIntLiteral(const TExprPtr& e) {
     auto n = TMaybeNode<TNumberExpr>(e);
     return n && !n.Cast()->IsFloat();

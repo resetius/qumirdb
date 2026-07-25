@@ -202,51 +202,6 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileCloneEntry(
     return runner;
 }
 
-std::unique_ptr<NQumir::TLLVMRunner> CompileDualKeyEntry(
-    const NQdb::NKernel::TAggregateKeyDescriptor& key,
-    const std::string& entrySource,
-    const std::string& entryName,
-    void*& entry)
-{
-    using namespace NQumir;
-    using namespace NQumir::NAst;
-
-    std::vector<TExprPtr> stmts;
-    for (const char* file : {
-             "string_ops.oz", "owned_blocks.oz", "robin_hood_dual_key.oz"}) {
-        auto library = NQdb::NKernel::ParseFunctionLibrary(
-            NQdb::NKernel::ReadAggregationKernel(file));
-        if (!library) {
-            ADD_FAILURE() << library.error().ToString();
-            return {};
-        }
-        stmts.insert(stmts.end(), library->begin(), library->end());
-    }
-    auto keyOps = NQdb::NKernel::GenKeyOperationFunDecls(key);
-    stmts.insert(stmts.end(), keyOps.begin(), keyOps.end());
-    auto ownership = NQdb::NKernel::GenKeyOwnershipFunDecls(key);
-    stmts.insert(stmts.end(), ownership.begin(), ownership.end());
-    auto entryLibrary = NQdb::NKernel::ParseFunctionLibrary(entrySource);
-    if (!entryLibrary) {
-        ADD_FAILURE() << entryLibrary.error().ToString();
-        return {};
-    }
-    stmts.insert(stmts.end(), entryLibrary->begin(), entryLibrary->end());
-
-    TLLVMRunnerOptions options;
-    options.CoreInput = true;
-    options.NativeCode = true;
-    options.AllowOverloads = true;
-    NQdb::NTest::ConfigureQumirDbSourceModule(options);
-    auto runner = std::make_unique<TLLVMRunner>(options);
-    auto program = std::make_shared<TBlockExpr>(TLocation{}, std::move(stmts));
-    NQdb::NTest::AddQumirDbUse(program);
-    std::string error;
-    entry = runner->CompileKernelAst(program, entryName, &error);
-    EXPECT_NE(entry, nullptr) << error;
-    return runner;
-}
-
 TEST(StringKeyDescriptor, BuildsScalarLookupAndStoredTypes) {
     TStructType input({{"name", Nullable(std::make_shared<TStringType>())}});
     auto key = NQdb::NKernel::BuildAggregateKeyDescriptor(input, {"name"});

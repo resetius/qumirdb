@@ -905,23 +905,6 @@ std::string Trim(std::string_view text) {
     return std::string(text);
 }
 
-std::string ArtifactSlice(
-    std::string_view text,
-    std::string_view beginMarker,
-    std::string_view endMarker)
-{
-    auto begin = text.find(beginMarker);
-    if (begin == std::string_view::npos) {
-        return {};
-    }
-    begin += beginMarker.size();
-    auto end = text.find(endMarker, begin);
-    if (end == std::string_view::npos) {
-        end = text.size();
-    }
-    return Trim(text.substr(begin, end - begin));
-}
-
 void MaybeAddArtifactRef(
     llvm::json::Object& refs,
     std::string name,
@@ -967,11 +950,6 @@ std::string ConnectionKindName(NQdb::NScheduler::EConnectionKind kind) {
             return "broadcast";
     }
     return "unknown";
-}
-
-std::string PlanLabelKind(std::string_view label) {
-    auto space = label.find(' ');
-    return std::string(label.substr(0, space));
 }
 
 llvm::json::Array StringArray(const std::vector<std::string>& values) {
