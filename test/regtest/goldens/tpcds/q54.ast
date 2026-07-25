@@ -14,7 +14,40 @@
           (from
             (subquery-table as cs_or_ws_sales
               (query
-                (unknown-body)
+                (union all
+                  (select
+                    (select-list
+                      (item as sold_date_sk
+                        cs_sold_date_sk
+                      )
+                      (item as customer_sk
+                        cs_bill_customer_sk
+                      )
+                      (item as item_sk
+                        cs_item_sk
+                      )
+                    )
+                    (from
+                      (table catalog_sales)
+                    )
+                  )
+                  (select
+                    (select-list
+                      (item as sold_date_sk
+                        ws_sold_date_sk
+                      )
+                      (item as customer_sk
+                        ws_bill_customer_sk
+                      )
+                      (item as item_sk
+                        ws_item_sk
+                      )
+                    )
+                    (from
+                      (table web_sales)
+                    )
+                  )
+                )
               )
             )
             (table item)

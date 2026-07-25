@@ -21,7 +21,79 @@
       (table item)
       (subquery-table as tmp
         (query
-          (unknown-body)
+          (union all
+            (union all
+              (select
+                (select-list
+                  (item as ext_price
+                    ws_ext_sales_price
+                  )
+                  (item as sold_date_sk
+                    ws_sold_date_sk
+                  )
+                  (item as sold_item_sk
+                    ws_item_sk
+                  )
+                  (item as time_sk
+                    ws_sold_time_sk
+                  )
+                )
+                (from
+                  (table web_sales)
+                  (table date_dim)
+                )
+                (where
+                  (&& (&& (== d_date_sk ws_sold_date_sk) (== d_moy 12)) (== d_year 2000))
+                )
+              )
+              (select
+                (select-list
+                  (item as ext_price
+                    cs_ext_sales_price
+                  )
+                  (item as sold_date_sk
+                    cs_sold_date_sk
+                  )
+                  (item as sold_item_sk
+                    cs_item_sk
+                  )
+                  (item as time_sk
+                    cs_sold_time_sk
+                  )
+                )
+                (from
+                  (table catalog_sales)
+                  (table date_dim)
+                )
+                (where
+                  (&& (&& (== d_date_sk cs_sold_date_sk) (== d_moy 12)) (== d_year 2000))
+                )
+              )
+            )
+            (select
+              (select-list
+                (item as ext_price
+                  ss_ext_sales_price
+                )
+                (item as sold_date_sk
+                  ss_sold_date_sk
+                )
+                (item as sold_item_sk
+                  ss_item_sk
+                )
+                (item as time_sk
+                  ss_sold_time_sk
+                )
+              )
+              (from
+                (table store_sales)
+                (table date_dim)
+              )
+              (where
+                (&& (&& (== d_date_sk ss_sold_date_sk) (== d_moy 12)) (== d_year 2000))
+              )
+            )
+          )
         )
       )
       (table time_dim)

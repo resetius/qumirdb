@@ -154,7 +154,34 @@
     (from
       (subquery-table as tmp1
         (query
-          (unknown-body)
+          (union all
+            (union all
+              (select
+                (select-list
+                  (star *)
+                )
+                (from
+                  (table ss)
+                )
+              )
+              (select
+                (select-list
+                  (star *)
+                )
+                (from
+                  (table cs)
+                )
+              )
+            )
+            (select
+              (select-list
+                (star *)
+              )
+              (from
+                (table ws)
+              )
+            )
+          )
         )
       )
     )

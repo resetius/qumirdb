@@ -169,7 +169,76 @@
     (from
       (subquery-table as x
         (query
-          (unknown-body)
+          (union all
+            (union all
+              (select
+                (select-list
+                  (item as channel
+                    (: (cast "store channel" <named StringView>) <named StringView>)
+                  )
+                  (item as id
+                    (call strcat (: (cast "store" <named StringView>) <named StringView>) store_id)
+                  )
+                  (item
+                    sales
+                  )
+                  (item
+                    returns
+                  )
+                  (item
+                    profit
+                  )
+                )
+                (from
+                  (table ssr)
+                )
+              )
+              (select
+                (select-list
+                  (item as channel
+                    (: (cast "catalog channel" <named StringView>) <named StringView>)
+                  )
+                  (item as id
+                    (call strcat (: (cast "catalog_page" <named StringView>) <named StringView>) catalog_page_id)
+                  )
+                  (item
+                    sales
+                  )
+                  (item
+                    returns
+                  )
+                  (item
+                    profit
+                  )
+                )
+                (from
+                  (table csr)
+                )
+              )
+            )
+            (select
+              (select-list
+                (item as channel
+                  (: (cast "web channel" <named StringView>) <named StringView>)
+                )
+                (item as id
+                  (call strcat (: (cast "web_site" <named StringView>) <named StringView>) web_site_id)
+                )
+                (item
+                  sales
+                )
+                (item
+                  returns
+                )
+                (item
+                  profit
+                )
+              )
+              (from
+                (table wsr)
+              )
+            )
+          )
         )
       )
     )

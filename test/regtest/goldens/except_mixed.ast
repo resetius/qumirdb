@@ -1,3 +1,36 @@
 (query
-  (unknown-body)
+  (except distinct
+    (select
+      (select-list
+        (item
+          a
+        )
+      )
+      (from
+        (table t)
+      )
+    )
+    (intersect distinct
+      (select
+        (select-list
+          (item
+            a
+          )
+        )
+        (from
+          (table s)
+        )
+      )
+      (select
+        (select-list
+          (item
+            a
+          )
+        )
+        (from
+          (table u)
+        )
+      )
+    )
+  )
 )

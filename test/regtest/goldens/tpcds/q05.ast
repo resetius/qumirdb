@@ -23,7 +23,58 @@
           (from
             (subquery-table as salesreturns
               (query
-                (unknown-body)
+                (union all
+                  (select
+                    (select-list
+                      (item as store_sk
+                        ss_store_sk
+                      )
+                      (item as date_sk
+                        ss_sold_date_sk
+                      )
+                      (item as sales_price
+                        ss_ext_sales_price
+                      )
+                      (item as profit
+                        ss_net_profit
+                      )
+                      (item as return_amt
+                        (: (cast 0 <named DECIMAL [7 2]>) <named DECIMAL [7 2]>)
+                      )
+                      (item as net_loss
+                        (: (cast 0 <named DECIMAL [7 2]>) <named DECIMAL [7 2]>)
+                      )
+                    )
+                    (from
+                      (table store_sales)
+                    )
+                  )
+                  (select
+                    (select-list
+                      (item as store_sk
+                        sr_store_sk
+                      )
+                      (item as date_sk
+                        sr_returned_date_sk
+                      )
+                      (item as sales_price
+                        (: (cast 0 <named DECIMAL [7 2]>) <named DECIMAL [7 2]>)
+                      )
+                      (item as profit
+                        (: (cast 0 <named DECIMAL [7 2]>) <named DECIMAL [7 2]>)
+                      )
+                      (item as return_amt
+                        sr_return_amt
+                      )
+                      (item as net_loss
+                        sr_net_loss
+                      )
+                    )
+                    (from
+                      (table store_returns)
+                    )
+                  )
+                )
               )
             )
             (table date_dim)
@@ -66,7 +117,58 @@
           (from
             (subquery-table as salesreturns
               (query
-                (unknown-body)
+                (union all
+                  (select
+                    (select-list
+                      (item as page_sk
+                        cs_catalog_page_sk
+                      )
+                      (item as date_sk
+                        cs_sold_date_sk
+                      )
+                      (item as sales_price
+                        cs_ext_sales_price
+                      )
+                      (item as profit
+                        cs_net_profit
+                      )
+                      (item as return_amt
+                        (: (cast 0 <named DECIMAL [7 2]>) <named DECIMAL [7 2]>)
+                      )
+                      (item as net_loss
+                        (: (cast 0 <named DECIMAL [7 2]>) <named DECIMAL [7 2]>)
+                      )
+                    )
+                    (from
+                      (table catalog_sales)
+                    )
+                  )
+                  (select
+                    (select-list
+                      (item as page_sk
+                        cr_catalog_page_sk
+                      )
+                      (item as date_sk
+                        cr_returned_date_sk
+                      )
+                      (item as sales_price
+                        (: (cast 0 <named DECIMAL [7 2]>) <named DECIMAL [7 2]>)
+                      )
+                      (item as profit
+                        (: (cast 0 <named DECIMAL [7 2]>) <named DECIMAL [7 2]>)
+                      )
+                      (item as return_amt
+                        cr_return_amount
+                      )
+                      (item as net_loss
+                        cr_net_loss
+                      )
+                    )
+                    (from
+                      (table catalog_returns)
+                    )
+                  )
+                )
               )
             )
             (table date_dim)
@@ -109,7 +211,64 @@
           (from
             (subquery-table as salesreturns
               (query
-                (unknown-body)
+                (union all
+                  (select
+                    (select-list
+                      (item as wsr_web_site_sk
+                        ws_web_site_sk
+                      )
+                      (item as date_sk
+                        ws_sold_date_sk
+                      )
+                      (item as sales_price
+                        ws_ext_sales_price
+                      )
+                      (item as profit
+                        ws_net_profit
+                      )
+                      (item as return_amt
+                        (: (cast 0 <named DECIMAL [7 2]>) <named DECIMAL [7 2]>)
+                      )
+                      (item as net_loss
+                        (: (cast 0 <named DECIMAL [7 2]>) <named DECIMAL [7 2]>)
+                      )
+                    )
+                    (from
+                      (table web_sales)
+                    )
+                  )
+                  (select
+                    (select-list
+                      (item as wsr_web_site_sk
+                        ws_web_site_sk
+                      )
+                      (item as date_sk
+                        wr_returned_date_sk
+                      )
+                      (item as sales_price
+                        (: (cast 0 <named DECIMAL [7 2]>) <named DECIMAL [7 2]>)
+                      )
+                      (item as profit
+                        (: (cast 0 <named DECIMAL [7 2]>) <named DECIMAL [7 2]>)
+                      )
+                      (item as return_amt
+                        wr_return_amt
+                      )
+                      (item as net_loss
+                        wr_net_loss
+                      )
+                    )
+                    (from
+                      (join left
+                        (table web_returns)
+                        (table web_sales)
+                        (on
+                          (&& (== wr_item_sk ws_item_sk) (== wr_order_number ws_order_number))
+                        )
+                      )
+                    )
+                  )
+                )
               )
             )
             (table date_dim)
@@ -151,7 +310,76 @@
     (from
       (subquery-table as x
         (query
-          (unknown-body)
+          (union all
+            (union all
+              (select
+                (select-list
+                  (item as channel
+                    (: (cast "store channel" <named StringView>) <named StringView>)
+                  )
+                  (item as id
+                    (call strcat (: (cast "store" <named StringView>) <named StringView>) s_store_id)
+                  )
+                  (item
+                    sales
+                  )
+                  (item
+                    returns
+                  )
+                  (item as profit
+                    (- profit profit_loss)
+                  )
+                )
+                (from
+                  (table ssr)
+                )
+              )
+              (select
+                (select-list
+                  (item as channel
+                    (: (cast "catalog channel" <named StringView>) <named StringView>)
+                  )
+                  (item as id
+                    (call strcat (: (cast "catalog_page" <named StringView>) <named StringView>) cp_catalog_page_id)
+                  )
+                  (item
+                    sales
+                  )
+                  (item
+                    returns
+                  )
+                  (item as profit
+                    (- profit profit_loss)
+                  )
+                )
+                (from
+                  (table csr)
+                )
+              )
+            )
+            (select
+              (select-list
+                (item as channel
+                  (: (cast "web channel" <named StringView>) <named StringView>)
+                )
+                (item as id
+                  (call strcat (: (cast "web_site" <named StringView>) <named StringView>) web_site_id)
+                )
+                (item
+                  sales
+                )
+                (item
+                  returns
+                )
+                (item as profit
+                  (- profit profit_loss)
+                )
+              )
+              (from
+                (table wsr)
+              )
+            )
+          )
         )
       )
     )

@@ -165,6 +165,15 @@ std::string JoinTypeName(ESqlJoinType type) {
     return "?";
 }
 
+std::string SetOpName(TSqlSetOp::EOp op) {
+    switch (op) {
+        case TSqlSetOp::EOp::Union: return "union";
+        case TSqlSetOp::EOp::Intersect: return "intersect";
+        case TSqlSetOp::EOp::Except: return "except";
+    }
+    return "?";
+}
+
 std::string Join(const std::vector<std::string>& parts, char sep) {
     std::string out;
     for (size_t i = 0; i < parts.size(); ++i) {
@@ -282,6 +291,19 @@ struct TSqlPrinter {
     void Body(int ind, const TSqlNodePtr& body) {
         if (auto select = TMaybeNode<TSqlSelect>(body)) {
             Select(ind, select.Cast());
+            return;
+        }
+        if (auto maybeSetOp = TMaybeNode<TSqlSetOp>(body)) {
+            auto setOp = maybeSetOp.Cast();
+            Line(ind, "(" + SetOpName(setOp->Op) +
+                (setOp->Quantifier == ESetQuantifier::Distinct ? " distinct" : " all"));
+            Body(ind + 2, setOp->Left);
+            Body(ind + 2, setOp->Right);
+            Line(ind, ")");
+            return;
+        }
+        if (auto query = TMaybeNode<TSqlQuery>(body)) {
+            Query(ind, query.Cast());
             return;
         }
         Line(ind, "(unknown-body)");
