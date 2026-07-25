@@ -8,6 +8,7 @@
 #include <qdb/plan/ops/sort.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/ops/union.h>
+#include <qdb/plan/ops/window.h>
 
 #include <qdb/kernel/annotate_type.h>
 #include <qdb/plan/clone_expr.h>
@@ -175,6 +176,43 @@ public:
 
     std::expected<NAst::TExprPtr, TError> Rewrite(NAst::TExprPtr expr) {
         if (!expr) {
+            return expr;
+        }
+        // A window function evaluates after aggregation: keep the window node in
+        // place, but hoist any aggregates from its arguments and PARTITION/ORDER
+        // (e.g. `sum(sum(x)) over (...)`, `rank() over (order by sum(x))`).
+        if (auto window = NAst::TMaybeNode<NSql::TWindowExpr>(expr)) {
+            auto w = window.Cast();
+            if (auto call = NAst::TMaybeNode<NAst::TCallExpr>(w->Expr)) {
+                for (auto& arg : call.Cast()->Args) {
+                    auto rewritten = Rewrite(arg);
+                    if (!rewritten) {
+                        return std::unexpected(rewritten.error());
+                    }
+                    arg = std::move(*rewritten);
+                }
+            }
+            if (w->WindowSpec) {
+                if (w->WindowSpec->PartitionBy) {
+                    auto rewritten = Rewrite(w->WindowSpec->PartitionBy);
+                    if (!rewritten) {
+                        return std::unexpected(rewritten.error());
+                    }
+                    w->WindowSpec->PartitionBy = std::move(*rewritten);
+                }
+                if (w->WindowSpec->OrderBy) {
+                    for (auto& item : w->WindowSpec->OrderBy->Items) {
+                        if (!item || !item->Expr) {
+                            continue;
+                        }
+                        auto rewritten = Rewrite(item->Expr);
+                        if (!rewritten) {
+                            return std::unexpected(rewritten.error());
+                        }
+                        item->Expr = std::move(*rewritten);
+                    }
+                }
+            }
             return expr;
         }
         if (auto agg = AsAggCall(expr)) {
@@ -367,6 +405,249 @@ public:
     bool IsDistinctSpec(const std::string& name) const {
         return DistinctSpecNames_.count(name) != 0;
     }
+};
+
+ESortNulls ConvertSortNulls(NSql::TSqlOrderItem::ENullOrder nulls);
+
+std::optional<TWindowFrame> ConvertFrame(
+    const NSql::TSqlPtr<NSql::TSqlWindowFrame>& frame)
+{
+    if (!frame) {
+        return std::nullopt;
+    }
+    auto convertBound = [](const NSql::TSqlPtr<NSql::TSqlFrameBound>& bound) -> TFrameBound {
+        TFrameBound out;
+        if (!bound) {
+            return out;
+        }
+        switch (bound->Type) {
+            case NSql::TSqlFrameBound::EType::UnboundedPreceding:
+                out.Kind = EFrameBoundKind::UnboundedPreceding; break;
+            case NSql::TSqlFrameBound::EType::Preceding:
+                out.Kind = EFrameBoundKind::Preceding; out.Offset = bound->Expr; break;
+            case NSql::TSqlFrameBound::EType::CurrentRow:
+                out.Kind = EFrameBoundKind::CurrentRow; break;
+            case NSql::TSqlFrameBound::EType::Following:
+                out.Kind = EFrameBoundKind::Following; out.Offset = bound->Expr; break;
+            case NSql::TSqlFrameBound::EType::UnboundedFollowing:
+                out.Kind = EFrameBoundKind::UnboundedFollowing; break;
+        }
+        return out;
+    };
+    TWindowFrame out;
+    out.Mode = frame->Type == NSql::TSqlWindowFrame::EType::Rows
+        ? EWindowFrameMode::Rows : EWindowFrameMode::Range;
+    out.Start = convertBound(frame->Start);
+    out.End = frame->End ? convertBound(frame->End) : TFrameBound{};
+    return out;
+}
+
+std::string FrameSignature(const std::optional<TWindowFrame>& frame) {
+    if (!frame) {
+        return "none";
+    }
+    auto boundSig = [](const TFrameBound& bound) {
+        std::string s(FrameBoundKindName(bound.Kind));
+        if (bound.Offset) {
+            s += ":" + NAst::NCore::PrintAst(bound.Offset);
+        }
+        return s;
+    };
+    return std::string(WindowFrameModeName(frame->Mode)) + "[" +
+        boundSig(frame->Start) + "," + boundSig(frame->End) + "]";
+}
+
+// Extracts window expressions from projection expressions into a stack of
+// TWindowOperator nodes (one per distinct spec) and rewrites each to a reference
+// to a synthetic output column. Runs after aggregation, so arguments and
+// partition/order keys are already over the aggregated relation.
+class TWindowCollector {
+    struct TRaw {
+        std::string Name;
+        std::string Func;
+        NAst::TExprPtr Arg;
+        std::vector<NAst::TExprPtr> PartitionExprs;
+        std::vector<NSql::TSqlPtr<NSql::TSqlOrderItem>> OrderItems;
+        std::optional<TWindowFrame> Frame;
+        std::string Signature;
+    };
+
+public:
+    std::expected<NAst::TExprPtr, TError> Rewrite(NAst::TExprPtr expr) {
+        if (!expr) {
+            return expr;
+        }
+        if (auto window = NAst::TMaybeNode<NSql::TWindowExpr>(expr)) {
+            return Emit(window.Cast());
+        }
+        for (auto* child : expr->MutableChildren()) {
+            auto rewritten = Rewrite(*child);
+            if (!rewritten) {
+                return std::unexpected(rewritten.error());
+            }
+            *child = std::move(*rewritten);
+        }
+        return expr;
+    }
+
+    bool Empty() const { return Raw_.empty(); }
+
+    std::expected<TOperatorPtr, TError> Build(TOperatorPtr input) {
+        // Plain idents keep their name; a computed key/arg is materialized into a
+        // synthetic column in one pass-through project below the whole stack.
+        std::map<std::string, std::pair<std::string, NAst::TExprPtr>> computed;
+        auto keyName = [&](const NAst::TExprPtr& expr) -> std::string {
+            if (auto ident = NAst::TMaybeNode<NAst::TIdentExpr>(expr)) {
+                return ident.Cast()->Name;
+            }
+            auto printed = NAst::NCore::PrintAst(expr);
+            auto it = computed.find(printed);
+            if (it == computed.end()) {
+                std::string name = "wk_" + std::to_string(computed.size());
+                computed.emplace(printed, std::make_pair(name, expr));
+                return name;
+            }
+            return it->second.first;
+        };
+
+        struct TResolved {
+            std::vector<std::string> PartitionKeys;
+            std::vector<TSortKey> OrderKeys;
+            std::optional<TWindowFrame> Frame;
+            std::string Signature;
+            TWindowFunc Func;
+        };
+        std::vector<TResolved> resolved;
+        resolved.reserve(Raw_.size());
+        for (auto& raw : Raw_) {
+            TResolved r;
+            for (const auto& expr : raw.PartitionExprs) {
+                r.PartitionKeys.push_back(keyName(expr));
+            }
+            for (const auto& item : raw.OrderItems) {
+                r.OrderKeys.push_back(TSortKey{
+                    .Column = keyName(item->Expr),
+                    .Direction = item->Desc ? ESortDirection::Desc : ESortDirection::Asc,
+                    .Nulls = ConvertSortNulls(item->NullOrder),
+                });
+            }
+            r.Frame = raw.Frame;
+            r.Signature = raw.Signature;
+            r.Func = TWindowFunc{
+                .Name = raw.Name,
+                .Func = raw.Func,
+                .Arg = raw.Arg ? Ident({}, keyName(raw.Arg)) : nullptr,
+            };
+            resolved.push_back(std::move(r));
+        }
+
+        TOperatorPtr node = std::move(input);
+        if (!computed.empty()) {
+            auto* schema = static_cast<NAst::TStructType*>(node->OutputColumns().get());
+            std::vector<TProjectionSpec> projs;
+            if (schema) {
+                for (const auto& [name, _] : schema->Fields) {
+                    projs.push_back({ .Name = name, .Expression = Ident({}, name) });
+                }
+            }
+            for (const auto& [_, entry] : computed) {
+                projs.push_back({ .Name = entry.first, .Expression = entry.second });
+            }
+            node = std::make_shared<TProjectOperator>(std::move(node), std::move(projs));
+        }
+
+        // One node per distinct spec, in first-seen order.
+        std::map<std::string, size_t> sigToGroup;
+        std::vector<std::vector<size_t>> groups;
+        for (size_t i = 0; i < resolved.size(); ++i) {
+            auto [it, inserted] = sigToGroup.try_emplace(resolved[i].Signature, groups.size());
+            if (inserted) {
+                groups.emplace_back();
+            }
+            groups[it->second].push_back(i);
+        }
+        for (const auto& group : groups) {
+            const auto& head = resolved[group[0]];
+            std::vector<TWindowFunc> funcs;
+            funcs.reserve(group.size());
+            for (auto idx : group) {
+                funcs.push_back(std::move(resolved[idx].Func));
+            }
+            node = std::make_shared<TWindowOperator>(
+                std::move(node), head.PartitionKeys, head.OrderKeys, head.Frame,
+                std::move(funcs));
+        }
+        return node;
+    }
+
+private:
+    std::expected<NAst::TExprPtr, TError> Emit(const NSql::TSqlPtr<NSql::TWindowExpr>& w) {
+        auto call = NAst::TMaybeNode<NAst::TCallExpr>(w->Expr);
+        if (!call) {
+            return std::unexpected(TError(w->Location, "unsupported window function expression"));
+        }
+        auto callee = NAst::TMaybeNode<NAst::TIdentExpr>(call.Cast()->Callee);
+        if (!callee) {
+            return std::unexpected(TError(w->Location, "unsupported window function"));
+        }
+        std::string func = ToLower(callee.Cast()->Name);
+        if (func != "rank" && func != "sum" && func != "avg" && func != "max") {
+            return std::unexpected(TError(w->Location,
+                "window function '" + func + "' is not supported"));
+        }
+        TRaw raw;
+        raw.Func = func;
+        const auto& args = call.Cast()->Args;
+        if (!args.empty()) {
+            raw.Arg = args[0];
+        }
+        if (func != "rank" && !raw.Arg) {
+            return std::unexpected(TError(w->Location, func + " window requires an argument"));
+        }
+        if (w->WindowSpec) {
+            if (w->WindowSpec->PartitionBy) {
+                if (auto block = NAst::TMaybeNode<NAst::TBlockExpr>(w->WindowSpec->PartitionBy)) {
+                    for (const auto& expr : block.Cast()->Stmts) {
+                        raw.PartitionExprs.push_back(expr);
+                    }
+                } else {
+                    raw.PartitionExprs.push_back(w->WindowSpec->PartitionBy);
+                }
+            }
+            if (w->WindowSpec->OrderBy) {
+                for (const auto& item : w->WindowSpec->OrderBy->Items) {
+                    if (item && item->Expr) {
+                        raw.OrderItems.push_back(item);
+                    }
+                }
+            }
+            raw.Frame = ConvertFrame(w->WindowSpec->Frame);
+        }
+        raw.Name = "w_" + std::to_string(Counter_++);
+        raw.Signature = Signature(raw);
+        auto loc = w->Location;
+        Raw_.push_back(std::move(raw));
+        return Ident(loc, Raw_.back().Name);
+    }
+
+    std::string Signature(const TRaw& raw) const {
+        std::string s = "p:";
+        for (const auto& expr : raw.PartitionExprs) {
+            s += NAst::NCore::PrintAst(expr) + ";";
+        }
+        s += "o:";
+        for (const auto& item : raw.OrderItems) {
+            s += NAst::NCore::PrintAst(item->Expr);
+            s += item->Desc ? " desc " : " asc ";
+            s += std::to_string(static_cast<int>(item->NullOrder));
+            s += ";";
+        }
+        s += "f:" + FrameSignature(raw.Frame);
+        return s;
+    }
+
+    std::vector<TRaw> Raw_;
+    int Counter_ = 0;
 };
 
 std::string ItemName(const NSql::TSqlSelectItem& item, size_t index) {
@@ -1590,6 +1871,23 @@ std::expected<TOperatorPtr, TError> BuildSelect(
         having = std::move(*rewritten);
     }
 
+    // Window functions run after aggregation/HAVING and before the final project.
+    // Shared by both the aggregated and non-aggregated paths.
+    auto applyWindows = [&](TOperatorPtr n) -> std::expected<TOperatorPtr, TError> {
+        TWindowCollector windows;
+        for (auto& projection : projections) {
+            auto rewritten = windows.Rewrite(projection.Expression);
+            if (!rewritten) {
+                return std::unexpected(rewritten.error());
+            }
+            projection.Expression = std::move(*rewritten);
+        }
+        if (windows.Empty()) {
+            return n;
+        }
+        return windows.Build(std::move(n));
+    };
+
     bool aggregated = select.GroupBy != nullptr || !collector.Empty();
     if (!aggregated) {
         for (const auto& projection : projections) {
@@ -1601,6 +1899,11 @@ std::expected<TOperatorPtr, TError> BuildSelect(
         if (having) {
             return std::unexpected(TError("HAVING requires aggregation"));
         }
+        auto windowed = applyWindows(std::move(node));
+        if (!windowed) {
+            return std::unexpected(windowed.error());
+        }
+        node = std::move(*windowed);
         if (auto ok = extractProjectionSubqueries(projections, node); !ok) {
             return std::unexpected(ok.error());
         }
@@ -1790,6 +2093,13 @@ std::expected<TOperatorPtr, TError> BuildSelect(
         }
         node = std::make_shared<TFilterOperator>(std::move(node), std::move(*rewritten));
     }
+    {
+        auto windowed = applyWindows(std::move(node));
+        if (!windowed) {
+            return std::unexpected(windowed.error());
+        }
+        node = std::move(*windowed);
+    }
     if (auto ok = extractProjectionSubqueries(projections, node); !ok) {
         return std::unexpected(ok.error());
     }
@@ -1825,6 +2135,21 @@ void CloneOperatorExprs(const TOperatorPtr& op) {
     } else if (auto join = TMaybeOp<TJoinOperator>(op)) {
         if (join.Cast()->Filter()) {
             join.Cast()->MutableFilter() = CloneExpr(join.Cast()->Filter());
+        }
+    } else if (auto maybeWindow = TMaybeOp<TWindowOperator>(op)) {
+        auto window = maybeWindow.Cast();
+        for (auto& func : window->MutableFunctions()) {
+            if (func.Arg) {
+                func.Arg = CloneExpr(func.Arg);
+            }
+        }
+        if (auto& frame = window->MutableFrame()) {
+            if (frame->Start.Offset) {
+                frame->Start.Offset = CloneExpr(frame->Start.Offset);
+            }
+            if (frame->End.Offset) {
+                frame->End.Offset = CloneExpr(frame->End.Offset);
+            }
         }
     }
 }
@@ -1884,7 +2209,10 @@ std::expected<TOperatorPtr, TError> ApplyOrderBy(
         select && select.Cast()->SelectList) {
         const auto& items = select.Cast()->SelectList->Items;
         for (size_t i = 0; i < items.size(); ++i) {
-            if (!items[i]->Star) {
+            // A window select item is referenced by its output alias (handled by
+            // the ident branch below); it also cannot be core-printed for a
+            // structural match, so skip it here.
+            if (!items[i]->Star && !HasWindowExpr(items[i]->Expr)) {
                 outputByExpr.emplace(NAst::NCore::PrintAst(items[i]->Expr), ItemName(*items[i], i));
             }
         }
@@ -1900,6 +2228,9 @@ std::expected<TOperatorPtr, TError> ApplyOrderBy(
         auto ident = NAst::TMaybeNode<NAst::TIdentExpr>(item->Expr);
         if (ident && HasOutputColumn(plan, ident.Cast()->Name)) {
             column = ident.Cast()->Name;
+        } else if (HasWindowExpr(item->Expr)) {
+            return std::unexpected(TError(item->Expr->Location,
+                "ORDER BY on a window expression must reference its select alias"));
         } else if (auto it = outputByExpr.find(NAst::NCore::PrintAst(item->Expr));
                    it != outputByExpr.end()) {
             column = it->second;
@@ -2120,9 +2451,6 @@ std::expected<TOperatorPtr, TError> BuildQuery(
     const NSql::TSqlQuery& query,
     const TTableSourceFactory& sources)
 {
-    if (HasWindowExpr(query)) {
-        return std::unexpected(TError("window functions are not supported in plans yet"));
-    }
     if (!query.WithClause) {
         auto plan = BuildQueryBody(query.Body, sources);
         if (!plan) {

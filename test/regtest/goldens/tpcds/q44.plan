@@ -1,2 +1,112 @@
-Error: window functions are not supported in plans yet
-
+(rel limit
+  (rel sort
+    (rel project
+      (rel filter
+        (rel join
+          (rel join
+            (rel join
+              (rel project
+                (rel project
+                  (rel filter
+                    (rel project
+                      (rel project
+                        (rel window
+                          (rel project
+                            (rel project
+                              (rel filter
+                                (rel join
+                                  (rel aggregate
+                                    (rel filter (rel source "store_sales" "ss1") (== ss_store_sk 2))
+                                    (keys ss_item_sk)
+                                    (agg sum_0 sum ss_net_profit)
+                                    (agg count_1 count ss_net_profit)
+                                    (agg sum_2 sum ss_net_profit)
+                                    (agg count_3 count ss_net_profit))
+                                  (rel project
+                                    (rel aggregate
+                                      (rel filter
+                                        (rel source "store_sales")
+                                        (&& (== ss_store_sk 2) (call qdb_is_null ss_hdemo_sk)))
+                                      (keys ss_store_sk)
+                                      (agg sum_0 sum ss_net_profit)
+                                      (agg count_1 count ss_net_profit))
+                                    (__scalar_0__ (/ sum_0 (cast count_1 f64))))
+                                  ()
+                                  (inner))
+                                (> (/ sum_2 (cast count_3 f64)) (* 0.90000000000000002 __scalar_0__)))
+                              (item_sk ss_item_sk)
+                              (rank_col (/ sum_0 (cast count_1 f64))))
+                            (|v1.item_sk| item_sk)
+                            (|v1.rank_col| rank_col))
+                          (order (rank_col asc nulls-default))
+                          (frame range (start unbounded-preceding) (end current-row))
+                          (fn w_0 rank))
+                        (item_sk item_sk)
+                        (rnk w_0))
+                      (|v11.item_sk| item_sk)
+                      (|v11.rnk| rnk))
+                    (< rnk 11))
+                  (item_sk |v11.item_sk|)
+                  (rnk |v11.rnk|))
+                (|asceding.item_sk| item_sk)
+                (|asceding.rnk| rnk))
+              (rel project
+                (rel project
+                  (rel filter
+                    (rel project
+                      (rel project
+                        (rel window
+                          (rel project
+                            (rel project
+                              (rel filter
+                                (rel join
+                                  (rel aggregate
+                                    (rel filter (rel source "store_sales" "ss1") (== ss_store_sk 2))
+                                    (keys ss_item_sk)
+                                    (agg sum_0 sum ss_net_profit)
+                                    (agg count_1 count ss_net_profit)
+                                    (agg sum_2 sum ss_net_profit)
+                                    (agg count_3 count ss_net_profit))
+                                  (rel project
+                                    (rel aggregate
+                                      (rel filter
+                                        (rel source "store_sales")
+                                        (&& (== ss_store_sk 2) (call qdb_is_null ss_hdemo_sk)))
+                                      (keys ss_store_sk)
+                                      (agg sum_0 sum ss_net_profit)
+                                      (agg count_1 count ss_net_profit))
+                                    (__scalar_0__ (/ sum_0 (cast count_1 f64))))
+                                  ()
+                                  (inner))
+                                (> (/ sum_2 (cast count_3 f64)) (* 0.90000000000000002 __scalar_0__)))
+                              (item_sk ss_item_sk)
+                              (rank_col (/ sum_0 (cast count_1 f64))))
+                            (|v2.item_sk| item_sk)
+                            (|v2.rank_col| rank_col))
+                          (order (rank_col desc nulls-default))
+                          (frame range (start unbounded-preceding) (end current-row))
+                          (fn w_0 rank))
+                        (item_sk item_sk)
+                        (rnk w_0))
+                      (|v21.item_sk| item_sk)
+                      (|v21.rnk| rnk))
+                    (< rnk 11))
+                  (item_sk |v21.item_sk|)
+                  (rnk |v21.rnk|))
+                (|descending.item_sk| item_sk)
+                (|descending.rnk| rnk))
+              ()
+              (inner))
+            (rel source "item" "i1")
+            ()
+            (inner))
+          (rel source "item" "i2")
+          ()
+          (inner))
+        (&& (&& (== |asceding.rnk| |descending.rnk|) (== |i1.i_item_sk| |asceding.item_sk|))
+          (== |i2.i_item_sk| |descending.item_sk|)))
+      (rnk |asceding.rnk|)
+      (best_performing |i1.i_product_name|)
+      (worst_performing |i2.i_product_name|))
+    (rnk asc nulls-default))
+  (limit 100))

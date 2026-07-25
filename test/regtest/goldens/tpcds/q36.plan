@@ -1,2 +1,72 @@
-Error: window functions are not supported in plans yet
-
+(rel limit
+  (rel project
+    (rel sort
+      (rel project
+        (rel window
+          (rel project
+            (rel aggregate
+              (rel project
+                (rel filter
+                  (rel join
+                    (rel join
+                      (rel join (rel source "store_sales") (rel source "date_dim" "d1") () (inner))
+                      (rel source "item")
+                      ()
+                      (inner))
+                    (rel source "store")
+                    ()
+                    (inner))
+                  (&& (&& (&& (&& (== |d1.d_year| 2000) (== |d1.d_date_sk| ss_sold_date_sk)) (== i_item_sk ss_item_sk))
+                      (== s_store_sk ss_store_sk))
+                    (|| (|| (|| (|| (|| (|| (|| (== s_state (: (cast "TN" <named StringView>) <named StringView>))
+                                  (== s_state (: (cast "TN" <named StringView>) <named StringView>)))
+                                (== s_state (: (cast "TN" <named StringView>) <named StringView>)))
+                              (== s_state (: (cast "TN" <named StringView>) <named StringView>)))
+                            (== s_state (: (cast "TN" <named StringView>) <named StringView>)))
+                          (== s_state (: (cast "TN" <named StringView>) <named StringView>)))
+                        (== s_state (: (cast "TN" <named StringView>) <named StringView>)))
+                      (== s_state (: (cast "TN" <named StringView>) <named StringView>)))))
+                (i_category i_category)
+                (i_class i_class)
+                (ss_net_profit ss_net_profit)
+                (ss_ext_sales_price ss_ext_sales_price))
+              (keys i_category i_class)
+              (set i_category i_class)
+              (set i_category)
+              (set)
+              (agg sum_0 sum ss_net_profit)
+              (agg sum_1 sum ss_ext_sales_price)
+              (agg sum_2 sum ss_net_profit)
+              (agg sum_3 sum ss_ext_sales_price))
+            (i_category i_category)
+            (i_class i_class)
+            (sum_0 sum_0)
+            (sum_1 sum_1)
+            (sum_2 sum_2)
+            (sum_3 sum_3)
+            (wk_0 (+ (if (== __grouping_id__ (: 2 i32)) 1 0)
+                (if (== __grouping_id__ (: 1 i32)) 1 (if (== __grouping_id__ (: 2 i32)) 1 0))))
+            (wk_2 (/ sum_2 sum_3))
+            (wk_1 (if
+                (call qdb_is_true (== (if (== __grouping_id__ (: 1 i32)) 1 (if (== __grouping_id__ (: 2 i32)) 1 0)) 0))
+                i_category)))
+          (partition wk_0 wk_1)
+          (order (wk_2 asc nulls-default))
+          (frame range (start unbounded-preceding) (end current-row))
+          (fn w_0 rank))
+        (gross_margin (/ sum_0 sum_1))
+        (i_category i_category)
+        (i_class i_class)
+        (lochierarchy (+ (if (== __grouping_id__ (: 2 i32)) 1 0)
+            (if (== __grouping_id__ (: 1 i32)) 1 (if (== __grouping_id__ (: 2 i32)) 1 0))))
+        (rank_within_parent w_0)
+        (__sort_0 (if (call qdb_is_true (== lochierarchy 0)) i_category)))
+      (lochierarchy desc nulls-default)
+      (__sort_0 asc nulls-default)
+      (rank_within_parent asc nulls-default))
+    (gross_margin gross_margin)
+    (i_category i_category)
+    (i_class i_class)
+    (lochierarchy lochierarchy)
+    (rank_within_parent rank_within_parent))
+  (limit 100))

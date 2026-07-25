@@ -21,7 +21,16 @@
       )
       (item as revenueratio
         (/ (* (call sum ss_ext_sales_price) 100)
-          (window (call sum (call sum ss_ext_sales_price)) (over (partition-by (block i_class)))))
+          (window
+            (call sum (call sum ss_ext_sales_price))
+            (over
+              (partition-by
+                (block
+                  i_class))
+              (range
+                (between
+                  (unbounded-preceding)
+                  (unbounded-following))))))
       )
     )
     (from

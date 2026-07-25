@@ -35,7 +35,11 @@
                       i_brand
                       s_store_name
                       s_company_name
-                      d_year))))
+                      d_year))
+                  (range
+                    (between
+                      (unbounded-preceding)
+                      (unbounded-following)))))
             )
             (item as rn
               (window
@@ -51,7 +55,11 @@
                     (order asc
                       d_year)
                     (order asc
-                      d_moy))))
+                      d_moy))
+                  (range
+                    (between
+                      (unbounded-preceding)
+                      (current-row)))))
             )
           )
           (from

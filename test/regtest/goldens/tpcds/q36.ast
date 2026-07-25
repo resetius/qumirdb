@@ -23,7 +23,11 @@
                 (if (call qdb_is_true (== (call grouping i_class) 0)) i_category)))
             (order-by
               (order asc
-                (/ (call sum ss_net_profit) (call sum ss_ext_sales_price))))))
+                (/ (call sum ss_net_profit) (call sum ss_ext_sales_price))))
+            (range
+              (between
+                (unbounded-preceding)
+                (current-row)))))
       )
     )
     (from

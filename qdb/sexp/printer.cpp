@@ -9,6 +9,7 @@
 #include <qdb/plan/ops/sort.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/ops/union.h>
+#include <qdb/plan/ops/window.h>
 
 #include <stdexcept>
 
@@ -198,6 +199,67 @@ static void PrintRel(NQumir::NAst::TExpr& expr, TPrinter& printer, TPrintFrame f
         for (const auto& input : un.Inputs()) {
             printer.Separator(frame.Level + 1);
             printer.PrintExpr(input, frame.AllowTypeWrap, frame.Level + 1);
+        }
+        out << ')';
+        return;
+    }
+
+    if (rel == TWindowOperator::OpId) {
+        auto& window = static_cast<TWindowOperator&>(op);
+        out << "(rel window";
+        printer.Separator(frame.Level + 1);
+        printer.PrintExpr(window.Input(), frame.AllowTypeWrap, frame.Level + 1);
+        if (!window.PartitionKeys().empty()) {
+            printer.Separator(frame.Level + 1);
+            out << "(partition";
+            for (const auto& key : window.PartitionKeys()) {
+                printer.Space();
+                printer.PrintIdentifier(key);
+            }
+            out << ')';
+        }
+        if (!window.OrderKeys().empty()) {
+            printer.Separator(frame.Level + 1);
+            out << "(order";
+            for (const auto& key : window.OrderKeys()) {
+                printer.Space();
+                out << '(';
+                printer.PrintIdentifier(key.Column);
+                printer.Space();
+                out << SortDirectionName(key.Direction);
+                printer.Space();
+                out << SortNullsName(key.Nulls);
+                out << ')';
+            }
+            out << ')';
+        }
+        if (const auto& windowFrame = window.Frame()) {
+            printer.Separator(frame.Level + 1);
+            out << "(frame " << WindowFrameModeName(windowFrame->Mode);
+            auto printBound = [&](const char* tag, const TFrameBound& bound) {
+                printer.Space();
+                out << '(' << tag << ' ' << FrameBoundKindName(bound.Kind);
+                if (bound.Offset) {
+                    printer.Space();
+                    printer.PrintExpr(bound.Offset, frame.AllowTypeWrap, frame.Level + 2);
+                }
+                out << ')';
+            };
+            printBound("start", windowFrame->Start);
+            printBound("end", windowFrame->End);
+            out << ')';
+        }
+        for (const auto& func : window.Functions()) {
+            printer.Separator(frame.Level + 1);
+            out << "(fn ";
+            printer.PrintIdentifier(func.Name);
+            printer.Space();
+            printer.PrintIdentifier(func.Func);
+            if (func.Arg) {
+                printer.Space();
+                printer.PrintExpr(func.Arg, frame.AllowTypeWrap, frame.Level + 2);
+            }
+            out << ')';
         }
         out << ')';
         return;
