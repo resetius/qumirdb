@@ -1055,20 +1055,25 @@ NQumir::NAst::TExprPtr BuildWindowMaterializeWrapperAst(
             const auto& argType =
                 inputType.Fields[static_cast<size_t>(funcs[f].ArgColumn)].second;
             const bool binInt = SortValueIsBinInt(argType);
+            const bool isPrefix = funcs[f].Func != "sum_partition";
             if (binInt) {
                 const char* filler = funcs[f].Func == "sum_prefix"
                     ? "window_fill_prefix_sum_binint"
                     : funcs[f].Func == "sum_partition"
                         ? "window_fill_partition_sum_binint"
                         : "window_fill_prefix_max_binint";
-                builder.Stmt(Oz::Call(filler, {
+                std::vector<TExprPtr> args = {
                     Oz::Ident("store"), Oz::Ident("row_ids"), Oz::Ident("start"),
                     Oz::Ident("n"),
                     Int64Literal(static_cast<int64_t>(funcs[f].ArgColumn)),
                     column(static_cast<size_t>(inputColumnCount) + f),
                     Oz::Ident("out_rowset"), Int64Literal(dataOwner),
                     Int64Literal(maskOwner),
-                }));
+                };
+                if (isPrefix) {
+                    args.push_back(Oz::Bool(funcs[f].PeerInclusive));
+                }
+                builder.Stmt(Oz::Call(filler, std::move(args)));
                 continue;
             }
             auto argCoreType = SortCoreType(argType);
@@ -1083,7 +1088,7 @@ NQumir::NAst::TExprPtr BuildWindowMaterializeWrapperAst(
                 : funcs[f].Func == "sum_partition"
                     ? "window_fill_partition_sum_fixed"
                     : "window_fill_prefix_max_fixed";
-            builder.Stmt(Oz::Call(filler, {
+            std::vector<TExprPtr> args = {
                 Oz::Ident("store"), Oz::Ident("row_ids"), Oz::Ident("start"),
                 Oz::Ident("n"), Int64Literal(static_cast<int64_t>(funcs[f].ArgColumn)),
                 Cast(Int64Literal(0), Ptr(std::move(argCoreType))),
@@ -1091,7 +1096,11 @@ NQumir::NAst::TExprPtr BuildWindowMaterializeWrapperAst(
                 column(static_cast<size_t>(inputColumnCount) + f),
                 Oz::Ident("out_rowset"), Int64Literal(dataOwner),
                 Int64Literal(maskOwner),
-            }));
+            };
+            if (isPrefix) {
+                args.push_back(Oz::Bool(funcs[f].PeerInclusive));
+            }
+            builder.Stmt(Oz::Call(filler, std::move(args)));
         } else {
             throw NQumir::TError(
                 "BuildWindowMaterializeWrapperAst: unsupported window function " +

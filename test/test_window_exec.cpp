@@ -748,6 +748,54 @@ TEST(WindowExec, PrefixSumGroupsNullPartitionKey) {
     Release(&result);
 }
 
+TEST(WindowExec, RangeSumSharesValueAcrossOrderPeers) {
+    // Default frame RANGE UNBOUNDED PRECEDING .. CURRENT ROW: all rows equal on
+    // the order key (peers) must share the running sum through the last peer.
+    std::array<int64_t, 5> o = {1, 1, 2, 3, 3};
+    std::array<int64_t, 5> v = {10, 20, 5, 4, 11};
+
+    std::vector<TColumn> columns = {
+        TColumn{.Data = reinterpret_cast<char*>(o.data())},
+        TColumn{.Data = reinterpret_cast<char*>(v.data())},
+    };
+    std::vector<TRowSet> batches = {TRowSet{
+        .Columns = columns.data(),
+        .ColumnCount = 2,
+        .RowCount = 5,
+        .Selection = nullptr,
+        .RefCount = 1,
+    }};
+    TMockSource source({"o", "v"}, std::move(batches));
+
+    auto root = ParsePlan(
+        "(rel window (rel source \"data.parquet\") "
+        "(order (o asc nulls-default)) "
+        "(frame range (start unbounded-preceding) (end current-row)) "
+        "(fn s sum v))",
+        source);
+
+    auto runtime = RunPlan(root);
+
+    TRowSet result{};
+    ASSERT_TRUE(runtime->Next(result));
+    ASSERT_EQ(result.RowCount, 5);
+
+    auto* outOrder = reinterpret_cast<int64_t*>(result.Columns[0].Data);
+    auto* outSums = reinterpret_cast<int64_t*>(result.Columns[2].Data);
+
+    // Peers (o=1 -> 10+20; o=3 -> +4+11) share the cumulative value; contrast the
+    // ROWS result 10,30,35,39,50.
+    const std::array<int64_t, 5> expectedOrder = {1, 1, 2, 3, 3};
+    const std::array<int64_t, 5> expectedSums = {30, 30, 35, 50, 50};
+
+    for (int64_t row = 0; row < result.RowCount; ++row) {
+        EXPECT_EQ(outOrder[row], expectedOrder[row]) << "row " << row;
+        EXPECT_EQ(outSums[row], expectedSums[row]) << "row " << row;
+    }
+
+    Release(&result);
+}
+
 int main(int argc, char** argv) {
     NQumir::NCodeGen::TLLVMInitializer initializer;
     ::testing::InitGoogleTest(&argc, argv);

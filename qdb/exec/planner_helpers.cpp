@@ -418,6 +418,25 @@ TWindowRuntimeProcess BuildWindowRuntimeProcess(
         radixKeys.push_back(std::move(radixKey));
     }
 
+    // Running (ordered) sum/max honor the frame: only UNBOUNDED PRECEDING ..
+    // CURRENT ROW is supported; RANGE mode makes CURRENT ROW peer-inclusive (all
+    // rows equal on the order key share the value through the last peer), ROWS is
+    // strict row-by-row. Ordered windows always carry a parser-materialized frame.
+    auto framePeerInclusive = [&]() -> bool {
+        const auto& frame = window.Frame();
+        if (!frame) {
+            return true; // default RANGE UNBOUNDED PRECEDING .. CURRENT ROW
+        }
+        const bool fullStart = frame->Start.Kind == EFrameBoundKind::UnboundedPreceding;
+        const bool currentEnd = frame->End.Kind == EFrameBoundKind::CurrentRow;
+        if (!fullStart || !currentEnd) {
+            throw std::runtime_error(
+                "window exec supports only UNBOUNDED PRECEDING .. CURRENT ROW "
+                "running frames yet");
+        }
+        return frame->Mode == EWindowFrameMode::Range;
+    };
+
     // Each window function becomes an appended output column. sum is either a
     // full-partition broadcast (no ORDER BY) or a running prefix; avg is
     // currently full-partition only; max is currently ordered-prefix only.
@@ -475,17 +494,19 @@ TWindowRuntimeProcess BuildWindowRuntimeProcess(
                 throw std::runtime_error(
                     "window exec supports only i64/f64/decimal arguments for sum yet");
             }
+            const bool ordered = !orderRadixKeys.empty();
             funcs.push_back({
-                .Func = orderRadixKeys.empty() ? "sum_partition" : "sum_prefix",
+                .Func = ordered ? "sum_prefix" : "sum_partition",
                 .ArgColumn = idx,
                 .ResultType = inputStruct->Fields[idx].second,
+                .PeerInclusive = ordered && framePeerInclusive(),
             });
             continue;
         }
         if (fn.Func == "max") {
             if (orderRadixKeys.empty()) {
                 throw std::runtime_error(
-                    "window max supports only ordered prefix frames yet");
+                    "window max supports only ordered running frames yet");
             }
             if (!isBinInt && !TMaybeType<TFloatType>(inner) &&
                 (!integer || integer.Cast()->BitWidth() != 64)) {
@@ -496,6 +517,7 @@ TWindowRuntimeProcess BuildWindowRuntimeProcess(
                 .Func = "max_prefix",
                 .ArgColumn = idx,
                 .ResultType = inputStruct->Fields[idx].second,
+                .PeerInclusive = framePeerInclusive(),
             });
             continue;
         }
