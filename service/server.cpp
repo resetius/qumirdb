@@ -608,7 +608,7 @@ private:
                 for (const auto& column : source.Schema().Columns) {
                     columns.push_back(llvm::json::Object{
                         {"name", std::string(column.Name)},
-                        {"type", NQumir::NAst::NCore::PrintType(column.Type)},
+                        {"type", column.Type ? column.Type->ToString() : "unknown"},
                     });
                 }
 
