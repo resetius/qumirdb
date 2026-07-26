@@ -187,6 +187,40 @@ TEST(WindowPlan, CteWindowAggregateArgsAreIndependentPerInline) {
     AssertWindowFuncArgsExistInInput(*plan);
 }
 
+TEST(WindowPlan, HavingScalarSubqueryIgnoresFunctionCalleeForCorrelation) {
+    NQdb::TMockSource storeSales({
+        "ss_item_sk",
+        "ss_net_profit",
+        "ss_store_sk",
+        "ss_hdemo_sk",
+    });
+    std::map<std::string, ISource*> tables = {{"store_sales", &storeSales}};
+
+    auto plan = BuildSqlPlan(
+        "SELECT item_sk, rank() OVER (ORDER BY rank_col ASC) AS r "
+        "FROM ("
+        "  SELECT ss_item_sk AS item_sk, avg(ss_net_profit) AS rank_col "
+        "  FROM store_sales ss1 "
+        "  WHERE ss_store_sk = 2 "
+        "  GROUP BY ss_item_sk "
+        "  HAVING avg(ss_net_profit) > 0.9 * ("
+        "    SELECT avg(ss_net_profit) AS rank_col "
+        "    FROM store_sales "
+        "    WHERE ss_store_sk = 2 AND ss_hdemo_sk IS NULL "
+        "    GROUP BY ss_store_sk"
+        "  )"
+        ") v",
+        tables);
+    ASSERT_TRUE(plan.has_value()) << (plan ? "" : plan.error().ToString());
+
+    auto* window = FindWindow(*plan);
+    ASSERT_NE(window, nullptr);
+    auto* scalarJoin = FindJoin(*plan);
+    ASSERT_NE(scalarJoin, nullptr);
+    EXPECT_EQ(scalarJoin->JoinType(), EJoinType::Inner);
+    EXPECT_TRUE(scalarJoin->Keys().empty());
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
