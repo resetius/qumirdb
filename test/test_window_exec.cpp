@@ -6,7 +6,9 @@
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/passes/column_pruning.h>
 #include <qdb/plan/passes/typing.h>
+#include <qdb/plan/types/decimal.h>
 #include <qdb/sexp/parser.h>
+#include <qdb/modules/qumirdb_runtime.h>
 
 #include <qumir/codegen/llvm/llvm_initializer.h>
 #include <qumir/parser/core/lexer.h>
@@ -198,6 +200,63 @@ TEST(WindowExec, RankI64WithoutPartition) {
 
     for (int64_t row = 0; row < result.RowCount; ++row) {
         EXPECT_EQ(outOrder[row], expectedOrder[row]) << "row " << row;
+        EXPECT_EQ(outRank[row], expectedRank[row]) << "row " << row;
+    }
+
+    Release(&result);
+
+    TRowSet second{};
+    EXPECT_FALSE(runtime->Next(second));
+}
+
+TEST(WindowExec, RankDecimalWithoutPartition) {
+    std::array<qdb_bin_int, 5> order = {{
+        {.Lo = 3000, .Hi = 0},
+        {.Lo = 1000, .Hi = 0},
+        {.Lo = 2000, .Hi = 0},
+        {.Lo = 2000, .Hi = 0},
+        {.Lo = 1000, .Hi = 0},
+    }};
+    std::array<int64_t, 5> payload = {3, 1, 2, 4, 5};
+
+    std::vector<TColumn> columns = {
+        TColumn{.Data = reinterpret_cast<char*>(order.data())},
+        TColumn{.Data = reinterpret_cast<char*>(payload.data())},
+    };
+    std::vector<TRowSet> batches = {TRowSet{
+        .Columns = columns.data(),
+        .ColumnCount = 2,
+        .RowCount = static_cast<int64_t>(order.size()),
+        .Selection = nullptr,
+        .RefCount = 1,
+    }};
+    TMockSource source(
+        {"d", "p"},
+        std::move(batches),
+        {std::make_shared<TDecimal>(15, 4), std::make_shared<NQumir::NAst::TIntegerType>()});
+
+    auto root = ParsePlan(
+        "(rel window (rel source \"data.parquet\") "
+        "(order (d asc nulls-default)) "
+        "(fn r rank))",
+        source);
+
+    auto runtime = RunPlan(root);
+
+    TRowSet result{};
+    ASSERT_TRUE(runtime->Next(result));
+    ASSERT_EQ(result.ColumnCount, 3);
+    ASSERT_EQ(result.RowCount, 5);
+
+    auto* outOrder = reinterpret_cast<qdb_bin_int*>(result.Columns[0].Data);
+    auto* outRank = reinterpret_cast<int64_t*>(result.Columns[2].Data);
+
+    const std::array<uint64_t, 5> expectedOrder = {1000, 1000, 2000, 2000, 3000};
+    const std::array<int64_t, 5> expectedRank = {1, 1, 3, 3, 5};
+
+    for (int64_t row = 0; row < result.RowCount; ++row) {
+        EXPECT_EQ(outOrder[row].Lo, expectedOrder[row]) << "row " << row;
+        EXPECT_EQ(outOrder[row].Hi, 0u) << "row " << row;
         EXPECT_EQ(outRank[row], expectedRank[row]) << "row " << row;
     }
 

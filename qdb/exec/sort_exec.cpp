@@ -1,6 +1,8 @@
 #include <qdb/exec/sort_exec.h>
 
 #include <qdb/exec/kernel_rowset.h>
+#include <qdb/modules/qumirdb_runtime.h>
+#include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
 
 #include <qumir/parser/type.h>
@@ -129,6 +131,18 @@ int CompareValues(const TColumn& left, int32_t leftRow,
     const TColumn& right, int32_t rightRow,
     const TTypePtr& type)
 {
+    if (IsDecimalType(type) || IsBinIntStorageType(type)) {
+        const auto lhs = Load<qdb_bin_int>(left, leftRow);
+        const auto rhs = Load<qdb_bin_int>(right, rightRow);
+        if (qdb_decimal_lt(lhs, rhs)) {
+            return -1;
+        }
+        if (qdb_decimal_gt(lhs, rhs)) {
+            return 1;
+        }
+        return 0;
+    }
+
     auto valueType = UnwrapNamedType(UnwrapNullableType(type));
     if (auto integer = TMaybeType<TIntegerType>(valueType)) {
         switch (integer.Cast()->Kind) {
@@ -226,6 +240,10 @@ bool SortRowsLess(const TRowStore& store, const std::vector<TSortKey>& keys,
 }
 
 size_t SortColumnFixedWidth(const TTypePtr& type) {
+    if (IsDecimalType(type) || IsBinIntStorageType(type)) {
+        return sizeof(qdb_bin_int);
+    }
+
     auto valueType = UnwrapNamedType(UnwrapNullableType(type));
     if (auto integer = TMaybeType<TIntegerType>(valueType)) {
         return static_cast<size_t>(integer.Cast()->BitWidth() / 8);

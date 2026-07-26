@@ -1011,11 +1011,22 @@ NQumir::NAst::TExprPtr BuildWindowMaterializeWrapperAst(
     for (size_t f = 0; f < funcs.size(); ++f) {
         const int64_t dataOwner = ownerIdx++;
         if (funcs[f].Func == "rank") {
-            builder.Stmt(Oz::Call("window_fill_rank_i64", {
+            const auto& orderType =
+                inputType.Fields[static_cast<size_t>(orderColumn)].second;
+            auto orderCoreType = SortValueIsBinInt(orderType)
+                ? BinIntStorageType()
+                : SortCoreType(orderType);
+            if (!orderCoreType) {
+                throw NQumir::TError(
+                    "BuildWindowMaterializeWrapperAst: unsupported rank order type " +
+                    (orderType ? orderType->ToString() : std::string("<null>")));
+            }
+            builder.Stmt(Oz::Call("window_fill_rank", {
                 Oz::Ident("store"), Oz::Ident("row_ids"), Oz::Ident("start"),
                 Oz::Ident("n"),
                 Int64Literal(static_cast<int64_t>(partitionColumn)),
                 Int64Literal(static_cast<int64_t>(orderColumn)),
+                Cast(Int64Literal(0), Ptr(std::move(orderCoreType))),
                 column(static_cast<size_t>(inputColumnCount) + f),
                 Oz::Ident("out_rowset"), Int64Literal(dataOwner),
             }));
@@ -1531,12 +1542,14 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
     };
     const auto keyDescriptor = NKernel::BuildAggregateKeyDescriptor(inputType, groupKeys);
     for (const auto& field : keyDescriptor.Fields) {
-        const auto type = UnwrapNamedType(UnwrapNullableType(field.Type));
-        if (!TMaybeType<TIntegerType>(type) && !TMaybeType<TFloatType>(type) &&
+        const auto valueType = UnwrapNullableType(field.Type);
+        const auto type = UnwrapNamedType(valueType);
+        if (!IsBinIntStorageType(valueType) &&
+            !TMaybeType<TIntegerType>(type) && !TMaybeType<TFloatType>(type) &&
             !TMaybeType<TStringType>(type)) {
             throw NQumir::TError(
                 "CompileAggregate: group key column '" + field.ColumnName +
-                "' must be integer, f64, or string");
+                "' must be integer, f64, string, or BinInt");
         }
     }
     auto columnIndex = [&](const std::string& name) -> int32_t {

@@ -179,7 +179,6 @@ NQumir::NAst::TExprPtr HashKeyValue(
                 std::vector<TExprPtr>{KeyValueExpr(root, path)}),
             std::make_shared<TIntegerType>(TIntegerType::U64));
     }
-    const auto type = UnwrapNamedType(originalType);
     auto u64Type = std::make_shared<TIntegerType>(TIntegerType::U64);
     auto ident = [&](const std::string& name) -> TExprPtr {
         return std::make_shared<TIdentExpr>(loc, name);
@@ -197,6 +196,39 @@ NQumir::NAst::TExprPtr HashKeyValue(
         body.push_back(std::make_shared<TAssignExpr>(
             loc, name, std::move(value)));
     };
+    auto mixU64 = [&](const std::string& name) {
+        assign(name, binary("^", ident(name),
+            binary(">>", ident(name), number(12))));
+        assign(name, binary("^", ident(name),
+            binary("<<", ident(name), number(25))));
+        assign(name, binary("^", ident(name),
+            binary(">>", ident(name), number(27))));
+        assign(name, binary("*", ident(name), number(2685821657736338717LL)));
+    };
+
+    if (IsBinIntStorageType(originalType)) {
+        const std::string loName = "key_hash_" + std::to_string(nextTemporary++);
+        const std::string hiName = "key_hash_" + std::to_string(nextTemporary++);
+        const std::string name = "key_hash_" + std::to_string(nextTemporary++);
+        body.push_back(std::make_shared<TVarStmt>(loc, loName, u64Type));
+        body.push_back(std::make_shared<TVarStmt>(loc, hiName, u64Type));
+        body.push_back(std::make_shared<TVarStmt>(loc, name, u64Type));
+        assign(loName, std::make_shared<TFieldAccessExpr>(
+            loc, KeyValueExpr(root, path), "Lo"));
+        assign(hiName, std::make_shared<TFieldAccessExpr>(
+            loc, KeyValueExpr(root, path), "Hi"));
+        mixU64(loName);
+        mixU64(hiName);
+        auto combined = binary("+", ident(hiName), number(-7046029254386353131LL));
+        combined = binary("+", std::move(combined),
+            binary("<<", ident(loName), number(6)));
+        combined = binary("+", std::move(combined),
+            binary(">>", ident(loName), number(2)));
+        assign(name, binary("^", ident(loName), std::move(combined)));
+        return ident(name);
+    }
+
+    const auto type = UnwrapNamedType(originalType);
 
     if (auto integer = TMaybeType<TIntegerType>(type)) {
         const std::string name = "key_hash_" + std::to_string(nextTemporary++);
@@ -206,13 +238,7 @@ NQumir::NAst::TExprPtr HashKeyValue(
         auto bits = std::make_shared<TCastExpr>(
             loc, KeyValueExpr(root, path), std::move(unsignedType));
         assign(name, std::make_shared<TCastExpr>(loc, std::move(bits), u64Type));
-        assign(name, binary("^", ident(name),
-            binary(">>", ident(name), number(12))));
-        assign(name, binary("^", ident(name),
-            binary("<<", ident(name), number(25))));
-        assign(name, binary("^", ident(name),
-            binary(">>", ident(name), number(27))));
-        assign(name, binary("*", ident(name), number(2685821657736338717LL)));
+        mixU64(name);
         return ident(name);
     }
 
@@ -229,13 +255,7 @@ NQumir::NAst::TExprPtr HashKeyValue(
         const std::string name = "key_hash_" + std::to_string(nextTemporary++);
         body.push_back(std::make_shared<TVarStmt>(loc, name, u64Type));
         assign(name, CanonicalFloatBits(root, path));
-        assign(name, binary("^", ident(name),
-            binary(">>", ident(name), number(12))));
-        assign(name, binary("^", ident(name),
-            binary("<<", ident(name), number(25))));
-        assign(name, binary("^", ident(name),
-            binary(">>", ident(name), number(27))));
-        assign(name, binary("*", ident(name), number(2685821657736338717LL)));
+        mixU64(name);
         return ident(name);
     }
 
@@ -291,6 +311,10 @@ NQumir::NAst::TExprPtr EqualKeyValue(
     const bool rightString = rightNamed &&
         (rightNamed.Cast()->Name == "StringView" ||
          rightNamed.Cast()->Name == "OwnedString");
+    auto binary = [&](const char* op, TExprPtr left, TExprPtr right) -> TExprPtr {
+        return std::make_shared<TBinaryExpr>(
+            loc, TOperator(op), std::move(left), std::move(right));
+    };
     if (leftString || rightString) {
         if (!leftString || !rightString) {
             throw std::invalid_argument(
@@ -301,12 +325,15 @@ NQumir::NAst::TExprPtr EqualKeyValue(
             std::vector<TExprPtr>{
                 KeyValueExpr("left", path), KeyValueExpr("right", path)});
     }
+    if (IsBinIntStorageType(leftType) || IsBinIntStorageType(rightType)) {
+        if (!IsBinIntStorageType(leftType) || !IsBinIntStorageType(rightType)) {
+            throw std::invalid_argument(
+                "GenKeyOperationFunDecls: mismatched BinInt key leaves");
+        }
+        return binary("==", KeyValueExpr("left", path), KeyValueExpr("right", path));
+    }
     const auto left = UnwrapNamedType(leftType);
     const auto right = UnwrapNamedType(rightType);
-    auto binary = [&](const char* op, TExprPtr left, TExprPtr right) -> TExprPtr {
-        return std::make_shared<TBinaryExpr>(
-            loc, TOperator(op), std::move(left), std::move(right));
-    };
     if (TMaybeType<TIntegerType>(left) && TMaybeType<TIntegerType>(right)) {
         return binary("==", KeyValueExpr("left", path), KeyValueExpr("right", path));
     }
@@ -422,6 +449,9 @@ NQumir::NAst::TExprPtr KeyOwnedBytesExpr(
         return std::make_shared<TFieldAccessExpr>(
             loc, KeyValueExpr(root, path), "Size");
     }
+    if (IsBinIntStorageType(originalType)) {
+        return zero();
+    }
     auto type = UnwrapNamedType(originalType);
     if (TMaybeType<TIntegerType>(type) || TMaybeType<TFloatType>(type) ||
         TMaybeType<TBoolType>(type)) {
@@ -507,6 +537,9 @@ NQumir::NAst::TExprPtr CloneKeyValue(
 
     auto lookup = UnwrapNamedType(lookupType);
     auto stored = UnwrapNamedType(storedType);
+    if (IsBinIntStorageType(lookupType) && IsBinIntStorageType(storedType)) {
+        return KeyValueExpr(root, path);
+    }
     if ((TMaybeType<TIntegerType>(lookup) && TMaybeType<TIntegerType>(stored)) ||
         (TMaybeType<TFloatType>(lookup) && TMaybeType<TFloatType>(stored)) ||
         (TMaybeType<TBoolType>(lookup) && TMaybeType<TBoolType>(stored))) {
@@ -549,8 +582,19 @@ NQumir::NAst::TExprPtr ZeroValueExpr(
     using namespace NQumir::NAst;
     NQumir::TLocation loc{};
     auto i64Type = std::make_shared<TIntegerType>(TIntegerType::I64);
+    auto u64Type = std::make_shared<TIntegerType>(TIntegerType::U64);
     auto zero = std::make_shared<TNumberExpr>(loc, int64_t{0});
     zero->Type = i64Type;
+    if (IsBinIntStorageType(originalType)) {
+        auto zeroU64 = [&]() -> TExprPtr {
+            auto value = std::make_shared<TNumberExpr>(loc, int64_t{0});
+            value->Type = u64Type;
+            return value;
+        };
+        return std::make_shared<TStructConstructExpr>(loc, originalType,
+            std::vector<TExprPtr>{zeroU64(), zeroU64()},
+            std::vector<std::string>{"Lo", "Hi"});
+    }
     auto type = UnwrapNamedType(originalType);
     if (TMaybeType<TIntegerType>(type)) {
         auto value = std::make_shared<TNumberExpr>(loc, int64_t{0});
