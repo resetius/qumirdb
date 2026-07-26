@@ -82,8 +82,7 @@ NQumir::NAst::TExprPtr BuildTopSortMergeProgramAst(
     const NQumir::NAst::TStructType* materializeType = nullptr);
 
 // One window function to materialize as an appended output column. For now:
-// "sum" over an i64 argument and "rank" over one optional i64 partition key and
-// one i64 order key.
+// "sum" over an i64 argument and "rank" over one order key.
 struct TWindowFuncInput {
     std::string Func;
     int32_t ArgColumn = -1;
@@ -97,7 +96,7 @@ struct TWindowFuncInput {
 NQumir::NAst::TExprPtr BuildWindowProgramAst(
     const std::vector<TSortRadixKeyInput>& keys,
     const NQumir::NAst::TStructType& inputType,
-    int32_t partitionColumn,
+    const std::vector<TSortRadixKeyInput>& partitionKeys,
     int32_t orderColumn,
     const std::vector<TWindowFuncInput>& funcs);
 
@@ -320,7 +319,7 @@ public:
     TSortRadixCompositeDispatch CompileWindow(
         const std::vector<TSortRadixKeyInput>& keys,
         const NQumir::NAst::TStructType& inputType,
-        int32_t partitionColumn,
+        const std::vector<TSortRadixKeyInput>& partitionKeys,
         int32_t orderColumn,
         const std::vector<TWindowFuncInput>& funcs);
 

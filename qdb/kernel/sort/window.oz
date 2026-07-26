@@ -7,24 +7,6 @@
   ;; sr_load_fixed_key from sort_rowids.oz) and the sort materialize owner list
   ;; (sort_materialize_record_owner from materialize.oz).
 
-  (fun window_same_i64_partition
-       ((var store <ptr TRowSet>)
-        (var left_row_id i64)
-        (var right_row_id i64)
-        (var partition_col i64)) -> bool
-    (block
-      (if (< partition_col (: 0 i64))
-        (block (return #t)))
-      (var left_valid = (call sr_row_valid store left_row_id partition_col))
-      (var right_valid = (call sr_row_valid store right_row_id partition_col))
-      (if (!= left_valid right_valid)
-        (block (return #f)))
-      (if (! left_valid)
-        (block (return #t)))
-      (var witness = (cast (: 0 i64) <ptr i64>))
-      (return (== (call sr_load_fixed_key store left_row_id partition_col witness)
-                  (call sr_load_fixed_key store right_row_id partition_col witness)))))
-
   (fun window_same_order [Value]
        ((var store <ptr TRowSet>)
         (var left_row_id i64)
@@ -68,7 +50,6 @@
         (var start i64)
         (var n i64)
         (var arg_col i64)
-        (var partition_col i64)
         (var out_col <ref TColumn>)
         (var out <ref TRowSet>)
         (var data_owner_idx i64))
@@ -83,8 +64,8 @@
           (if (> i (: 0 i64))
             (block
               (var prev_row_id = (index row_ids (+ start (- i (: 1 i64)))))
-              (if (! (call window_same_i64_partition
-                        store prev_row_id row_id partition_col))
+              (if (! (call window_same_partition
+                        store prev_row_id row_id))
                 (block (= acc (: 0 i64))))))
           (if (call sr_row_valid store row_id arg_col)
             (block
@@ -100,7 +81,6 @@
         (var row_ids <ptr i64>)
         (var start i64)
         (var n i64)
-        (var partition_col i64)
         (var order_col i64)
         (var order_witness <ptr OrderValue>)
         (var out_col <ref TColumn>)
@@ -117,8 +97,8 @@
           (if (> i (: 0 i64))
             (block
               (var prev_row_id = (index row_ids (+ start (- i (: 1 i64)))))
-              (if (! (call window_same_i64_partition
-                        store prev_row_id row_id partition_col))
+              (if (! (call window_same_partition
+                        store prev_row_id row_id))
                 (block
                   (= rank (: 1 i64))
                   (= pos (: 1 i64)))
