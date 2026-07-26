@@ -69,9 +69,11 @@
       (field_assign out_col OffsetWidth (: 0 u8))
       (return data)))
 
-  ;; sum(x) OVER (PARTITION BY optional_i64 ORDER BY ...) with frame UNBOUNDED
-  ;; PRECEDING .. CURRENT ROW. NULL args are skipped (SQL sum ignores nulls);
-  ;; the output is NULL until at least one non-NULL value exists in the frame.
+  ;; sum(x) OVER (PARTITION BY ... ORDER BY ...) with frame UNBOUNDED PRECEDING ..
+  ;; CURRENT ROW. peer_inclusive selects RANGE mode: CURRENT ROW then includes all
+  ;; peer rows (equal order key), so every peer shares the running sum through the
+  ;; last peer; peer_inclusive=false is ROWS mode (strict row-by-row). NULL args
+  ;; are skipped (SQL sum ignores nulls); output is NULL until the first non-NULL.
   (fun window_fill_prefix_sum_fixed [Value]
        ((var store <ptr TRowSet>)
         (var row_ids <ptr i64>)
@@ -83,7 +85,8 @@
         (var out_col <ref TColumn>)
         (var out <ref TRowSet>)
         (var data_owner_idx i64)
-        (var mask_owner_idx i64))
+        (var mask_owner_idx i64)
+        (var peer_inclusive bool))
     (block
       (var data =
         (call window_init_masked_fixed_output
@@ -95,24 +98,39 @@
       (var i = (: 0 i64))
       (while (< i n)
         (block
-          (var row_id = (index row_ids (+ start i)))
+          (var row_i = (index row_ids (+ start i)))
           (if (> i (: 0 i64))
             (block
-              (var prev_row_id = (index row_ids (+ start (- i (: 1 i64)))))
-              (if (! (call window_same_partition
-                        store prev_row_id row_id))
-                (block
-                  (= acc zero)
-                  (= valid_count (: 0 i64))))))
-          (if (call sr_row_valid store row_id arg_col)
+              (var prev = (index row_ids (+ start (- i (: 1 i64)))))
+              (if (! (call window_same_partition store prev row_i))
+                (block (= acc zero) (= valid_count (: 0 i64))))))
+          (var peer_end = (+ i (: 1 i64)))
+          (if peer_inclusive
             (block
-              (= acc (+ acc
-                (call sr_load_fixed_key store row_id arg_col arg_witness)))
-              (= valid_count (+ valid_count (: 1 i64)))))
+              (while (&& (< peer_end n)
+                         (&& (call window_same_partition store row_i
+                                (index row_ids (+ start peer_end)))
+                             (call window_same_order store row_i
+                                (index row_ids (+ start peer_end)))))
+                (block (= peer_end (+ peer_end (: 1 i64)))))))
+          (var j = i)
+          (while (< j peer_end)
+            (block
+              (var row_j = (index row_ids (+ start j)))
+              (if (call sr_row_valid store row_j arg_col)
+                (block
+                  (= acc (+ acc
+                    (call sr_load_fixed_key store row_j arg_col arg_witness)))
+                  (= valid_count (+ valid_count (: 1 i64)))))
+              (= j (+ j (: 1 i64)))))
           (var valid = (> valid_count (: 0 i64)))
-          (call qdb_bitmap_set_valid mask i valid)
-          (= data [i] acc)
-          (= i (+ i (: 1 i64)))))))
+          (= j i)
+          (while (< j peer_end)
+            (block
+              (call qdb_bitmap_set_valid mask j valid)
+              (= data [j] acc)
+              (= j (+ j (: 1 i64)))))
+          (= i peer_end)))))
 
   (fun window_fill_prefix_sum_binint
        ((var store <ptr TRowSet>)
@@ -123,7 +141,8 @@
         (var out_col <ref TColumn>)
         (var out <ref TRowSet>)
         (var data_owner_idx i64)
-        (var mask_owner_idx i64))
+        (var mask_owner_idx i64)
+        (var peer_inclusive bool))
     (block
       (var witness = (cast (: 0 i64) <ptr BinInt>))
       (var data =
@@ -136,24 +155,39 @@
       (var i = (: 0 i64))
       (while (< i n)
         (block
-          (var row_id = (index row_ids (+ start i)))
+          (var row_i = (index row_ids (+ start i)))
           (if (> i (: 0 i64))
             (block
-              (var prev_row_id = (index row_ids (+ start (- i (: 1 i64)))))
-              (if (! (call window_same_partition
-                        store prev_row_id row_id))
-                (block
-                  (= acc zero)
-                  (= valid_count (: 0 i64))))))
-          (if (call sr_row_valid store row_id arg_col)
+              (var prev = (index row_ids (+ start (- i (: 1 i64)))))
+              (if (! (call window_same_partition store prev row_i))
+                (block (= acc zero) (= valid_count (: 0 i64))))))
+          (var peer_end = (+ i (: 1 i64)))
+          (if peer_inclusive
             (block
-              (= acc (+ acc
-                (call sr_load_fixed_key store row_id arg_col witness)))
-              (= valid_count (+ valid_count (: 1 i64)))))
+              (while (&& (< peer_end n)
+                         (&& (call window_same_partition store row_i
+                                (index row_ids (+ start peer_end)))
+                             (call window_same_order store row_i
+                                (index row_ids (+ start peer_end)))))
+                (block (= peer_end (+ peer_end (: 1 i64)))))))
+          (var j = i)
+          (while (< j peer_end)
+            (block
+              (var row_j = (index row_ids (+ start j)))
+              (if (call sr_row_valid store row_j arg_col)
+                (block
+                  (= acc (+ acc
+                    (call sr_load_fixed_key store row_j arg_col witness)))
+                  (= valid_count (+ valid_count (: 1 i64)))))
+              (= j (+ j (: 1 i64)))))
           (var valid = (> valid_count (: 0 i64)))
-          (call qdb_bitmap_set_valid mask i valid)
-          (= data [i] acc)
-          (= i (+ i (: 1 i64)))))))
+          (= j i)
+          (while (< j peer_end)
+            (block
+              (call qdb_bitmap_set_valid mask j valid)
+              (= data [j] acc)
+              (= j (+ j (: 1 i64)))))
+          (= i peer_end)))))
 
   (fun window_fill_prefix_max_fixed [Value]
        ((var store <ptr TRowSet>)
@@ -166,7 +200,8 @@
         (var out_col <ref TColumn>)
         (var out <ref TRowSet>)
         (var data_owner_idx i64)
-        (var mask_owner_idx i64))
+        (var mask_owner_idx i64)
+        (var peer_inclusive bool))
     (block
       (var data =
         (call window_init_masked_fixed_output
@@ -178,28 +213,41 @@
       (var i = (: 0 i64))
       (while (< i n)
         (block
-          (var row_id = (index row_ids (+ start i)))
+          (var row_i = (index row_ids (+ start i)))
           (if (> i (: 0 i64))
             (block
-              (var prev_row_id = (index row_ids (+ start (- i (: 1 i64)))))
-              (if (! (call window_same_partition
-                        store prev_row_id row_id))
-                (block
-                  (= acc zero)
-                  (= valid_count (: 0 i64))))))
-          (if (call sr_row_valid store row_id arg_col)
+              (var prev = (index row_ids (+ start (- i (: 1 i64)))))
+              (if (! (call window_same_partition store prev row_i))
+                (block (= acc zero) (= valid_count (: 0 i64))))))
+          (var peer_end = (+ i (: 1 i64)))
+          (if peer_inclusive
             (block
-              (var value = (call sr_load_fixed_key store row_id arg_col arg_witness))
-              (if (== valid_count (: 0 i64))
-                (block (= acc value))
+              (while (&& (< peer_end n)
+                         (&& (call window_same_partition store row_i
+                                (index row_ids (+ start peer_end)))
+                             (call window_same_order store row_i
+                                (index row_ids (+ start peer_end)))))
+                (block (= peer_end (+ peer_end (: 1 i64)))))))
+          (var j = i)
+          (while (< j peer_end)
+            (block
+              (var row_j = (index row_ids (+ start j)))
+              (if (call sr_row_valid store row_j arg_col)
                 (block
-                  (if (> value acc)
-                    (block (= acc value)))))
-              (= valid_count (+ valid_count (: 1 i64)))))
+                  (var value = (call sr_load_fixed_key store row_j arg_col arg_witness))
+                  (if (== valid_count (: 0 i64))
+                    (block (= acc value))
+                    (block (if (> value acc) (block (= acc value)))))
+                  (= valid_count (+ valid_count (: 1 i64)))))
+              (= j (+ j (: 1 i64)))))
           (var valid = (> valid_count (: 0 i64)))
-          (call qdb_bitmap_set_valid mask i valid)
-          (= data [i] acc)
-          (= i (+ i (: 1 i64)))))))
+          (= j i)
+          (while (< j peer_end)
+            (block
+              (call qdb_bitmap_set_valid mask j valid)
+              (= data [j] acc)
+              (= j (+ j (: 1 i64)))))
+          (= i peer_end)))))
 
   (fun window_fill_prefix_max_binint
        ((var store <ptr TRowSet>)
@@ -210,7 +258,8 @@
         (var out_col <ref TColumn>)
         (var out <ref TRowSet>)
         (var data_owner_idx i64)
-        (var mask_owner_idx i64))
+        (var mask_owner_idx i64)
+        (var peer_inclusive bool))
     (block
       (var witness = (cast (: 0 i64) <ptr BinInt>))
       (var data =
@@ -223,28 +272,41 @@
       (var i = (: 0 i64))
       (while (< i n)
         (block
-          (var row_id = (index row_ids (+ start i)))
+          (var row_i = (index row_ids (+ start i)))
           (if (> i (: 0 i64))
             (block
-              (var prev_row_id = (index row_ids (+ start (- i (: 1 i64)))))
-              (if (! (call window_same_partition
-                        store prev_row_id row_id))
-                (block
-                  (= acc zero)
-                  (= valid_count (: 0 i64))))))
-          (if (call sr_row_valid store row_id arg_col)
+              (var prev = (index row_ids (+ start (- i (: 1 i64)))))
+              (if (! (call window_same_partition store prev row_i))
+                (block (= acc zero) (= valid_count (: 0 i64))))))
+          (var peer_end = (+ i (: 1 i64)))
+          (if peer_inclusive
             (block
-              (var value = (call sr_load_fixed_key store row_id arg_col witness))
-              (if (== valid_count (: 0 i64))
-                (block (= acc value))
+              (while (&& (< peer_end n)
+                         (&& (call window_same_partition store row_i
+                                (index row_ids (+ start peer_end)))
+                             (call window_same_order store row_i
+                                (index row_ids (+ start peer_end)))))
+                (block (= peer_end (+ peer_end (: 1 i64)))))))
+          (var j = i)
+          (while (< j peer_end)
+            (block
+              (var row_j = (index row_ids (+ start j)))
+              (if (call sr_row_valid store row_j arg_col)
                 (block
-                  (if (> value acc)
-                    (block (= acc value)))))
-              (= valid_count (+ valid_count (: 1 i64)))))
+                  (var value = (call sr_load_fixed_key store row_j arg_col witness))
+                  (if (== valid_count (: 0 i64))
+                    (block (= acc value))
+                    (block (if (> value acc) (block (= acc value)))))
+                  (= valid_count (+ valid_count (: 1 i64)))))
+              (= j (+ j (: 1 i64)))))
           (var valid = (> valid_count (: 0 i64)))
-          (call qdb_bitmap_set_valid mask i valid)
-          (= data [i] acc)
-          (= i (+ i (: 1 i64)))))))
+          (= j i)
+          (while (< j peer_end)
+            (block
+              (call qdb_bitmap_set_valid mask j valid)
+              (= data [j] acc)
+              (= j (+ j (: 1 i64)))))
+          (= i peer_end)))))
 
   ;; rank() OVER (PARTITION BY optional_i64 ORDER BY fixed-width). Peers with
   ;; the same order key keep the same rank; the next distinct peer gets its

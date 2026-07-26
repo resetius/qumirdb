@@ -88,6 +88,9 @@ struct TWindowFuncInput {
     std::string Func;
     int32_t ArgColumn = -1;
     NQumir::NAst::TTypePtr ResultType;
+    // For running sum/max (sum_prefix/max_prefix): RANGE frame (each row shares
+    // the running value through the last order-key peer) vs ROWS (row-by-row).
+    bool PeerInclusive = false;
 };
 
 // Window program (entry qdb_window_run, same ABI as qdb_sort_run): optionally
