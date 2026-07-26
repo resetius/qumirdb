@@ -905,7 +905,211 @@ void AddSortMaterializeLibrary(
     }
 }
 
+// Like BuildSortMaterializeWrapperAst, but the output rowset carries the input
+// columns (in sorted order) followed by one computed column per window function
+// (entry window_materialize_row_ids). Each window column is filled by a scan
+// over the sorted row-id slice (window.oz).
+NQumir::NAst::TExprPtr BuildWindowMaterializeWrapperAst(
+    const NQumir::NAst::TStructType& inputType,
+    int32_t partitionColumn,
+    const std::vector<TWindowFuncInput>& funcs)
+{
+    using namespace NQumir::NAst;
+    namespace Oz = NKernel::NOz;
+
+    auto i64Type = std::make_shared<TIntegerType>();
+    auto rowSetType = QumirDbNamedType("TRowSet");
+    auto columnType = QumirDbNamedType("TColumn");
+    auto rowSetPtrType = Ptr(rowSetType);
+    auto rowSetRefType = std::make_shared<TReferenceType>(rowSetType);
+    auto columnPtrType = Ptr(columnType);
+    auto ptrI64Type = Ptr(i64Type);
+
+    const int64_t inputColumnCount = static_cast<int64_t>(inputType.Fields.size());
+    const int64_t columnCount = inputColumnCount + static_cast<int64_t>(funcs.size());
+    int64_t ownedPtrCount = 1; // columns array, stored by sort_materialize_begin.
+    for (const auto& field : inputType.Fields) {
+        ownedPtrCount += SortKeyIsString(field.second) ? 3 : 2;
+    }
+    ownedPtrCount += static_cast<int64_t>(funcs.size()); // one data buffer each.
+
+    auto column = [&](size_t idx) -> TExprPtr {
+        return Oz::Index("columns", Int64Literal(static_cast<int64_t>(idx)));
+    };
+
+    Oz::TFunBuilder builder("window_materialize_row_ids");
+    builder
+        .Param("store", rowSetPtrType)
+        .Param("row_ids", ptrI64Type)
+        .Param("start", i64Type)
+        .Param("limit", i64Type)
+        .Param("out_rowset", rowSetRefType)
+        .Return(i64Type)
+        .Var("n", i64Type)
+        .Assign("n", Oz::Ident("limit"))
+        .Stmt(Oz::If(
+            Oz::Bin(TOperator("<="), Oz::Ident("n"), Int64Literal(0)),
+            Oz::Block({Oz::Return(Int64Literal(0))})))
+        .Var("columns", columnPtrType)
+        .Assign("columns", Oz::Call("sort_materialize_begin", {
+            Int64Literal(columnCount),
+            Int64Literal(ownedPtrCount),
+            Oz::Ident("n"),
+            Oz::Ident("out_rowset"),
+        }));
+
+    int64_t ownerIdx = 2;
+    for (size_t c = 0; c < inputType.Fields.size(); ++c) {
+        const auto& type = inputType.Fields[c].second;
+        const auto srcCol = Int64Literal(static_cast<int64_t>(c));
+        if (SortKeyIsString(type)) {
+            const int64_t offsetsOwner = ownerIdx++;
+            const int64_t dataOwner = ownerIdx++;
+            const int64_t maskOwner = ownerIdx++;
+            builder.Stmt(Oz::Call("sort_materialize_string_column", {
+                Oz::Ident("store"), Oz::Ident("row_ids"), Oz::Ident("start"),
+                Oz::Ident("n"), srcCol, column(c), Oz::Ident("out_rowset"),
+                Int64Literal(offsetsOwner), Int64Literal(dataOwner),
+                Int64Literal(maskOwner),
+            }));
+            continue;
+        }
+        const int64_t dataOwner = ownerIdx++;
+        const int64_t maskOwner = ownerIdx++;
+        if (SortKeyIsBool(type)) {
+            builder.Stmt(Oz::Call("sort_materialize_bool_column", {
+                Oz::Ident("store"), Oz::Ident("row_ids"), Oz::Ident("start"),
+                Oz::Ident("n"), srcCol, column(c), Oz::Ident("out_rowset"),
+                Int64Literal(dataOwner), Int64Literal(maskOwner),
+            }));
+            continue;
+        }
+        if (SortValueIsBinInt(type)) {
+            builder.Stmt(Oz::Call("sort_materialize_binint_column", {
+                Oz::Ident("store"), Oz::Ident("row_ids"), Oz::Ident("start"),
+                Oz::Ident("n"), srcCol, column(c), Oz::Ident("out_rowset"),
+                Int64Literal(dataOwner), Int64Literal(maskOwner),
+            }));
+            continue;
+        }
+        auto coreType = SortCoreType(type);
+        const int64_t width = MaterializeFixedWidth(type);
+        if (!coreType || width == 0) {
+            throw NQumir::TError(
+                "BuildWindowMaterializeWrapperAst: unsupported column type " +
+                (type ? type->ToString() : std::string("<null>")));
+        }
+        builder.Stmt(Oz::Call("sort_materialize_fixed_column", {
+            Oz::Ident("store"), Oz::Ident("row_ids"), Oz::Ident("start"),
+            Oz::Ident("n"), srcCol, column(c), Oz::Ident("out_rowset"),
+            Int64Literal(dataOwner), Int64Literal(maskOwner),
+            Int64Literal(width), Cast(Int64Literal(0), Ptr(std::move(coreType))),
+        }));
+    }
+
+    for (size_t f = 0; f < funcs.size(); ++f) {
+        const int64_t dataOwner = ownerIdx++;
+        builder.Stmt(Oz::Call("window_fill_prefix_sum_i64", {
+            Oz::Ident("store"), Oz::Ident("row_ids"), Oz::Ident("start"),
+            Oz::Ident("n"), Int64Literal(static_cast<int64_t>(funcs[f].ArgColumn)),
+            Int64Literal(static_cast<int64_t>(partitionColumn)),
+            column(static_cast<size_t>(inputColumnCount) + f),
+            Oz::Ident("out_rowset"), Int64Literal(dataOwner),
+        }));
+    }
+
+    builder.Stmt(Oz::Return(Oz::Ident("n")));
+    return std::move(builder).Build();
+}
+
+// Like BuildSortRunWrapperAst but materializes via window_materialize_row_ids.
+NQumir::NAst::TExprPtr BuildWindowRunWrapperAst(
+    const std::vector<TSortRadixKeyInput>& keys)
+{
+    using namespace NQumir::NAst;
+    namespace Oz = NKernel::NOz;
+
+    auto i64Type = std::make_shared<TIntegerType>();
+    auto u32Type = std::make_shared<TIntegerType>(TIntegerType::U32);
+    auto boolType = std::make_shared<TBoolType>();
+    auto rowSetPtrType = Ptr(QumirDbNamedType("TRowSet"));
+    auto rowSetRefType = std::make_shared<TReferenceType>(QumirDbNamedType("TRowSet"));
+    auto ptrI64Type = Ptr(i64Type);
+    auto ptrU32Type = Ptr(u32Type);
+    auto ptrBoolType = Ptr(boolType);
+
+    Oz::TFunBuilder builder("qdb_window_run");
+    builder
+        .Param("store", rowSetPtrType)
+        .Param("row_ids", ptrI64Type)
+        .Param("work", ptrI64Type)
+        .Param("counts", ptrU32Type)
+        .Param("n", i64Type)
+        .Param("descs", ptrBoolType)
+        .Param("nulls_firsts", ptrBoolType)
+        .Param("do_sort", boolType)
+        .Param("start", i64Type)
+        .Param("limit", i64Type)
+        .Param("out_rowset", rowSetRefType)
+        .Return(i64Type);
+
+    std::vector<TExprPtr> sortStmts;
+    for (size_t k = keys.size(); k > 0; --k) {
+        const size_t keyIdx = k - 1;
+        auto desc = Oz::Index("descs", Int64Literal(static_cast<int64_t>(keyIdx)));
+        auto nullsFirst = Oz::Index(
+            "nulls_firsts", Int64Literal(static_cast<int64_t>(keyIdx)));
+        sortStmts.push_back(BuildRowIdSortCall(
+            keys[keyIdx], false, std::move(desc), std::move(nullsFirst), "store"));
+    }
+    builder.Stmt(Oz::If(Oz::Ident("do_sort"), Oz::Block(std::move(sortStmts))));
+    builder.Stmt(Oz::If(
+        Oz::Bin(TOperator("<="), Oz::Ident("limit"), Int64Literal(0)),
+        Oz::Block({Oz::Return(Int64Literal(0))})));
+    builder.Stmt(Oz::Return(Oz::Call("window_materialize_row_ids", {
+        Oz::Ident("store"),
+        Oz::Ident("row_ids"),
+        Oz::Ident("start"),
+        Oz::Ident("limit"),
+        Oz::Ident("out_rowset"),
+    })));
+    return std::move(builder).Build();
+}
+
 } // namespace
+
+NQumir::NAst::TExprPtr BuildWindowProgramAst(
+    const std::vector<TSortRadixKeyInput>& keys,
+    const NQumir::NAst::TStructType& inputType,
+    int32_t partitionColumn,
+    const std::vector<TWindowFuncInput>& funcs)
+{
+    using namespace NQumir::NAst;
+    if (keys.empty()) {
+        throw NQumir::TError("BuildWindowProgramAst: empty key list");
+    }
+    std::vector<TExprPtr> programStmts;
+    auto addLibrary = [&](const std::string& name, bool skipUse) {
+        auto library = NKernel::ParseFunctionLibrary(NKernel::ReadSortKernel(name));
+        if (!library) {
+            throw NQumir::TError("BuildWindowProgramAst: " + library.error().ToString());
+        }
+        for (auto& stmt : *library) {
+            if (skipUse && TMaybeNode<TUseExpr>(stmt)) {
+                continue;
+            }
+            programStmts.push_back(std::move(stmt));
+        }
+    };
+    addLibrary("radix.oz", false);
+    addLibrary("sort_rowids.oz", true);
+    AddSortMaterializeLibrary(programStmts, "BuildWindowProgramAst");
+    addLibrary("window.oz", true);
+    programStmts.push_back(BuildWindowMaterializeWrapperAst(
+        inputType, partitionColumn, funcs));
+    programStmts.push_back(BuildWindowRunWrapperAst(keys));
+    return std::make_shared<TBlockExpr>(NQumir::TLocation{}, std::move(programStmts));
+}
 
 NQumir::NAst::TExprPtr BuildRadixSortProgramAst(
     const std::vector<TSortRadixKeyInput>& keys,
@@ -1145,6 +1349,39 @@ TKernelCompiler::TSortRadixCompositeDispatch TKernelCompiler::CompileRadixSortCo
         uint32_t* counts, int64_t n, bool* descs, bool* nullsFirsts,
         bool doSort, int64_t start, int64_t limit, TRowSet* output) {
         return reinterpret_cast<TSortFn>(slot->Fns[0])(
+            store, rowIds, work, counts, n, descs, nullsFirsts,
+            doSort, start, limit, output);
+    };
+}
+
+TKernelCompiler::TSortRadixCompositeDispatch
+TKernelCompiler::CompileWindow(
+    const std::vector<TSortRadixKeyInput>& keys,
+    const NQumir::NAst::TStructType& inputType,
+    int32_t partitionColumn,
+    const std::vector<TWindowFuncInput>& funcs)
+{
+    using namespace NQumir::NAst;
+    if (keys.empty()) {
+        throw NQumir::TError("CompileWindow: empty key list");
+    }
+
+    auto program = BuildWindowProgramAst(keys, inputType, partitionColumn, funcs);
+    PrintKernelAst(Diagnostics_, "window.run.fused", program);
+
+    auto kernel = EmitKernel(
+        "window.run.fused",
+        {"qdb_window_run"},
+        std::move(program));
+    FinishKernelDiagnostics(Diagnostics_);
+
+    using TWindowFn = int64_t(*)(
+        TRowSet*, int64_t*, int64_t*, uint32_t*, int64_t, bool*, bool*,
+        bool, int64_t, int64_t, TRowSet*);
+    return [slot = kernel.Slot](TRowSet* store, int64_t* rowIds, int64_t* work,
+        uint32_t* counts, int64_t n, bool* descs, bool* nullsFirsts,
+        bool doSort, int64_t start, int64_t limit, TRowSet* output) {
+        return reinterpret_cast<TWindowFn>(slot->Fns[0])(
             store, rowIds, work, counts, n, descs, nullsFirsts,
             doSort, start, limit, output);
     };

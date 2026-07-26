@@ -84,6 +84,13 @@ bool SortNullsFirst(const NKernel::TKernelSortKeySpec& key) {
     return key.Direction == ESortDirection::Desc;
 }
 
+bool SortNullsFirst(const TSortKey& key) {
+    if (key.Nulls != ESortNulls::Default) {
+        return key.Nulls == ESortNulls::First;
+    }
+    return key.Direction == ESortDirection::Desc;
+}
+
 struct TSortKernelInputs {
     std::vector<TSortColumnRef> KeyColumns;
     std::vector<TSortRadixKeyInput> RadixKeys;
@@ -352,6 +359,109 @@ TSortRuntimeProcess BuildSortRuntimeProcess(
     return {
         .KeyColumns = std::move(sortInputs.KeyColumns),
         .RadixKernel = std::move(radixKernel),
+    };
+}
+
+TWindowRuntimeProcess BuildWindowRuntimeProcess(
+    TWindowOperator& window,
+    const NQumir::NAst::TTypePtr& inputType,
+    TKernelCompilerOptions options)
+{
+    using namespace NQumir::NAst;
+    auto* inputStruct = static_cast<TStructType*>(inputType.get());
+    if (!inputStruct) {
+        throw std::runtime_error("window input must have TStructType");
+    }
+
+    auto fieldIndex = [&](const std::string& name) -> int32_t {
+        for (size_t i = 0; i < inputStruct->Fields.size(); ++i) {
+            if (inputStruct->Fields[i].first == name) {
+                return static_cast<int32_t>(i);
+            }
+        }
+        throw std::runtime_error("window: column not found: " + name);
+    };
+
+    // Combined sort keys: partition (asc) ++ order. Clusters partitions and
+    // orders within each; the segmented scan runs over this order.
+    std::vector<TSortKey> keys;
+    for (const auto& partition : window.PartitionKeys()) {
+        keys.push_back(TSortKey{.Column = partition});
+    }
+    for (const auto& order : window.OrderKeys()) {
+        keys.push_back(order);
+    }
+    if (keys.empty()) {
+        throw std::runtime_error(
+            "window without partition/order is not supported in exec yet");
+    }
+
+    std::vector<TSortColumnRef> keyColumns;
+    std::vector<TSortRadixKeyInput> radixKeys;
+    int32_t partitionColumn = -1;
+    for (const auto& key : keys) {
+        const int32_t idx = fieldIndex(key.Column);
+        const auto& type = inputStruct->Fields[idx].second;
+        keyColumns.push_back({.Index = idx, .Type = type});
+        radixKeys.push_back({
+            .ColumnIndex = idx,
+            .Type = type,
+            .Desc = key.Direction == ESortDirection::Desc,
+            .NullsFirst = SortNullsFirst(key),
+        });
+    }
+    if (window.PartitionKeys().size() > 1) {
+        throw std::runtime_error(
+            "window exec supports at most one partition key for running sum yet");
+    }
+    if (!window.PartitionKeys().empty()) {
+        partitionColumn = fieldIndex(window.PartitionKeys()[0]);
+        auto inner = UnwrapNamedType(UnwrapNullableType(
+            inputStruct->Fields[partitionColumn].second));
+        auto integer = TMaybeType<TIntegerType>(inner);
+        if (!integer || integer.Cast()->BitWidth() != 64) {
+            throw std::runtime_error(
+                "window exec supports only i64 partition keys for running sum yet");
+        }
+    }
+
+    // Each window function becomes an appended output column (currently: sum
+    // over an i64 argument, running prefix).
+    std::vector<TWindowFuncInput> funcs;
+    for (const auto& fn : window.Functions()) {
+        if (fn.Func != "sum") {
+            throw std::runtime_error(
+                "window function not supported in exec yet: " + fn.Func);
+        }
+        auto ident = TMaybeNode<TIdentExpr>(fn.Arg);
+        if (!ident) {
+            throw std::runtime_error("window sum requires a column argument");
+        }
+        const int32_t idx = fieldIndex(ident.Cast()->Name);
+        auto inner = UnwrapNamedType(UnwrapNullableType(inputStruct->Fields[idx].second));
+        auto integer = TMaybeType<TIntegerType>(inner);
+        if (!integer || integer.Cast()->BitWidth() != 64) {
+            throw std::runtime_error(
+                "window exec supports only i64 arguments for running sum yet");
+        }
+        funcs.push_back({
+            .Func = fn.Func,
+            .ArgColumn = idx,
+            .ResultType = inputStruct->Fields[idx].second,
+        });
+    }
+
+    TKernelCompiler compiler(std::move(options));
+    TSortRadixKernel kernel;
+    kernel.Enabled = true;
+    kernel.Dispatch = compiler.CompileWindow(
+        radixKeys, *inputStruct, partitionColumn, funcs);
+
+    return {
+        .OutputType = ComputeWindowOutputType(inputType, window.Functions()),
+        .Keys = std::move(keys),
+        .KeyColumns = std::move(keyColumns),
+        .Kernel = std::move(kernel),
     };
 }
 
