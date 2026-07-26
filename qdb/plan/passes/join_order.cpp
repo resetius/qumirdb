@@ -6,6 +6,7 @@
 #include <qdb/plan/ops/limit.h>
 #include <qdb/plan/ops/project.h>
 #include <qdb/plan/ops/sort.h>
+#include <qdb/plan/ops/window.h>
 #include <qdb/plan/passes/cbo/dpccp.h>
 
 #include "factor_conjuncts.h"
@@ -386,6 +387,11 @@ TOperatorPtr Reorder(
         topSort->MutableInput() = Reorder(topSort->Input(), {}, ctx);
         return topSort;
     }
+    if (auto maybeWindow = TMaybeOp<TWindowOperator>(node)) {
+        auto window = maybeWindow.Cast();
+        window->MutableInput() = Reorder(window->Input(), {}, ctx);
+        return window;
+    }
     return node;
 }
 
@@ -494,6 +500,8 @@ TOperatorPtr PushDown(TOperatorPtr node) {
         s.Cast()->MutableInput() = PushDown(s.Cast()->Input());
     } else if (auto t = TMaybeOp<TTopSortOperator>(node)) {
         t.Cast()->MutableInput() = PushDown(t.Cast()->Input());
+    } else if (auto w = TMaybeOp<TWindowOperator>(node)) {
+        w.Cast()->MutableInput() = PushDown(w.Cast()->Input());
     }
     return node;
 }
