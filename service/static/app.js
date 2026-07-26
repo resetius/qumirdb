@@ -29,6 +29,7 @@ const ACTIVE_DATASET_KEY = 'qdb.web.activeDataset';
 const LAST_RUN_KEY = 'qdb.web.lastRun';
 const LOCAL_DATA_DOWNLOAD_CONCURRENCY = 4;
 const MAX_PERSISTED_RESULT_ROWS = 1000;
+const BROWSER_EXPLAIN_PREFETCH_CONCURRENCY = 4;
 const TPCH_QUERY_FOLDER_ID = 'tpch';
 const TPCDS_QUERY_FOLDER_ID = 'tpcds';
 const DEFAULT_QUERY_FOLDER_ID = 'default';
@@ -58,6 +59,7 @@ let toastTimer = 0;
 let runningJob = null;
 const runQueue = [];
 let jobSeq = 0;
+let browserExplainPrefetchActive = 0;
 
 window.addEventListener('DOMContentLoaded', () => {
   window.lucide?.createIcons();
@@ -1353,7 +1355,7 @@ function enqueueQueryRun(queryId, sql, dataset, options = {}) {
     return false;
   }
 
-  runQueue.push({
+  const job = {
     id: ++jobSeq,
     runId: (crypto.randomUUID?.() ||
       `run-${Date.now()}-${Math.random().toString(16).slice(2)}`),
@@ -1363,8 +1365,17 @@ function enqueueQueryRun(queryId, sql, dataset, options = {}) {
     dataset,
     kind: dataset.source?.kind === 'browser' ? 'browser' : 'server',
     cancelled: false,
-    cancel: null
-  });
+    cancel: null,
+    explainPromise: null,
+    explainController: null,
+    activeWorker: null,
+    rejectWorker: null
+  };
+  if (job.kind === 'browser') {
+    job.cancel = () => cancelBrowserJob(job);
+  }
+  runQueue.push(job);
+  scheduleBrowserExplainPrefetch();
   return true;
 }
 
@@ -1385,6 +1396,7 @@ function cancelJob(job) {
 function stopQuery(queryId) {
   for (let i = runQueue.length - 1; i >= 0; i--) {
     if (runQueue[i].queryId === queryId) {
+      cancelJob(runQueue[i]);
       runQueue.splice(i, 1);
     }
   }
@@ -1401,6 +1413,7 @@ function stopFolder(folderId) {
   const queryIds = new Set(queriesInFolder(folderId).map(query => query.id));
   for (let i = runQueue.length - 1; i >= 0; i--) {
     if (queryIds.has(runQueue[i].queryId)) {
+      cancelJob(runQueue[i]);
       runQueue.splice(i, 1);
     }
   }
@@ -1425,6 +1438,7 @@ function pumpQueue() {
     return;
   }
   runningJob = job;
+  scheduleBrowserExplainPrefetch();
   renderQueries();
   const runner = job.kind === 'browser' ? executeBrowserJob : executeServerJob;
   Promise.resolve()
@@ -1578,42 +1592,111 @@ async function explainCurrent(
     return true;
 }
 
-async function executeBrowserJob(job) {
-  const { sql, dataset, queryId, datasetId, runId } = job;
-  const controller = new AbortController();
-  let activeWorker = null;
-  let rejectWorker = null;
-  job.cancel = () => {
-    controller.abort();
-    // Kill the server-side explain child (qdb_plan_export) if it is still going.
-    postJson(`/api/cancel?runId=${encodeURIComponent(runId)}`, {}).catch(() => {});
-    if (activeWorker) {
-      activeWorker.terminate();
-    }
-    if (rejectWorker) {
-      rejectWorker(new Error('cancelled'));
+function browserExplainRequest(job) {
+  return {
+    sql: job.sql,
+    dataset: job.dataset,
+    options: {
+      scheduler: 'single',
+      scanTasks: 1,
+      shufflePartitions: 1,
+      format: 'runtime-bundle',
+      embedWasm: true
     }
   };
+}
+
+function browserExplainPath(job) {
+  return `/api/explain?runId=${encodeURIComponent(job.runId)}`;
+}
+
+async function fetchBrowserExplainBundle(job, controller) {
+  try {
+    return await postJson(
+      browserExplainPath(job),
+      browserExplainRequest(job),
+      controller.signal);
+  } catch (error) {
+    if (error.name === 'AbortError') {
+      return {
+        ok: false,
+        aborted: true,
+        error: { stage: 'explain', message: 'cancelled' }
+      };
+    }
+    return {
+      ok: false,
+      error: { stage: 'explain', message: error.message || String(error) }
+    };
+  }
+}
+
+function cancelBrowserJob(job) {
+  if (job.explainController) {
+    job.explainController.abort();
+    postJson(`/api/cancel?runId=${encodeURIComponent(job.runId)}`, {}).catch(() => {});
+  }
+  if (job.activeWorker) {
+    job.activeWorker.terminate();
+    job.activeWorker = null;
+  }
+  if (job.rejectWorker) {
+    job.rejectWorker(new Error('cancelled'));
+    job.rejectWorker = null;
+  }
+}
+
+function startBrowserExplainPrefetch(job) {
+  if (job.cancelled || job.kind !== 'browser' || job.explainPromise) {
+    return false;
+  }
+  const controller = new AbortController();
+  job.explainController = controller;
+  ++browserExplainPrefetchActive;
+  job.explainPromise = fetchBrowserExplainBundle(job, controller)
+    .finally(() => {
+      --browserExplainPrefetchActive;
+      if (job.explainController === controller) {
+        job.explainController = null;
+      }
+      scheduleBrowserExplainPrefetch();
+    });
+  return true;
+}
+
+function scheduleBrowserExplainPrefetch() {
+  while (browserExplainPrefetchActive < BROWSER_EXPLAIN_PREFETCH_CONCURRENCY) {
+    const job = runQueue.find(item =>
+      item.kind === 'browser' &&
+      !item.cancelled &&
+      !item.explainPromise);
+    if (!job || !startBrowserExplainPrefetch(job)) {
+      return;
+    }
+  }
+}
+
+async function executeBrowserJob(job) {
+  const { sql, dataset, queryId, datasetId } = job;
+  job.cancel = () => cancelBrowserJob(job);
   const viewing = () => isActiveWorkspace(queryId, datasetId);
 
   try {
     if (viewing()) {
       setStatus('explaining');
     }
-    const request = {
-      sql,
-      dataset,
-      options: {
-        scheduler: 'single',
-        scanTasks: 1,
-        shufflePartitions: 1,
-        format: 'runtime-bundle',
-        embedWasm: true
-      }
-    };
-    const bundle = await postJson(
-      `/api/explain?runId=${encodeURIComponent(runId)}`, request, controller.signal);
-    if (job.cancelled) {
+    if (!job.explainPromise) {
+      const controller = new AbortController();
+      job.explainController = controller;
+      job.explainPromise = fetchBrowserExplainBundle(job, controller)
+        .finally(() => {
+          if (job.explainController === controller) {
+            job.explainController = null;
+          }
+        });
+    }
+    const bundle = await job.explainPromise;
+    if (job.cancelled || bundle.aborted) {
       return;
     }
     if (bundle.ok === false) {
@@ -1671,10 +1754,12 @@ async function executeBrowserJob(job) {
           updateRunProgress(progress);
         }
       },
-      (worker, reject) => { activeWorker = worker; rejectWorker = reject; });
+      (worker, reject) => { job.activeWorker = worker; job.rejectWorker = reject; });
     if (job.cancelled) {
       return;
     }
+    job.activeWorker = null;
+    job.rejectWorker = null;
     const elapsedMs = performance.now() - started;
     const details = {
       mode: 'browser',
@@ -1702,6 +1787,8 @@ async function executeBrowserJob(job) {
       () => persistBrowserResultToSlot(
         queryId, datasetId, result, elapsedMs, details));
   } catch (error) {
+    job.activeWorker = null;
+    job.rejectWorker = null;
     if (job.cancelled || error.name === 'AbortError') {
       return;
     }
