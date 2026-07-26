@@ -2158,6 +2158,11 @@ std::expected<TOperatorPtr, TError> BuildSelect(
         std::move(node), std::move(keys), std::move(specs));
     if (multiSet) {
         aggregate->MutableGroupingSets() = std::move(groupingSets);
+        auto inputSchema = aggregate->Input()->OutputColumns();
+        aggregate->Type = std::make_shared<NAst::TFunctionType>(
+            std::vector<NAst::TTypePtr>{inputSchema},
+            ComputeAggregateOutputType(inputSchema, aggregate->GroupKeys(), aggregate->Aggs(),
+                !aggregate->GroupingSets().empty()));
     }
     node = aggregate;
     }
