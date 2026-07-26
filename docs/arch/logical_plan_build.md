@@ -11,7 +11,7 @@ joins — those are optimizer passes that run afterwards (see
 | Area | Source |
 |---|---|
 | Builder | `qdb/plan/build.{h,cpp}` (`BuildPlan` → `BuildQuery` → `BuildSelect`) |
-| Operators | `qdb/plan/ops/{source,filter,project,aggregate,join}.{h,cpp}` |
+| Operators | `qdb/plan/ops/{source,filter,project,aggregate,join,window}.{h,cpp}` |
 | Expression clone (CTE inlining) | `qdb/plan/clone_expr.{h,cpp}` |
 | Conjunct splitting | `qdb/plan/passes/flatten_conjucts.{h,cpp}` |
 
@@ -35,6 +35,7 @@ the raw SQL identifiers (bare or `alias.col`); no types are attached.
 | `project` | list of `(name, expression)` |
 | `aggregate` | group keys (names), aggregate specs `(name, func, arg-expr\|null)` |
 | `join` | left, right, keys `(leftCol,rightCol)`, type, residual expr (null) |
+| `window` | partition keys (names), order keys, frame, function specs `(name, func, arg-expr\|null)` |
 
 Join types: `Inner, Left, Right, Full, LeftSemi, RightSemi, LeftAnti, RightAnti`.
 
@@ -145,6 +146,35 @@ non-distinct aggregates, or distinct over several columns, is rejected.
 ### SELECT DISTINCT
 
 An `aggregate` with all output columns as group keys and no measures.
+
+### Window functions → window
+
+A window call (`f(...) OVER (PARTITION BY ... ORDER BY ... <frame>)`) is evaluated
+**after** WHERE / GROUP BY / HAVING and **before** the final SELECT projection.
+Functions that share one identical spec (partition + order + frame) are grouped
+into a single `window` node; distinct specs stack into several:
+
+```
+project   (final SELECT list; window calls replaced by references)
+└─ window  partition=[...] order=[...] fns=[w_0=rank, ...]      -- one per spec
+   └─ filter (HAVING, if present)
+      └─ aggregate / <WHERE tree>
+```
+
+- The node **preserves every input row and column** and appends one output
+  column (`w_<n>`) per function; the SELECT expression referencing the window is
+  rewritten to that column.
+- Aggregates inside a window argument or its PARTITION/ORDER (`sum(sum(x)) OVER`,
+  `rank() OVER (ORDER BY sum(x))`) are hoisted into the aggregate below, so by the
+  time the window is built its keys/arguments are over the aggregated relation.
+- Computed partition/order keys and function arguments are materialized into a
+  pass-through `project` below the window (like aggregate argument
+  materialization); plain columns are used directly.
+- The **default frame** is materialized by the parser: `RANGE UNBOUNDED PRECEDING
+  AND CURRENT ROW` when ORDER BY is present, else `... AND UNBOUNDED FOLLOWING`
+  (the whole partition).
+
+Supported functions (qdb v1): `rank`, `sum`, `avg`, `max`.
 
 ## CTE (WITH)
 
