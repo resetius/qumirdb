@@ -1497,6 +1497,12 @@ void CollectCorrelations(
             }
         }
     }
+    if (auto call = NAst::TMaybeNode<NAst::TCallExpr>(expr)) {
+        for (const auto& arg : call.Cast()->Args) {
+            CollectCorrelations(arg, local, out);
+        }
+        return;
+    }
     for (auto* child : expr->MutableChildren()) {
         CollectCorrelations(*child, local, out);
     }
@@ -1513,6 +1519,12 @@ void RenameIdents(
     if (auto ident = NAst::TMaybeNode<NAst::TIdentExpr>(expr)) {
         if (auto it = rename.find(ident.Cast()->Name); it != rename.end()) {
             ident.Cast()->Name = it->second;
+        }
+        return;
+    }
+    if (auto call = NAst::TMaybeNode<NAst::TCallExpr>(expr)) {
+        for (auto& arg : call.Cast()->Args) {
+            RenameIdents(arg, rename);
         }
         return;
     }
@@ -1613,6 +1625,14 @@ bool HasUnmappedOuter(
     }
     if (auto ident = NAst::TMaybeNode<NAst::TIdentExpr>(expr)) {
         return local.count(ident.Cast()->Name) == 0;
+    }
+    if (auto call = NAst::TMaybeNode<NAst::TCallExpr>(expr)) {
+        for (const auto& arg : call.Cast()->Args) {
+            if (HasUnmappedOuter(arg, local)) {
+                return true;
+            }
+        }
+        return false;
     }
     for (auto* child : expr->MutableChildren()) {
         if (HasUnmappedOuter(*child, local)) {
