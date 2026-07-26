@@ -471,34 +471,43 @@ TWindowRuntimeProcess BuildWindowRuntimeProcess(
             IsDecimalType(valueType) || IsBinIntStorageType(valueType);
         auto inner = UnwrapNamedType(valueType);
         auto integer = TMaybeType<TIntegerType>(inner);
+        const bool isInteger = static_cast<bool>(integer);
+        const bool isFloat = static_cast<bool>(TMaybeType<TFloatType>(inner));
+        auto wrapNullable = [&](TTypePtr type) -> TTypePtr {
+            return IsNullableType(argType)
+                ? std::make_shared<TNullable>(std::move(type))
+                : type;
+        };
         if (fn.Func == "avg") {
             if (!window.OrderKeys().empty()) {
                 throw std::runtime_error(
                     "window avg supports only full-partition frames yet");
             }
-            if (!isBinInt && !TMaybeType<TFloatType>(inner) &&
-                (!integer || integer.Cast()->BitWidth() != 64)) {
+            if (!isBinInt && !isFloat && !isInteger) {
                 throw std::runtime_error(
-                    "window exec supports only i64/f64/decimal arguments for avg yet");
+                    "window exec supports only integer/f64/decimal arguments for avg yet");
             }
             funcs.push_back({
                 .Func = "avg_partition",
                 .ArgColumn = idx,
-                .ResultType = isBinInt ? argType : std::make_shared<TFloatType>(),
+                .ResultType = isBinInt
+                    ? argType
+                    : wrapNullable(std::make_shared<TFloatType>()),
             });
             continue;
         }
         if (fn.Func == "sum") {
-            if (!isBinInt && !TMaybeType<TFloatType>(inner) &&
-                (!integer || integer.Cast()->BitWidth() != 64)) {
+            if (!isBinInt && !isFloat && !isInteger) {
                 throw std::runtime_error(
-                    "window exec supports only i64/f64/decimal arguments for sum yet");
+                    "window exec supports only integer/f64/decimal arguments for sum yet");
             }
             const bool ordered = !orderRadixKeys.empty();
             funcs.push_back({
                 .Func = ordered ? "sum_prefix" : "sum_partition",
                 .ArgColumn = idx,
-                .ResultType = inputStruct->Fields[idx].second,
+                .ResultType = isInteger
+                    ? wrapNullable(std::make_shared<TIntegerType>())
+                    : inputStruct->Fields[idx].second,
                 .PeerInclusive = ordered && framePeerInclusive(),
             });
             continue;

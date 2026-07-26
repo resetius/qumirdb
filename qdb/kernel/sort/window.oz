@@ -74,14 +74,15 @@
   ;; peer rows (equal order key), so every peer shares the running sum through the
   ;; last peer; peer_inclusive=false is ROWS mode (strict row-by-row). NULL args
   ;; are skipped (SQL sum ignores nulls); output is NULL until the first non-NULL.
-  (fun window_fill_prefix_sum_fixed [Value]
+  (fun window_fill_prefix_sum_fixed [Value Sum]
        ((var store <ptr TRowSet>)
         (var row_ids <ptr i64>)
         (var start i64)
         (var n i64)
         (var arg_col i64)
         (var arg_witness <ptr Value>)
-        (var value_bytes i64)
+        (var sum_witness <ptr Sum>)
+        (var sum_bytes i64)
         (var out_col <ref TColumn>)
         (var out <ref TRowSet>)
         (var data_owner_idx i64)
@@ -90,9 +91,9 @@
     (block
       (var data =
         (call window_init_masked_fixed_output
-          n value_bytes out_col out data_owner_idx mask_owner_idx arg_witness))
+          n sum_bytes out_col out data_owner_idx mask_owner_idx sum_witness))
       (var mask = (field out_col Mask))
-      (var zero = (cast (: 0 i64) Value))
+      (var zero = (cast (: 0 i64) Sum))
       (var acc = zero)
       (var valid_count = (: 0 i64))
       (var i = (: 0 i64))
@@ -120,7 +121,9 @@
               (if (call sr_row_valid store row_j arg_col)
                 (block
                   (= acc (+ acc
-                    (call sr_load_fixed_key store row_j arg_col arg_witness)))
+                    (cast
+                      (call sr_load_fixed_key store row_j arg_col arg_witness)
+                      Sum)))
                   (= valid_count (+ valid_count (: 1 i64)))))
               (= j (+ j (: 1 i64)))))
           (var valid = (> valid_count (: 0 i64)))
@@ -449,14 +452,15 @@
               (= j (+ j (: 1 i64)))))
           (= i run_end)))))
 
-  (fun window_fill_partition_sum_fixed [Value]
+  (fun window_fill_partition_sum_fixed [Value Sum]
        ((var store <ptr TRowSet>)
         (var row_ids <ptr i64>)
         (var start i64)
         (var n i64)
         (var arg_col i64)
         (var arg_witness <ptr Value>)
-        (var value_bytes i64)
+        (var sum_witness <ptr Sum>)
+        (var sum_bytes i64)
         (var out_col <ref TColumn>)
         (var out <ref TRowSet>)
         (var data_owner_idx i64)
@@ -464,9 +468,9 @@
     (block
       (var data =
         (call window_init_masked_fixed_output
-          n value_bytes out_col out data_owner_idx mask_owner_idx arg_witness))
+          n sum_bytes out_col out data_owner_idx mask_owner_idx sum_witness))
       (var mask = (field out_col Mask))
-      (var zero = (cast (: 0 i64) Value))
+      (var zero = (cast (: 0 i64) Sum))
       (var i = (: 0 i64))
       (while (< i n)
         (block
@@ -486,7 +490,9 @@
               (if (call sr_row_valid store row_id arg_col)
                 (block
                   (= acc (+ acc
-                    (call sr_load_fixed_key store row_id arg_col arg_witness)))
+                    (cast
+                      (call sr_load_fixed_key store row_id arg_col arg_witness)
+                      Sum)))
                   (= count (+ count (: 1 i64)))))
               (= j (+ j (: 1 i64)))))
 

@@ -118,6 +118,63 @@ TEST(WindowExec, PrefixSumI64ResetsPerPartition) {
     EXPECT_FALSE(runtime->Next(second));
 }
 
+TEST(WindowExec, PrefixSumI32OutputsI64) {
+    std::array<int64_t, 6> keys = {2, 1, 1, 2, 1, 2};
+    std::array<int64_t, 6> order = {1, 2, 1, 3, 3, 2};
+    std::array<int32_t, 6> values = {20, 7, 5, 4, 11, 6};
+
+    std::vector<TColumn> columns = {
+        TColumn{.Data = reinterpret_cast<char*>(keys.data())},
+        TColumn{.Data = reinterpret_cast<char*>(order.data())},
+        TColumn{.Data = reinterpret_cast<char*>(values.data())},
+    };
+    std::vector<TRowSet> batches = {TRowSet{
+        .Columns = columns.data(),
+        .ColumnCount = 3,
+        .RowCount = static_cast<int64_t>(keys.size()),
+        .Selection = nullptr,
+        .RefCount = 1,
+    }};
+    TMockSource source(
+        {"k", "o", "v"},
+        std::move(batches),
+        {std::make_shared<NQumir::NAst::TIntegerType>(),
+         std::make_shared<NQumir::NAst::TIntegerType>(),
+         std::make_shared<NQumir::NAst::TIntegerType>(
+             NQumir::NAst::TIntegerType::I32)});
+
+    auto root = ParsePlan(
+        "(rel window (rel source \"data.parquet\") "
+        "(partition k) "
+        "(order (o asc nulls-default)) "
+        "(frame rows (start unbounded-preceding) (end current-row)) "
+        "(fn running_sum sum v))",
+        source);
+
+    auto runtime = RunPlan(root);
+
+    TRowSet result{};
+    ASSERT_TRUE(runtime->Next(result));
+    ASSERT_EQ(result.ColumnCount, 4);
+    ASSERT_EQ(result.RowCount, 6);
+
+    auto* outValues = reinterpret_cast<int32_t*>(result.Columns[2].Data);
+    auto* outSums = reinterpret_cast<int64_t*>(result.Columns[3].Data);
+
+    const std::array<int32_t, 6> expectedValues = {5, 7, 11, 20, 6, 4};
+    const std::array<int64_t, 6> expectedSums = {5, 12, 23, 20, 26, 30};
+
+    for (int64_t row = 0; row < result.RowCount; ++row) {
+        EXPECT_EQ(outValues[row], expectedValues[row]) << "row " << row;
+        EXPECT_EQ(outSums[row], expectedSums[row]) << "row " << row;
+    }
+
+    Release(&result);
+
+    TRowSet second{};
+    EXPECT_FALSE(runtime->Next(second));
+}
+
 TEST(WindowExec, RankI64WithPeersResetsPerPartition) {
     std::array<int64_t, 7> keys = {2, 1, 1, 2, 1, 2, 1};
     std::array<int64_t, 7> order = {5, 10, 10, 7, 20, 5, 30};
@@ -288,6 +345,59 @@ TEST(WindowExec, AvgI64BroadcastsPerPartition) {
 
     for (int64_t row = 0; row < result.RowCount; ++row) {
         EXPECT_EQ(outKeys[row], expectedKeys[row]) << "row " << row;
+        EXPECT_EQ(outValues[row], expectedValues[row]) << "row " << row;
+        EXPECT_TRUE(IsValid(result.Columns[2], row)) << "row " << row;
+        EXPECT_DOUBLE_EQ(outAvg[row], expectedAvg[row]) << "row " << row;
+    }
+
+    Release(&result);
+
+    TRowSet second{};
+    EXPECT_FALSE(runtime->Next(second));
+}
+
+TEST(WindowExec, AvgI32BroadcastsF64PerPartition) {
+    std::array<int64_t, 5> keys = {2, 1, 1, 2, 1};
+    std::array<int32_t, 5> values = {10, 3, 6, 30, 12};
+
+    std::vector<TColumn> columns = {
+        TColumn{.Data = reinterpret_cast<char*>(keys.data())},
+        TColumn{.Data = reinterpret_cast<char*>(values.data())},
+    };
+    std::vector<TRowSet> batches = {TRowSet{
+        .Columns = columns.data(),
+        .ColumnCount = 2,
+        .RowCount = static_cast<int64_t>(keys.size()),
+        .Selection = nullptr,
+        .RefCount = 1,
+    }};
+    TMockSource source(
+        {"k", "v"},
+        std::move(batches),
+        {std::make_shared<NQumir::NAst::TIntegerType>(),
+         std::make_shared<NQumir::NAst::TIntegerType>(
+             NQumir::NAst::TIntegerType::I32)});
+
+    auto root = ParsePlan(
+        "(rel window (rel source \"data.parquet\") "
+        "(partition k) "
+        "(fn avg_v avg v))",
+        source);
+
+    auto runtime = RunPlan(root);
+
+    TRowSet result{};
+    ASSERT_TRUE(runtime->Next(result));
+    ASSERT_EQ(result.ColumnCount, 3);
+    ASSERT_EQ(result.RowCount, 5);
+
+    auto* outValues = reinterpret_cast<int32_t*>(result.Columns[1].Data);
+    auto* outAvg = reinterpret_cast<double*>(result.Columns[2].Data);
+
+    const std::array<int32_t, 5> expectedValues = {3, 6, 12, 10, 30};
+    const std::array<double, 5> expectedAvg = {7.0, 7.0, 7.0, 20.0, 20.0};
+
+    for (int64_t row = 0; row < result.RowCount; ++row) {
         EXPECT_EQ(outValues[row], expectedValues[row]) << "row " << row;
         EXPECT_TRUE(IsValid(result.Columns[2], row)) << "row " << row;
         EXPECT_DOUBLE_EQ(outAvg[row], expectedAvg[row]) << "row " << row;
