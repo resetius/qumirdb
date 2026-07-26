@@ -9,6 +9,7 @@
 #include <qdb/plan/ops/operator.h>
 #include <qdb/plan/ops/sort.h>
 #include <qdb/plan/ops/source.h>
+#include <qdb/plan/ops/window.h>
 #include <qdb/plan/passes/equijoin.h>
 #include <qdb/plan/passes/join_order.h>
 #include <qdb/plan/passes/qualify_columns.h>
@@ -105,6 +106,10 @@ const TSortOperator* AsSort(const TOperatorPtr& op) {
 
 const TLimitOperator* AsLimit(const TOperatorPtr& op) {
     return dynamic_cast<const TLimitOperator*>(op.get());
+}
+
+const TWindowOperator* AsWindow(const TOperatorPtr& op) {
+    return dynamic_cast<const TWindowOperator*>(op.get());
 }
 
 std::set<std::string> LeafAliases(const TOperatorPtr& op) {
@@ -284,6 +289,47 @@ TEST(PushDown, SingleTableToLeafEqualityStaysAbove) {
     EXPECT_EQ(AsSource(leftFilter->Input())->GetAlias(), "a");
     ASSERT_NE(AsSource(join->Right()), nullptr);
     EXPECT_EQ(AsSource(join->Right())->GetAlias(), "b");
+}
+
+// A predicate over a PARTITION BY column is pushed below the window (dropping
+// whole partitions is safe); a predicate over the window output stays above.
+TEST(PushDown, PartitionPredicateThroughWindow) {
+    NQdb::TMockSource t({"a", "b"});
+    std::map<std::string, ISource*> tables = {{"T", &t}};
+
+    auto root = PushDownPredicates(BuildAnnotated(
+        "(rel filter"
+        "  (rel window (rel source \"T\" \"t\") (partition a) (fn w_0 rank))"
+        "  (&& (== a 5) (== w_0 1)))",
+        tables));
+
+    auto topFilter = AsFilter(root);
+    ASSERT_NE(topFilter, nullptr);
+    auto window = AsWindow(topFilter->Input());
+    ASSERT_NE(window, nullptr);
+
+    auto innerFilter = AsFilter(window->Input());
+    ASSERT_NE(innerFilter, nullptr);
+    ASSERT_NE(AsSource(innerFilter->Input()), nullptr);
+    EXPECT_EQ(AsSource(innerFilter->Input())->GetAlias(), "t");
+}
+
+// The join equality sits below the window; ExtractEquiJoins must recurse through
+// the window to lift it into a join key (the fallthrough would not recurse).
+TEST(PushDown, WindowRecursesToChildJoin) {
+    NQdb::TMockSource a({"aid", "aval"});
+    NQdb::TMockSource b({"bid", "bval"});
+    std::map<std::string, ISource*> tables = {{"A", &a}, {"B", &b}};
+
+    auto root = Optimize(
+        "(rel window"
+        "  (rel filter"
+        "    (rel join (rel source \"A\" \"a\") (rel source \"B\" \"b\") () (inner))"
+        "    (== aid bid))"
+        "  (partition aid) (fn w_0 rank))",
+        tables);
+
+    EXPECT_EQ(Keys(root), (TKeys{{"a.aid", "b.bid"}}));
 }
 
 int main(int argc, char** argv) {

@@ -7,6 +7,7 @@
 #include <qdb/plan/ops/project.h>
 #include <qdb/plan/ops/sort.h>
 #include <qdb/plan/ops/union.h>
+#include <qdb/plan/ops/window.h>
 #include <qdb/plan/passes/unbound_vars.h>
 #include <qdb/utils/union_find.h>
 
@@ -232,6 +233,28 @@ TOperatorPtr ProcessSort(std::shared_ptr<TSortOperator> sort, TContext ctx) {
 TOperatorPtr ProcessTopSort(std::shared_ptr<TTopSortOperator> topSort, TContext ctx) {
     topSort->MutableInput() = Process(topSort->Input(), {{}, ctx.Mode});
     return Materialize(topSort, ctx.Conjucts);
+}
+
+// A window is a partial barrier: a predicate over PARTITION BY columns only can
+// pass below it (dropping whole partitions never changes a per-partition window
+// result), while predicates over its output columns or non-partition inputs stay
+// above.
+TOperatorPtr ProcessWindow(std::shared_ptr<TWindowOperator> window, TContext ctx) {
+    std::unordered_set<std::string> partitionCols(
+        window->PartitionKeys().begin(), window->PartitionKeys().end());
+
+    std::vector<TConjuct> pushable;
+    std::vector<TConjuct> keep;
+    for (auto& conj : ctx.Conjucts) {
+        if (!partitionCols.empty() && Covers(ColumnsOf(conj), partitionCols)) {
+            pushable.push_back(std::move(conj));
+        } else {
+            keep.push_back(std::move(conj));
+        }
+    }
+
+    window->MutableInput() = Process(window->Input(), {std::move(pushable), ctx.Mode});
+    return Materialize(window, keep);
 }
 
 // Outer joins are excluded: pushing onto the null-extended side changes results.
@@ -501,6 +524,9 @@ TOperatorPtr Process(TOperatorPtr node, TContext ctx) {
     } else if (auto maybeTopSort = TMaybeOp<TTopSortOperator>(node)) {
         auto topSort = maybeTopSort.Cast();
         return ProcessTopSort(topSort, std::move(ctx));
+    } else if (auto maybeWindow = TMaybeOp<TWindowOperator>(node)) {
+        auto window = maybeWindow.Cast();
+        return ProcessWindow(window, std::move(ctx));
     } else if (auto maybeUnion = TMaybeOp<TUnionAllOperator>(node)) {
         // TODO: push ctx.Conjucts down into each branch. The predicate references
         // the union output (first branch) names, so pushing into other branches

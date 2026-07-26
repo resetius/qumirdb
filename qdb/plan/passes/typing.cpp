@@ -8,6 +8,7 @@
 #include <qdb/plan/ops/sort.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/ops/union.h>
+#include <qdb/plan/ops/window.h>
 #include <qdb/plan/types/nullable.h>
 #include <qdb/plan/types/decimal.h>
 #include <qdb/kernel/annotate_type.h>
@@ -134,6 +135,15 @@ void AnnotateTypes(const TOperatorPtr& root) {
             std::vector<TTypePtr>{inputSchema},
             ComputeAggregateOutputType(inputSchema, agg->GroupKeys(), agg->Aggs(),
                 !agg->GroupingSets().empty()));
+        return;
+    }
+
+    if (auto maybe = TMaybeOp<TWindowOperator>(root)) {
+        auto window = maybe.Cast();
+        auto inputSchema = window->Input()->OutputColumns();
+        root->Type = std::make_shared<TFunctionType>(
+            std::vector<TTypePtr>{inputSchema},
+            ComputeWindowOutputType(inputSchema, window->Functions()));
         return;
     }
 
