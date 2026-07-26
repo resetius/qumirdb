@@ -14,6 +14,7 @@
 #include <qdb/plan/clone_expr.h>
 #include <qdb/plan/passes/flatten_conjuncts.h>
 #include <qdb/plan/passes/flatten_disjuncts.h>
+#include <qdb/plan/passes/unbound_vars.h>
 #include <qdb/plan/types/decimal.h>
 
 #include <qumir/parser/ast.h>
@@ -1620,22 +1621,8 @@ bool HasUnmappedOuter(
     const NAst::TExprPtr& expr,
     const std::unordered_set<std::string>& local)
 {
-    if (!expr) {
-        return false;
-    }
-    if (auto ident = NAst::TMaybeNode<NAst::TIdentExpr>(expr)) {
-        return local.count(ident.Cast()->Name) == 0;
-    }
-    if (auto call = NAst::TMaybeNode<NAst::TCallExpr>(expr)) {
-        for (const auto& arg : call.Cast()->Args) {
-            if (HasUnmappedOuter(arg, local)) {
-                return true;
-            }
-        }
-        return false;
-    }
-    for (auto* child : expr->MutableChildren()) {
-        if (HasUnmappedOuter(*child, local)) {
+    for (const auto& name : FindUnboundVars(expr)) {
+        if (!local.count(name)) {
             return true;
         }
     }

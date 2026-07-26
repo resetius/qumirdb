@@ -221,6 +221,40 @@ TEST(WindowPlan, HavingScalarSubqueryIgnoresFunctionCalleeForCorrelation) {
     EXPECT_TRUE(scalarJoin->Keys().empty());
 }
 
+TEST(WindowPlan, ScalarSubqueryIgnoresInListTemporaryForCorrelation) {
+    NQdb::TMockSource customer({
+        "c_phone",
+        "c_acctbal",
+        "c_custkey",
+    });
+    NQdb::TMockSource orders({"o_custkey"});
+    std::map<std::string, ISource*> tables = {
+        {"customer", &customer},
+        {"orders", &orders},
+    };
+
+    auto plan = BuildSqlPlan(
+        "SELECT cntrycode, count(*) AS numcust, sum(c_acctbal) AS totacctbal "
+        "FROM ("
+        "  SELECT substring(c_phone FROM 1 FOR 2) AS cntrycode, c_acctbal "
+        "  FROM customer "
+        "  WHERE substring(c_phone FROM 1 FOR 2) IN ('27', '20') "
+        "    AND c_acctbal > ("
+        "      SELECT avg(c_acctbal) "
+        "      FROM customer "
+        "      WHERE c_acctbal > 0.00 "
+        "        AND substring(c_phone FROM 1 FOR 2) IN ('27', '20')"
+        "    ) "
+        "    AND NOT EXISTS ("
+        "      SELECT * FROM orders WHERE o_custkey = c_custkey"
+        "    )"
+        ") AS custsale "
+        "GROUP BY cntrycode "
+        "ORDER BY cntrycode",
+        tables);
+    ASSERT_TRUE(plan.has_value()) << (plan ? "" : plan.error().ToString());
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

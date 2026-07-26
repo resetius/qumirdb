@@ -28,23 +28,66 @@ function base64ToBytes(base64) {
 }
 
 // Byte width of a fixed-width core type in a kernel data buffer.
+function logicalTypeName(typeOrColumn) {
+  const type = typeof typeOrColumn === 'object' && typeOrColumn !== null
+    ? typeOrColumn.type
+    : typeOrColumn;
+  return String(type || '').toLowerCase();
+}
+
+function decimalScale(typeOrColumn) {
+  if (typeof typeOrColumn === 'object' && typeOrColumn !== null &&
+      typeOrColumn.scale !== undefined) {
+    return Number(typeOrColumn.scale) || 0;
+  }
+  const match = String(typeOrColumn || '').match(/^decimal\s*\(\s*\d+\s*,\s*(\d+)\s*\)$/i);
+  return match ? Number(match[1]) : 0;
+}
+
+function storageTypeName(typeOrColumn) {
+  if (typeof typeOrColumn === 'object' && typeOrColumn !== null &&
+      typeOrColumn.storageType) {
+    return String(typeOrColumn.storageType).toLowerCase();
+  }
+  let type = logicalTypeName(typeOrColumn);
+  const nullable = type.match(/^nullable<(.+)>$/i);
+  if (nullable) {
+    type = nullable[1].trim().toLowerCase();
+  }
+  if (type === 'decimal' || type === 'binint' || type.startsWith('decimal(')) {
+    return 'binint';
+  }
+  return type;
+}
+
+function isStringColumn(column) {
+  return storageTypeName(column) === 'string';
+}
+
+function isDecimalColumn(column) {
+  const type = logicalTypeName(column);
+  return type === 'decimal' || type.startsWith('decimal(');
+}
+
 export function coreTypeWidth(type) {
-  switch (type) {
+  switch (storageTypeName(type)) {
     case 'i8': case 'u8': case 'bool': return 1;
     case 'i16': case 'u16': return 2;
     case 'i32': case 'u32': return 4;
     case 'i64': case 'u64': case 'f64': return 8;
     case 'string': return 16; // StringView (ptr + size)
+    case 'binint': return 16; // qdb_bin_int (Lo + Hi)
     default: return 0;
   }
 }
 
 function isBigType(type) {
-  return type === 'i64' || type === 'u64';
+  const storage = storageTypeName(type);
+  return storage === 'i64' || storage === 'u64';
 }
 
 function numericArrayConstructor(type) {
-  switch (type) {
+  switch (storageTypeName(type)) {
     case 'i8': return Int8Array;
     case 'u8': case 'bool': return Uint8Array;
     case 'i16': return Int16Array;
@@ -143,18 +186,18 @@ class RowSetWriter {
 
     const encoder = new TextEncoder();
     const encoded = columns.map(column => {
-      if (column.type !== 'string') return null;
+      if (!isStringColumn(column)) return null;
       return encodeStringColumn(column.values, rowCount, encoder);
     });
     const masks = columns.map(column => columnValidityMask(column.values, rowCount));
 
     for (let c = 0; c < columns.length; ++c) {
       const column = columns[c];
-      if (column.type === 'string') {
+      if (isStringColumn(column)) {
         this.ensureData(c, Math.max(encoded[c].total, 1), 1);
         this.ensureOffsets(c, (rowCount + 1) * 4);
       } else {
-        const width = coreTypeWidth(column.type);
+        const width = coreTypeWidth(column);
         this.ensureData(c, Math.max(rowCount, 1) * width, 8);
       }
       if (masks[c]) {
@@ -179,7 +222,7 @@ class RowSetWriter {
         memBytes.set(masks[c], this.maskPtrs[c]);
         writePointer(dv, colPtr + colLayout.mask, this.maskPtrs[c]);
       }
-      if (column.type === 'string') {
+      if (isStringColumn(column)) {
         const enc = encoded[c];
         let p = this.dataPtrs[c];
         for (let i = 0; i < rowCount; ++i) {
@@ -192,14 +235,14 @@ class RowSetWriter {
         writePointer(dv, colPtr + colLayout.offsets, this.offsetsPtrs[c]);
         dv.setUint8(colPtr + colLayout.offsetWidth, 4);
       } else {
-        const width = coreTypeWidth(column.type);
+        const width = coreTypeWidth(column);
         const values = column.values;
-        const bytes = typedColumnBytes(values, column.type, rowCount);
+        const bytes = typedColumnBytes(values, column, rowCount);
         if (bytes) {
           memBytes.set(bytes, this.dataPtrs[c]);
         } else {
           for (let i = 0; i < rowCount; ++i) {
-            writeNumericValue(dv, this.dataPtrs[c] + i * width, column.type, values[i]);
+            writeNumericValue(dv, this.dataPtrs[c] + i * width, column, values[i]);
           }
         }
       }
@@ -311,11 +354,11 @@ export class WasmSourceBatchBuilder {
 
     for (let c = 0; c < this.columns.length; ++c) {
       const column = this.columns[c];
-      if (column.type === 'string') {
+      if (isStringColumn(column)) {
         this.offsetsPtrs[c] = arena.alloc((this.rowCount + 1) * 4, 4);
         arena.bytes().fill(0, this.offsetsPtrs[c], this.offsetsPtrs[c] + (this.rowCount + 1) * 4);
       } else {
-        const width = coreTypeWidth(column.type);
+        const width = coreTypeWidth(column);
         if (width <= 0) {
           throw new Error(`unsupported source column type: ${column.type}`);
         }
@@ -339,7 +382,7 @@ export class WasmSourceBatchBuilder {
         `source chunk ${columnName} has invalid row range ${from}..${to} of ${this.rowCount}`);
     }
     const column = this.columns[index];
-    if (column.type === 'string') {
+    if (isStringColumn(column)) {
       this.writeStringChunk(index, columnData, from, to);
     } else {
       this.writeNumericChunk(index, columnData, from, to);
@@ -356,8 +399,8 @@ export class WasmSourceBatchBuilder {
     if (count <= 0) {
       return;
     }
-    const width = coreTypeWidth(column.type);
-    const bytes = typedColumnBytes(values, column.type, count);
+    const width = coreTypeWidth(column);
+    const bytes = typedColumnBytes(values, column, count);
     if (bytes) {
       this.arena.bytes().set(bytes, this.dataPtrs[index] + start * width);
       this.nextRows[index] = end;
@@ -382,12 +425,12 @@ export class WasmSourceBatchBuilder {
       const row = start + i;
       if (isNullish(value)) {
         clearValidityBit(memBytes, this.maskPtrs[index], row);
-        writeNumericValue(dv, this.dataPtrs[index] + row * width, column.type, 0);
+        writeNumericValue(dv, this.dataPtrs[index] + row * width, column, 0);
       } else {
         writeNumericValue(
           dv,
           this.dataPtrs[index] + row * width,
-          column.type,
+          column,
           sourceNumericValue(column, value));
       }
     }
@@ -479,7 +522,7 @@ export class WasmSourceBatchBuilder {
         throw new Error(
           `source column ${this.columns[c].name} ended at row ${this.nextRows[c]} of ${this.rowCount}`);
       }
-      if (this.columns[c].type !== 'string') {
+      if (!isStringColumn(this.columns[c])) {
         continue;
       }
       const offsetsPtr = this.offsetsPtrs[c];
@@ -505,7 +548,7 @@ export class WasmSourceBatchBuilder {
       if (this.maskPtrs[c]) {
         writePointer(dv, colPtr + colLayout.mask, this.maskPtrs[c]);
       }
-      if (column.type === 'string') {
+      if (isStringColumn(column)) {
         writePointer(dv, colPtr + colLayout.offsets, this.offsetsPtrs[c]);
         dv.setUint8(colPtr + colLayout.offsetWidth, 4);
       }
@@ -802,6 +845,10 @@ function shapeColumns(output) {
   return (output || []).map(column => ({
     name: column.name,
     type: column.type,
+    storageType: column.storageType,
+    precision: column.precision,
+    scale: column.scale,
+    nullable: column.nullable,
   }));
 }
 
@@ -903,8 +950,80 @@ function readPointer(dv, offset) {
   return Number(dv.getBigUint64(offset, true));
 }
 
+function decimalToScaledBigInt(value, scale) {
+  if (value === null || value === undefined) {
+    return 0n;
+  }
+  if (typeof value === 'bigint') {
+    return value;
+  }
+  if (value instanceof Uint8Array) {
+    let raw = 0n;
+    for (const byte of value) {
+      raw = (raw << 8n) | BigInt(byte);
+    }
+    if (value.length > 0 && (value[0] & 0x80)) {
+      raw -= 1n << BigInt(value.length * 8);
+    }
+    return raw;
+  }
+  if (value instanceof ArrayBuffer) {
+    return decimalToScaledBigInt(new Uint8Array(value), scale);
+  }
+  if (typeof value === 'number') {
+    return BigInt(Math.round(value * (10 ** scale)));
+  }
+  const text = String(value).trim();
+  if (!text) {
+    return 0n;
+  }
+  const neg = text.startsWith('-');
+  const unsigned = neg || text.startsWith('+') ? text.slice(1) : text;
+  const [wholeText, fracText = ''] = unsigned.split('.');
+  const whole = BigInt(wholeText || '0');
+  const paddedFrac = (fracText + '0'.repeat(scale)).slice(0, scale);
+  const frac = BigInt(paddedFrac || '0');
+  const factor = 10n ** BigInt(scale);
+  const result = whole * factor + frac;
+  return neg ? -result : result;
+}
+
+function writeBinIntValue(dv, address, value, scale) {
+  const raw = BigInt.asUintN(128, decimalToScaledBigInt(value, scale));
+  dv.setBigUint64(address, BigInt.asUintN(64, raw), true);
+  dv.setBigUint64(address + 8, BigInt.asUintN(64, raw >> 64n), true);
+}
+
+function readBinIntValue(dv, address) {
+  const lo = dv.getBigUint64(address, true);
+  const hi = dv.getBigInt64(address + 8, true);
+  return (hi << 64n) + lo;
+}
+
+function writeBinIntRaw(dv, address, value) {
+  const raw = BigInt.asUintN(128, BigInt(value));
+  dv.setBigUint64(Number(address), BigInt.asUintN(64, raw), true);
+  dv.setBigUint64(Number(address) + 8, BigInt.asUintN(64, raw >> 64n), true);
+}
+
+function formatDecimalValue(raw, scale) {
+  let value = BigInt(raw);
+  const neg = value < 0n;
+  if (neg) {
+    value = -value;
+  }
+  const factor = 10n ** BigInt(scale);
+  const whole = value / factor;
+  const frac = value % factor;
+  if (scale === 0) {
+    return `${neg ? '-' : ''}${whole}`;
+  }
+  return `${neg ? '-' : ''}${whole}.${frac.toString().padStart(scale, '0')}`;
+}
+
 function writeNumericValue(dv, address, type, value) {
-  switch (type) {
+  const storage = storageTypeName(type);
+  switch (storage) {
     case 'i8': dv.setInt8(address, Number(value) | 0); break;
     case 'u8': case 'bool': dv.setUint8(address, Number(value) & 0xff); break;
     case 'i16': dv.setInt16(address, Number(value) | 0, true); break;
@@ -914,12 +1033,13 @@ function writeNumericValue(dv, address, type, value) {
     case 'i64': dv.setBigInt64(address, BigInt(value ?? 0), true); break;
     case 'u64': dv.setBigUint64(address, BigInt(value ?? 0), true); break;
     case 'f64': dv.setFloat64(address, Number(value ?? 0), true); break;
+    case 'binint': writeBinIntValue(dv, address, value, decimalScale(type)); break;
     default: throw new Error(`unsupported numeric column type: ${type}`);
   }
 }
 
 function readNumericValue(dv, address, type) {
-  switch (type) {
+  switch (storageTypeName(type)) {
     case 'i8': return dv.getInt8(address);
     case 'u8': case 'bool': return dv.getUint8(address);
     case 'i16': return dv.getInt16(address, true);
@@ -929,6 +1049,7 @@ function readNumericValue(dv, address, type) {
     case 'i64': return dv.getBigInt64(address, true);
     case 'u64': return dv.getBigUint64(address, true);
     case 'f64': return dv.getFloat64(address, true);
+    case 'binint': return readBinIntValue(dv, address);
     default: throw new Error(`unsupported numeric column type: ${type}`);
   }
 }
@@ -1059,6 +1180,26 @@ function createQdbEnv(getMemory, holder) {
     dv.setBigUint64(Number(out), BigInt(data) + BigInt(offset), true);
     dv.setBigInt64(Number(out) + 8, BigInt(len), true);
   };
+  const binIntArg = (lo, hi) =>
+    (BigInt.asIntN(64, BigInt(hi)) << 64n) + BigInt.asUintN(64, BigInt(lo));
+  const writeDecimalResult = (out, value) => {
+    writeBinIntRaw(new DataView(getMemory().buffer), Number(out), value);
+  };
+  const pow10 = (scale) => 10n ** BigInt(Number(scale));
+  const decimalFromI64 = (out, value, scale) =>
+    writeDecimalResult(out, BigInt(value) * pow10(scale));
+  const decimalFromF64 = (out, value, scale) =>
+    writeDecimalResult(out, BigInt(Math.round(Number(value) * Number(pow10(scale)))));
+  const decimalScaleUp = (out, lo, hi, delta) =>
+    writeDecimalResult(out, binIntArg(lo, hi) * pow10(delta));
+  const decimalBinary = (out, llo, lhi, rlo, rhi, op) =>
+    writeDecimalResult(out, op(binIntArg(llo, lhi), binIntArg(rlo, rhi)));
+  const decimalMulI64 = (out, lo, hi, rhs) =>
+    writeDecimalResult(out, binIntArg(lo, hi) * BigInt(rhs));
+  const decimalDivI64 = (out, lo, hi, rhs) =>
+    writeDecimalResult(out, binIntArg(lo, hi) / BigInt(rhs));
+  const decimalCompare = (llo, lhi, rlo, rhi, op) =>
+    op(binIntArg(llo, lhi), binIntArg(rlo, rhi)) ? 1 : 0;
 
   return {
     // malloc family over the query's shared linear memory (segregated
@@ -1082,6 +1223,31 @@ function createQdbEnv(getMemory, holder) {
       const x = value * factor;
       return (Math.sign(x) * Math.round(Math.abs(x))) / factor;
     },
+    qdb_decimal_from_i64: decimalFromI64,
+    qdb_decimal_from_f64: decimalFromF64,
+    qdb_decimal_scale_up: decimalScaleUp,
+    qdb_decimal_add: (out, llo, lhi, rlo, rhi) =>
+      decimalBinary(out, llo, lhi, rlo, rhi, (l, r) => l + r),
+    qdb_decimal_sub: (out, llo, lhi, rlo, rhi) =>
+      decimalBinary(out, llo, lhi, rlo, rhi, (l, r) => l - r),
+    qdb_decimal_neg: (out, lo, hi) =>
+      writeDecimalResult(out, -binIntArg(lo, hi)),
+    qdb_decimal_mul_i64: decimalMulI64,
+    qdb_decimal_div_i64: decimalDivI64,
+    qdb_decimal_div: (out, llo, lhi, rlo, rhi) =>
+      decimalBinary(out, llo, lhi, rlo, rhi, (l, r) => l / r),
+    qdb_decimal_eq: (llo, lhi, rlo, rhi) =>
+      decimalCompare(llo, lhi, rlo, rhi, (l, r) => l === r),
+    qdb_decimal_ne: (llo, lhi, rlo, rhi) =>
+      decimalCompare(llo, lhi, rlo, rhi, (l, r) => l !== r),
+    qdb_decimal_lt: (llo, lhi, rlo, rhi) =>
+      decimalCompare(llo, lhi, rlo, rhi, (l, r) => l < r),
+    qdb_decimal_le: (llo, lhi, rlo, rhi) =>
+      decimalCompare(llo, lhi, rlo, rhi, (l, r) => l <= r),
+    qdb_decimal_gt: (llo, lhi, rlo, rhi) =>
+      decimalCompare(llo, lhi, rlo, rhi, (l, r) => l > r),
+    qdb_decimal_ge: (llo, lhi, rlo, rhi) =>
+      decimalCompare(llo, lhi, rlo, rhi, (l, r) => l >= r),
 
     // Cast a string-literal char* to a StringView {Data = lit, Size = strlen}
     // (sret out pointer). Matches qdb_lit_to_sv in qumirdb_runtime.cpp.
@@ -1135,7 +1301,7 @@ function marshalRowSet(arena, layout, columns, rowCount, wantSelection, selectio
   // Pre-encode string columns before any allocation (a mid-write grow would
   // detach views): parts hold each row's bytes, offsets are cumulative.
   const encoded = columns.map(column => {
-    if (column.type !== 'string') return null;
+    if (!isStringColumn(column)) return null;
     return encodeStringColumn(column.values, rowCount, encoder);
   });
 
@@ -1147,11 +1313,11 @@ function marshalRowSet(arena, layout, columns, rowCount, wantSelection, selectio
 
   for (let c = 0; c < columns.length; ++c) {
     const column = columns[c];
-    if (column.type === 'string') {
+    if (isStringColumn(column)) {
       dataPtrs[c] = arena.alloc(Math.max(encoded[c].total, 1), 1);
       offsetsPtrs[c] = arena.alloc((rowCount + 1) * 4, 4);
     } else {
-      const width = coreTypeWidth(column.type);
+      const width = coreTypeWidth(column);
       dataPtrs[c] = arena.alloc(Math.max(rowCount, 1) * width, 8);
     }
     if (masks[c]) {
@@ -1177,7 +1343,7 @@ function marshalRowSet(arena, layout, columns, rowCount, wantSelection, selectio
       memBytes.set(masks[c], maskPtrs[c]);
       writePointer(dv, colPtr + colLayout.mask, maskPtrs[c]);
     }
-    if (column.type === 'string') {
+    if (isStringColumn(column)) {
       const enc = encoded[c];
       let p = dataPtrs[c];
       for (let i = 0; i < rowCount; ++i) {
@@ -1190,14 +1356,14 @@ function marshalRowSet(arena, layout, columns, rowCount, wantSelection, selectio
       writePointer(dv, colPtr + colLayout.offsets, offsetsPtrs[c]);
       dv.setUint8(colPtr + colLayout.offsetWidth, 4);
     } else {
-      const width = coreTypeWidth(column.type);
+      const width = coreTypeWidth(column);
       const values = column.values;
-      const bytes = typedColumnBytes(values, column.type, rowCount);
+      const bytes = typedColumnBytes(values, column, rowCount);
       if (bytes) {
         memBytes.set(bytes, dataPtrs[c]);
       } else {
         for (let i = 0; i < rowCount; ++i) {
-          writeNumericValue(dv, dataPtrs[c] + i * width, column.type, values[i]);
+          writeNumericValue(dv, dataPtrs[c] + i * width, column, values[i]);
         }
       }
     }
@@ -1343,10 +1509,11 @@ export function runProject(kernel, layout, rowSet, output, arena) {
   let columnsBase = 0;
   let outArrayPtr = 0;
   const computedBuffers = [];
+  const computedMaskBuffers = [];
 
   try {
     if (computed.length > 0) {
-      outArrayPtr = arena.alloc(computed.length * 8, 8);
+      outArrayPtr = arena.alloc(computed.length * 16, 8);
       for (let k = 0; k < computed.length; ++k) {
         const width = Number(computed[k].width || 0);
         if (width <= 0) {
@@ -1354,12 +1521,25 @@ export function runProject(kernel, layout, rowSet, output, arena) {
         }
         const ptr = arena.alloc(Math.max(rowCount, 1) * width, 8);
         computedBuffers.push(ptr);
+        if (computed[k].nullable) {
+          const maskPtr = arena.alloc(Math.max((rowCount + 7) >> 3, 1), 8);
+          arena.bytes().fill(0, maskPtr, maskPtr + Math.max((rowCount + 7) >> 3, 1));
+          computedMaskBuffers.push(maskPtr);
+        } else {
+          computedMaskBuffers.push(0);
+        }
       }
       let dv = arena.view();
       for (let k = 0; k < computedBuffers.length; ++k) {
         writePointer(dv, outArrayPtr + k * 8, computedBuffers[k]);
+        if (computedMaskBuffers[k]) {
+          writePointer(dv, outArrayPtr + (computed.length + k) * 8, computedMaskBuffers[k]);
+        }
       }
-      kernel.fn(BigInt(input.rowsetPtr), BigInt(outArrayPtr));
+      if (input.rowsetPtr === undefined || outArrayPtr === undefined) {
+        throw new Error('project kernel rowset/output pointer is missing');
+      }
+      kernel.fn(BigInt(input.rowsetPtr), BigInt(outArrayPtr), 0n);
       arena.free(outArrayPtr);
       outArrayPtr = 0;
     }
@@ -1368,12 +1548,18 @@ export function runProject(kernel, layout, rowSet, output, arena) {
       const spec = computed[k];
       if (!spec.isString) {
         ownedPtrs.push(ptr);
-        return { dataPtr: ptr, offsetsPtr: 0, offsetWidth: 0 };
+        if (computedMaskBuffers[k]) {
+          ownedPtrs.push(computedMaskBuffers[k]);
+        }
+        return { dataPtr: ptr, offsetsPtr: 0, offsetWidth: 0, maskPtr: computedMaskBuffers[k] };
       }
       const stringColumn = buildProjectStringColumn(arena, layout, ptr, rowCount);
       arena.free(ptr);
       ownedPtrs.push(stringColumn.dataPtr, stringColumn.offsetsPtr);
-      return stringColumn;
+      if (computedMaskBuffers[k]) {
+        ownedPtrs.push(computedMaskBuffers[k]);
+      }
+      return { ...stringColumn, maskPtr: computedMaskBuffers[k] };
     });
 
     rowsetPtr = arena.alloc(layout.rowset.size, 8);
@@ -1396,6 +1582,9 @@ export function runProject(kernel, layout, rowSet, output, arena) {
       writeEmptyColumn(dv, outCol, layout);
       const computedColumn = computedColumns[computedCursor++];
       writePointer(dv, outCol + layout.column.data, computedColumn.dataPtr);
+      if (computedColumn.maskPtr) {
+        writePointer(dv, outCol + layout.column.mask, computedColumn.maskPtr);
+      }
       if (computedColumn.offsetsPtr) {
         writePointer(dv, outCol + layout.column.offsets, computedColumn.offsetsPtr);
         dv.setUint8(outCol + layout.column.offsetWidth, computedColumn.offsetWidth);
@@ -1440,6 +1629,9 @@ export function runProject(kernel, layout, rowSet, output, arena) {
     for (const ptr of computedBuffers) {
       arena.free(ptr);
     }
+    for (const ptr of computedMaskBuffers) {
+      arena.free(ptr);
+    }
     for (const ptr of ownedPtrs) {
       arena.free(ptr);
     }
@@ -1477,7 +1669,7 @@ function materializeWasmRowSet(arena, layout, output, rowsetPtr) {
     const valid = maskPtr ? readValidityBits(memBytes, maskPtr, rowCount) : null;
     const values = new Array(rowCount);
 
-    if (spec.type === 'string') {
+    if (isStringColumn(spec)) {
       for (let r = 0; r < rowCount; ++r) {
         if (valid && !valid[r]) {
           values[r] = null;
@@ -1492,11 +1684,16 @@ function materializeWasmRowSet(arena, layout, output, rowsetPtr) {
         values[r] = decoder.decode(memBytes.subarray(dataPtr + begin, dataPtr + end));
       }
     } else {
-      const width = coreTypeWidth(spec.type);
+      const width = coreTypeWidth(spec);
       for (let r = 0; r < rowCount; ++r) {
-        values[r] = (valid && !valid[r])
-          ? null
-          : readNumericValue(dv, dataPtr + r * width, spec.type);
+        if (valid && !valid[r]) {
+          values[r] = null;
+          continue;
+        }
+        const raw = readNumericValue(dv, dataPtr + r * width, spec);
+        values[r] = isDecimalColumn(spec)
+          ? formatDecimalValue(raw, decimalScale(spec))
+          : raw;
       }
     }
     columns.push({ name: spec.name, type: spec.type, values });

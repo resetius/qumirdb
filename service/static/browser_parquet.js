@@ -59,6 +59,11 @@ function parquetTypeName(field) {
     field.converted_type ?? field.convertedType)).toUpperCase();
   const logical = JSON.stringify(field.logicalType || field.logical_type || {}).toUpperCase();
 
+  if (converted.includes('DECIMAL') || logical.includes('DECIMAL')) {
+    const precision = Number(field.precision ?? field.type_precision ?? field.typePrecision ?? 18);
+    const scale = Number(field.scale ?? field.type_scale ?? field.typeScale ?? 0);
+    return `DECIMAL(${precision || 18},${scale || 0})`;
+  }
   if (converted.includes('UTF8') || logical.includes('STRING')) {
     return 'string';
   }
@@ -84,6 +89,14 @@ function parquetTypeName(field) {
     return 'string';
   }
   return 'string';
+}
+
+function parquetNullable(field) {
+  const repetition = field.repetition_type ?? field.repetitionType;
+  if (typeof repetition === 'number') {
+    return repetition === 1;
+  }
+  return String(repetition || '').toUpperCase() === 'OPTIONAL';
 }
 
 function parquetPhysicalType(type) {
@@ -144,10 +157,13 @@ function schemaFields(metadata) {
       return children === 0;
     })
     .filter((field, index) => index > 0 || field.type || field.physicalType)
-    .map(field => ({
-      name: field.name,
-      type: parquetTypeName(field)
-    }));
+    .map(field => {
+      const type = parquetTypeName(field);
+      return {
+        name: field.name,
+        type: parquetNullable(field) ? `Nullable<${type}>` : type
+      };
+    });
 }
 
 function rowGroupStats(metadata) {

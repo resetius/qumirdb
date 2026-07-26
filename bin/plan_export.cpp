@@ -18,6 +18,7 @@
 #include <qdb/plan/passes/top_sort.h>
 #include <qdb/plan/passes/typing.h>
 #include <qdb/plan/passes/unbound_vars.h>
+#include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
 #include <qdb/kernel/compiler.h>
 #include <qdb/kernel/join_key.h>
@@ -48,6 +49,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <cctype>
 #include <cstdlib>
 #include <cstring>
 #include <cstdio>
@@ -522,41 +524,103 @@ NQumir::NAst::TTypePtr ParseType(std::string_view typeName) {
     using namespace NQumir::NAst;
     using TInt = TIntegerType;
 
-    if (typeName == "i8") {
-        return std::make_shared<TInt>(TInt::I8);
+    while (!typeName.empty() && std::isspace(static_cast<unsigned char>(typeName.front()))) {
+        typeName.remove_prefix(1);
     }
-    if (typeName == "i16") {
-        return std::make_shared<TInt>(TInt::I16);
+    while (!typeName.empty() && std::isspace(static_cast<unsigned char>(typeName.back()))) {
+        typeName.remove_suffix(1);
     }
-    if (typeName == "i32") {
-        return std::make_shared<TInt>(TInt::I32);
+    if (typeName.starts_with("Nullable<") && typeName.ends_with(">")) {
+        return std::make_shared<TNullable>(
+            ParseType(typeName.substr(9, typeName.size() - 10)));
     }
-    if (typeName == "i64") {
-        return std::make_shared<TInt>(TInt::I64);
-    }
-    if (typeName == "u8") {
-        return std::make_shared<TInt>(TInt::U8);
-    }
-    if (typeName == "u16") {
-        return std::make_shared<TInt>(TInt::U16);
-    }
-    if (typeName == "u32") {
-        return std::make_shared<TInt>(TInt::U32);
-    }
-    if (typeName == "u64") {
-        return std::make_shared<TInt>(TInt::U64);
-    }
-    if (typeName == "f64") {
-        return std::make_shared<TFloatType>();
-    }
-    if (typeName == "bool") {
-        return std::make_shared<TBoolType>();
-    }
-    if (typeName == "string") {
+    if (typeName == "<named StringView>") {
         return std::make_shared<TStringType>();
     }
-    if (typeName == "date") {
+    if (typeName.starts_with("<named DECIMAL [") && typeName.ends_with("]>")) {
+        auto body = typeName.substr(16, typeName.size() - 18);
+        auto space = body.find(' ');
+        auto precision = ParseDecimalArg(space == std::string_view::npos
+            ? body : body.substr(0, space));
+        auto scale = space == std::string_view::npos
+            ? std::optional<int32_t>{DefaultDecimalScale}
+            : ParseDecimalArg(body.substr(space + 1));
+        if (precision && scale) {
+            return std::make_shared<TDecimal>(*precision, *scale);
+        }
+    }
+
+    auto upper = [](std::string_view value) {
+        std::string out;
+        out.reserve(value.size());
+        for (char c : value) {
+            out.push_back(std::toupper(static_cast<unsigned char>(c)));
+        }
+        return out;
+    };
+    const std::string normalized = upper(typeName);
+
+    if (normalized == "I8") {
+        return std::make_shared<TInt>(TInt::I8);
+    }
+    if (normalized == "I16") {
+        return std::make_shared<TInt>(TInt::I16);
+    }
+    if (normalized == "I32") {
         return std::make_shared<TInt>(TInt::I32);
+    }
+    if (normalized == "I64") {
+        return std::make_shared<TInt>(TInt::I64);
+    }
+    if (normalized == "U8") {
+        return std::make_shared<TInt>(TInt::U8);
+    }
+    if (normalized == "U16") {
+        return std::make_shared<TInt>(TInt::U16);
+    }
+    if (normalized == "U32") {
+        return std::make_shared<TInt>(TInt::U32);
+    }
+    if (normalized == "U64") {
+        return std::make_shared<TInt>(TInt::U64);
+    }
+    if (normalized == "F64") {
+        return std::make_shared<TFloatType>();
+    }
+    if (normalized == "BOOL" || normalized == "BOOLEAN") {
+        return std::make_shared<TBoolType>();
+    }
+    if (normalized == "STRING" || normalized == "TEXT" || normalized == "VARCHAR") {
+        return std::make_shared<TStringType>();
+    }
+    if (normalized == "DATE") {
+        return std::make_shared<TInt>(TInt::I32);
+    }
+    if (normalized == "TIMESTAMP") {
+        return std::make_shared<TInt>(TInt::I64);
+    }
+    if (normalized == "DECIMAL") {
+        return std::make_shared<TDecimal>();
+    }
+    if (normalized.starts_with("DECIMAL(") && normalized.ends_with(")")) {
+        auto body = typeName.substr(8, typeName.size() - 9);
+        auto comma = body.find(',');
+        auto parseArg = [](std::string_view arg) -> std::optional<int32_t> {
+            while (!arg.empty() && std::isspace(static_cast<unsigned char>(arg.front()))) {
+                arg.remove_prefix(1);
+            }
+            while (!arg.empty() && std::isspace(static_cast<unsigned char>(arg.back()))) {
+                arg.remove_suffix(1);
+            }
+            return ParseDecimalArg(arg);
+        };
+        auto precision = parseArg(comma == std::string_view::npos ? body : body.substr(0, comma));
+        auto scale = comma == std::string_view::npos
+            ? std::optional<int32_t>{DefaultDecimalScale}
+            : parseArg(body.substr(comma + 1));
+        if (precision && scale) {
+            return std::make_shared<TDecimal>(*precision, *scale);
+        }
     }
 
     throw std::runtime_error("unsupported schema type: " + std::string(typeName));
@@ -1374,7 +1438,26 @@ std::string BareColumnName(std::string_view qualified) {
 llvm::json::Object CoreTypeJson(const NQumir::NAst::TTypePtr& type) {
     using namespace NQumir::NAst;
     const bool nullable = NQdb::IsNullableType(type);
-    auto inner = UnwrapNamedType(NQdb::UnwrapNullableType(type));
+    auto valueType = NQdb::UnwrapNullableType(type);
+    if (auto decimal = NQdb::DecimalSpecOfValueType(valueType)) {
+        return llvm::json::Object{
+            {"type", "decimal"},
+            {"storageType", "binint"},
+            {"precision", decimal->Precision},
+            {"scale", decimal->Scale},
+            {"width", 16},
+            {"nullable", nullable},
+        };
+    }
+    if (NQdb::IsBinIntStorageType(valueType)) {
+        return llvm::json::Object{
+            {"type", "binint"},
+            {"storageType", "binint"},
+            {"width", 16},
+            {"nullable", nullable},
+        };
+    }
+    auto inner = UnwrapNamedType(valueType);
     std::string name;
     if (auto integer = TMaybeType<TIntegerType>(inner)) {
         name = integer.Cast()->ToString();
@@ -1395,7 +1478,11 @@ llvm::json::Object CoreTypeJson(const NQumir::NAst::TTypePtr& type) {
 
 size_t ExecProjectWidth(const NQumir::NAst::TTypePtr& outType) {
     using namespace NQumir::NAst;
-    auto inner = UnwrapNamedType(NQdb::UnwrapNullableType(outType));
+    auto valueType = NQdb::UnwrapNullableType(outType);
+    if (NQdb::DecimalSpecOfValueType(valueType) || NQdb::IsBinIntStorageType(valueType)) {
+        return 16;
+    }
+    auto inner = UnwrapNamedType(valueType);
     if (auto integer = TMaybeType<TIntegerType>(inner)) {
         return static_cast<size_t>(integer.Cast()->BitWidth() / 8);
     }
