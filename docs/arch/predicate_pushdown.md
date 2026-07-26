@@ -28,6 +28,9 @@ names) or an opaque expression.
 - `filter`            → drop the node, add its conjuncts to the pool, recurse.
 - `project`/`aggregate` → recurse the input with an **empty** pool (a barrier:
   columns are redefined), then materialize the pool's conjuncts above as a filter.
+- `window` → a **partial** barrier: conjuncts over `PARTITION BY` columns only are
+  pushed into the child; the rest (including any over the window's output columns)
+  materialize above. See [below](#window-partial-barrier).
 - redistributable `join` (inner, semi, anti) → `ProcessJoin`.
 - outer `join` (left, right, full) → `ProcessOuterJoin`.
 - leaf (`source`) → materialize the pool above it as a filter.
@@ -39,6 +42,29 @@ Conjuncts are obtained with `FactorConjuncts`, which both flattens `&&` and
 is `FindUnboundVars`, which excludes a call's callee (a function name is not a
 column) so that e.g. `like(o_comment, '…')` counts as constraining only
 `o_comment` and can be pushed to one side.
+
+## Window (partial barrier)
+
+`ProcessWindow` (`equijoin.cpp`) recurses into the window's child — so joins and
+predicates **below** the window are still optimized — and splits the incoming
+pool by coverage:
+
+- a conjunct whose columns are all `PARTITION BY` keys → pushed into the child;
+- everything else → materialized as a `filter` above the window.
+
+Pushing a partition-key predicate below the window is always safe: it drops whole
+partitions, and a per-partition window result is independent of which other
+partitions exist. A predicate over any **non-partition** input column is *not*
+safe (it would remove rows inside a partition and change the window result), and
+a predicate over a **window output** column (e.g. `WHERE rn = 1` over
+`row_number()`) cannot move below the node that computes it — both stay above.
+
+```
+filter (&& (= p 5) (= rn 1))          filter (= rn 1)
+└─ window partition=[p] ...      =>    └─ window partition=[p] ...
+   └─ <input>                             └─ filter (= p 5)
+                                             └─ <input>
+```
 
 ## ProcessJoin (inner / semi / anti)
 

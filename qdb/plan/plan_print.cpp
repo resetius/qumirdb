@@ -3,6 +3,7 @@
 #include <qdb/plan/ops/filter.h>
 #include <qdb/plan/ops/project.h>
 #include <qdb/plan/ops/source.h>
+#include <qdb/plan/ops/window.h>
 
 #include <qumir/parser/core/printer.h>
 
@@ -118,6 +119,32 @@ std::string SortPlanLabel(
     return label;
 }
 
+std::string WindowPlanLabel(const TWindowOperator& window) {
+    std::string label = "window";
+    const auto& parts = window.PartitionKeys();
+    for (size_t i = 0; i < parts.size(); ++i) {
+        label += (i ? ", " : " partition=[") + parts[i];
+    }
+    if (!parts.empty()) {
+        label += "]";
+    }
+    const auto& orders = window.OrderKeys();
+    for (size_t i = 0; i < orders.size(); ++i) {
+        label += (i ? ", " : " order=[") + SortKeyLabel(orders[i]);
+    }
+    if (!orders.empty()) {
+        label += "]";
+    }
+    const auto& funcs = window.Functions();
+    for (size_t i = 0; i < funcs.size(); ++i) {
+        label += (i ? ", " : " fns=[") + funcs[i].Name + "=" + funcs[i].Func;
+    }
+    if (!funcs.empty()) {
+        label += "]";
+    }
+    return label;
+}
+
 std::string PlanLabel(const TOperatorPtr& op) {
     if (auto source = TMaybeOp<TSourceOperator>(op)) {
         auto src = source.Cast();
@@ -149,6 +176,9 @@ std::string PlanLabel(const TOperatorPtr& op) {
     }
     if (auto sort = TMaybeOp<TTopSortOperator>(op)) {
         return SortPlanLabel("top-sort", sort.Cast()->Keys(), sort.Cast()->Limit());
+    }
+    if (auto window = TMaybeOp<TWindowOperator>(op)) {
+        return WindowPlanLabel(*window.Cast());
     }
     return std::string(op->RelName());
 }
