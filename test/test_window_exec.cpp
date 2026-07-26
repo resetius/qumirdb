@@ -685,6 +685,69 @@ TEST(WindowExec, PrefixMaxDecimalSkipsNullsAndKeepsNullUntilFirstValue) {
     EXPECT_FALSE(runtime->Next(second));
 }
 
+TEST(WindowExec, PrefixSumGroupsNullPartitionKey) {
+    // Partition key k is nullable; rows 0 and 2 are NULL but hold different
+    // underlying value bytes (5 and 2), so a non-nullable radix would scatter
+    // them by raw bytes and split the NULL partition / misorder it. The nullable
+    // radix must segregate NULLs into one contiguous partition.
+    std::array<int64_t, 4> k = {5, 1, 2, 1};
+    std::array<uint8_t, 1> kMask = {0x0A}; // rows 1,3 valid; rows 0,2 NULL
+    std::array<int64_t, 4> o = {1, 1, 2, 2};
+    std::array<int64_t, 4> v = {10, 20, 30, 40};
+
+    std::vector<TColumn> columns = {
+        TColumn{.Data = reinterpret_cast<char*>(k.data()), .Mask = kMask.data()},
+        TColumn{.Data = reinterpret_cast<char*>(o.data())},
+        TColumn{.Data = reinterpret_cast<char*>(v.data())},
+    };
+    std::vector<TRowSet> batches = {TRowSet{
+        .Columns = columns.data(),
+        .ColumnCount = 3,
+        .RowCount = 4,
+        .Selection = nullptr,
+        .RefCount = 1,
+    }};
+    auto nullableI64 = std::make_shared<NQdb::TNullable>(
+        std::make_shared<NQumir::NAst::TIntegerType>());
+    auto i64 = std::make_shared<NQumir::NAst::TIntegerType>();
+    TMockSource source({"k", "o", "v"}, std::move(batches),
+        {nullableI64, i64, i64});
+
+    auto root = ParsePlan(
+        "(rel window (rel source \"data.parquet\") "
+        "(partition k) "
+        "(order (o asc nulls-default)) "
+        "(frame rows (start unbounded-preceding) (end current-row)) "
+        "(fn running_sum sum v))",
+        source);
+
+    auto runtime = RunPlan(root);
+
+    TRowSet result{};
+    ASSERT_TRUE(runtime->Next(result));
+    ASSERT_EQ(result.RowCount, 4);
+
+    auto* outOrder = reinterpret_cast<int64_t*>(result.Columns[1].Data);
+    auto* outValues = reinterpret_cast<int64_t*>(result.Columns[2].Data);
+    auto* outSums = reinterpret_cast<int64_t*>(result.Columns[3].Data);
+
+    // k=1 partition first (NULLS LAST for ASC), then the NULL partition; ORDER BY
+    // o within each. Prefix sums reset at the partition boundary.
+    const std::array<bool, 4> expectedKeyValid = {true, true, false, false};
+    const std::array<int64_t, 4> expectedOrder = {1, 2, 1, 2};
+    const std::array<int64_t, 4> expectedValues = {20, 40, 10, 30};
+    const std::array<int64_t, 4> expectedSums = {20, 60, 10, 40};
+
+    for (int64_t row = 0; row < result.RowCount; ++row) {
+        EXPECT_EQ(IsValid(result.Columns[0], row), expectedKeyValid[row]) << "row " << row;
+        EXPECT_EQ(outOrder[row], expectedOrder[row]) << "row " << row;
+        EXPECT_EQ(outValues[row], expectedValues[row]) << "row " << row;
+        EXPECT_EQ(outSums[row], expectedSums[row]) << "row " << row;
+    }
+
+    Release(&result);
+}
+
 int main(int argc, char** argv) {
     NQumir::NCodeGen::TLLVMInitializer initializer;
     ::testing::InitGoogleTest(&argc, argv);
