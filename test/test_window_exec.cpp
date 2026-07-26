@@ -7,6 +7,7 @@
 #include <qdb/plan/passes/column_pruning.h>
 #include <qdb/plan/passes/typing.h>
 #include <qdb/plan/types/decimal.h>
+#include <qdb/plan/types/nullable.h>
 #include <qdb/sexp/parser.h>
 #include <qdb/modules/qumirdb_runtime.h>
 
@@ -48,6 +49,14 @@ TOperatorPtr ParsePlan(const std::string& sexp, ISource& source) {
     AnnotateTypes(root);
     ApplyColumnPruning(root);
     return root;
+}
+
+bool IsValid(const TColumn& column, int64_t row) {
+    if (!column.Mask) {
+        return true;
+    }
+    const int64_t bit = column.MaskBitOffset + row;
+    return ((column.Mask[bit / 8] >> (bit % 8)) & 1) != 0;
 }
 
 } // namespace
@@ -280,6 +289,7 @@ TEST(WindowExec, AvgI64BroadcastsPerPartition) {
     for (int64_t row = 0; row < result.RowCount; ++row) {
         EXPECT_EQ(outKeys[row], expectedKeys[row]) << "row " << row;
         EXPECT_EQ(outValues[row], expectedValues[row]) << "row " << row;
+        EXPECT_TRUE(IsValid(result.Columns[2], row)) << "row " << row;
         EXPECT_DOUBLE_EQ(outAvg[row], expectedAvg[row]) << "row " << row;
     }
 
@@ -336,6 +346,7 @@ TEST(WindowExec, AvgDecimalBroadcastsPerPartition) {
 
     for (int64_t row = 0; row < result.RowCount; ++row) {
         EXPECT_EQ(outKeys[row], expectedKeys[row]) << "row " << row;
+        EXPECT_TRUE(IsValid(result.Columns[2], row)) << "row " << row;
         EXPECT_EQ(outAvg[row].Lo, expectedAvg[row]) << "row " << row;
         EXPECT_EQ(outAvg[row].Hi, 0u) << "row " << row;
     }
@@ -442,6 +453,230 @@ TEST(WindowExec, RankDecimalWithoutPartition) {
         EXPECT_EQ(outOrder[row].Lo, expectedOrder[row]) << "row " << row;
         EXPECT_EQ(outOrder[row].Hi, 0u) << "row " << row;
         EXPECT_EQ(outRank[row], expectedRank[row]) << "row " << row;
+    }
+
+    Release(&result);
+
+    TRowSet second{};
+    EXPECT_FALSE(runtime->Next(second));
+}
+
+TEST(WindowExec, SumDecimalBroadcastsNullForAllNullPartition) {
+    std::array<int64_t, 5> keys = {2, 1, 2, 1, 2};
+    std::array<qdb_bin_int, 5> values = {{
+        {.Lo = 100, .Hi = 0},
+        {.Lo = 10, .Hi = 0},
+        {.Lo = 300, .Hi = 0},
+        {.Lo = 20, .Hi = 0},
+        {.Lo = 400, .Hi = 0},
+    }};
+    std::array<uint8_t, 1> valueMask = {0};
+    valueMask[0] = static_cast<uint8_t>((1u << 0) | (1u << 2) | (1u << 4));
+
+    std::vector<TColumn> columns = {
+        TColumn{.Data = reinterpret_cast<char*>(keys.data())},
+        TColumn{
+            .Data = reinterpret_cast<char*>(values.data()),
+            .Mask = valueMask.data(),
+        },
+    };
+    std::vector<TRowSet> batches = {TRowSet{
+        .Columns = columns.data(),
+        .ColumnCount = 2,
+        .RowCount = static_cast<int64_t>(keys.size()),
+        .Selection = nullptr,
+        .RefCount = 1,
+    }};
+    TMockSource source(
+        {"k", "v"},
+        std::move(batches),
+        {
+            std::make_shared<NQumir::NAst::TIntegerType>(),
+            std::make_shared<TNullable>(std::make_shared<TDecimal>(15, 2)),
+        });
+
+    auto root = ParsePlan(
+        "(rel window (rel source \"data.parquet\") "
+        "(partition k) "
+        "(frame range (start unbounded-preceding) (end unbounded-following)) "
+        "(fn total sum v))",
+        source);
+
+    auto runtime = RunPlan(root);
+
+    TRowSet result{};
+    ASSERT_TRUE(runtime->Next(result));
+    ASSERT_EQ(result.ColumnCount, 3);
+    ASSERT_EQ(result.RowCount, 5);
+
+    auto* outKeys = reinterpret_cast<int64_t*>(result.Columns[0].Data);
+    auto* outSum = reinterpret_cast<qdb_bin_int*>(result.Columns[2].Data);
+
+    const std::array<int64_t, 5> expectedKeys = {1, 1, 2, 2, 2};
+    const std::array<bool, 5> expectedValid = {false, false, true, true, true};
+    const std::array<uint64_t, 5> expectedSum = {0, 0, 800, 800, 800};
+
+    for (int64_t row = 0; row < result.RowCount; ++row) {
+        EXPECT_EQ(outKeys[row], expectedKeys[row]) << "row " << row;
+        EXPECT_EQ(IsValid(result.Columns[2], row), expectedValid[row]) << "row " << row;
+        if (expectedValid[row]) {
+            EXPECT_EQ(outSum[row].Lo, expectedSum[row]) << "row " << row;
+            EXPECT_EQ(outSum[row].Hi, 0u) << "row " << row;
+        }
+    }
+
+    Release(&result);
+
+    TRowSet second{};
+    EXPECT_FALSE(runtime->Next(second));
+}
+
+TEST(WindowExec, PrefixSumDecimalSkipsNullsAndKeepsNullUntilFirstValue) {
+    std::array<int64_t, 5> keys = {1, 1, 2, 1, 2};
+    std::array<int64_t, 5> order = {1, 2, 1, 3, 2};
+    std::array<qdb_bin_int, 5> values = {{
+        {.Lo = 10, .Hi = 0},
+        {.Lo = 500, .Hi = 0},
+        {.Lo = 70, .Hi = 0},
+        {.Lo = 30, .Hi = 0},
+        {.Lo = 700, .Hi = 0},
+    }};
+    std::array<uint8_t, 1> valueMask = {0};
+    valueMask[0] = static_cast<uint8_t>((1u << 1) | (1u << 4));
+
+    std::vector<TColumn> columns = {
+        TColumn{.Data = reinterpret_cast<char*>(keys.data())},
+        TColumn{.Data = reinterpret_cast<char*>(order.data())},
+        TColumn{
+            .Data = reinterpret_cast<char*>(values.data()),
+            .Mask = valueMask.data(),
+        },
+    };
+    std::vector<TRowSet> batches = {TRowSet{
+        .Columns = columns.data(),
+        .ColumnCount = 3,
+        .RowCount = static_cast<int64_t>(keys.size()),
+        .Selection = nullptr,
+        .RefCount = 1,
+    }};
+    TMockSource source(
+        {"k", "o", "v"},
+        std::move(batches),
+        {
+            std::make_shared<NQumir::NAst::TIntegerType>(),
+            std::make_shared<NQumir::NAst::TIntegerType>(),
+            std::make_shared<TNullable>(std::make_shared<TDecimal>(15, 2)),
+        });
+
+    auto root = ParsePlan(
+        "(rel window (rel source \"data.parquet\") "
+        "(partition k) "
+        "(order (o asc nulls-default)) "
+        "(frame rows (start unbounded-preceding) (end current-row)) "
+        "(fn running_sum sum v))",
+        source);
+
+    auto runtime = RunPlan(root);
+
+    TRowSet result{};
+    ASSERT_TRUE(runtime->Next(result));
+    ASSERT_EQ(result.ColumnCount, 4);
+    ASSERT_EQ(result.RowCount, 5);
+
+    auto* outKeys = reinterpret_cast<int64_t*>(result.Columns[0].Data);
+    auto* outOrder = reinterpret_cast<int64_t*>(result.Columns[1].Data);
+    auto* outSum = reinterpret_cast<qdb_bin_int*>(result.Columns[3].Data);
+
+    const std::array<int64_t, 5> expectedKeys = {1, 1, 1, 2, 2};
+    const std::array<int64_t, 5> expectedOrder = {1, 2, 3, 1, 2};
+    const std::array<bool, 5> expectedValid = {false, true, true, false, true};
+    const std::array<uint64_t, 5> expectedSum = {0, 500, 500, 0, 700};
+
+    for (int64_t row = 0; row < result.RowCount; ++row) {
+        EXPECT_EQ(outKeys[row], expectedKeys[row]) << "row " << row;
+        EXPECT_EQ(outOrder[row], expectedOrder[row]) << "row " << row;
+        EXPECT_EQ(IsValid(result.Columns[3], row), expectedValid[row]) << "row " << row;
+        if (expectedValid[row]) {
+            EXPECT_EQ(outSum[row].Lo, expectedSum[row]) << "row " << row;
+            EXPECT_EQ(outSum[row].Hi, 0u) << "row " << row;
+        }
+    }
+
+    Release(&result);
+
+    TRowSet second{};
+    EXPECT_FALSE(runtime->Next(second));
+}
+
+TEST(WindowExec, PrefixMaxDecimalSkipsNullsAndKeepsNullUntilFirstValue) {
+    std::array<int64_t, 5> keys = {1, 1, 2, 1, 2};
+    std::array<int64_t, 5> order = {1, 2, 1, 3, 2};
+    std::array<qdb_bin_int, 5> values = {{
+        {.Lo = 10, .Hi = 0},
+        {.Lo = 300, .Hi = 0},
+        {.Lo = 70, .Hi = 0},
+        {.Lo = 200, .Hi = 0},
+        {.Lo = 700, .Hi = 0},
+    }};
+    std::array<uint8_t, 1> valueMask = {0};
+    valueMask[0] = static_cast<uint8_t>((1u << 1) | (1u << 3) | (1u << 4));
+
+    std::vector<TColumn> columns = {
+        TColumn{.Data = reinterpret_cast<char*>(keys.data())},
+        TColumn{.Data = reinterpret_cast<char*>(order.data())},
+        TColumn{
+            .Data = reinterpret_cast<char*>(values.data()),
+            .Mask = valueMask.data(),
+        },
+    };
+    std::vector<TRowSet> batches = {TRowSet{
+        .Columns = columns.data(),
+        .ColumnCount = 3,
+        .RowCount = static_cast<int64_t>(keys.size()),
+        .Selection = nullptr,
+        .RefCount = 1,
+    }};
+    TMockSource source(
+        {"k", "o", "v"},
+        std::move(batches),
+        {
+            std::make_shared<NQumir::NAst::TIntegerType>(),
+            std::make_shared<NQumir::NAst::TIntegerType>(),
+            std::make_shared<TNullable>(std::make_shared<TDecimal>(15, 2)),
+        });
+
+    auto root = ParsePlan(
+        "(rel window (rel source \"data.parquet\") "
+        "(partition k) "
+        "(order (o asc nulls-default)) "
+        "(frame rows (start unbounded-preceding) (end current-row)) "
+        "(fn running_max max v))",
+        source);
+
+    auto runtime = RunPlan(root);
+
+    TRowSet result{};
+    ASSERT_TRUE(runtime->Next(result));
+    ASSERT_EQ(result.ColumnCount, 4);
+    ASSERT_EQ(result.RowCount, 5);
+
+    auto* outKeys = reinterpret_cast<int64_t*>(result.Columns[0].Data);
+    auto* outOrder = reinterpret_cast<int64_t*>(result.Columns[1].Data);
+    auto* outMax = reinterpret_cast<qdb_bin_int*>(result.Columns[3].Data);
+
+    const std::array<int64_t, 5> expectedKeys = {1, 1, 1, 2, 2};
+    const std::array<int64_t, 5> expectedOrder = {1, 2, 3, 1, 2};
+    const std::array<bool, 5> expectedValid = {false, true, true, false, true};
+    const std::array<uint64_t, 5> expectedMax = {0, 300, 300, 0, 700};
+
+    for (int64_t row = 0; row < result.RowCount; ++row) {
+        EXPECT_EQ(outKeys[row], expectedKeys[row]) << "row " << row;
+        EXPECT_EQ(outOrder[row], expectedOrder[row]) << "row " << row;
+        EXPECT_EQ(IsValid(result.Columns[3], row), expectedValid[row]) << "row " << row;
+        if (expectedValid[row]) {
+            EXPECT_EQ(outMax[row].Lo, expectedMax[row]) << "row " << row;
+            EXPECT_EQ(outMax[row].Hi, 0u) << "row " << row;
+        }
     }
 
     Release(&result);

@@ -930,7 +930,9 @@ NQumir::NAst::TExprPtr BuildWindowMaterializeWrapperAst(
     for (const auto& field : inputType.Fields) {
         ownedPtrCount += SortKeyIsString(field.second) ? 3 : 2;
     }
-    ownedPtrCount += static_cast<int64_t>(funcs.size()); // one data buffer each.
+    for (const auto& func : funcs) {
+        ownedPtrCount += func.Func == "rank" ? 1 : 2; // data; plus Mask for aggregates.
+    }
 
     auto column = [&](size_t idx) -> TExprPtr {
         return Oz::Index("columns", Int64Literal(static_cast<int64_t>(idx)));
@@ -1015,7 +1017,8 @@ NQumir::NAst::TExprPtr BuildWindowMaterializeWrapperAst(
                 column(static_cast<size_t>(inputColumnCount) + f),
                 Oz::Ident("out_rowset"), Int64Literal(dataOwner),
             }));
-        } else if (funcs[f].Func == "avg") {
+        } else if (funcs[f].Func == "avg_partition") {
+            const int64_t maskOwner = ownerIdx++;
             const auto& argType =
                 inputType.Fields[static_cast<size_t>(funcs[f].ArgColumn)].second;
             if (SortValueIsBinInt(argType)) {
@@ -1025,6 +1028,7 @@ NQumir::NAst::TExprPtr BuildWindowMaterializeWrapperAst(
                     Int64Literal(static_cast<int64_t>(funcs[f].ArgColumn)),
                     column(static_cast<size_t>(inputColumnCount) + f),
                     Oz::Ident("out_rowset"), Int64Literal(dataOwner),
+                    Int64Literal(maskOwner),
                 }));
                 continue;
             }
@@ -1041,14 +1045,57 @@ NQumir::NAst::TExprPtr BuildWindowMaterializeWrapperAst(
                 Cast(Int64Literal(0), Ptr(std::move(argCoreType))),
                 column(static_cast<size_t>(inputColumnCount) + f),
                 Oz::Ident("out_rowset"), Int64Literal(dataOwner),
+                Int64Literal(maskOwner),
             }));
-        } else {
-            builder.Stmt(Oz::Call("window_fill_prefix_sum_i64", {
+        } else if (funcs[f].Func == "sum_prefix" ||
+                   funcs[f].Func == "sum_partition" ||
+                   funcs[f].Func == "max_prefix")
+        {
+            const int64_t maskOwner = ownerIdx++;
+            const auto& argType =
+                inputType.Fields[static_cast<size_t>(funcs[f].ArgColumn)].second;
+            const bool binInt = SortValueIsBinInt(argType);
+            if (binInt) {
+                const char* filler = funcs[f].Func == "sum_prefix"
+                    ? "window_fill_prefix_sum_binint"
+                    : funcs[f].Func == "sum_partition"
+                        ? "window_fill_partition_sum_binint"
+                        : "window_fill_prefix_max_binint";
+                builder.Stmt(Oz::Call(filler, {
+                    Oz::Ident("store"), Oz::Ident("row_ids"), Oz::Ident("start"),
+                    Oz::Ident("n"),
+                    Int64Literal(static_cast<int64_t>(funcs[f].ArgColumn)),
+                    column(static_cast<size_t>(inputColumnCount) + f),
+                    Oz::Ident("out_rowset"), Int64Literal(dataOwner),
+                    Int64Literal(maskOwner),
+                }));
+                continue;
+            }
+            auto argCoreType = SortCoreType(argType);
+            const int64_t width = MaterializeFixedWidth(argType);
+            if (!argCoreType || width == 0) {
+                throw NQumir::TError(
+                    "BuildWindowMaterializeWrapperAst: unsupported window argument type " +
+                    (argType ? argType->ToString() : std::string("<null>")));
+            }
+            const char* filler = funcs[f].Func == "sum_prefix"
+                ? "window_fill_prefix_sum_fixed"
+                : funcs[f].Func == "sum_partition"
+                    ? "window_fill_partition_sum_fixed"
+                    : "window_fill_prefix_max_fixed";
+            builder.Stmt(Oz::Call(filler, {
                 Oz::Ident("store"), Oz::Ident("row_ids"), Oz::Ident("start"),
                 Oz::Ident("n"), Int64Literal(static_cast<int64_t>(funcs[f].ArgColumn)),
+                Cast(Int64Literal(0), Ptr(std::move(argCoreType))),
+                Int64Literal(width),
                 column(static_cast<size_t>(inputColumnCount) + f),
                 Oz::Ident("out_rowset"), Int64Literal(dataOwner),
+                Int64Literal(maskOwner),
             }));
+        } else {
+            throw NQumir::TError(
+                "BuildWindowMaterializeWrapperAst: unsupported window function " +
+                funcs[f].Func);
         }
     }
 

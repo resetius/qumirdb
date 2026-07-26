@@ -418,11 +418,13 @@ TWindowRuntimeProcess BuildWindowRuntimeProcess(
         radixKeys.push_back(std::move(radixKey));
     }
 
-    // Each window function becomes an appended output column. Ordered sum is a
-    // running prefix; avg is currently full-partition only (no ORDER BY).
+    // Each window function becomes an appended output column. sum is either a
+    // full-partition broadcast (no ORDER BY) or a running prefix; avg is
+    // currently full-partition only; max is currently ordered-prefix only.
     std::vector<TWindowFuncInput> funcs;
     for (const auto& fn : window.Functions()) {
-        if (fn.Func != "sum" && fn.Func != "rank" && fn.Func != "avg") {
+        if (fn.Func != "sum" && fn.Func != "rank" && fn.Func != "avg" &&
+            fn.Func != "max") {
             throw std::runtime_error(
                 "window function not supported in exec yet: " + fn.Func);
         }
@@ -461,21 +463,44 @@ TWindowRuntimeProcess BuildWindowRuntimeProcess(
                     "window exec supports only i64/f64/decimal arguments for avg yet");
             }
             funcs.push_back({
-                .Func = fn.Func,
+                .Func = "avg_partition",
                 .ArgColumn = idx,
                 .ResultType = isBinInt ? argType : std::make_shared<TFloatType>(),
             });
             continue;
         }
-        if (!integer || integer.Cast()->BitWidth() != 64) {
-            throw std::runtime_error(
-                "window exec supports only i64 arguments for running sum yet");
+        if (fn.Func == "sum") {
+            if (!isBinInt && !TMaybeType<TFloatType>(inner) &&
+                (!integer || integer.Cast()->BitWidth() != 64)) {
+                throw std::runtime_error(
+                    "window exec supports only i64/f64/decimal arguments for sum yet");
+            }
+            funcs.push_back({
+                .Func = orderRadixKeys.empty() ? "sum_partition" : "sum_prefix",
+                .ArgColumn = idx,
+                .ResultType = inputStruct->Fields[idx].second,
+            });
+            continue;
         }
-        funcs.push_back({
-            .Func = fn.Func,
-            .ArgColumn = idx,
-            .ResultType = inputStruct->Fields[idx].second,
-        });
+        if (fn.Func == "max") {
+            if (orderRadixKeys.empty()) {
+                throw std::runtime_error(
+                    "window max supports only ordered prefix frames yet");
+            }
+            if (!isBinInt && !TMaybeType<TFloatType>(inner) &&
+                (!integer || integer.Cast()->BitWidth() != 64)) {
+                throw std::runtime_error(
+                    "window exec supports only i64/f64/decimal arguments for max yet");
+            }
+            funcs.push_back({
+                .Func = "max_prefix",
+                .ArgColumn = idx,
+                .ResultType = inputStruct->Fields[idx].second,
+            });
+            continue;
+        }
+        throw std::runtime_error(
+            "window function not supported in exec yet: " + fn.Func);
     }
 
     TKernelCompiler compiler(std::move(options));
