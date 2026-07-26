@@ -11,6 +11,8 @@
 #include <qdb/plan/ops/project.h>
 #include <qdb/plan/ops/sort.h>
 #include <qdb/plan/ops/source.h>
+#include <qdb/plan/ops/union.h>
+#include <qdb/plan/ops/window.h>
 #include <qdb/plan/passes/column_pruning.h>
 #include <qdb/plan/passes/equijoin.h>
 #include <qdb/plan/passes/join_order.h>
@@ -900,18 +902,26 @@ std::expected<NQdb::TOperatorPtr, NQumir::TError> ParseSql(
 
 std::string LogicalPlanTreeText(const NQdb::TOperatorPtr& plan) {
     std::ostringstream out;
-    PrintPlanTree(out, plan);
+    try {
+        PrintPlanTree(out, plan);
+    } catch (const std::exception& e) {
+        out << "<unprintable logical plan: " << e.what() << ">\n";
+    }
     return out.str();
 }
 
 std::string LogicalPlanAstText(const NQdb::TOperatorPtr& plan) {
     std::ostringstream out;
-    NQumir::NAst::NCore::PrintAst(
-        out,
-        plan,
-        NQumir::NAst::NCore::TPrintOptions{
-            .NodePrinters = NQdb::NSexp::MakeRelPrinters(),
-        });
+    try {
+        NQumir::NAst::NCore::PrintAst(
+            out,
+            plan,
+            NQumir::NAst::NCore::TPrintOptions{
+                .NodePrinters = NQdb::NSexp::MakeRelPrinters(),
+            });
+    } catch (const std::exception& e) {
+        out << "<unprintable logical ast: " << e.what() << ">";
+    }
     return out.str();
 }
 
@@ -946,12 +956,16 @@ llvm::json::Object PlanPassDiagnosticsJson(
 
 std::string LogicalNodeAstText(const NQdb::TOperatorPtr& op) {
     std::ostringstream out;
-    NQumir::NAst::NCore::PrintAst(
-        out,
-        op,
-        NQumir::NAst::NCore::TPrintOptions{
-            .NodePrinters = NQdb::NSexp::MakeRelPrinters(),
-        });
+    try {
+        NQumir::NAst::NCore::PrintAst(
+            out,
+            op,
+            NQumir::NAst::NCore::TPrintOptions{
+                .NodePrinters = NQdb::NSexp::MakeRelPrinters(),
+            });
+    } catch (const std::exception& e) {
+        out << "<unprintable logical node ast: " << e.what() << ">";
+    }
     return out.str();
 }
 
@@ -967,6 +981,14 @@ std::string Trim(std::string_view text) {
         text.remove_suffix(1);
     }
     return std::string(text);
+}
+
+std::string SafeExprLine(const NQumir::NAst::TExprPtr& expr) {
+    try {
+        return NQdb::ExprLine(expr);
+    } catch (const std::exception& e) {
+        return "<unprintable expr: " + std::string(e.what()) + ">";
+    }
 }
 
 void MaybeAddArtifactRef(
@@ -1052,7 +1074,7 @@ llvm::json::Object LogicalNodeDetails(const NQdb::TOperatorPtr& op) {
     }
     if (auto filter = TMaybeOp<TFilterOperator>(op)) {
         return llvm::json::Object{
-            {"predicate", ExprLine(filter.Cast()->Predicate())},
+            {"predicate", SafeExprLine(filter.Cast()->Predicate())},
         };
     }
     if (auto project = TMaybeOp<TProjectOperator>(op)) {
@@ -1060,7 +1082,7 @@ llvm::json::Object LogicalNodeDetails(const NQdb::TOperatorPtr& op) {
         for (const auto& spec : project.Cast()->Projections()) {
             projections.push_back(llvm::json::Object{
                 {"name", spec.Name},
-                {"expr", ExprLine(spec.Expression)},
+                {"expr", SafeExprLine(spec.Expression)},
             });
         }
         return llvm::json::Object{
@@ -1074,7 +1096,7 @@ llvm::json::Object LogicalNodeDetails(const NQdb::TOperatorPtr& op) {
             aggs.push_back(llvm::json::Object{
                 {"name", spec.Name},
                 {"func", spec.Func},
-                {"arg", ExprLine(spec.Arg)},
+                {"arg", SafeExprLine(spec.Arg)},
             });
         }
         return llvm::json::Object{
@@ -1094,7 +1116,7 @@ llvm::json::Object LogicalNodeDetails(const NQdb::TOperatorPtr& op) {
         return llvm::json::Object{
             {"joinType", std::string(JoinTypeName(j->JoinType()))},
             {"keys", std::move(keys)},
-            {"residual", ExprLine(j->Filter())},
+            {"residual", SafeExprLine(j->Filter())},
         };
     }
     if (auto sort = TMaybeOp<TSortOperator>(op)) {
@@ -1378,7 +1400,11 @@ llvm::json::Object LogicalGraphJson(
 
 std::string AstText(const NQumir::NAst::TExprPtr& ast) {
     std::ostringstream out;
-    NQumir::NAst::NCore::PrintAst(out, ast);
+    try {
+        NQumir::NAst::NCore::PrintAst(out, ast);
+    } catch (const std::exception& e) {
+        out << "<unprintable ast: " << e.what() << ">";
+    }
     return out.str();
 }
 
@@ -1627,7 +1653,8 @@ bool BrowserSupportsJoin(NQdb::EJoinType type, bool hasResidual) {
     if (type == EJoinType::Inner) {
         return true;
     }
-    if ((type == EJoinType::Left || type == EJoinType::Right) && !hasResidual) {
+    if ((type == EJoinType::Left || type == EJoinType::Right ||
+         type == EJoinType::Full) && !hasResidual) {
         return true;
     }
     if (type == EJoinType::LeftSemi || type == EJoinType::LeftAnti) {
@@ -1747,6 +1774,68 @@ std::optional<llvm::json::Object> BuildSortStageJson(
     return stage;
 }
 
+std::optional<llvm::json::Object> BuildWindowStageJson(
+    NQdb::TWindowOperator& window,
+    const NQumir::NAst::TStructType& inputStruct,
+    const NQumir::NAst::TStructType& outputStruct,
+    const TKernelIndex& kernels,
+    bool embedWasm,
+    std::string& error)
+{
+    if (!embedWasm) {
+        error = "window stage requires embedded wasm kernel";
+        return std::nullopt;
+    }
+
+    const auto* wasmKernel = FindKernel(kernels, &window, "window.run.fused");
+    if (!wasmKernel) {
+        error = "window kernel was not generated";
+        return std::nullopt;
+    }
+    if (wasmKernel->Artifacts->Wasm.empty()) {
+        error = "window kernel failed to compile to wasm";
+        return std::nullopt;
+    }
+
+    std::vector<NQdb::TSortKey> sortKeys;
+    sortKeys.reserve(window.PartitionKeys().size() + window.OrderKeys().size());
+    for (const auto& partition : window.PartitionKeys()) {
+        sortKeys.push_back(NQdb::TSortKey{.Column = partition});
+    }
+    for (const auto& order : window.OrderKeys()) {
+        sortKeys.push_back(order);
+    }
+    if (sortKeys.size() != wasmKernel->Kernel->SortKeys.size()) {
+        error = "window sort key metadata is unavailable";
+        return std::nullopt;
+    }
+
+    llvm::json::Array keys;
+    for (size_t i = 0; i < wasmKernel->Kernel->SortKeys.size(); ++i) {
+        const auto& key = wasmKernel->Kernel->SortKeys[i];
+        const auto& sortKey = sortKeys[i];
+        const bool nullsFirst = sortKey.Nulls == NQdb::ESortNulls::First ||
+            (sortKey.Nulls == NQdb::ESortNulls::Default &&
+                sortKey.Direction == NQdb::ESortDirection::Desc);
+        keys.push_back(llvm::json::Object{
+            {"index", key.Index},
+            {"width", key.WidthBytes},
+            {"isString", key.IsString},
+            {"desc", key.Desc},
+            {"nullsFirst", nullsFirst},
+        });
+    }
+
+    return llvm::json::Object{
+        {"wasm", wasmKernel->Artifacts->Wasm},
+        {"partitionKeys", StringArray(window.PartitionKeys())},
+        {"sortKeys", SortKeysJson(sortKeys)},
+        {"radixKeys", std::move(keys)},
+        {"output", StructColumnsJson(outputStruct)},
+        {"input", StructColumnsJson(inputStruct)},
+    };
+}
+
 struct TExecGraphBuildResult {
     int64_t NodeId = -1;
     NQumir::NAst::TTypePtr OutputType;
@@ -1841,8 +1930,8 @@ struct TExecGraphBuilder {
         }
         const int64_t filterId = AddNode(llvm::json::Object{
             {"kind", "filter"},
-            {"label", "filter " + ExprLine(join.Filter())},
-            {"predicate", ExprLine(join.Filter())},
+            {"label", "filter " + SafeExprLine(join.Filter())},
+            {"predicate", SafeExprLine(join.Filter())},
             {"wasm", ref->Artifacts->Wasm},
         });
         AddEdge(crossId, filterId, 0);
@@ -1880,8 +1969,8 @@ struct TExecGraphBuilder {
                 }
                 const int64_t id = AddNode(llvm::json::Object{
                     {"kind", "filter"},
-                    {"label", "filter " + ExprLine(filter.Cast()->Predicate())},
-                    {"predicate", ExprLine(filter.Cast()->Predicate())},
+                    {"label", "filter " + SafeExprLine(filter.Cast()->Predicate())},
+                    {"predicate", SafeExprLine(filter.Cast()->Predicate())},
                     {"wasm", ref->Artifacts->Wasm},
                 });
                 AddEdge(input.NodeId, id, 0);
@@ -1929,10 +2018,12 @@ struct TExecGraphBuilder {
                     Unsupported = UnsupportedExec("aggregate kernel failed to compile to wasm");
                     return {};
                 }
+                const bool groupingSets = !aggregate.Cast()->GroupingSets().empty();
                 auto outputType = ComputeAggregateOutputType(
                     input.OutputType,
                     aggregate.Cast()->GroupKeys(),
-                    aggregate.Cast()->Aggs());
+                    aggregate.Cast()->Aggs(),
+                    groupingSets);
                 auto* outStruct =
                     static_cast<NQumir::NAst::TStructType*>(outputType.get());
                 const size_t keyCount = ref->Kernel->AggKeys.size();
@@ -1948,14 +2039,77 @@ struct TExecGraphBuilder {
                     }
                     output.push_back(std::move(entry));
                 }
-                const int64_t id = AddNode(llvm::json::Object{
+                llvm::json::Object stage{
                     {"kind", "aggregate"},
                     {"label", AggregatePlanLabel(*aggregate.Cast())},
                     {"groupKeys", StringArray(aggregate.Cast()->GroupKeys())},
                     {"wasm", ref->Artifacts->Wasm},
                     {"keyCount", static_cast<int64_t>(keyCount)},
                     {"output", std::move(output)},
+                };
+                if (groupingSets) {
+                    llvm::json::Array sets;
+                    for (const auto& set : aggregate.Cast()->GroupingSets()) {
+                        llvm::json::Array item;
+                        for (size_t index : set) {
+                            item.push_back(static_cast<int64_t>(index));
+                        }
+                        sets.push_back(std::move(item));
+                    }
+                    stage["groupingSets"] = std::move(sets);
+                    stage["groupKeyCount"] =
+                        static_cast<int64_t>(aggregate.Cast()->GroupKeys().size());
+                }
+                const int64_t id = AddNode(std::move(stage));
+                AddEdge(input.NodeId, id, 0);
+                return {.NodeId = id, .OutputType = outputType};
+            }
+
+            if (auto un = TMaybeOp<TUnionAllOperator>(op)) {
+                std::vector<TExecGraphBuildResult> inputs;
+                inputs.reserve(un.Cast()->Inputs().size());
+                for (const auto& branch : un.Cast()->Inputs()) {
+                    auto input = Build(branch);
+                    if (Unsupported) return {};
+                    inputs.push_back(std::move(input));
+                }
+                if (inputs.empty()) {
+                    Unsupported = UnsupportedExec("browser union-all has no inputs");
+                    return {};
+                }
+                auto* outStruct =
+                    static_cast<NQumir::NAst::TStructType*>(inputs.front().OutputType.get());
+                const int64_t id = AddNode(llvm::json::Object{
+                    {"kind", "union-all"},
+                    {"label", "union-all"},
+                    {"output", StructColumnsJson(*outStruct)},
                 });
+                for (size_t i = 0; i < inputs.size(); ++i) {
+                    AddEdge(inputs[i].NodeId, id, static_cast<int64_t>(i));
+                }
+                return {.NodeId = id, .OutputType = inputs.front().OutputType};
+            }
+
+            if (auto window = TMaybeOp<TWindowOperator>(op)) {
+                auto input = Build(window.Cast()->Input());
+                if (Unsupported) return {};
+                auto* inputStruct =
+                    static_cast<NQumir::NAst::TStructType*>(input.OutputType.get());
+                auto outputType = ComputeWindowOutputType(
+                    input.OutputType,
+                    window.Cast()->Functions());
+                auto* outStruct =
+                    static_cast<NQumir::NAst::TStructType*>(outputType.get());
+                std::string error;
+                auto stage = BuildWindowStageJson(
+                    *window.Cast(), *inputStruct, *outStruct, Kernels, EmbedWasm, error);
+                if (!stage) {
+                    Unsupported = UnsupportedExec(std::move(error));
+                    return {};
+                }
+                stage->insert({"kind", "window"});
+                stage->insert({"label", "window"});
+                const int64_t id = AddNode(std::move(*stage));
                 AddEdge(input.NodeId, id, 0);
                 return {.NodeId = id, .OutputType = outputType};
             }
@@ -2085,7 +2239,8 @@ struct TExecGraphBuilder {
             return {};
         }
 
-        Unsupported = UnsupportedExec("plan contains an unsupported browser exec operator");
+        Unsupported = UnsupportedExec(
+            "browser exec does not support operator: " + std::string(op->RelName()));
         return {};
     }
 };
@@ -2138,7 +2293,11 @@ llvm::json::Object BuildBundle(TExportRequest& request) {
     }
 
     std::ostringstream runtimeText;
-    NQdb::PrintRuntimePlan(runtimeText, *plan);
+    try {
+        NQdb::PrintRuntimePlan(runtimeText, *plan);
+    } catch (const std::exception& e) {
+        runtimeText << "<unprintable runtime plan: " << e.what() << ">\n";
+    }
 
     TArtifactStore artifacts;
     auto logicalGraph = LogicalGraphJson(*plan, artifacts);

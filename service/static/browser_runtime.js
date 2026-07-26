@@ -1180,6 +1180,30 @@ function createQdbEnv(getMemory, holder) {
     dv.setBigUint64(Number(out), BigInt(data) + BigInt(offset), true);
     dv.setBigInt64(Number(out) + 8, BigInt(len), true);
   };
+  const stringConcat = (out, _arena, ld, ls, rd, rs) => {
+    const leftSize = Math.max(Number(ls), 0);
+    const rightSize = Math.max(Number(rs), 0);
+    const size = leftSize + rightSize;
+    const dv = new DataView(getMemory().buffer);
+    if (size <= 0) {
+      writePointer(dv, Number(out), 0);
+      dv.setBigInt64(Number(out) + 8, 0n, true);
+      return;
+    }
+    const ptr = alloc(size);
+    const mem = new Uint8Array(getMemory().buffer);
+    let offset = ptr;
+    if (leftSize > 0) {
+      mem.set(mem.subarray(Number(ld), Number(ld) + leftSize), offset);
+      offset += leftSize;
+    }
+    if (rightSize > 0) {
+      mem.set(mem.subarray(Number(rd), Number(rd) + rightSize), offset);
+    }
+    const outView = new DataView(getMemory().buffer);
+    writePointer(outView, Number(out), ptr);
+    outView.setBigInt64(Number(out) + 8, BigInt(size), true);
+  };
   const binIntArg = (lo, hi) =>
     (BigInt.asIntN(64, BigInt(hi)) << 64n) + BigInt.asUintN(64, BigInt(lo));
   const writeDecimalResult = (out, value) => {
@@ -1202,6 +1226,8 @@ function createQdbEnv(getMemory, holder) {
     op(binIntArg(llo, lhi), binIntArg(rlo, rhi)) ? 1 : 0;
 
   return {
+    sqrt: Math.sqrt,
+
     // malloc family over the query's shared linear memory (segregated
     // free-list; free reclaims). qdb_realloc is not imported: it is implemented
     // in Oz (qumirdb.oz) on top of qdb_alloc/qdb_free.
@@ -1214,6 +1240,7 @@ function createQdbEnv(getMemory, holder) {
     qdb_string_view_sql_like: (sd, ss, pd, ps) =>
       BigInt(sqlLikeBytes(bytesAt(sd, ss), bytesAt(pd, ps))),
     qdb_substring: substring,
+    qdb_string_concat: stringConcat,
     qdb_date_year: dateYear,
     qdb_sql_date: sqlDate,
     qdb_sql_interval: sqlInterval,
@@ -1800,6 +1827,10 @@ function updateAggregateState(state, rowSet) {
   if (state.finished) {
     throw new Error('aggregate state is already finalized');
   }
+  if (Array.isArray(state.stage.groupingSets) && state.stage.groupingSets.length > 0) {
+    updateGroupingSetsAggregateState(state, rowSet);
+    return;
+  }
   const { batch, selection } = rowSet;
   const wasm = wasmRowSetForSelection(batch, selection);
   // update(ht, batch) — the kernel honors rowset.Selection.
@@ -1808,6 +1839,115 @@ function updateAggregateState(state, rowSet) {
     : state.inputWriter.write(
         batch.columns, batch.rowCount, false, selection).rowsetPtr;
   state.dispatch(BigInt(state.ht), BigInt(rowsetPtr), 0n, 1n);
+}
+
+function ensureGroupingSetScratch(state, rowCount) {
+  const arena = state.arena;
+  const idBytes = Math.max(rowCount, 1) * 4;
+  if (!state.groupingSetIdPtr || state.groupingSetIdCap < idBytes) {
+    if (state.groupingSetIdPtr) arena.free(state.groupingSetIdPtr);
+    state.groupingSetIdPtr = arena.alloc(idBytes, 4);
+    state.groupingSetIdCap = idBytes;
+  }
+  const maskBytes = Math.max((rowCount + 7) >> 3, 1);
+  if (!state.groupingNullMaskPtr || state.groupingNullMaskCap < maskBytes) {
+    if (state.groupingNullMaskPtr) arena.free(state.groupingNullMaskPtr);
+    state.groupingNullMaskPtr = arena.alloc(maskBytes, 1);
+    state.groupingNullMaskCap = maskBytes;
+  }
+  new Uint8Array(
+    arena.memory.buffer,
+    state.groupingNullMaskPtr,
+    maskBytes).fill(0);
+}
+
+function writeGroupingSetIds(state, rowCount, setIndex) {
+  const ids = new Int32Array(
+    state.arena.memory.buffer,
+    state.groupingSetIdPtr,
+    Math.max(rowCount, 1));
+  ids.fill(Number(setIndex));
+}
+
+function makeGroupingSetRowSet(state, baseRowsetPtr, set, setIndex) {
+  const { arena, layout } = state;
+  let dv = arena.view();
+  const rowLayout = layout.rowset;
+  const colLayout = layout.column;
+  const baseColumns = readPointer(dv, baseRowsetPtr + rowLayout.columns);
+  const baseColumnCount = Number(
+    dv.getBigInt64(baseRowsetPtr + rowLayout.columnCount, true));
+  const rowCount = Number(
+    dv.getBigInt64(baseRowsetPtr + rowLayout.rowCount, true));
+  const selectionPtr = readPointer(dv, baseRowsetPtr + rowLayout.selection);
+
+  ensureGroupingSetScratch(state, rowCount);
+  writeGroupingSetIds(state, rowCount, setIndex);
+
+  const columnCount = baseColumnCount + 1;
+  const columnsBase = arena.alloc(Math.max(columnCount, 1) * colLayout.size, 8);
+  const rowsetPtr = arena.alloc(rowLayout.size, 8);
+  dv = arena.view();
+  const bytes = arena.bytes();
+  new Uint8Array(arena.memory.buffer, columnsBase, columnCount * colLayout.size).fill(0);
+  new Uint8Array(arena.memory.buffer, rowsetPtr, rowLayout.size).fill(0);
+
+  writePointer(dv, columnsBase + colLayout.data, state.groupingSetIdPtr);
+  const included = new Set((set || []).map(Number));
+  const groupKeyCount = Number(state.stage.groupKeyCount || 0);
+  for (let c = 0; c < baseColumnCount; ++c) {
+    const src = baseColumns + c * colLayout.size;
+    const dst = columnsBase + (c + 1) * colLayout.size;
+    bytes.copyWithin(dst, src, src + colLayout.size);
+    if (c < groupKeyCount && !included.has(c)) {
+      writePointer(dv, dst + colLayout.mask, state.groupingNullMaskPtr);
+    }
+  }
+
+  writePointer(dv, rowsetPtr + rowLayout.columns, columnsBase);
+  dv.setBigInt64(rowsetPtr + rowLayout.columnCount, BigInt(columnCount), true);
+  dv.setBigInt64(rowsetPtr + rowLayout.rowCount, BigInt(rowCount), true);
+  if (selectionPtr) {
+    writePointer(dv, rowsetPtr + rowLayout.selection, selectionPtr);
+  }
+  return { rowsetPtr, columnsBase };
+}
+
+function freeGroupingSetRowSet(state, view) {
+  if (!view) return;
+  state.arena.free(view.columnsBase);
+  state.arena.free(view.rowsetPtr);
+}
+
+function updateGroupingSetsAggregateState(state, rowSet) {
+  const { batch, selection } = rowSet;
+  const wasm = wasmRowSetForSelection(batch, selection);
+  let baseRowsetPtr;
+  let marshalledPtr = 0;
+  if (wasm) {
+    baseRowsetPtr = wasm.rowsetPtr;
+  } else {
+    const marshalled = marshalRowSet(
+      state.arena, state.layout, batch.columns, batch.rowCount, false, selection);
+    baseRowsetPtr = marshalled.rowsetPtr;
+    marshalledPtr = marshalled.rowsetPtr;
+  }
+
+  try {
+    const sets = state.stage.groupingSets || [];
+    for (let si = 0; si < sets.length; ++si) {
+      const view = makeGroupingSetRowSet(state, baseRowsetPtr, sets[si], si);
+      try {
+        state.dispatch(BigInt(state.ht), BigInt(view.rowsetPtr), 0n, 1n);
+      } finally {
+        freeGroupingSetRowSet(state, view);
+      }
+    }
+  } finally {
+    if (marshalledPtr) {
+      freeMarshalledRowSet(state.arena, state.layout, marshalledPtr);
+    }
+  }
 }
 
 function finishAggregateState(state, asWasm = false) {
@@ -2042,7 +2182,9 @@ function isLeftSemiAntiJoin(stage) {
 }
 
 function isOuterJoin(stage) {
-  return stage.joinType === 'left' || stage.joinType === 'right';
+  return stage.joinType === 'left' ||
+    stage.joinType === 'right' ||
+    stage.joinType === 'full';
 }
 
 function finalizeSemiAntiJoinState(state) {
@@ -2254,11 +2396,19 @@ function outputShapeFromRowSets(rowSets) {
 }
 
 function emptyBatchForRowSets(rowSets) {
+  return emptyBatchForOutput(outputShapeFromRowSets(rowSets));
+}
+
+function emptyBatchForOutput(output) {
   return {
     rowCount: 0,
-    columns: outputShapeFromRowSets(rowSets).map(col => ({
+    columns: shapeColumns(output).map(col => ({
       name: col.name,
       type: col.type,
+      storageType: col.storageType,
+      precision: col.precision,
+      scale: col.scale,
+      nullable: col.nullable,
       values: [],
     })),
   };
@@ -2300,8 +2450,15 @@ function stableSortRowSetForStore(arena, layout, rowSet) {
   };
 }
 
-function runSortKernelRowSets(kernel, layout, rowSets, radixKeys, limit) {
+function runSortKernelRowSets(
+  kernel,
+  layout,
+  rowSets,
+  radixKeys,
+  limit,
+  outputShape = null) {
   const arena = kernel.holder.arena;
+  const output = outputShape || outputShapeFromRowSets(rowSets);
 
   const n = selectedRowCount(rowSets);
   const keyCount = radixKeys.length;
@@ -2326,7 +2483,7 @@ function runSortKernelRowSets(kernel, layout, rowSets, radixKeys, limit) {
       releaseWasmRowSet(rowSet);
     }
     store.freeMarshalled();
-    return emptyBatchForRowSets(rowSets);
+    return emptyBatchForOutput(output);
   }
   const keep = (limit != null && limit < n)
     ? Math.max(Number(limit), 0)
@@ -2336,7 +2493,7 @@ function runSortKernelRowSets(kernel, layout, rowSets, radixKeys, limit) {
       releaseWasmRowSet(rowSet);
     }
     store.freeMarshalled();
-    return emptyBatchForRowSets(rowSets);
+    return emptyBatchForOutput(output);
   }
 
   // Allocate everything up front (a mid-write grow would detach views).
@@ -2381,13 +2538,13 @@ function runSortKernelRowSets(kernel, layout, rowSets, radixKeys, limit) {
       BigInt(keep),
       BigInt(outRowSetPtr)));
     if (out <= 0) {
-      return emptyBatchForRowSets(rowSets);
+      return emptyBatchForOutput(output);
     }
     outRowSetTransferred = true;
     return makeWasmOwnedBatch(
       { arena, layout },
       outRowSetPtr,
-      outputShapeFromRowSets(rowSets));
+      output);
   } finally {
     arena.free(rowIdsPtr);
     arena.free(workPtr);
@@ -2420,6 +2577,22 @@ function runRadixSortRowSets(kernel, layout, rowSets, radixKeys, limit) {
 export function runRadixSort(kernel, layout, batch, selection, radixKeys, limit) {
   return runRadixSortRowSets(
     kernel, layout, [{ batch, selection: selection || null }], radixKeys, limit);
+}
+
+function runWindowKernelRowSets(kernel, layout, rowSets, stage) {
+  try {
+    return runSortKernelRowSets(
+      kernel,
+      layout,
+      rowSets,
+      stage.radixKeys,
+      null,
+      stage.output || []);
+  } finally {
+    for (const rowSet of rowSets) {
+      releaseWasmRowSet(rowSet);
+    }
+  }
 }
 
 const TaskResult = {
@@ -2663,6 +2836,8 @@ function canConsumeWasmOutput(task) {
   return kind === 'filter' ||
     kind === 'project' ||
     kind === 'aggregate' ||
+    kind === 'union-all' ||
+    kind === 'window' ||
     kind === 'join' ||
     kind === 'cross-join' ||
     kind === 'sort' ||
@@ -2813,6 +2988,95 @@ class ProjectTask {
     this.rows += outRowSet.batch.rowCount;
     output.push(outRowSet);
     return TaskResult.OK;
+  }
+}
+
+class UnionAllTask {
+  constructor(stage) {
+    this.stage = stage;
+    this.inputIndex = 0;
+    this.done = false;
+    this.rows = 0;
+  }
+
+  async execute() {
+    if (this.done) return TaskResult.FINISHED;
+    const output = this.node.outbound[0].connection;
+    if (!output.canPush()) return TaskResult.BLOCKED_OUTPUT;
+
+    while (this.inputIndex < this.node.inbound.length) {
+      const input = this.node.inbound[this.inputIndex].connection;
+      const fetched = input.fetch();
+      if (fetched.result === FetchResult.NO_DATA) return TaskResult.NEED_DATA;
+      if (fetched.result === FetchResult.FINISHED) {
+        ++this.inputIndex;
+        continue;
+      }
+      this.rows += fetched.rowSet.batch.rowCount;
+      output.push(fetched.rowSet);
+      return TaskResult.OK;
+    }
+
+    output.finish();
+    this.done = true;
+    return TaskResult.FINISHED;
+  }
+}
+
+class WindowTask {
+  constructor(stage, layout, shared) {
+    this.stage = stage;
+    this.layout = layout;
+    this.shared = shared;
+    this.inputs = [];
+    this.pending = null;
+    this.done = false;
+    this.rows = 0;
+  }
+
+  async execute() {
+    if (this.done) return TaskResult.FINISHED;
+    const input = this.node.inbound[0].connection;
+    const output = this.node.outbound[0].connection;
+
+    if (this.pending) {
+      if (!output.canPush()) return TaskResult.BLOCKED_OUTPUT;
+      output.push({ batch: this.pending, selection: null });
+      output.finish();
+      this.pending = null;
+      this.done = true;
+      return TaskResult.FINISHED;
+    }
+
+    const fetched = input.fetch();
+    if (fetched.result === FetchResult.NO_DATA) return TaskResult.NEED_DATA;
+    if (fetched.result === FetchResult.OK) {
+      this.inputs.push(fetched.rowSet);
+      this.rows += fetched.rowSet.batch.rowCount;
+      return TaskResult.OK;
+    }
+
+    if (!this.stage.wasm || !Array.isArray(this.stage.radixKeys)) {
+      throw new Error('window stage is missing wasm kernel');
+    }
+    const kernel = await instantiateKernel(
+      this.stage.wasm,
+      'qdb_window_run',
+      this.shared);
+    const inputs = this.inputs;
+    this.inputs = [];
+    this.pending = runWindowKernelRowSets(
+      kernel, this.layout, inputs, this.stage);
+    return this.execute();
+  }
+
+  destroy() {
+    releaseWasmBatch(this.pending);
+    this.pending = null;
+    for (const rowSet of this.inputs) {
+      releaseWasmRowSet(rowSet);
+    }
+    this.inputs = [];
   }
 }
 
@@ -3484,6 +3748,12 @@ function stageLabel(stage) {
   if (stage.kind === 'aggregate') {
     return aggregateLabel(stage);
   }
+  if (stage.kind === 'union-all') {
+    return 'union-all';
+  }
+  if (stage.kind === 'window') {
+    return 'window';
+  }
   if (stage.kind === 'join') {
     const type = stage.joinType || 'inner';
     const keys = Array.isArray(stage.keys) && stage.keys.length > 0
@@ -3521,6 +3791,12 @@ function taskNodeForStage(stage, layout, readSourceBatches, onProgress, shared) 
   }
   if (stage.kind === 'aggregate') {
     return makeNode(new AggregateTask(stage, layout, shared), stageLabel(stage));
+  }
+  if (stage.kind === 'union-all') {
+    return makeNode(new UnionAllTask(stage), stageLabel(stage));
+  }
+  if (stage.kind === 'window') {
+    return makeNode(new WindowTask(stage, layout, shared), stageLabel(stage));
   }
   if (stage.kind === 'join') {
     return makeNode(new JoinTask(stage, layout, shared), stageLabel(stage));

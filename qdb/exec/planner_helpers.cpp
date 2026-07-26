@@ -503,11 +503,28 @@ TWindowRuntimeProcess BuildWindowRuntimeProcess(
             "window function not supported in exec yet: " + fn.Func);
     }
 
+    auto* sink = options.Sink;
+    const size_t sinkBefore = sink ? sink->size() : 0;
     TKernelCompiler compiler(std::move(options));
     TSortRadixKernel kernel;
     kernel.Enabled = true;
     kernel.Dispatch = compiler.CompileWindow(
         radixKeys, *inputStruct, partitionRadixKeys, orderRadixKeys, funcs);
+    if (sink) {
+        std::vector<TGeneratedKernel::TSortKeyMeta> meta;
+        meta.reserve(keyColumns.size());
+        for (size_t k = 0; k < keyColumns.size(); ++k) {
+            meta.push_back({
+                .Index = keyColumns[k].Index,
+                .WidthBytes = RadixKeyWidthBytes(keyColumns[k].Type),
+                .IsString = IsStringRadixKey(keyColumns[k].Type),
+                .Desc = keys[k].Direction == ESortDirection::Desc,
+            });
+        }
+        for (size_t i = sinkBefore; i < sink->size(); ++i) {
+            (*sink)[i].SortKeys = meta;
+        }
+    }
 
     return {
         .OutputType = ComputeWindowOutputType(inputType, window.Functions()),
