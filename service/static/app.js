@@ -32,6 +32,12 @@ const MAX_PERSISTED_RESULT_ROWS = 1000;
 const BROWSER_EXPLAIN_PREFETCH_CONCURRENCY = 4;
 const TPCH_QUERY_FOLDER_ID = 'tpch';
 const TPCDS_QUERY_FOLDER_ID = 'tpcds';
+const OBSOLETE_BENCHMARK_QUERY_IDS = new Set([
+  'tpcds-q14',
+  'tpcds-q23',
+  'tpcds-q24',
+  'tpcds-q39'
+]);
 const DEFAULT_QUERY_FOLDER_ID = 'default';
 
 let editor = null;
@@ -292,6 +298,7 @@ function normalizeQueries(queries) {
   }
   return (Array.isArray(queries) ? queries : [])
     .filter(query => query && query.id && query.name)
+    .filter(query => !OBSOLETE_BENCHMARK_QUERY_IDS.has(query.id))
     .map(query => {
       const fallbackFolderId = benchmarkFolderByQueryId.get(query.id) ||
         DEFAULT_QUERY_FOLDER_ID;
