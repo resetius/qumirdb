@@ -166,6 +166,81 @@ bool IsFloatType(const NAst::TTypePtr& type) {
         NAst::TMaybeType<NAst::TFloatType>(NAst::UnwrapNamedType(UnwrapNullableType(type))));
 }
 
+NSql::TSqlPtr<NSql::TSqlOrderItem> CloneSqlOrderItem(
+    const NSql::TSqlPtr<NSql::TSqlOrderItem>& item)
+{
+    if (!item) {
+        return nullptr;
+    }
+    auto copy = std::make_shared<NSql::TSqlOrderItem>();
+    copy->Expr = item->Expr ? CloneExpr(item->Expr) : nullptr;
+    copy->Desc = item->Desc;
+    copy->NullOrder = item->NullOrder;
+    return copy;
+}
+
+NSql::TSqlPtr<NSql::TSqlOrder> CloneSqlOrder(
+    const NSql::TSqlPtr<NSql::TSqlOrder>& order)
+{
+    if (!order) {
+        return nullptr;
+    }
+    auto copy = std::make_shared<NSql::TSqlOrder>();
+    copy->Items.reserve(order->Items.size());
+    for (const auto& item : order->Items) {
+        copy->Items.push_back(CloneSqlOrderItem(item));
+    }
+    return copy;
+}
+
+NSql::TSqlPtr<NSql::TSqlFrameBound> CloneSqlFrameBound(
+    const NSql::TSqlPtr<NSql::TSqlFrameBound>& bound)
+{
+    if (!bound) {
+        return nullptr;
+    }
+    return std::make_shared<NSql::TSqlFrameBound>(
+        bound->Type,
+        bound->Expr ? CloneExpr(bound->Expr) : nullptr);
+}
+
+NSql::TSqlPtr<NSql::TSqlWindowFrame> CloneSqlWindowFrame(
+    const NSql::TSqlPtr<NSql::TSqlWindowFrame>& frame)
+{
+    if (!frame) {
+        return nullptr;
+    }
+    return std::make_shared<NSql::TSqlWindowFrame>(
+        frame->Type,
+        CloneSqlFrameBound(frame->Start),
+        CloneSqlFrameBound(frame->End));
+}
+
+NSql::TSqlPtr<NSql::TSqlWindowSpec> CloneSqlWindowSpec(
+    const NSql::TSqlPtr<NSql::TSqlWindowSpec>& spec)
+{
+    if (!spec) {
+        return nullptr;
+    }
+    return std::make_shared<NSql::TSqlWindowSpec>(
+        spec->PartitionBy ? CloneExpr(spec->PartitionBy) : nullptr,
+        CloneSqlOrder(spec->OrderBy),
+        CloneSqlWindowFrame(spec->Frame));
+}
+
+NSql::TSqlPtr<NSql::TWindowExpr> CloneSqlWindowExpr(
+    const NSql::TSqlPtr<NSql::TWindowExpr>& window)
+{
+    if (!window) {
+        return nullptr;
+    }
+    auto copy = std::make_shared<NSql::TWindowExpr>(
+        window->Expr ? CloneExpr(window->Expr) : nullptr,
+        CloneSqlWindowSpec(window->WindowSpec));
+    copy->Type = window->Type;
+    return copy;
+}
+
 // Replaces aggregate calls in an expression with references to synthetic
 // aggregate output columns, collecting the corresponding specs.
 class TAggCollector {
@@ -182,7 +257,7 @@ public:
         // place, but hoist any aggregates from its arguments and PARTITION/ORDER
         // (e.g. `sum(sum(x)) over (...)`, `rank() over (order by sum(x))`).
         if (auto window = NAst::TMaybeNode<NSql::TWindowExpr>(expr)) {
-            auto w = window.Cast();
+            auto w = CloneSqlWindowExpr(window.Cast());
             if (auto call = NAst::TMaybeNode<NAst::TCallExpr>(w->Expr)) {
                 for (auto& arg : call.Cast()->Args) {
                     auto rewritten = Rewrite(arg);
@@ -213,7 +288,7 @@ public:
                     }
                 }
             }
-            return expr;
+            return w;
         }
         if (auto agg = AsAggCall(expr)) {
             return Emit(*agg, expr->Location);

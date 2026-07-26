@@ -80,6 +80,33 @@ const TJoinOperator* FindJoin(const TOperatorPtr& op) {
     return nullptr;
 }
 
+void AssertWindowFuncArgsExistInInput(const TOperatorPtr& op) {
+    if (auto* window = dynamic_cast<const TWindowOperator*>(op.get())) {
+        auto* input = static_cast<NQumir::NAst::TStructType*>(
+            window->Input()->OutputColumns().get());
+        ASSERT_NE(input, nullptr);
+        auto hasField = [&](const std::string& name) {
+            for (const auto& [fieldName, _] : input->Fields) {
+                if (fieldName == name) {
+                    return true;
+                }
+            }
+            return false;
+        };
+        for (const auto& func : window->Functions()) {
+            if (auto ident = NQumir::NAst::TMaybeNode<NQumir::NAst::TIdentExpr>(func.Arg)) {
+                EXPECT_TRUE(hasField(ident.Cast()->Name))
+                    << "missing window argument " << ident.Cast()->Name;
+            }
+        }
+    }
+    for (const auto& child : op->Children()) {
+        if (auto childOp = NQumir::NAst::TMaybeNode<IOperator>(child)) {
+            AssertWindowFuncArgsExistInInput(childOp.Cast());
+        }
+    }
+}
+
 } // namespace
 
 TEST(WindowPlan, SingleSpecStructure) {
@@ -142,6 +169,22 @@ TEST(WindowPlan, FullPipelineOverJoin) {
     auto* join = FindJoin(*plan);
     ASSERT_NE(join, nullptr);
     EXPECT_FALSE(join->Keys().empty());
+}
+
+TEST(WindowPlan, CteWindowAggregateArgsAreIndependentPerInline) {
+    NQdb::TMockSource t({"k", "v"});
+    std::map<std::string, ISource*> tables = {{"t", &t}};
+
+    auto plan = BuildSqlPlan(
+        "WITH w AS ("
+        "  SELECT k, sum(v) AS s, avg(sum(v)) OVER (PARTITION BY k) AS a "
+        "  FROM t GROUP BY k"
+        ") "
+        "SELECT l.a, r.a FROM w l, w r WHERE l.k = r.k",
+        tables);
+    ASSERT_TRUE(plan.has_value()) << (plan ? "" : plan.error().ToString());
+
+    AssertWindowFuncArgsExistInInput(*plan);
 }
 
 int main(int argc, char** argv) {
