@@ -8,6 +8,7 @@
 #include <qdb/plan/ops/sort.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/ops/union.h>
+#include <qdb/plan/ops/window.h>
 
 #include <qumir/parser/ast.h>
 #include <qumir/parser/type.h>
@@ -264,6 +265,33 @@ std::shared_ptr<TStructType> QualifyColumnsImpl(const TOperatorPtr& op) {
         }
         for (const auto& spec : agg->Aggs()) {
             outFields.emplace_back(spec.Name, nullptr);
+        }
+        return std::make_shared<TStructType>(std::move(outFields));
+    }
+
+    // ── Window ──────────────────────────────────────────────────────────────
+    // Preserves all input columns and appends one per function; qualify the
+    // partition/order key names and the function arguments against the input.
+    if (auto maybe = TMaybeOp<TWindowOperator>(op)) {
+        auto window = maybe.Cast();
+        auto childSchema = QualifyColumnsImpl(window->Input());
+        if (childSchema) {
+            for (auto& key : window->MutablePartitionKeys()) {
+                key = QualifyIdent(*childSchema, key);
+            }
+            for (auto& key : window->MutableOrderKeys()) {
+                key.Column = QualifyIdent(*childSchema, key.Column);
+            }
+            for (auto& func : window->MutableFunctions()) {
+                QualifyExpr(func.Arg, *childSchema);
+            }
+        }
+        std::vector<std::pair<std::string, TTypePtr>> outFields;
+        if (childSchema) {
+            outFields = childSchema->Fields;
+        }
+        for (const auto& func : window->Functions()) {
+            outFields.emplace_back(func.Name, nullptr);
         }
         return std::make_shared<TStructType>(std::move(outFields));
     }
