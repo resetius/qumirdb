@@ -5,6 +5,7 @@
 
 #include <qumir/parser/type.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <memory>
 #include <stdexcept>
@@ -82,8 +83,13 @@ bool TWindowProcessor::Next(TRowSet& rowSet)
         throw std::runtime_error("window: key column mismatch");
     }
 
+    // The nullable radix (used when any key is nullable) needs a 257th bucket
+    // for the segregated NULL rows.
+    const bool nullable = std::any_of(
+        KeyColumns_.begin(), KeyColumns_.end(),
+        [](const TSortColumnRef& keyColumn) { return IsNullableType(keyColumn.Type); });
     std::vector<TRowId> work(Rows_.size() * WorkStride(KeyColumns_));
-    std::vector<uint32_t> counts(256);
+    std::vector<uint32_t> counts(nullable ? 257 : 256);
     auto descs = std::make_unique<bool[]>(Keys_.size());
     auto nullsFirsts = std::make_unique<bool[]>(Keys_.size());
     for (size_t k = 0; k < Keys_.size(); ++k) {

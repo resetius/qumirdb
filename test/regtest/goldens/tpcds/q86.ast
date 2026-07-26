@@ -20,7 +20,7 @@
             (partition-by
               (block
                 (+ (call grouping i_category) (call grouping i_class))
-                (if (call qdb_is_true (== (call grouping i_class) 0)) i_category)))
+                (if (call qdb_is_true (== (call grouping i_class) 0)) i_category (call qdb_sql_null))))
             (order-by
               (order desc
                 (call sum ws_net_paid)))
@@ -52,7 +52,7 @@
       lochierarchy
     )
     (order asc
-      (if (call qdb_is_true (== lochierarchy 0)) i_category)
+      (if (call qdb_is_true (== lochierarchy 0)) i_category (call qdb_sql_null))
     )
     (order asc
       rank_within_parent

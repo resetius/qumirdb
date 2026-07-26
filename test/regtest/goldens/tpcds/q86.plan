@@ -24,6 +24,7 @@
               (set)
               (agg sum_0 sum ws_net_paid)
               (agg sum_1 sum ws_net_paid))
+            (__grouping_id__ __grouping_id__)
             (i_category i_category)
             (i_class i_class)
             (sum_0 sum_0)
@@ -32,7 +33,8 @@
                 (if (== __grouping_id__ (: 1 i32)) 1 (if (== __grouping_id__ (: 2 i32)) 1 0))))
             (wk_1 (if
                 (call qdb_is_true (== (if (== __grouping_id__ (: 1 i32)) 1 (if (== __grouping_id__ (: 2 i32)) 1 0)) 0))
-                i_category)))
+                i_category
+                (call qdb_sql_null))))
           (partition wk_0 wk_1)
           (order (sum_1 desc nulls-default))
           (frame range (start unbounded-preceding) (end current-row))
@@ -43,7 +45,7 @@
         (lochierarchy (+ (if (== __grouping_id__ (: 2 i32)) 1 0)
             (if (== __grouping_id__ (: 1 i32)) 1 (if (== __grouping_id__ (: 2 i32)) 1 0))))
         (rank_within_parent w_0)
-        (__sort_0 (if (call qdb_is_true (== lochierarchy 0)) i_category)))
+        (__sort_0 (if (call qdb_is_true (== lochierarchy 0)) i_category (call qdb_sql_null))))
       (lochierarchy desc nulls-default)
       (__sort_0 asc nulls-default)
       (rank_within_parent asc nulls-default))

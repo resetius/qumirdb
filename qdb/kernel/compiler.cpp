@@ -1206,7 +1206,8 @@ NQumir::NAst::TExprPtr BuildWindowKeyComparatorAst(
 
 // Like BuildSortRunWrapperAst but materializes via window_materialize_row_ids.
 NQumir::NAst::TExprPtr BuildWindowRunWrapperAst(
-    const std::vector<TSortRadixKeyInput>& keys)
+    const std::vector<TSortRadixKeyInput>& keys,
+    bool nullable)
 {
     using namespace NQumir::NAst;
     namespace Oz = NKernel::NOz;
@@ -1242,7 +1243,7 @@ NQumir::NAst::TExprPtr BuildWindowRunWrapperAst(
         auto nullsFirst = Oz::Index(
             "nulls_firsts", Int64Literal(static_cast<int64_t>(keyIdx)));
         sortStmts.push_back(BuildRowIdSortCall(
-            keys[keyIdx], false, std::move(desc), std::move(nullsFirst), "store"));
+            keys[keyIdx], nullable, std::move(desc), std::move(nullsFirst), "store"));
     }
     builder.Stmt(Oz::If(Oz::Ident("do_sort"), Oz::Block(std::move(sortStmts))));
     builder.Stmt(Oz::If(
@@ -1294,7 +1295,12 @@ NQumir::NAst::TExprPtr BuildWindowProgramAst(
     addLibrary("window.oz", true);
     programStmts.push_back(BuildWindowMaterializeWrapperAst(
         inputType, funcs));
-    programStmts.push_back(BuildWindowRunWrapperAst(keys));
+    // Nullable keys need the null-aware radix (nulls segregated to FIRST/LAST);
+    // the non-nullable variant would bucket NULL rows by raw value bytes and
+    // scatter a partition.
+    const bool nullable = std::any_of(keys.begin(), keys.end(),
+        [](const TSortRadixKeyInput& key) { return IsNullableType(key.Type); });
+    programStmts.push_back(BuildWindowRunWrapperAst(keys, nullable));
     return std::make_shared<TBlockExpr>(NQumir::TLocation{}, std::move(programStmts));
 }
 

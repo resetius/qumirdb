@@ -20,7 +20,7 @@
             (partition-by
               (block
                 (+ (call grouping s_state) (call grouping s_county))
-                (if (call qdb_is_true (== (call grouping s_county) 0)) s_state)))
+                (if (call qdb_is_true (== (call grouping s_county) 0)) s_state (call qdb_sql_null))))
             (order-by
               (order desc
                 (call sum ss_net_profit)))
@@ -105,7 +105,7 @@
       lochierarchy
     )
     (order asc
-      (if (call qdb_is_true (== lochierarchy 0)) s_state)
+      (if (call qdb_is_true (== lochierarchy 0)) s_state (call qdb_sql_null))
     )
     (order asc
       rank_within_parent
