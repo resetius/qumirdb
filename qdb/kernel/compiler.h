@@ -81,6 +81,25 @@ NQumir::NAst::TExprPtr BuildTopSortMergeProgramAst(
     const std::vector<TSortRadixKeyInput>& keys,
     const NQumir::NAst::TStructType* materializeType = nullptr);
 
+// One window function to materialize as an appended output column. For now:
+// "sum" over an i64 argument, frame UNBOUNDED PRECEDING .. CURRENT ROW (a
+// running prefix sum, optionally reset by one i64 partition key).
+struct TWindowFuncInput {
+    std::string Func;
+    int32_t ArgColumn = -1;
+    NQumir::NAst::TTypePtr ResultType;
+};
+
+// Window program (entry qdb_window_run, same ABI as qdb_sort_run): optionally
+// sorts the packed TRowId permutation by `keys`, then materializes the [start,
+// limit) slice into a kernel-owned TRowSet whose columns are the input columns
+// (in sorted order) followed by one computed column per window function.
+NQumir::NAst::TExprPtr BuildWindowProgramAst(
+    const std::vector<TSortRadixKeyInput>& keys,
+    const NQumir::NAst::TStructType& inputType,
+    int32_t partitionColumn,
+    const std::vector<TWindowFuncInput>& funcs);
+
 // agg_dispatch(ref HashTable ht, ref TRowSet batch, i64 arg, i64 op) -> i64
 //   op == 0: init(ht, capacity = arg)
 //   op == 1: update ht from *batch (arg ignored)
@@ -293,6 +312,15 @@ public:
     TTopSortDispatch CompileTopSort(
         const std::vector<TSortRadixKeyInput>& keys,
         const NQumir::NAst::TStructType* materializeType = nullptr);
+
+    // Window kernel (entry qdb_window_run, reuses the sort dispatch ABI): sorts
+    // by `keys` (partition ++ order), then materializes input columns followed
+    // by one column per window function.
+    TSortRadixCompositeDispatch CompileWindow(
+        const std::vector<TSortRadixKeyInput>& keys,
+        const NQumir::NAst::TStructType& inputType,
+        int32_t partitionColumn,
+        const std::vector<TWindowFuncInput>& funcs);
 
     // Compiles the per-query generic update and finalize programs for `aggs`
     // grouped by `groupKeys`, over rows of `inputType`.

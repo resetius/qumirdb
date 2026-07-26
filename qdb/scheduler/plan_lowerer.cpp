@@ -3,6 +3,7 @@
 #include <qdb/exec/join_exec.h>
 #include <qdb/exec/planner_helpers.h>
 #include <qdb/exec/sort_exec.h>
+#include <qdb/exec/window_exec.h>
 #include <qdb/io/parquet/source.h>
 #include <qdb/kernel/compiler.h>
 #include <qdb/kernel/finalize.h>
@@ -15,6 +16,7 @@
 #include <qdb/plan/ops/sort.h>
 #include <qdb/plan/ops/union.h>
 #include <qdb/plan/ops/source.h>
+#include <qdb/plan/ops/window.h>
 #include <qdb/plan/types/nullable.h>
 #include <qdb/scheduler/connection.h>
 #include <qdb/scheduler/executor.h>
@@ -87,6 +89,23 @@ struct TSortBlockingState {
     {}
 
     TSortProcessor Processor;
+    bool InputFinished = false;
+};
+
+struct TWindowBlockingState {
+    TWindowBlockingState(
+        NQumir::NAst::TTypePtr outputType,
+        std::vector<TSortKey> keys,
+        std::vector<TSortColumnRef> keyColumns,
+        TSortRadixKernel radixKernel)
+        : Processor(
+            std::move(outputType),
+            std::move(keys),
+            std::move(keyColumns),
+            std::move(radixKernel))
+    {}
+
+    TWindowProcessor Processor;
     bool InputFinished = false;
 };
 
@@ -442,6 +461,16 @@ public:
             }
             return 1;
         }
+        if (auto n = TMaybeOp<TWindowOperator>(op)) {
+            const size_t childLanes = OutputLanes(n.Cast()->Input());
+            if (childLanes == 0) {
+                return 0;
+            }
+            if (!n.Cast()->PartitionKeys().empty() && childLanes > 1) {
+                return JoinPartitions(childLanes);
+            }
+            return 1;
+        }
         if (TMaybeOp<TLimitOperator>(op) ||
             TMaybeOp<TSortOperator>(op) ||
             TMaybeOp<TTopSortOperator>(op))
@@ -563,6 +592,9 @@ public:
         }
         if (auto n = TMaybeOp<TAggregateOperator>(op)) {
             return LowerAggregate(*n.Cast(), outConn, outLaneOffset);
+        }
+        if (auto n = TMaybeOp<TWindowOperator>(op)) {
+            return LowerWindow(*n.Cast(), outConn, outLaneOffset);
         }
         if (auto n = TMaybeOp<TLimitOperator>(op)) {
             return LowerLimit(*n.Cast(), outConn, outLaneOffset);
@@ -777,6 +809,9 @@ private:
             return OutputLanes(n.Cast()->Input()) != 0;
         }
         if (auto n = TMaybeOp<TTopSortOperator>(op)) {
+            return OutputLanes(n.Cast()->Input()) != 0;
+        }
+        if (auto n = TMaybeOp<TWindowOperator>(op)) {
             return OutputLanes(n.Cast()->Input()) != 0;
         }
         return false;
@@ -1789,6 +1824,96 @@ private:
             for (size_t s = 0; s < rightLanes; ++s) {
                 Graph_.AddEdge(
                     *rightShuf.Nodes[s], node, *rightShuf.Connection, s, j);
+            }
+            result.Producers.push_back(&node);
+        }
+        return result;
+    }
+
+    TBlockingTail BuildWindowTail(
+        const NQumir::NAst::TTypePtr& childType,
+        TWindowOperator& window,
+        std::string stage)
+    {
+        TKernelCompilerOptions options = KernelOptions(std::move(stage), &window);
+        auto runtime = BuildWindowRuntimeProcess(window, childType, std::move(options));
+        return TBlockingTail{
+            .Code = MakeSortBlockingCode<TWindowBlockingState>(),
+            .MakeState = [runtime]() -> std::shared_ptr<void> {
+                return std::make_shared<TWindowBlockingState>(
+                    runtime.OutputType,
+                    runtime.Keys,
+                    runtime.KeyColumns,
+                    runtime.Kernel);
+            },
+            .OutputType = runtime.OutputType,
+        };
+    }
+
+    TLoweredOutput LowerWindow(
+        TWindowOperator& window,
+        NScheduler::IConnection& outConn,
+        size_t outLaneOffset)
+    {
+        const size_t childLanes = OutputLanes(window.Input());
+        const auto windowGroup = StageGroup("window", &window);
+
+        if (childLanes <= 1 || window.PartitionKeys().empty()) {
+            return LowerBlocking(
+                window.Input(),
+                "window",
+                windowGroup,
+                [&, windowGroup](const NQumir::NAst::TTypePtr& childType) {
+                    return BuildWindowTail(childType, window, windowGroup);
+                },
+                outConn,
+                outLaneOffset);
+        }
+
+        const size_t parts = JoinPartitions(childLanes);
+        auto& childConnRef = AddConn<NScheduler::TOneToOneConnection>(
+            childLanes, childLanes, "window-shuffle-input");
+        auto childOut = Lower(window.Input(), childConnRef);
+
+        auto childType = childOut.OutputType;
+        auto* childStruct =
+            static_cast<NQumir::NAst::TStructType*>(childType.get());
+        if (!childStruct) {
+            throw std::runtime_error("window input must have TStructType");
+        }
+
+        auto partitionHash = MakeGroupKeyHash(*childStruct, window.PartitionKeys());
+        auto hashCode = MakeHashShuffleCode(std::move(partitionHash), childType);
+        auto shuf = BuildShuffleNodes(
+            childOut,
+            childConnRef,
+            childLanes,
+            parts,
+            std::move(hashCode),
+            "window-shuffle");
+
+        TBlockingTail tail =
+            [&]() {
+                TStageDiagnosticsScope diagnosticsScope(Diagnostics_, windowGroup);
+                return BuildWindowTail(childType, window, windowGroup);
+            }();
+
+        TLoweredOutput result;
+        result.OutputType = tail.OutputType;
+        result.Producers.reserve(parts);
+        for (size_t m = 0; m < parts; ++m) {
+            auto task = std::make_unique<NScheduler::TBlockingTask>(
+                tail.Code,
+                tail.MakeState(),
+                NScheduler::TInputPort{.Connection = shuf.Connection, .Lane = m},
+                NScheduler::TOutputPort{.Connection = &outConn, .Lane = m + outLaneOffset});
+            auto& node = Graph_.AddOwnedNode(std::move(task));
+            MarkNode(node,
+                "window",
+                windowGroup,
+                "window");
+            for (size_t s = 0; s < childLanes; ++s) {
+                Graph_.AddEdge(*shuf.Nodes[s], node, *shuf.Connection, s, m);
             }
             result.Producers.push_back(&node);
         }

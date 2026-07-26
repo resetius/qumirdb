@@ -8,6 +8,7 @@
 #include <qdb/plan/ops/project.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/ops/sort.h>
+#include <qdb/plan/ops/window.h>
 
 #include <iosfwd>
 #include <string>
@@ -62,6 +63,18 @@ TSortRuntimeProcess BuildSortRuntimeProcess(
     const NQumir::NAst::TStructType& inputType,
     const std::vector<TSortKey>& keys,
     std::string_view kernelName,
+    TKernelCompilerOptions options);
+
+struct TWindowRuntimeProcess {
+    NQumir::NAst::TTypePtr OutputType;
+    std::vector<TSortKey> Keys;              // partition (asc) ++ order
+    std::vector<TSortColumnRef> KeyColumns;
+    TSortRadixKernel Kernel;                 // Kernel.Dispatch = window kernel
+};
+
+TWindowRuntimeProcess BuildWindowRuntimeProcess(
+    TWindowOperator& window,
+    const NQumir::NAst::TTypePtr& inputType,
     TKernelCompilerOptions options);
 
 } // namespace NQdb
