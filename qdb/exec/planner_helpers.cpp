@@ -399,7 +399,7 @@ TWindowRuntimeProcess BuildWindowRuntimeProcess(
     std::vector<TSortColumnRef> keyColumns;
     std::vector<TSortRadixKeyInput> radixKeys;
     std::vector<TSortRadixKeyInput> partitionRadixKeys;
-    int32_t orderColumn = -1;
+    std::vector<TSortRadixKeyInput> orderRadixKeys;
     for (const auto& key : keys) {
         const int32_t idx = fieldIndex(key.Column);
         const auto& type = inputStruct->Fields[idx].second;
@@ -412,24 +412,17 @@ TWindowRuntimeProcess BuildWindowRuntimeProcess(
         keyColumns.push_back({.Index = idx, .Type = type});
         if (partitionRadixKeys.size() < window.PartitionKeys().size()) {
             partitionRadixKeys.push_back(radixKey);
+        } else {
+            orderRadixKeys.push_back(radixKey);
         }
         radixKeys.push_back(std::move(radixKey));
     }
-    const bool hasRank = std::any_of(
-        window.Functions().begin(), window.Functions().end(),
-        [](const TWindowFunc& fn) { return fn.Func == "rank"; });
-    if (hasRank && window.OrderKeys().size() > 1) {
-        throw std::runtime_error("window exec supports at most one order key for rank yet");
-    }
-    if (!window.OrderKeys().empty()) {
-        orderColumn = fieldIndex(window.OrderKeys()[0].Column);
-    }
 
-    // Each window function becomes an appended output column (currently: sum
-    // over an i64 argument, running prefix; rank over one i64 order key).
+    // Each window function becomes an appended output column. Ordered sum is a
+    // running prefix; avg is currently full-partition only (no ORDER BY).
     std::vector<TWindowFuncInput> funcs;
     for (const auto& fn : window.Functions()) {
-        if (fn.Func != "sum" && fn.Func != "rank") {
+        if (fn.Func != "sum" && fn.Func != "rank" && fn.Func != "avg") {
             throw std::runtime_error(
                 "window function not supported in exec yet: " + fn.Func);
         }
@@ -437,21 +430,8 @@ TWindowRuntimeProcess BuildWindowRuntimeProcess(
             if (fn.Arg) {
                 throw std::runtime_error("window rank does not accept an argument");
             }
-            if (orderColumn < 0) {
+            if (orderRadixKeys.empty()) {
                 throw std::runtime_error("window rank requires an order key yet");
-            }
-            auto orderType = inputStruct->Fields[orderColumn].second;
-            auto orderValueType = UnwrapNullableType(orderType);
-            const bool isBinInt =
-                IsDecimalType(orderValueType) || IsBinIntStorageType(orderValueType);
-            auto inner = UnwrapNamedType(orderValueType);
-            auto integer = TMaybeType<TIntegerType>(inner);
-            const bool isFixedRankOrder =
-                isBinInt || static_cast<bool>(integer) ||
-                static_cast<bool>(TMaybeType<TFloatType>(inner));
-            if (!isFixedRankOrder) {
-                throw std::runtime_error(
-                    "window exec supports only fixed-width order keys for rank yet");
             }
             funcs.push_back({
                 .Func = fn.Func,
@@ -461,11 +441,32 @@ TWindowRuntimeProcess BuildWindowRuntimeProcess(
         }
         auto ident = TMaybeNode<TIdentExpr>(fn.Arg);
         if (!ident) {
-            throw std::runtime_error("window sum requires a column argument");
+            throw std::runtime_error("window " + fn.Func + " requires a column argument");
         }
         const int32_t idx = fieldIndex(ident.Cast()->Name);
-        auto inner = UnwrapNamedType(UnwrapNullableType(inputStruct->Fields[idx].second));
+        const auto& argType = inputStruct->Fields[idx].second;
+        auto valueType = UnwrapNullableType(argType);
+        const bool isBinInt =
+            IsDecimalType(valueType) || IsBinIntStorageType(valueType);
+        auto inner = UnwrapNamedType(valueType);
         auto integer = TMaybeType<TIntegerType>(inner);
+        if (fn.Func == "avg") {
+            if (!window.OrderKeys().empty()) {
+                throw std::runtime_error(
+                    "window avg supports only full-partition frames yet");
+            }
+            if (!isBinInt && !TMaybeType<TFloatType>(inner) &&
+                (!integer || integer.Cast()->BitWidth() != 64)) {
+                throw std::runtime_error(
+                    "window exec supports only i64/f64/decimal arguments for avg yet");
+            }
+            funcs.push_back({
+                .Func = fn.Func,
+                .ArgColumn = idx,
+                .ResultType = isBinInt ? argType : std::make_shared<TFloatType>(),
+            });
+            continue;
+        }
         if (!integer || integer.Cast()->BitWidth() != 64) {
             throw std::runtime_error(
                 "window exec supports only i64 arguments for running sum yet");
@@ -481,7 +482,7 @@ TWindowRuntimeProcess BuildWindowRuntimeProcess(
     TSortRadixKernel kernel;
     kernel.Enabled = true;
     kernel.Dispatch = compiler.CompileWindow(
-        radixKeys, *inputStruct, partitionRadixKeys, orderColumn, funcs);
+        radixKeys, *inputStruct, partitionRadixKeys, orderRadixKeys, funcs);
 
     return {
         .OutputType = ComputeWindowOutputType(inputType, window.Functions()),

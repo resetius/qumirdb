@@ -239,6 +239,113 @@ TEST(WindowExec, RankResetsPerStringAndI64Partition) {
     EXPECT_FALSE(runtime->Next(second));
 }
 
+TEST(WindowExec, AvgI64BroadcastsPerPartition) {
+    std::array<int64_t, 5> keys = {2, 1, 1, 2, 1};
+    std::array<int64_t, 5> values = {10, 3, 6, 30, 12};
+
+    std::vector<TColumn> columns = {
+        TColumn{.Data = reinterpret_cast<char*>(keys.data())},
+        TColumn{.Data = reinterpret_cast<char*>(values.data())},
+    };
+    std::vector<TRowSet> batches = {TRowSet{
+        .Columns = columns.data(),
+        .ColumnCount = 2,
+        .RowCount = static_cast<int64_t>(keys.size()),
+        .Selection = nullptr,
+        .RefCount = 1,
+    }};
+    TMockSource source({"k", "v"}, std::move(batches));
+
+    auto root = ParsePlan(
+        "(rel window (rel source \"data.parquet\") "
+        "(partition k) "
+        "(fn avg_v avg v))",
+        source);
+
+    auto runtime = RunPlan(root);
+
+    TRowSet result{};
+    ASSERT_TRUE(runtime->Next(result));
+    ASSERT_EQ(result.ColumnCount, 3);
+    ASSERT_EQ(result.RowCount, 5);
+
+    auto* outKeys = reinterpret_cast<int64_t*>(result.Columns[0].Data);
+    auto* outValues = reinterpret_cast<int64_t*>(result.Columns[1].Data);
+    auto* outAvg = reinterpret_cast<double*>(result.Columns[2].Data);
+
+    const std::array<int64_t, 5> expectedKeys = {1, 1, 1, 2, 2};
+    const std::array<int64_t, 5> expectedValues = {3, 6, 12, 10, 30};
+    const std::array<double, 5> expectedAvg = {7.0, 7.0, 7.0, 20.0, 20.0};
+
+    for (int64_t row = 0; row < result.RowCount; ++row) {
+        EXPECT_EQ(outKeys[row], expectedKeys[row]) << "row " << row;
+        EXPECT_EQ(outValues[row], expectedValues[row]) << "row " << row;
+        EXPECT_DOUBLE_EQ(outAvg[row], expectedAvg[row]) << "row " << row;
+    }
+
+    Release(&result);
+
+    TRowSet second{};
+    EXPECT_FALSE(runtime->Next(second));
+}
+
+TEST(WindowExec, AvgDecimalBroadcastsPerPartition) {
+    std::array<int64_t, 5> keys = {2, 1, 1, 2, 1};
+    std::array<qdb_bin_int, 5> values = {{
+        {.Lo = 1000, .Hi = 0},
+        {.Lo = 300, .Hi = 0},
+        {.Lo = 600, .Hi = 0},
+        {.Lo = 3000, .Hi = 0},
+        {.Lo = 1200, .Hi = 0},
+    }};
+
+    std::vector<TColumn> columns = {
+        TColumn{.Data = reinterpret_cast<char*>(keys.data())},
+        TColumn{.Data = reinterpret_cast<char*>(values.data())},
+    };
+    std::vector<TRowSet> batches = {TRowSet{
+        .Columns = columns.data(),
+        .ColumnCount = 2,
+        .RowCount = static_cast<int64_t>(keys.size()),
+        .Selection = nullptr,
+        .RefCount = 1,
+    }};
+    TMockSource source(
+        {"k", "v"},
+        std::move(batches),
+        {std::make_shared<NQumir::NAst::TIntegerType>(), std::make_shared<TDecimal>(15, 2)});
+
+    auto root = ParsePlan(
+        "(rel window (rel source \"data.parquet\") "
+        "(partition k) "
+        "(fn avg_v avg v))",
+        source);
+
+    auto runtime = RunPlan(root);
+
+    TRowSet result{};
+    ASSERT_TRUE(runtime->Next(result));
+    ASSERT_EQ(result.ColumnCount, 3);
+    ASSERT_EQ(result.RowCount, 5);
+
+    auto* outKeys = reinterpret_cast<int64_t*>(result.Columns[0].Data);
+    auto* outAvg = reinterpret_cast<qdb_bin_int*>(result.Columns[2].Data);
+
+    const std::array<int64_t, 5> expectedKeys = {1, 1, 1, 2, 2};
+    const std::array<uint64_t, 5> expectedAvg = {700, 700, 700, 2000, 2000};
+
+    for (int64_t row = 0; row < result.RowCount; ++row) {
+        EXPECT_EQ(outKeys[row], expectedKeys[row]) << "row " << row;
+        EXPECT_EQ(outAvg[row].Lo, expectedAvg[row]) << "row " << row;
+        EXPECT_EQ(outAvg[row].Hi, 0u) << "row " << row;
+    }
+
+    Release(&result);
+
+    TRowSet second{};
+    EXPECT_FALSE(runtime->Next(second));
+}
+
 TEST(WindowExec, RankI64WithoutPartition) {
     std::array<int64_t, 5> order = {30, 10, 20, 20, 10};
     std::array<int64_t, 5> payload = {3, 1, 2, 4, 5};

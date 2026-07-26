@@ -97,7 +97,7 @@ NQumir::NAst::TExprPtr BuildWindowProgramAst(
     const std::vector<TSortRadixKeyInput>& keys,
     const NQumir::NAst::TStructType& inputType,
     const std::vector<TSortRadixKeyInput>& partitionKeys,
-    int32_t orderColumn,
+    const std::vector<TSortRadixKeyInput>& orderKeys,
     const std::vector<TWindowFuncInput>& funcs);
 
 // agg_dispatch(ref HashTable ht, ref TRowSet batch, i64 arg, i64 op) -> i64
@@ -320,7 +320,7 @@ public:
         const std::vector<TSortRadixKeyInput>& keys,
         const NQumir::NAst::TStructType& inputType,
         const std::vector<TSortRadixKeyInput>& partitionKeys,
-        int32_t orderColumn,
+        const std::vector<TSortRadixKeyInput>& orderKeys,
         const std::vector<TWindowFuncInput>& funcs);
 
     // Compiles the per-query generic update and finalize programs for `aggs`

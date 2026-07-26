@@ -911,7 +911,6 @@ void AddSortMaterializeLibrary(
 // over the sorted row-id slice (window.oz).
 NQumir::NAst::TExprPtr BuildWindowMaterializeWrapperAst(
     const NQumir::NAst::TStructType& inputType,
-    int32_t orderColumn,
     const std::vector<TWindowFuncInput>& funcs)
 {
     using namespace NQumir::NAst;
@@ -1010,21 +1009,36 @@ NQumir::NAst::TExprPtr BuildWindowMaterializeWrapperAst(
     for (size_t f = 0; f < funcs.size(); ++f) {
         const int64_t dataOwner = ownerIdx++;
         if (funcs[f].Func == "rank") {
-            const auto& orderType =
-                inputType.Fields[static_cast<size_t>(orderColumn)].second;
-            auto orderCoreType = SortValueIsBinInt(orderType)
-                ? BinIntStorageType()
-                : SortCoreType(orderType);
-            if (!orderCoreType) {
-                throw NQumir::TError(
-                    "BuildWindowMaterializeWrapperAst: unsupported rank order type " +
-                    (orderType ? orderType->ToString() : std::string("<null>")));
-            }
             builder.Stmt(Oz::Call("window_fill_rank", {
                 Oz::Ident("store"), Oz::Ident("row_ids"), Oz::Ident("start"),
                 Oz::Ident("n"),
-                Int64Literal(static_cast<int64_t>(orderColumn)),
-                Cast(Int64Literal(0), Ptr(std::move(orderCoreType))),
+                column(static_cast<size_t>(inputColumnCount) + f),
+                Oz::Ident("out_rowset"), Int64Literal(dataOwner),
+            }));
+        } else if (funcs[f].Func == "avg") {
+            const auto& argType =
+                inputType.Fields[static_cast<size_t>(funcs[f].ArgColumn)].second;
+            if (SortValueIsBinInt(argType)) {
+                builder.Stmt(Oz::Call("window_fill_partition_avg_binint", {
+                    Oz::Ident("store"), Oz::Ident("row_ids"), Oz::Ident("start"),
+                    Oz::Ident("n"),
+                    Int64Literal(static_cast<int64_t>(funcs[f].ArgColumn)),
+                    column(static_cast<size_t>(inputColumnCount) + f),
+                    Oz::Ident("out_rowset"), Int64Literal(dataOwner),
+                }));
+                continue;
+            }
+            auto argCoreType = SortCoreType(argType);
+            if (!argCoreType) {
+                throw NQumir::TError(
+                    "BuildWindowMaterializeWrapperAst: unsupported avg argument type " +
+                    (argType ? argType->ToString() : std::string("<null>")));
+            }
+            builder.Stmt(Oz::Call("window_fill_partition_avg_f64", {
+                Oz::Ident("store"), Oz::Ident("row_ids"), Oz::Ident("start"),
+                Oz::Ident("n"),
+                Int64Literal(static_cast<int64_t>(funcs[f].ArgColumn)),
+                Cast(Int64Literal(0), Ptr(std::move(argCoreType))),
                 column(static_cast<size_t>(inputColumnCount) + f),
                 Oz::Ident("out_rowset"), Int64Literal(dataOwner),
             }));
@@ -1042,8 +1056,9 @@ NQumir::NAst::TExprPtr BuildWindowMaterializeWrapperAst(
     return std::move(builder).Build();
 }
 
-NQumir::NAst::TExprPtr BuildWindowPartitionComparatorAst(
-    const std::vector<TSortRadixKeyInput>& partitionKeys)
+NQumir::NAst::TExprPtr BuildWindowKeyComparatorAst(
+    std::string name,
+    const std::vector<TSortRadixKeyInput>& keys)
 {
     using namespace NQumir::NAst;
     namespace Oz = NKernel::NOz;
@@ -1052,15 +1067,15 @@ NQumir::NAst::TExprPtr BuildWindowPartitionComparatorAst(
     auto boolType = std::make_shared<TBoolType>();
     auto rowSetPtrType = Ptr(QumirDbNamedType("TRowSet"));
 
-    Oz::TFunBuilder builder("window_same_partition");
+    Oz::TFunBuilder builder(std::move(name));
     builder
         .Param("store", rowSetPtrType)
         .Param("left_row_id", i64Type)
         .Param("right_row_id", i64Type)
         .Return(boolType);
 
-    for (size_t i = 0; i < partitionKeys.size(); ++i) {
-        const auto& key = partitionKeys[i];
+    for (size_t i = 0; i < keys.size(); ++i) {
+        const auto& key = keys[i];
         const auto columnIdx = Int64Literal(static_cast<int64_t>(key.ColumnIndex));
         const std::string leftValid = "left_valid_" + std::to_string(i);
         const std::string rightValid = "right_valid_" + std::to_string(i);
@@ -1202,7 +1217,7 @@ NQumir::NAst::TExprPtr BuildWindowProgramAst(
     const std::vector<TSortRadixKeyInput>& keys,
     const NQumir::NAst::TStructType& inputType,
     const std::vector<TSortRadixKeyInput>& partitionKeys,
-    int32_t orderColumn,
+    const std::vector<TSortRadixKeyInput>& orderKeys,
     const std::vector<TWindowFuncInput>& funcs)
 {
     using namespace NQumir::NAst;
@@ -1225,10 +1240,13 @@ NQumir::NAst::TExprPtr BuildWindowProgramAst(
     addLibrary("radix.oz", false);
     addLibrary("sort_rowids.oz", true);
     AddSortMaterializeLibrary(programStmts, "BuildWindowProgramAst");
-    programStmts.push_back(BuildWindowPartitionComparatorAst(partitionKeys));
+    programStmts.push_back(BuildWindowKeyComparatorAst(
+        "window_same_partition", partitionKeys));
+    programStmts.push_back(BuildWindowKeyComparatorAst(
+        "window_same_order", orderKeys));
     addLibrary("window.oz", true);
     programStmts.push_back(BuildWindowMaterializeWrapperAst(
-        inputType, orderColumn, funcs));
+        inputType, funcs));
     programStmts.push_back(BuildWindowRunWrapperAst(keys));
     return std::make_shared<TBlockExpr>(NQumir::TLocation{}, std::move(programStmts));
 }
@@ -1481,7 +1499,7 @@ TKernelCompiler::CompileWindow(
     const std::vector<TSortRadixKeyInput>& keys,
     const NQumir::NAst::TStructType& inputType,
     const std::vector<TSortRadixKeyInput>& partitionKeys,
-    int32_t orderColumn,
+    const std::vector<TSortRadixKeyInput>& orderKeys,
     const std::vector<TWindowFuncInput>& funcs)
 {
     using namespace NQumir::NAst;
@@ -1490,7 +1508,7 @@ TKernelCompiler::CompileWindow(
     }
 
     auto program = BuildWindowProgramAst(
-        keys, inputType, partitionKeys, orderColumn, funcs);
+        keys, inputType, partitionKeys, orderKeys, funcs);
     PrintKernelAst(Diagnostics_, "window.run.fused", program);
 
     auto kernel = EmitKernel(
