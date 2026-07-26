@@ -288,25 +288,43 @@ function ensureBenchmarkQueries(queries) {
   ];
 }
 
+function benchmarkQueryMetaById() {
+  const meta = new Map();
+  for (const set of benchmarkQuerySets()) {
+    set.queries.forEach((query, index) => {
+      meta.set(query.id, { folderId: set.folderId, index });
+    });
+  }
+  return meta;
+}
+
 function normalizeQueries(queries) {
   const folderIds = new Set(loadQueryFolders().map(folder => folder.id));
-  const benchmarkFolderByQueryId = new Map();
-  for (const set of benchmarkQuerySets()) {
-    for (const query of set.queries) {
-      benchmarkFolderByQueryId.set(query.id, set.folderId);
-    }
-  }
-  return (Array.isArray(queries) ? queries : [])
+  const benchmarkMetaByQueryId = benchmarkQueryMetaById();
+  const normalized = (Array.isArray(queries) ? queries : [])
     .filter(query => query && query.id && query.name)
     .filter(query => !OBSOLETE_BENCHMARK_QUERY_IDS.has(query.id))
     .map(query => {
-      const fallbackFolderId = benchmarkFolderByQueryId.get(query.id) ||
+      const benchmarkMeta = benchmarkMetaByQueryId.get(query.id);
+      const fallbackFolderId = benchmarkMeta?.folderId ||
         DEFAULT_QUERY_FOLDER_ID;
       const folderId = folderIds.has(query.folderId)
         ? query.folderId
         : fallbackFolderId;
       return { ...query, folderId };
     });
+  normalized.sort((left, right) => {
+    const leftMeta = benchmarkMetaByQueryId.get(left.id);
+    const rightMeta = benchmarkMetaByQueryId.get(right.id);
+    if (!leftMeta || !rightMeta || leftMeta.folderId !== rightMeta.folderId) {
+      return 0;
+    }
+    if (left.folderId !== leftMeta.folderId || right.folderId !== rightMeta.folderId) {
+      return 0;
+    }
+    return leftMeta.index - rightMeta.index;
+  });
+  return normalized;
 }
 
 function loadQueries() {
