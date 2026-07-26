@@ -355,6 +355,45 @@ TEST(SqlGroupingE2E, RollupGroupingColumns) {
     }));
 }
 
+TEST(SqlGroupingE2E, GroupingExpressionSurvivesWindowExtraction) {
+    const std::string categories = "aabb";
+    std::array<int64_t, 5> categoryOffsets = {0, 1, 2, 3, 4};
+    std::array<int64_t, 4> classes = {10, 20, 10, 20};
+    std::array<int64_t, 4> values = {5, 7, 11, 13};
+    std::array<TColumn, 3> cols = {
+        TColumn{
+            .Data = const_cast<char*>(categories.data()),
+            .Offsets = categoryOffsets.data(),
+            .OffsetWidth = 8,
+        },
+        TColumn{.Data = reinterpret_cast<char*>(classes.data())},
+        TColumn{.Data = reinterpret_cast<char*>(values.data())},
+    };
+    TRowSet batch{.Columns = cols.data(), .ColumnCount = 3, .RowCount = 4, .RefCount = 1};
+    TMockSource t(
+        {"category", "class", "value"},
+        {std::make_shared<TStringType>(),
+         std::make_shared<TIntegerType>(),
+         std::make_shared<TIntegerType>()},
+        {batch});
+
+    auto plan = SqlPlan(
+        "select grouping(category)+grouping(class) as lochierarchy, "
+        "rank() over (partition by grouping(category)+grouping(class), "
+        "case when grouping(class) = 0 then category end "
+        "order by sum(value) desc) as rank_within_parent "
+        "from t group by rollup(category, class);",
+        {{"t", &t}});
+
+    int64_t rows = 0;
+    TRowSet out{};
+    while (plan->Next(out)) {
+        rows += out.RowCount;
+        Release(&out);
+    }
+    EXPECT_EQ(rows, 7);
+}
+
 TEST(SqlStddevSampE2E, GlobalFloat) {
     std::array<double, 3> v = {1.0, 2.0, 3.0};
     std::array<TColumn, 1> cols = {
@@ -533,6 +572,48 @@ TEST(ProjectE2E, NormalizesBareNullIfBranchBeforeProjectKernel) {
     EXPECT_FALSE(IsValid(out.Columns[0], 3));
     EXPECT_EQ(maybeValue[0], values[0]);
     EXPECT_EQ(maybeValue[2], values[2]);
+    Release(&out);
+    EXPECT_FALSE(plan->Next(out));
+}
+
+TEST(ProjectE2E, NormalizesBareNullStringIfBranchBeforeProjectKernel) {
+    std::array<int64_t, 4> flags = {0, 1, 0, 1};
+    const std::string labels = "abcd";
+    std::array<int64_t, 5> offsets = {0, 1, 2, 3, 4};
+    std::array<TColumn, 2> cols = {
+        TColumn{.Data = reinterpret_cast<char*>(flags.data())},
+        TColumn{
+            .Data = const_cast<char*>(labels.data()),
+            .Offsets = offsets.data(),
+            .OffsetWidth = 8,
+        },
+    };
+    TRowSet batch{.Columns = cols.data(), .ColumnCount = 2, .RowCount = 4, .RefCount = 1};
+    NQdb::TMockSource src(
+        {"flag", "label"},
+        {std::make_shared<TIntegerType>(), std::make_shared<TStringType>()},
+        {batch});
+
+    auto plan = Plan(
+        "(rel project (rel source \"L\") "
+        "(maybe_label (if (call qdb_is_true (== flag (: 0 i64))) "
+        "label (call qdb_sql_null))))",
+        src);
+
+    auto* outType = static_cast<TStructType*>(plan->OutputType().get());
+    ASSERT_EQ(outType->Fields.size(), 1u);
+    ASSERT_TRUE(IsNullableType(outType->Fields[0].second));
+    EXPECT_TRUE(TMaybeType<TStringType>(UnwrapNullableType(outType->Fields[0].second)));
+
+    TRowSet out{};
+    ASSERT_TRUE(plan->Next(out));
+    ASSERT_EQ(out.ColumnCount, 1);
+    ASSERT_EQ(out.RowCount, 4);
+    ASSERT_NE(out.Columns[0].Mask, nullptr);
+    EXPECT_TRUE(IsValid(out.Columns[0], 0));
+    EXPECT_FALSE(IsValid(out.Columns[0], 1));
+    EXPECT_TRUE(IsValid(out.Columns[0], 2));
+    EXPECT_FALSE(IsValid(out.Columns[0], 3));
     Release(&out);
     EXPECT_FALSE(plan->Next(out));
 }

@@ -1799,6 +1799,8 @@ TAstExprTask case_expr(TParserContext& ctx) {
     if (IsKeyword(token, "ELSE")) {
         ret = co_await expr(ctx);
         token = ctx.Stream.Next();
+    } else {
+        ret = call(loc, "qdb_sql_null", {});
     }
 
     if (!IsKeyword(token, "END")) {
