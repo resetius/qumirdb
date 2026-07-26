@@ -450,12 +450,15 @@ TWindowRuntimeProcess BuildWindowRuntimeProcess(
             if (orderColumn < 0) {
                 throw std::runtime_error("window rank requires an order key yet");
             }
-            auto inner = UnwrapNamedType(UnwrapNullableType(
-                inputStruct->Fields[orderColumn].second));
+            auto orderType = inputStruct->Fields[orderColumn].second;
+            auto orderValueType = UnwrapNullableType(orderType);
+            const bool isBinInt =
+                IsDecimalType(orderValueType) || IsBinIntStorageType(orderValueType);
+            auto inner = UnwrapNamedType(orderValueType);
             auto integer = TMaybeType<TIntegerType>(inner);
-            if (!integer || integer.Cast()->BitWidth() != 64) {
+            if (!isBinInt && (!integer || integer.Cast()->BitWidth() != 64)) {
                 throw std::runtime_error(
-                    "window exec supports only i64 order keys for rank yet");
+                    "window exec supports only i64/decimal order keys for rank yet");
             }
             funcs.push_back({
                 .Func = fn.Func,

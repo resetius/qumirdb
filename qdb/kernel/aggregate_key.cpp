@@ -1,4 +1,5 @@
 #include <qdb/kernel/aggregate_key.h>
+#include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
 
 #include <qumir/error.h>
@@ -20,6 +21,9 @@ using TRepresentedType = TRepresentedKeyType;
 TLayout TypeLayout(const NQumir::NAst::TTypePtr& original) {
     using namespace NQumir::NAst;
 
+    if (IsDecimalType(original) || IsBinIntStorageType(original)) {
+        return {16, 8};
+    }
     auto type = UnwrapNamedType(original);
     if (auto integer = TMaybeType<TIntegerType>(type)) {
         const size_t size = static_cast<size_t>(integer.Cast()->BitWidth() / 8);
@@ -80,6 +84,16 @@ TRepresentedKeyType RepresentKeyType(const NQumir::NAst::TTypePtr& original) {
 
     const bool nullable = IsNullableType(original);
     auto inner = nullable ? UnwrapNullableType(original) : original;
+    if (IsDecimalType(inner) || IsBinIntStorageType(inner)) {
+        auto storage = BinIntStorageType();
+        return {
+            .Lookup = storage,
+            .Stored = storage,
+            .Layout = TypeLayout(storage),
+            .Nullable = nullable,
+            .Inner = storage,
+        };
+    }
     auto type = UnwrapNamedType(inner);
     if (TMaybeType<TStringType>(type)) {
         return {

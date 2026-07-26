@@ -25,11 +25,12 @@
       (return (== (call sr_load_fixed_key store left_row_id partition_col witness)
                   (call sr_load_fixed_key store right_row_id partition_col witness)))))
 
-  (fun window_same_i64_order
+  (fun window_same_order [Value]
        ((var store <ptr TRowSet>)
         (var left_row_id i64)
         (var right_row_id i64)
-        (var order_col i64)) -> bool
+        (var order_col i64)
+        (var witness <ptr Value>)) -> bool
     (block
       (if (< order_col (: 0 i64))
         (block (return #t)))
@@ -39,7 +40,6 @@
         (block (return #f)))
       (if (! left_valid)
         (block (return #t)))
-      (var witness = (cast (: 0 i64) <ptr i64>))
       (return (== (call sr_load_fixed_key store left_row_id order_col witness)
                   (call sr_load_fixed_key store right_row_id order_col witness)))))
 
@@ -92,16 +92,17 @@
           (= data [i] acc)
           (= i (+ i (: 1 i64)))))))
 
-  ;; rank() OVER (PARTITION BY optional_i64 ORDER BY i64). Peers with the same
-  ;; order key keep the same rank; the next distinct peer gets its 1-based row
-  ;; position inside the partition.
-  (fun window_fill_rank_i64
+  ;; rank() OVER (PARTITION BY optional_i64 ORDER BY fixed-width). Peers with
+  ;; the same order key keep the same rank; the next distinct peer gets its
+  ;; 1-based row position inside the partition.
+  (fun window_fill_rank [OrderValue]
        ((var store <ptr TRowSet>)
         (var row_ids <ptr i64>)
         (var start i64)
         (var n i64)
         (var partition_col i64)
         (var order_col i64)
+        (var order_witness <ptr OrderValue>)
         (var out_col <ref TColumn>)
         (var out <ref TRowSet>)
         (var data_owner_idx i64))
@@ -123,8 +124,8 @@
                   (= pos (: 1 i64)))
                 (block
                   (= pos (+ pos (: 1 i64)))
-                  (if (! (call window_same_i64_order
-                            store prev_row_id row_id order_col))
+                  (if (! (call window_same_order
+                            store prev_row_id row_id order_col order_witness))
                     (block (= rank pos)))))))
           (= data [i] rank)
           (= i (+ i (: 1 i64)))))))

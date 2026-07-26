@@ -17,6 +17,7 @@
 #include <qdb/plan/ops/union.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/ops/window.h>
+#include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
 #include <qdb/scheduler/connection.h>
 #include <qdb/scheduler/executor.h>
@@ -338,8 +339,11 @@ inline std::function<bool(TRowSet*, uint64_t*)> MakeGroupKeyHash(
         }
         TKeyColumn kc;
         kc.Index = index;
-        auto inner = UnwrapNamedType(UnwrapNullableType(fieldType));
-        if (TMaybeType<TStringType>(inner)) {
+        auto valueType = UnwrapNullableType(fieldType);
+        if (IsDecimalType(valueType) || IsBinIntStorageType(valueType)) {
+            kc.Width = 16;
+        } else if (auto inner = UnwrapNamedType(valueType);
+            TMaybeType<TStringType>(inner)) {
             kc.IsString = true;
         } else if (TMaybeType<TBoolType>(inner)) {
             kc.IsBool = true;
