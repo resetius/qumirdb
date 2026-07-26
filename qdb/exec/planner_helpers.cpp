@@ -399,6 +399,7 @@ TWindowRuntimeProcess BuildWindowRuntimeProcess(
     std::vector<TSortColumnRef> keyColumns;
     std::vector<TSortRadixKeyInput> radixKeys;
     int32_t partitionColumn = -1;
+    int32_t orderColumn = -1;
     for (const auto& key : keys) {
         const int32_t idx = fieldIndex(key.Column);
         const auto& type = inputStruct->Fields[idx].second;
@@ -412,7 +413,7 @@ TWindowRuntimeProcess BuildWindowRuntimeProcess(
     }
     if (window.PartitionKeys().size() > 1) {
         throw std::runtime_error(
-            "window exec supports at most one partition key for running sum yet");
+            "window exec supports at most one partition key yet");
     }
     if (!window.PartitionKeys().empty()) {
         partitionColumn = fieldIndex(window.PartitionKeys()[0]);
@@ -421,17 +422,46 @@ TWindowRuntimeProcess BuildWindowRuntimeProcess(
         auto integer = TMaybeType<TIntegerType>(inner);
         if (!integer || integer.Cast()->BitWidth() != 64) {
             throw std::runtime_error(
-                "window exec supports only i64 partition keys for running sum yet");
+                "window exec supports only i64 partition keys yet");
         }
+    }
+    const bool hasRank = std::any_of(
+        window.Functions().begin(), window.Functions().end(),
+        [](const TWindowFunc& fn) { return fn.Func == "rank"; });
+    if (hasRank && window.OrderKeys().size() > 1) {
+        throw std::runtime_error("window exec supports at most one order key for rank yet");
+    }
+    if (!window.OrderKeys().empty()) {
+        orderColumn = fieldIndex(window.OrderKeys()[0].Column);
     }
 
     // Each window function becomes an appended output column (currently: sum
-    // over an i64 argument, running prefix).
+    // over an i64 argument, running prefix; rank over one i64 order key).
     std::vector<TWindowFuncInput> funcs;
     for (const auto& fn : window.Functions()) {
-        if (fn.Func != "sum") {
+        if (fn.Func != "sum" && fn.Func != "rank") {
             throw std::runtime_error(
                 "window function not supported in exec yet: " + fn.Func);
+        }
+        if (fn.Func == "rank") {
+            if (fn.Arg) {
+                throw std::runtime_error("window rank does not accept an argument");
+            }
+            if (orderColumn < 0) {
+                throw std::runtime_error("window rank requires an order key yet");
+            }
+            auto inner = UnwrapNamedType(UnwrapNullableType(
+                inputStruct->Fields[orderColumn].second));
+            auto integer = TMaybeType<TIntegerType>(inner);
+            if (!integer || integer.Cast()->BitWidth() != 64) {
+                throw std::runtime_error(
+                    "window exec supports only i64 order keys for rank yet");
+            }
+            funcs.push_back({
+                .Func = fn.Func,
+                .ResultType = std::make_shared<TIntegerType>(),
+            });
+            continue;
         }
         auto ident = TMaybeNode<TIdentExpr>(fn.Arg);
         if (!ident) {
@@ -455,7 +485,7 @@ TWindowRuntimeProcess BuildWindowRuntimeProcess(
     TSortRadixKernel kernel;
     kernel.Enabled = true;
     kernel.Dispatch = compiler.CompileWindow(
-        radixKeys, *inputStruct, partitionColumn, funcs);
+        radixKeys, *inputStruct, partitionColumn, orderColumn, funcs);
 
     return {
         .OutputType = ComputeWindowOutputType(inputType, window.Functions()),

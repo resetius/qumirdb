@@ -912,6 +912,7 @@ void AddSortMaterializeLibrary(
 NQumir::NAst::TExprPtr BuildWindowMaterializeWrapperAst(
     const NQumir::NAst::TStructType& inputType,
     int32_t partitionColumn,
+    int32_t orderColumn,
     const std::vector<TWindowFuncInput>& funcs)
 {
     using namespace NQumir::NAst;
@@ -1009,13 +1010,24 @@ NQumir::NAst::TExprPtr BuildWindowMaterializeWrapperAst(
 
     for (size_t f = 0; f < funcs.size(); ++f) {
         const int64_t dataOwner = ownerIdx++;
-        builder.Stmt(Oz::Call("window_fill_prefix_sum_i64", {
-            Oz::Ident("store"), Oz::Ident("row_ids"), Oz::Ident("start"),
-            Oz::Ident("n"), Int64Literal(static_cast<int64_t>(funcs[f].ArgColumn)),
-            Int64Literal(static_cast<int64_t>(partitionColumn)),
-            column(static_cast<size_t>(inputColumnCount) + f),
-            Oz::Ident("out_rowset"), Int64Literal(dataOwner),
-        }));
+        if (funcs[f].Func == "rank") {
+            builder.Stmt(Oz::Call("window_fill_rank_i64", {
+                Oz::Ident("store"), Oz::Ident("row_ids"), Oz::Ident("start"),
+                Oz::Ident("n"),
+                Int64Literal(static_cast<int64_t>(partitionColumn)),
+                Int64Literal(static_cast<int64_t>(orderColumn)),
+                column(static_cast<size_t>(inputColumnCount) + f),
+                Oz::Ident("out_rowset"), Int64Literal(dataOwner),
+            }));
+        } else {
+            builder.Stmt(Oz::Call("window_fill_prefix_sum_i64", {
+                Oz::Ident("store"), Oz::Ident("row_ids"), Oz::Ident("start"),
+                Oz::Ident("n"), Int64Literal(static_cast<int64_t>(funcs[f].ArgColumn)),
+                Int64Literal(static_cast<int64_t>(partitionColumn)),
+                column(static_cast<size_t>(inputColumnCount) + f),
+                Oz::Ident("out_rowset"), Int64Literal(dataOwner),
+            }));
+        }
     }
 
     builder.Stmt(Oz::Return(Oz::Ident("n")));
@@ -1082,6 +1094,7 @@ NQumir::NAst::TExprPtr BuildWindowProgramAst(
     const std::vector<TSortRadixKeyInput>& keys,
     const NQumir::NAst::TStructType& inputType,
     int32_t partitionColumn,
+    int32_t orderColumn,
     const std::vector<TWindowFuncInput>& funcs)
 {
     using namespace NQumir::NAst;
@@ -1106,7 +1119,7 @@ NQumir::NAst::TExprPtr BuildWindowProgramAst(
     AddSortMaterializeLibrary(programStmts, "BuildWindowProgramAst");
     addLibrary("window.oz", true);
     programStmts.push_back(BuildWindowMaterializeWrapperAst(
-        inputType, partitionColumn, funcs));
+        inputType, partitionColumn, orderColumn, funcs));
     programStmts.push_back(BuildWindowRunWrapperAst(keys));
     return std::make_shared<TBlockExpr>(NQumir::TLocation{}, std::move(programStmts));
 }
@@ -1359,6 +1372,7 @@ TKernelCompiler::CompileWindow(
     const std::vector<TSortRadixKeyInput>& keys,
     const NQumir::NAst::TStructType& inputType,
     int32_t partitionColumn,
+    int32_t orderColumn,
     const std::vector<TWindowFuncInput>& funcs)
 {
     using namespace NQumir::NAst;
@@ -1366,7 +1380,8 @@ TKernelCompiler::CompileWindow(
         throw NQumir::TError("CompileWindow: empty key list");
     }
 
-    auto program = BuildWindowProgramAst(keys, inputType, partitionColumn, funcs);
+    auto program = BuildWindowProgramAst(
+        keys, inputType, partitionColumn, orderColumn, funcs);
     PrintKernelAst(Diagnostics_, "window.run.fused", program);
 
     auto kernel = EmitKernel(
