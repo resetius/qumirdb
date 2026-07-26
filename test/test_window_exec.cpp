@@ -107,6 +107,106 @@ TEST(WindowExec, PrefixSumI64ResetsPerPartition) {
     EXPECT_FALSE(runtime->Next(second));
 }
 
+TEST(WindowExec, RankI64WithPeersResetsPerPartition) {
+    std::array<int64_t, 7> keys = {2, 1, 1, 2, 1, 2, 1};
+    std::array<int64_t, 7> order = {5, 10, 10, 7, 20, 5, 30};
+    std::array<int64_t, 7> payload = {100, 1, 2, 200, 3, 101, 4};
+
+    std::vector<TColumn> columns = {
+        TColumn{.Data = reinterpret_cast<char*>(keys.data())},
+        TColumn{.Data = reinterpret_cast<char*>(order.data())},
+        TColumn{.Data = reinterpret_cast<char*>(payload.data())},
+    };
+    std::vector<TRowSet> batches = {TRowSet{
+        .Columns = columns.data(),
+        .ColumnCount = 3,
+        .RowCount = static_cast<int64_t>(keys.size()),
+        .Selection = nullptr,
+        .RefCount = 1,
+    }};
+    TMockSource source({"k", "o", "p"}, std::move(batches));
+
+    auto root = ParsePlan(
+        "(rel window (rel source \"data.parquet\") "
+        "(partition k) "
+        "(order (o asc nulls-default)) "
+        "(fn r rank))",
+        source);
+
+    auto runtime = RunPlan(root);
+
+    TRowSet result{};
+    ASSERT_TRUE(runtime->Next(result));
+    ASSERT_EQ(result.ColumnCount, 4);
+    ASSERT_EQ(result.RowCount, 7);
+
+    auto* outKeys = reinterpret_cast<int64_t*>(result.Columns[0].Data);
+    auto* outOrder = reinterpret_cast<int64_t*>(result.Columns[1].Data);
+    auto* outRank = reinterpret_cast<int64_t*>(result.Columns[3].Data);
+
+    const std::array<int64_t, 7> expectedKeys = {1, 1, 1, 1, 2, 2, 2};
+    const std::array<int64_t, 7> expectedOrder = {10, 10, 20, 30, 5, 5, 7};
+    const std::array<int64_t, 7> expectedRank = {1, 1, 3, 4, 1, 1, 3};
+
+    for (int64_t row = 0; row < result.RowCount; ++row) {
+        EXPECT_EQ(outKeys[row], expectedKeys[row]) << "row " << row;
+        EXPECT_EQ(outOrder[row], expectedOrder[row]) << "row " << row;
+        EXPECT_EQ(outRank[row], expectedRank[row]) << "row " << row;
+    }
+
+    Release(&result);
+
+    TRowSet second{};
+    EXPECT_FALSE(runtime->Next(second));
+}
+
+TEST(WindowExec, RankI64WithoutPartition) {
+    std::array<int64_t, 5> order = {30, 10, 20, 20, 10};
+    std::array<int64_t, 5> payload = {3, 1, 2, 4, 5};
+
+    std::vector<TColumn> columns = {
+        TColumn{.Data = reinterpret_cast<char*>(order.data())},
+        TColumn{.Data = reinterpret_cast<char*>(payload.data())},
+    };
+    std::vector<TRowSet> batches = {TRowSet{
+        .Columns = columns.data(),
+        .ColumnCount = 2,
+        .RowCount = static_cast<int64_t>(order.size()),
+        .Selection = nullptr,
+        .RefCount = 1,
+    }};
+    TMockSource source({"o", "p"}, std::move(batches));
+
+    auto root = ParsePlan(
+        "(rel window (rel source \"data.parquet\") "
+        "(order (o asc nulls-default)) "
+        "(fn r rank))",
+        source);
+
+    auto runtime = RunPlan(root);
+
+    TRowSet result{};
+    ASSERT_TRUE(runtime->Next(result));
+    ASSERT_EQ(result.ColumnCount, 3);
+    ASSERT_EQ(result.RowCount, 5);
+
+    auto* outOrder = reinterpret_cast<int64_t*>(result.Columns[0].Data);
+    auto* outRank = reinterpret_cast<int64_t*>(result.Columns[2].Data);
+
+    const std::array<int64_t, 5> expectedOrder = {10, 10, 20, 20, 30};
+    const std::array<int64_t, 5> expectedRank = {1, 1, 3, 3, 5};
+
+    for (int64_t row = 0; row < result.RowCount; ++row) {
+        EXPECT_EQ(outOrder[row], expectedOrder[row]) << "row " << row;
+        EXPECT_EQ(outRank[row], expectedRank[row]) << "row " << row;
+    }
+
+    Release(&result);
+
+    TRowSet second{};
+    EXPECT_FALSE(runtime->Next(second));
+}
+
 int main(int argc, char** argv) {
     NQumir::NCodeGen::TLLVMInitializer initializer;
     ::testing::InitGoogleTest(&argc, argv);

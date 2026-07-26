@@ -82,8 +82,8 @@ NQumir::NAst::TExprPtr BuildTopSortMergeProgramAst(
     const NQumir::NAst::TStructType* materializeType = nullptr);
 
 // One window function to materialize as an appended output column. For now:
-// "sum" over an i64 argument, frame UNBOUNDED PRECEDING .. CURRENT ROW (a
-// running prefix sum, optionally reset by one i64 partition key).
+// "sum" over an i64 argument and "rank" over one optional i64 partition key and
+// one i64 order key.
 struct TWindowFuncInput {
     std::string Func;
     int32_t ArgColumn = -1;
@@ -98,6 +98,7 @@ NQumir::NAst::TExprPtr BuildWindowProgramAst(
     const std::vector<TSortRadixKeyInput>& keys,
     const NQumir::NAst::TStructType& inputType,
     int32_t partitionColumn,
+    int32_t orderColumn,
     const std::vector<TWindowFuncInput>& funcs);
 
 // agg_dispatch(ref HashTable ht, ref TRowSet batch, i64 arg, i64 op) -> i64
@@ -320,6 +321,7 @@ public:
         const std::vector<TSortRadixKeyInput>& keys,
         const NQumir::NAst::TStructType& inputType,
         int32_t partitionColumn,
+        int32_t orderColumn,
         const std::vector<TWindowFuncInput>& funcs);
 
     // Compiles the per-query generic update and finalize programs for `aggs`
