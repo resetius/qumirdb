@@ -398,32 +398,22 @@ TWindowRuntimeProcess BuildWindowRuntimeProcess(
 
     std::vector<TSortColumnRef> keyColumns;
     std::vector<TSortRadixKeyInput> radixKeys;
-    int32_t partitionColumn = -1;
+    std::vector<TSortRadixKeyInput> partitionRadixKeys;
     int32_t orderColumn = -1;
     for (const auto& key : keys) {
         const int32_t idx = fieldIndex(key.Column);
         const auto& type = inputStruct->Fields[idx].second;
-        keyColumns.push_back({.Index = idx, .Type = type});
-        radixKeys.push_back({
+        TSortRadixKeyInput radixKey{
             .ColumnIndex = idx,
             .Type = type,
             .Desc = key.Direction == ESortDirection::Desc,
             .NullsFirst = SortNullsFirst(key),
-        });
-    }
-    if (window.PartitionKeys().size() > 1) {
-        throw std::runtime_error(
-            "window exec supports at most one partition key yet");
-    }
-    if (!window.PartitionKeys().empty()) {
-        partitionColumn = fieldIndex(window.PartitionKeys()[0]);
-        auto inner = UnwrapNamedType(UnwrapNullableType(
-            inputStruct->Fields[partitionColumn].second));
-        auto integer = TMaybeType<TIntegerType>(inner);
-        if (!integer || integer.Cast()->BitWidth() != 64) {
-            throw std::runtime_error(
-                "window exec supports only i64 partition keys yet");
+        };
+        keyColumns.push_back({.Index = idx, .Type = type});
+        if (partitionRadixKeys.size() < window.PartitionKeys().size()) {
+            partitionRadixKeys.push_back(radixKey);
         }
+        radixKeys.push_back(std::move(radixKey));
     }
     const bool hasRank = std::any_of(
         window.Functions().begin(), window.Functions().end(),
@@ -456,9 +446,12 @@ TWindowRuntimeProcess BuildWindowRuntimeProcess(
                 IsDecimalType(orderValueType) || IsBinIntStorageType(orderValueType);
             auto inner = UnwrapNamedType(orderValueType);
             auto integer = TMaybeType<TIntegerType>(inner);
-            if (!isBinInt && (!integer || integer.Cast()->BitWidth() != 64)) {
+            const bool isFixedRankOrder =
+                isBinInt || static_cast<bool>(integer) ||
+                static_cast<bool>(TMaybeType<TFloatType>(inner));
+            if (!isFixedRankOrder) {
                 throw std::runtime_error(
-                    "window exec supports only i64/decimal order keys for rank yet");
+                    "window exec supports only fixed-width order keys for rank yet");
             }
             funcs.push_back({
                 .Func = fn.Func,
@@ -488,7 +481,7 @@ TWindowRuntimeProcess BuildWindowRuntimeProcess(
     TSortRadixKernel kernel;
     kernel.Enabled = true;
     kernel.Dispatch = compiler.CompileWindow(
-        radixKeys, *inputStruct, partitionColumn, orderColumn, funcs);
+        radixKeys, *inputStruct, partitionRadixKeys, orderColumn, funcs);
 
     return {
         .OutputType = ComputeWindowOutputType(inputType, window.Functions()),

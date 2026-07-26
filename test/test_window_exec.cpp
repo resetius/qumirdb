@@ -162,6 +162,83 @@ TEST(WindowExec, RankI64WithPeersResetsPerPartition) {
     EXPECT_FALSE(runtime->Next(second));
 }
 
+TEST(WindowExec, RankResetsPerStringAndI64Partition) {
+    const std::string groups = "baaabb";
+    std::array<int64_t, 7> groupOffsets = {0, 1, 2, 3, 4, 5, 6};
+    std::array<int64_t, 6> shards = {2, 1, 1, 1, 2, 1};
+    std::array<int64_t, 6> order = {5, 10, 20, 10, 7, 5};
+    std::array<int64_t, 6> payload = {200, 1, 3, 2, 300, 100};
+
+    std::vector<TColumn> columns = {
+        TColumn{
+            .Data = const_cast<char*>(groups.data()),
+            .Offsets = groupOffsets.data(),
+            .OffsetWidth = 8,
+        },
+        TColumn{.Data = reinterpret_cast<char*>(shards.data())},
+        TColumn{.Data = reinterpret_cast<char*>(order.data())},
+        TColumn{.Data = reinterpret_cast<char*>(payload.data())},
+    };
+    std::vector<TRowSet> batches = {TRowSet{
+        .Columns = columns.data(),
+        .ColumnCount = 4,
+        .RowCount = static_cast<int64_t>(shards.size()),
+        .Selection = nullptr,
+        .RefCount = 1,
+    }};
+    TMockSource source(
+        {"g", "s", "o", "p"},
+        std::move(batches),
+        {
+            std::make_shared<NQumir::NAst::TStringType>(),
+            std::make_shared<NQumir::NAst::TIntegerType>(),
+            std::make_shared<NQumir::NAst::TIntegerType>(),
+            std::make_shared<NQumir::NAst::TIntegerType>(),
+        });
+
+    auto root = ParsePlan(
+        "(rel window (rel source \"data.parquet\") "
+        "(partition g s) "
+        "(order (o asc nulls-default)) "
+        "(fn r rank))",
+        source);
+
+    auto runtime = RunPlan(root);
+
+    TRowSet result{};
+    ASSERT_TRUE(runtime->Next(result));
+    ASSERT_EQ(result.ColumnCount, 5);
+    ASSERT_EQ(result.RowCount, 6);
+
+    auto* outShard = reinterpret_cast<int64_t*>(result.Columns[1].Data);
+    auto* outOrder = reinterpret_cast<int64_t*>(result.Columns[2].Data);
+    auto* outRank = reinterpret_cast<int64_t*>(result.Columns[4].Data);
+
+    ASSERT_EQ(result.Columns[0].OffsetWidth, 8);
+    const auto* outOffsets = static_cast<const int64_t*>(result.Columns[0].Offsets);
+    const std::string_view outData(result.Columns[0].Data, outOffsets[result.RowCount]);
+
+    const std::array<std::string_view, 6> expectedGroup = {"a", "a", "a", "b", "b", "b"};
+    const std::array<int64_t, 6> expectedShard = {1, 1, 1, 1, 2, 2};
+    const std::array<int64_t, 6> expectedOrder = {10, 10, 20, 5, 5, 7};
+    const std::array<int64_t, 6> expectedRank = {1, 1, 3, 1, 1, 2};
+
+    for (int64_t row = 0; row < result.RowCount; ++row) {
+        const std::string_view gotGroup(
+            outData.data() + outOffsets[row],
+            static_cast<size_t>(outOffsets[row + 1] - outOffsets[row]));
+        EXPECT_EQ(gotGroup, expectedGroup[row]) << "row " << row;
+        EXPECT_EQ(outShard[row], expectedShard[row]) << "row " << row;
+        EXPECT_EQ(outOrder[row], expectedOrder[row]) << "row " << row;
+        EXPECT_EQ(outRank[row], expectedRank[row]) << "row " << row;
+    }
+
+    Release(&result);
+
+    TRowSet second{};
+    EXPECT_FALSE(runtime->Next(second));
+}
+
 TEST(WindowExec, RankI64WithoutPartition) {
     std::array<int64_t, 5> order = {30, 10, 20, 20, 10};
     std::array<int64_t, 5> payload = {3, 1, 2, 4, 5};

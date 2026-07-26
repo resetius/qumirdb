@@ -911,7 +911,6 @@ void AddSortMaterializeLibrary(
 // over the sorted row-id slice (window.oz).
 NQumir::NAst::TExprPtr BuildWindowMaterializeWrapperAst(
     const NQumir::NAst::TStructType& inputType,
-    int32_t partitionColumn,
     int32_t orderColumn,
     const std::vector<TWindowFuncInput>& funcs)
 {
@@ -1024,7 +1023,6 @@ NQumir::NAst::TExprPtr BuildWindowMaterializeWrapperAst(
             builder.Stmt(Oz::Call("window_fill_rank", {
                 Oz::Ident("store"), Oz::Ident("row_ids"), Oz::Ident("start"),
                 Oz::Ident("n"),
-                Int64Literal(static_cast<int64_t>(partitionColumn)),
                 Int64Literal(static_cast<int64_t>(orderColumn)),
                 Cast(Int64Literal(0), Ptr(std::move(orderCoreType))),
                 column(static_cast<size_t>(inputColumnCount) + f),
@@ -1034,7 +1032,6 @@ NQumir::NAst::TExprPtr BuildWindowMaterializeWrapperAst(
             builder.Stmt(Oz::Call("window_fill_prefix_sum_i64", {
                 Oz::Ident("store"), Oz::Ident("row_ids"), Oz::Ident("start"),
                 Oz::Ident("n"), Int64Literal(static_cast<int64_t>(funcs[f].ArgColumn)),
-                Int64Literal(static_cast<int64_t>(partitionColumn)),
                 column(static_cast<size_t>(inputColumnCount) + f),
                 Oz::Ident("out_rowset"), Int64Literal(dataOwner),
             }));
@@ -1042,6 +1039,106 @@ NQumir::NAst::TExprPtr BuildWindowMaterializeWrapperAst(
     }
 
     builder.Stmt(Oz::Return(Oz::Ident("n")));
+    return std::move(builder).Build();
+}
+
+NQumir::NAst::TExprPtr BuildWindowPartitionComparatorAst(
+    const std::vector<TSortRadixKeyInput>& partitionKeys)
+{
+    using namespace NQumir::NAst;
+    namespace Oz = NKernel::NOz;
+
+    auto i64Type = std::make_shared<TIntegerType>();
+    auto boolType = std::make_shared<TBoolType>();
+    auto rowSetPtrType = Ptr(QumirDbNamedType("TRowSet"));
+
+    Oz::TFunBuilder builder("window_same_partition");
+    builder
+        .Param("store", rowSetPtrType)
+        .Param("left_row_id", i64Type)
+        .Param("right_row_id", i64Type)
+        .Return(boolType);
+
+    for (size_t i = 0; i < partitionKeys.size(); ++i) {
+        const auto& key = partitionKeys[i];
+        const auto columnIdx = Int64Literal(static_cast<int64_t>(key.ColumnIndex));
+        const std::string leftValid = "left_valid_" + std::to_string(i);
+        const std::string rightValid = "right_valid_" + std::to_string(i);
+
+        builder
+            .Var(leftValid, boolType)
+            .Assign(leftValid, Oz::Call("sr_row_valid", {
+                Oz::Ident("store"), Oz::Ident("left_row_id"), columnIdx,
+            }))
+            .Var(rightValid, boolType)
+            .Assign(rightValid, Oz::Call("sr_row_valid", {
+                Oz::Ident("store"), Oz::Ident("right_row_id"),
+                Int64Literal(static_cast<int64_t>(key.ColumnIndex)),
+            }))
+            .Stmt(Oz::If(
+                Oz::Bin(TOperator("!="), Oz::Ident(leftValid), Oz::Ident(rightValid)),
+                Oz::Block({Oz::Return(Oz::Bool(false))})));
+
+        std::vector<TExprPtr> compareStmts;
+        if (SortKeyIsString(key.Type)) {
+            compareStmts.push_back(Oz::If(
+                Oz::Bin(TOperator("!="),
+                    Oz::Call("sr_sort_compare", {
+                        Oz::Ident("store"),
+                        Int64Literal(static_cast<int64_t>(key.ColumnIndex)),
+                        Oz::Ident("left_row_id"),
+                        Oz::Ident("right_row_id"),
+                    }),
+                    Int64Literal(0)),
+                Oz::Block({Oz::Return(Oz::Bool(false))})));
+        } else if (SortKeyIsBool(key.Type)) {
+            compareStmts.push_back(Oz::If(
+                Oz::Bin(TOperator("!="),
+                    Oz::Call("sr_load_bool_key", {
+                        Oz::Ident("store"),
+                        Oz::Ident("left_row_id"),
+                        Int64Literal(static_cast<int64_t>(key.ColumnIndex)),
+                    }),
+                    Oz::Call("sr_load_bool_key", {
+                        Oz::Ident("store"),
+                        Oz::Ident("right_row_id"),
+                        Int64Literal(static_cast<int64_t>(key.ColumnIndex)),
+                    })),
+                Oz::Block({Oz::Return(Oz::Bool(false))})));
+        } else {
+            auto coreType = SortValueIsBinInt(key.Type)
+                ? BinIntStorageType()
+                : SortCoreType(key.Type);
+            if (!coreType) {
+                throw NQumir::TError(
+                    "BuildWindowPartitionComparatorAst: unsupported partition type " +
+                    (key.Type ? key.Type->ToString() : std::string("<null>")));
+            }
+            auto witness = [&]() {
+                return Cast(Int64Literal(0), Ptr(coreType));
+            };
+            compareStmts.push_back(Oz::If(
+                Oz::Bin(TOperator("!="),
+                    Oz::Call("sr_load_fixed_key", {
+                        Oz::Ident("store"),
+                        Oz::Ident("left_row_id"),
+                        Int64Literal(static_cast<int64_t>(key.ColumnIndex)),
+                        witness(),
+                    }),
+                    Oz::Call("sr_load_fixed_key", {
+                        Oz::Ident("store"),
+                        Oz::Ident("right_row_id"),
+                        Int64Literal(static_cast<int64_t>(key.ColumnIndex)),
+                        witness(),
+                    })),
+                Oz::Block({Oz::Return(Oz::Bool(false))})));
+        }
+        builder.Stmt(Oz::If(
+            Oz::Ident(leftValid),
+            Oz::Block(std::move(compareStmts))));
+    }
+
+    builder.Stmt(Oz::Return(Oz::Bool(true)));
     return std::move(builder).Build();
 }
 
@@ -1104,7 +1201,7 @@ NQumir::NAst::TExprPtr BuildWindowRunWrapperAst(
 NQumir::NAst::TExprPtr BuildWindowProgramAst(
     const std::vector<TSortRadixKeyInput>& keys,
     const NQumir::NAst::TStructType& inputType,
-    int32_t partitionColumn,
+    const std::vector<TSortRadixKeyInput>& partitionKeys,
     int32_t orderColumn,
     const std::vector<TWindowFuncInput>& funcs)
 {
@@ -1128,9 +1225,10 @@ NQumir::NAst::TExprPtr BuildWindowProgramAst(
     addLibrary("radix.oz", false);
     addLibrary("sort_rowids.oz", true);
     AddSortMaterializeLibrary(programStmts, "BuildWindowProgramAst");
+    programStmts.push_back(BuildWindowPartitionComparatorAst(partitionKeys));
     addLibrary("window.oz", true);
     programStmts.push_back(BuildWindowMaterializeWrapperAst(
-        inputType, partitionColumn, orderColumn, funcs));
+        inputType, orderColumn, funcs));
     programStmts.push_back(BuildWindowRunWrapperAst(keys));
     return std::make_shared<TBlockExpr>(NQumir::TLocation{}, std::move(programStmts));
 }
@@ -1382,7 +1480,7 @@ TKernelCompiler::TSortRadixCompositeDispatch
 TKernelCompiler::CompileWindow(
     const std::vector<TSortRadixKeyInput>& keys,
     const NQumir::NAst::TStructType& inputType,
-    int32_t partitionColumn,
+    const std::vector<TSortRadixKeyInput>& partitionKeys,
     int32_t orderColumn,
     const std::vector<TWindowFuncInput>& funcs)
 {
@@ -1392,7 +1490,7 @@ TKernelCompiler::CompileWindow(
     }
 
     auto program = BuildWindowProgramAst(
-        keys, inputType, partitionColumn, orderColumn, funcs);
+        keys, inputType, partitionKeys, orderColumn, funcs);
     PrintKernelAst(Diagnostics_, "window.run.fused", program);
 
     auto kernel = EmitKernel(
