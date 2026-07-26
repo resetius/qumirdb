@@ -3,6 +3,7 @@
 #include <coroio/pipe/pipe.hpp>
 
 #include <qdb/io/parquet/source.h>
+#include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
 #include <qdb/plan/stats_codec.h>
 
@@ -146,6 +147,90 @@ llvm::json::Object ErrorJson(std::string stage, std::string message) {
 std::string BaseName(const std::filesystem::path& path) {
     auto name = path.filename().string();
     return name.empty() ? path.string() : name;
+}
+
+std::string Trim(std::string_view value) {
+    const auto begin = value.find_first_not_of(" \t\r\n");
+    if (begin == std::string_view::npos) {
+        return {};
+    }
+    const auto end = value.find_last_not_of(" \t\r\n");
+    return std::string(value.substr(begin, end - begin + 1));
+}
+
+std::filesystem::path ExpandUserPath(std::string_view value) {
+    std::string text = Trim(value);
+    if (text == "~" || text.starts_with("~/")) {
+        if (const char* home = std::getenv("HOME")) {
+            return std::filesystem::path(home) /
+                (text.size() == 1 ? std::filesystem::path{} : std::filesystem::path(text.substr(2)));
+        }
+    }
+    return std::filesystem::path(std::move(text));
+}
+
+bool IsDirectory(const std::filesystem::path& path) {
+    std::error_code ec;
+    return std::filesystem::exists(path, ec) && std::filesystem::is_directory(path, ec);
+}
+
+struct TDataDirArg {
+    std::filesystem::path Path;
+    std::optional<std::string> Alias;
+};
+
+TDataDirArg ParseDataDirArg(std::string_view value) {
+    const std::string text = Trim(value);
+    auto directPath = ExpandUserPath(text);
+    if (IsDirectory(directPath)) {
+        return {.Path = std::move(directPath)};
+    }
+
+    const auto end = text.find_last_not_of(" \t\r\n");
+    if (end == std::string::npos) {
+        return {.Path = std::move(directPath)};
+    }
+    const auto aliasBegin = text.find_last_of(" \t\r\n", end);
+    if (aliasBegin == std::string::npos) {
+        return {.Path = std::move(directPath)};
+    }
+
+    auto path = ExpandUserPath(text.substr(0, aliasBegin));
+    auto alias = Trim(std::string_view(text).substr(aliasBegin, end - aliasBegin + 1));
+    if (alias.empty() || !IsDirectory(path)) {
+        return {.Path = std::move(directPath)};
+    }
+    return {.Path = std::move(path), .Alias = std::move(alias)};
+}
+
+std::string SchemaTypeName(const NQumir::NAst::TTypePtr& type) {
+    using namespace NQumir::NAst;
+
+    if (!type) {
+        return "unknown";
+    }
+    if (auto nullable = TMaybeType<NQdb::TNullable>(type)) {
+        return "Nullable<" + SchemaTypeName(nullable.Cast()->UnderlyingType) + ">";
+    }
+    if (auto decimal = NQdb::DecimalSpecOfValueType(type)) {
+        return "DECIMAL(" + std::to_string(decimal->Precision) + "," +
+            std::to_string(decimal->Scale) + ")";
+    }
+    if (auto integer = TMaybeType<TIntegerType>(type)) {
+        return integer.Cast()->ToString();
+    }
+    if (TMaybeType<TFloatType>(type)) {
+        return "f64";
+    }
+    if (TMaybeType<TBoolType>(type)) {
+        return "bool";
+    }
+    if (TMaybeType<TStringType>(type)) {
+        return "string";
+    }
+
+    auto direct = type->ToString();
+    return direct.empty() ? NQumir::NAst::NCore::PrintType(type) : direct;
 }
 
 std::string TableNameFromPath(const std::filesystem::path& path) {
@@ -560,10 +645,11 @@ private:
         size_t serverIndex = 0;
         size_t localIndex = 0;
         auto addDir = [&](const std::string& dirValue, EDatasetKind kind, size_t index) {
+            auto arg = ParseDataDirArg(dirValue);
             std::error_code ec;
-            fs::path dir = fs::weakly_canonical(dirValue, ec);
+            fs::path dir = fs::weakly_canonical(arg.Path, ec);
             if (ec || dir.empty()) {
-                dir = fs::path(dirValue).lexically_normal();
+                dir = arg.Path.lexically_normal();
             }
             if (!fs::exists(dir) || !fs::is_directory(dir)) {
                 std::cerr << "[QumirDB Web] skip data dir: " << dir << "\n";
@@ -573,7 +659,7 @@ private:
             TServerDataset dataset;
             dataset.Id = (kind == EDatasetKind::Server ? "server:" : "local:") +
                 std::to_string(index);
-            dataset.Name = BaseName(dir);
+            dataset.Name = arg.Alias ? *arg.Alias : BaseName(dir);
             dataset.Path = dir;
             dataset.Kind = kind;
             dataset.Json = BuildDatasetJson(dataset);
@@ -608,7 +694,7 @@ private:
                 for (const auto& column : source.Schema().Columns) {
                     columns.push_back(llvm::json::Object{
                         {"name", std::string(column.Name)},
-                        {"type", column.Type ? column.Type->ToString() : "unknown"},
+                        {"type", SchemaTypeName(column.Type)},
                     });
                 }
 
@@ -982,7 +1068,7 @@ int main(int argc, char** argv) {
             std::cout << "Usage: " << argv[0]
                       << " [--port n] [--static-dir dir] [--binary-dir dir]"
                       << " [--source-dir dir]"
-                      << " [--data dir ...] [--local-data dir ...]\n";
+                      << " [--data 'dir [alias]' ...] [--local-data 'dir [alias]' ...]\n";
             return 0;
         }
     }
