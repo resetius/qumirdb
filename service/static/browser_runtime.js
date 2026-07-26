@@ -941,9 +941,7 @@ function freeMarshalledRowSet(arena, layout, rowsetPtr) {
 }
 
 function writePointer(dv, offset, address) {
-  // Pointers are 8-byte fields; the address lives in the low 32 bits.
-  dv.setUint32(offset, address >>> 0, true);
-  dv.setUint32(offset + 4, 0, true);
+  dv.setBigUint64(offset, BigInt(Number(address)), true);
 }
 
 function readPointer(dv, offset) {
@@ -2767,7 +2765,21 @@ class SingleThreadedScheduler {
       ++this.stats.popped;
 
       const started = nowMs();
-      const state = await node.task.execute();
+      let state;
+      try {
+        state = await node.task.execute();
+      } catch (error) {
+        const message = error?.message || String(error);
+        const stats = node.task?.shared?.arena?.stats?.();
+        const suffix = stats
+          ? ` (wasm reserved ${stats.reservedMB}MB, peak live ${stats.peakLiveMB}MB)`
+          : '';
+        const wrapped = new Error(`${node.label}: ${message}${suffix}`);
+        if (error?.stack) {
+          wrapped.stack = `${wrapped.message}\n${error.stack}`;
+        }
+        throw wrapped;
+      }
       node.elapsedMs += nowMs() - started;
       node.rows = node.task.rows || node.rows || 0;
       ++this.stats.executed;
