@@ -1,6 +1,7 @@
 import { getJson, postJson } from './api.js';
 import { renderGraph } from './graph.js';
 import { tpchQueries } from './tpch_queries.js';
+import { tpcdsQueries } from './tpcds_queries.js';
 import {
   addFilesToBrowserDataset,
   addStoredFilesToBrowserDataset,
@@ -29,6 +30,7 @@ const LAST_RUN_KEY = 'qdb.web.lastRun';
 const LOCAL_DATA_DOWNLOAD_CONCURRENCY = 4;
 const MAX_PERSISTED_RESULT_ROWS = 1000;
 const TPCH_QUERY_FOLDER_ID = 'tpch';
+const TPCDS_QUERY_FOLDER_ID = 'tpcds';
 const DEFAULT_QUERY_FOLDER_ID = 'default';
 
 let editor = null;
@@ -254,7 +256,8 @@ function initQueries() {
 
 function benchmarkQuerySets() {
   return [
-    { folderId: TPCH_QUERY_FOLDER_ID, queries: tpchQueries }
+    { folderId: TPCH_QUERY_FOLDER_ID, queries: tpchQueries },
+    { folderId: TPCDS_QUERY_FOLDER_ID, queries: tpcdsQueries }
   ];
 }
 
@@ -313,6 +316,7 @@ function saveQueries(queries) {
 function defaultQueryFolders() {
   return [
     { id: TPCH_QUERY_FOLDER_ID, name: 'TPC-H' },
+    { id: TPCDS_QUERY_FOLDER_ID, name: 'TPC-DS' },
     { id: DEFAULT_QUERY_FOLDER_ID, name: 'Queries' }
   ];
 }
