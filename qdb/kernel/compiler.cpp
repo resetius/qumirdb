@@ -179,6 +179,12 @@ bool SortValueIsBinInt(const NQumir::NAst::TTypePtr& type) {
     return IsDecimalType(valueType) || IsBinIntStorageType(valueType);
 }
 
+bool SortValueIsInteger(const NQumir::NAst::TTypePtr& type) {
+    using namespace NQumir::NAst;
+    return static_cast<bool>(TMaybeType<TIntegerType>(
+        UnwrapNamedType(UnwrapNullableType(type))));
+}
+
 NQumir::NAst::TExprPtr Int64Literal(int64_t value) {
     auto expr = NKernel::NOz::Int(value);
     expr->Type = std::make_shared<NQumir::NAst::TIntegerType>();
@@ -1088,15 +1094,33 @@ NQumir::NAst::TExprPtr BuildWindowMaterializeWrapperAst(
                 : funcs[f].Func == "sum_partition"
                     ? "window_fill_partition_sum_fixed"
                     : "window_fill_prefix_max_fixed";
+            const bool integerSum =
+                (funcs[f].Func == "sum_prefix" || funcs[f].Func == "sum_partition") &&
+                SortValueIsInteger(argType);
             std::vector<TExprPtr> args = {
                 Oz::Ident("store"), Oz::Ident("row_ids"), Oz::Ident("start"),
                 Oz::Ident("n"), Int64Literal(static_cast<int64_t>(funcs[f].ArgColumn)),
                 Cast(Int64Literal(0), Ptr(std::move(argCoreType))),
-                Int64Literal(width),
-                column(static_cast<size_t>(inputColumnCount) + f),
-                Oz::Ident("out_rowset"), Int64Literal(dataOwner),
-                Int64Literal(maskOwner),
             };
+            if (funcs[f].Func == "sum_prefix" || funcs[f].Func == "sum_partition") {
+                auto outCoreType = integerSum
+                    ? std::make_shared<TIntegerType>()
+                    : SortCoreType(argType);
+                const int64_t outWidth = integerSum ? 8 : width;
+                if (!outCoreType || outWidth == 0) {
+                    throw NQumir::TError(
+                        "BuildWindowMaterializeWrapperAst: unsupported window sum result type " +
+                        (argType ? argType->ToString() : std::string("<null>")));
+                }
+                args.push_back(Cast(Int64Literal(0), Ptr(std::move(outCoreType))));
+                args.push_back(Int64Literal(outWidth));
+            } else {
+                args.push_back(Int64Literal(width));
+            }
+            args.push_back(column(static_cast<size_t>(inputColumnCount) + f));
+            args.push_back(Oz::Ident("out_rowset"));
+            args.push_back(Int64Literal(dataOwner));
+            args.push_back(Int64Literal(maskOwner));
             if (isPrefix) {
                 args.push_back(Oz::Bool(funcs[f].PeerInclusive));
             }
