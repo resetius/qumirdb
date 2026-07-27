@@ -255,6 +255,30 @@ TEST(WindowPlan, ScalarSubqueryIgnoresInListTemporaryForCorrelation) {
     ASSERT_TRUE(plan.has_value()) << (plan ? "" : plan.error().ToString());
 }
 
+TEST(WindowPlan, WindowOutsideSelectListRejected) {
+    NQdb::TMockSource t({"a", "b"});
+    std::map<std::string, ISource*> tables = {{"t", &t}};
+
+    // Windows are only valid in the SELECT list / ORDER BY; elsewhere they must
+    // yield a clean error rather than crashing in later passes.
+    auto inWhere = BuildSqlPlan(
+        "SELECT a FROM t WHERE rank() OVER (ORDER BY b) > 1", tables);
+    EXPECT_FALSE(inWhere.has_value());
+
+    auto inHaving = BuildSqlPlan(
+        "SELECT a FROM t GROUP BY a HAVING rank() OVER (ORDER BY a) > 1", tables);
+    EXPECT_FALSE(inHaving.has_value());
+
+    // A window inside an independent subquery in WHERE is that subquery's own,
+    // and must NOT be rejected here.
+    auto inSubqueryOk = BuildSqlPlan(
+        "SELECT a FROM t WHERE a IN "
+        "(SELECT b FROM (SELECT b, rank() OVER (ORDER BY b) rk FROM t) s WHERE rk = 1)",
+        tables);
+    EXPECT_TRUE(inSubqueryOk.has_value())
+        << (inSubqueryOk ? "" : inSubqueryOk.error().ToString());
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

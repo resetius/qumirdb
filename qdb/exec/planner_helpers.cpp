@@ -373,9 +373,17 @@ TWindowRuntimeProcess BuildWindowRuntimeProcess(
         throw std::runtime_error("window input must have TStructType");
     }
 
+    // Resolve a key/arg name the same way the hash-shuffle does (MakeGroupKeyHash
+    // in plan_lowerer.cpp): bare-suffix OR exact match, first hit. Keeping the two
+    // in lockstep guarantees the shuffle and the per-task boundary detection pick
+    // the same column even when a bare suffix collides (e.g. `a.k` and `k`).
     auto fieldIndex = [&](const std::string& name) -> int32_t {
         for (size_t i = 0; i < inputStruct->Fields.size(); ++i) {
-            if (inputStruct->Fields[i].first == name) {
+            const std::string& field = inputStruct->Fields[i].first;
+            auto dot = field.rfind('.');
+            const std::string bare =
+                dot != std::string::npos ? field.substr(dot + 1) : field;
+            if (bare == name || field == name) {
                 return static_cast<int32_t>(i);
             }
         }
