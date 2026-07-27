@@ -132,6 +132,17 @@ NQumir::NAst::TTypePtr ComputeWindowOutputType(
     const NQumir::NAst::TTypePtr& inputSchema,
     const std::vector<TWindowFunc>& functions);
 
+// Extra scale added to a decimal AVG result so the quotient keeps fractional
+// precision (SQL avg widens scale) instead of truncating to the input scale.
+inline constexpr int32_t kWindowAvgExtraScale = 4;
+
+// Result type of avg over `argType`: a decimal argument yields a decimal with
+// scale = argScale + kWindowAvgExtraScale (capped at max precision), preserving
+// nullability; any other numeric argument yields f64. Shared by the logical type
+// (WindowResultType) and the exec lowering so the schema and kernel agree.
+NQumir::NAst::TTypePtr ComputeWindowAvgResultType(
+    const NQumir::NAst::TTypePtr& argType);
+
 std::string_view WindowFrameModeName(EWindowFrameMode mode);
 std::string_view FrameBoundKindName(EFrameBoundKind kind);
 

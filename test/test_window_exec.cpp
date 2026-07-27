@@ -452,7 +452,10 @@ TEST(WindowExec, AvgDecimalBroadcastsPerPartition) {
     auto* outAvg = reinterpret_cast<qdb_bin_int*>(result.Columns[2].Data);
 
     const std::array<int64_t, 5> expectedKeys = {1, 1, 1, 2, 2};
-    const std::array<uint64_t, 5> expectedAvg = {700, 700, 700, 2000, 2000};
+    // avg widens the decimal scale by kWindowAvgExtraScale (2 -> 6), so values are
+    // scaled by 10^4: 7.000000 and 20.000000 keep full fractional precision.
+    const std::array<uint64_t, 5> expectedAvg = {
+        7000000, 7000000, 7000000, 20000000, 20000000};
 
     for (int64_t row = 0; row < result.RowCount; ++row) {
         EXPECT_EQ(outKeys[row], expectedKeys[row]) << "row " << row;
@@ -465,6 +468,50 @@ TEST(WindowExec, AvgDecimalBroadcastsPerPartition) {
 
     TRowSet second{};
     EXPECT_FALSE(runtime->Next(second));
+}
+
+TEST(WindowExec, AvgDecimalKeepsFractionalPrecision) {
+    // Non-exact average over one partition: 5.00 / 3. At the input scale (2) this
+    // truncates to 1.66; widening the scale by 4 keeps 1.666666.
+    std::array<int64_t, 3> keys = {1, 1, 1};
+    std::array<qdb_bin_int, 3> values = {{
+        {.Lo = 100, .Hi = 0},   // 1.00
+        {.Lo = 200, .Hi = 0},   // 2.00
+        {.Lo = 200, .Hi = 0},   // 2.00
+    }};
+
+    std::vector<TColumn> columns = {
+        TColumn{.Data = reinterpret_cast<char*>(keys.data())},
+        TColumn{.Data = reinterpret_cast<char*>(values.data())},
+    };
+    std::vector<TRowSet> batches = {TRowSet{
+        .Columns = columns.data(),
+        .ColumnCount = 2,
+        .RowCount = 3,
+        .Selection = nullptr,
+        .RefCount = 1,
+    }};
+    TMockSource source({"k", "v"}, std::move(batches),
+        {std::make_shared<NQumir::NAst::TIntegerType>(),
+         std::make_shared<TDecimal>(15, 2)});
+
+    auto root = ParsePlan(
+        "(rel window (rel source \"data.parquet\") (partition k) (fn a avg v))",
+        source);
+
+    auto runtime = RunPlan(root);
+    TRowSet result{};
+    ASSERT_TRUE(runtime->Next(result));
+    ASSERT_EQ(result.RowCount, 3);
+
+    auto* outAvg = reinterpret_cast<qdb_bin_int*>(result.Columns[2].Data);
+    for (int64_t row = 0; row < result.RowCount; ++row) {
+        // 1.666666 at scale 6 (would be 1.66 = 166 at the truncating scale 2).
+        EXPECT_EQ(outAvg[row].Lo, 1666666u) << "row " << row;
+        EXPECT_EQ(outAvg[row].Hi, 0u) << "row " << row;
+    }
+
+    Release(&result);
 }
 
 TEST(WindowExec, RankI64WithoutPartition) {

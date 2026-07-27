@@ -400,6 +400,9 @@
               (= j (+ j (: 1 i64)))))
           (= i run_end)))))
 
+  ;; avg(x) OVER (PARTITION BY ...) for decimal: the sum is scaled up by
+  ;; 10^scale_delta before dividing by the count so the quotient keeps
+  ;; fractional precision instead of truncating to the argument's scale.
   (fun window_fill_partition_avg_binint
        ((var store <ptr TRowSet>)
         (var row_ids <ptr i64>)
@@ -409,7 +412,8 @@
         (var out_col <ref TColumn>)
         (var out <ref TRowSet>)
         (var data_owner_idx i64)
-        (var mask_owner_idx i64))
+        (var mask_owner_idx i64)
+        (var scale_delta i64))
     (block
       (var out_witness = (cast (: 0 i64) <ptr BinInt>))
       (var data =
@@ -443,7 +447,8 @@
 
           (var avg = zero)
           (if (> count (: 0 i64))
-            (block (= avg (/ acc count))))
+            (block
+              (= avg (/ (call qdb_decimal_scale_up acc scale_delta) count))))
           (= j i)
           (while (< j run_end)
             (block
