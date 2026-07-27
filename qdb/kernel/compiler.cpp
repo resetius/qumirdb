@@ -1206,7 +1206,7 @@ NQumir::NAst::TExprPtr BuildWindowKeyComparatorAst(
                 : SortCoreType(key.Type);
             if (!coreType) {
                 throw NQumir::TError(
-                    "BuildWindowPartitionComparatorAst: unsupported partition type " +
+                    "BuildWindowKeyComparatorAst: unsupported key type " +
                     (key.Type ? key.Type->ToString() : std::string("<null>")));
             }
             auto witness = [&]() {

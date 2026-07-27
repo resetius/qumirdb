@@ -1073,6 +1073,27 @@ bool HasWindowExpr(const NAst::TExprPtr& expr) {
     return false;
 }
 
+// True if `expr` contains a window function in its OWN scope — not descending
+// into nested subqueries, whose windows belong to that subquery. Used to reject
+// windows in WHERE/HAVING and in ORDER BY over an independent scalar subquery.
+bool HasWindowExprLocal(const NAst::TExprPtr& expr) {
+    if (!expr) {
+        return false;
+    }
+    if (NAst::TMaybeNode<NSql::TWindowExpr>(expr)) {
+        return true;
+    }
+    if (NAst::TMaybeNode<NSql::TSubqueryExpr>(expr)) {
+        return false;
+    }
+    for (const auto& child : expr->Children()) {
+        if (HasWindowExprLocal(child)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool HasWindowExpr(const NSql::TSqlQuery& query) {
     if (query.WithClause) {
         for (const auto& cte : query.WithClause->Ctes) {
@@ -1823,6 +1844,17 @@ std::expected<TOperatorPtr, TError> BuildSelect(
     if (!select.From) {
         return std::unexpected(TError("SELECT without FROM is not supported yet"));
     }
+    // Window functions are only valid in the SELECT list and ORDER BY. Elsewhere
+    // they are left as raw TWindowExpr nodes (applyWindows rewrites projections
+    // only), so reject them with a clear message instead of crashing later in
+    // type annotation. Use the local check so a window inside an independent
+    // subquery in WHERE/HAVING (its own scope) is not mistaken for one here.
+    if (HasWindowExprLocal(select.Where)) {
+        return std::unexpected(TError("window functions are not allowed in WHERE"));
+    }
+    if (HasWindowExprLocal(select.Having)) {
+        return std::unexpected(TError("window functions are not allowed in HAVING"));
+    }
     int scalarCounter = 0;
     // Extracts scalar subqueries out of a finished projection list, broadcasting
     // each onto `n` (uncorrelated → keyless cross join; correlated → decorrelated
@@ -2315,7 +2347,7 @@ std::expected<TOperatorPtr, TError> ApplyOrderBy(
         auto ident = NAst::TMaybeNode<NAst::TIdentExpr>(item->Expr);
         if (ident && HasOutputColumn(plan, ident.Cast()->Name)) {
             column = ident.Cast()->Name;
-        } else if (HasWindowExpr(item->Expr)) {
+        } else if (HasWindowExprLocal(item->Expr)) {
             return std::unexpected(TError(item->Expr->Location,
                 "ORDER BY on a window expression must reference its select alias"));
         } else if (auto it = outputByExpr.find(NAst::NCore::PrintAst(item->Expr));
