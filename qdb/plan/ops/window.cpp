@@ -8,6 +8,8 @@
 #include <qumir/parser/core/printer.h>
 #include <qumir/parser/type.h>
 
+#include <algorithm>
+
 namespace NQdb {
 
 using namespace NQumir::NAst;
@@ -29,11 +31,7 @@ TTypePtr WindowResultType(const std::string& func, const TTypePtr& argType) {
         return nullable ? std::make_shared<TNullable>(std::move(type)) : type;
     };
     if (func == "avg") {
-        // avg over a decimal stays decimal; otherwise it is f64.
-        if (DecimalSpecOfValueType(argType)) {
-            return argType;
-        }
-        return wrap(std::make_shared<TFloatType>());
+        return ComputeWindowAvgResultType(argType);
     }
     // sum / max: i64 state for every integer argument, else keep the arg type.
     auto inner = nullable ? UnwrapNullableType(argType) : argType;
@@ -90,6 +88,22 @@ std::string_view FrameBoundKindName(EFrameBoundKind kind) {
             return "unbounded-following";
     }
     return "current-row";
+}
+
+TTypePtr ComputeWindowAvgResultType(const TTypePtr& argType) {
+    if (!argType) {
+        return argType;
+    }
+    const bool nullable = IsNullableType(argType);
+    auto wrap = [&](TTypePtr type) -> TTypePtr {
+        return nullable ? std::make_shared<TNullable>(std::move(type)) : type;
+    };
+    if (auto spec = DecimalSpecOfValueType(UnwrapNullableType(argType))) {
+        const int32_t scale =
+            std::min(spec->Scale + kWindowAvgExtraScale, MaxDecimalPrecision);
+        return wrap(std::make_shared<TDecimal>(MaxDecimalPrecision, scale));
+    }
+    return wrap(std::make_shared<TFloatType>());
 }
 
 TTypePtr ComputeWindowOutputType(

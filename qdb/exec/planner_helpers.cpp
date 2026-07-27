@@ -498,9 +498,7 @@ TWindowRuntimeProcess BuildWindowRuntimeProcess(
             funcs.push_back({
                 .Func = "avg_partition",
                 .ArgColumn = idx,
-                .ResultType = isBinInt
-                    ? argType
-                    : wrapNullable(std::make_shared<TFloatType>()),
+                .ResultType = ComputeWindowAvgResultType(argType),
             });
             continue;
         }

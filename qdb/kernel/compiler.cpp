@@ -1028,6 +1028,14 @@ NQumir::NAst::TExprPtr BuildWindowMaterializeWrapperAst(
             const auto& argType =
                 inputType.Fields[static_cast<size_t>(funcs[f].ArgColumn)].second;
             if (SortValueIsBinInt(argType)) {
+                // Scale the sum up to the result decimal's scale before dividing
+                // by the count, so the quotient keeps fractional precision. The
+                // delta is exactly the scale the result type added over the arg.
+                auto argSpec = DecimalSpecOfValueType(UnwrapNullableType(argType));
+                auto resSpec = DecimalSpecOfValueType(
+                    UnwrapNullableType(funcs[f].ResultType));
+                const int64_t scaleDelta =
+                    (argSpec && resSpec) ? (resSpec->Scale - argSpec->Scale) : 0;
                 builder.Stmt(Oz::Call("window_fill_partition_avg_binint", {
                     Oz::Ident("store"), Oz::Ident("row_ids"), Oz::Ident("start"),
                     Oz::Ident("n"),
@@ -1035,6 +1043,7 @@ NQumir::NAst::TExprPtr BuildWindowMaterializeWrapperAst(
                     column(static_cast<size_t>(inputColumnCount) + f),
                     Oz::Ident("out_rowset"), Int64Literal(dataOwner),
                     Int64Literal(maskOwner),
+                    Int64Literal(scaleDelta),
                 }));
                 continue;
             }
