@@ -56,6 +56,7 @@ add_library(qumirdb
     exec/aggregate_exec.cpp
     exec/join_exec.cpp
     exec/sort_exec.cpp
+    exec/sort_key_ops.cpp
     exec/window_exec.cpp
     exec/planner_helpers.cpp
     scheduler/connection.cpp
