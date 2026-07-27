@@ -1,6 +1,7 @@
 #include <qdb/exec/sort_exec.h>
 
 #include <qdb/exec/kernel_rowset.h>
+#include <qdb/exec/sort_key_ops.h>
 #include <qdb/modules/qumirdb_runtime.h>
 #include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
@@ -73,10 +74,6 @@ void ClearBit(std::vector<uint8_t>& mask, size_t i) {
     mask[i / 8] &= ~(uint8_t(1) << (i % 8));
 }
 
-bool RowSelected(const TRowSet& batch, int32_t row) {
-    return !batch.Selection || batch.Selection[row] != 0;
-}
-
 bool SourceValid(const TColumn& col, int32_t row) {
     if (!col.Mask) {
         return true;
@@ -99,14 +96,6 @@ std::string_view StringAt(const TColumn& col, int32_t row) {
 
 bool BoolAt(const TColumn& col, int32_t row) {
     return IsBitSet(reinterpret_cast<const uint8_t*>(col.Data), col.DataBitOffset + row);
-}
-
-ESortNulls EffectiveNulls(const TSortKey& key) {
-    if (key.Nulls != ESortNulls::Default) {
-        return key.Nulls;
-    }
-    // Matches PostgreSQL's default: ASC puts NULLS LAST, DESC puts NULLS FIRST.
-    return key.Direction == ESortDirection::Desc ? ESortNulls::First : ESortNulls::Last;
 }
 
 template <class T>
@@ -356,23 +345,6 @@ void GatherColumn(const TRowStore& store, const std::vector<TRowId>& rowIds,
     if (!anyNull) {
         out.Mask.clear();
     }
-}
-
-bool IsStringKeyType(const TTypePtr& type) {
-    return static_cast<bool>(TMaybeType<TStringType>(
-        UnwrapNamedType(UnwrapNullableType(type))));
-}
-
-// The cascade's `work` scratch is shared by every key. Numeric/bool keys need
-// one row-id array; string keys sort {prefix, rowId} pairs and need two pair
-// arrays (32 bytes/row = 4 i64/row).
-size_t RadixWorkStride(const std::vector<TSortColumnRef>& keyColumns) {
-    for (const auto& keyColumn : keyColumns) {
-        if (IsStringKeyType(keyColumn.Type)) {
-            return 4;
-        }
-    }
-    return 1;
 }
 
 } // namespace

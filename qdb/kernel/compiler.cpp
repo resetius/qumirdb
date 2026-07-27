@@ -702,8 +702,23 @@ int64_t MaterializeFixedWidth(const NQumir::NAst::TTypePtr& type) {
     return 0;
 }
 
+// Emits an entry that gathers `inputType`'s columns from a sorted row-id slice.
+// `entryName` names it. Callers may append computed columns (e.g. window
+// functions): reserve `extraColumnCount` column slots and `extraOwnerCount`
+// owner slots, and pass `emitExtraColumns` to fill them — it receives the
+// builder, the column-slot accessor, and the next free owner index (updated in
+// place). Shared by sort (sort_materialize_row_ids) and window.
+using TExtraColumnEmitter = std::function<void(
+    NKernel::NOz::TFunBuilder&,
+    const std::function<NQumir::NAst::TExprPtr(size_t)>&,
+    int64_t&)>;
+
 NQumir::NAst::TExprPtr BuildSortMaterializeWrapperAst(
-    const NQumir::NAst::TStructType& inputType)
+    const NQumir::NAst::TStructType& inputType,
+    const std::string& entryName = "sort_materialize_row_ids",
+    int64_t extraColumnCount = 0,
+    int64_t extraOwnerCount = 0,
+    const TExtraColumnEmitter& emitExtraColumns = {})
 {
     using namespace NQumir::NAst;
     namespace Oz = NKernel::NOz;
@@ -716,17 +731,19 @@ NQumir::NAst::TExprPtr BuildSortMaterializeWrapperAst(
     auto columnPtrType = Ptr(columnType);
     auto ptrI64Type = Ptr(i64Type);
 
-    const int64_t columnCount = static_cast<int64_t>(inputType.Fields.size());
+    const int64_t columnCount =
+        static_cast<int64_t>(inputType.Fields.size()) + extraColumnCount;
     int64_t ownedPtrCount = 1; // columns array, stored by sort_materialize_begin.
     for (const auto& field : inputType.Fields) {
         ownedPtrCount += SortKeyIsString(field.second) ? 3 : 2;
     }
+    ownedPtrCount += extraOwnerCount;
 
     auto column = [&](size_t idx) -> TExprPtr {
         return Oz::Index("columns", Int64Literal(static_cast<int64_t>(idx)));
     };
 
-    Oz::TFunBuilder builder("sort_materialize_row_ids");
+    Oz::TFunBuilder builder(entryName);
     builder
         .Param("store", rowSetPtrType)
         .Param("row_ids", ptrI64Type)
@@ -820,13 +837,21 @@ NQumir::NAst::TExprPtr BuildSortMaterializeWrapperAst(
             Cast(Int64Literal(0), Ptr(std::move(coreType))),
         }));
     }
+    if (emitExtraColumns) {
+        emitExtraColumns(builder, column, ownerIdx);
+    }
     builder.Stmt(Oz::Return(Oz::Ident("n")));
     return std::move(builder).Build();
 }
 
+// Builds a `runName` stage entry (sort ABI): optionally sorts the row-ids by
+// `keys`, then materializes the [start, limit) slice via `materializeEntry`.
+// Shared by sort (sort_materialize_row_ids) and window (window_materialize_row_ids).
 NQumir::NAst::TExprPtr BuildSortRunWrapperAst(
+    const std::string& runName,
     const std::vector<TSortRadixKeyInput>& keys,
-    bool nullable)
+    bool nullable,
+    const std::string& materializeEntry)
 {
     using namespace NQumir::NAst;
     namespace Oz = NKernel::NOz;
@@ -840,7 +865,7 @@ NQumir::NAst::TExprPtr BuildSortRunWrapperAst(
     auto ptrU32Type = Ptr(u32Type);
     auto ptrBoolType = Ptr(boolType);
 
-    Oz::TFunBuilder builder("qdb_sort_run");
+    Oz::TFunBuilder builder(runName);
     builder
         .Param("store", rowSetPtrType)
         .Param("row_ids", ptrI64Type)
@@ -868,7 +893,7 @@ NQumir::NAst::TExprPtr BuildSortRunWrapperAst(
     builder.Stmt(Oz::If(
         Oz::Bin(TOperator("<="), Oz::Ident("limit"), Int64Literal(0)),
         Oz::Block({Oz::Return(Int64Literal(0))})));
-    builder.Stmt(Oz::Return(Oz::Call("sort_materialize_row_ids", {
+    builder.Stmt(Oz::Return(Oz::Call(materializeEntry, {
         Oz::Ident("store"),
         Oz::Ident("row_ids"),
         Oz::Ident("start"),
@@ -922,227 +947,151 @@ NQumir::NAst::TExprPtr BuildWindowMaterializeWrapperAst(
     using namespace NQumir::NAst;
     namespace Oz = NKernel::NOz;
 
-    auto i64Type = std::make_shared<TIntegerType>();
-    auto rowSetType = QumirDbNamedType("TRowSet");
-    auto columnType = QumirDbNamedType("TColumn");
-    auto rowSetPtrType = Ptr(rowSetType);
-    auto rowSetRefType = std::make_shared<TReferenceType>(rowSetType);
-    auto columnPtrType = Ptr(columnType);
-    auto ptrI64Type = Ptr(i64Type);
-
     const int64_t inputColumnCount = static_cast<int64_t>(inputType.Fields.size());
-    const int64_t columnCount = inputColumnCount + static_cast<int64_t>(funcs.size());
-    int64_t ownedPtrCount = 1; // columns array, stored by sort_materialize_begin.
-    for (const auto& field : inputType.Fields) {
-        ownedPtrCount += SortKeyIsString(field.second) ? 3 : 2;
-    }
+    int64_t extraOwnerCount = 0;
     for (const auto& func : funcs) {
-        ownedPtrCount += func.Func == "rank" ? 1 : 2; // data; plus Mask for aggregates.
+        extraOwnerCount += func.Func == "rank" ? 1 : 2; // data; plus Mask for aggregates.
     }
 
-    auto column = [&](size_t idx) -> TExprPtr {
-        return Oz::Index("columns", Int64Literal(static_cast<int64_t>(idx)));
-    };
-
-    Oz::TFunBuilder builder("window_materialize_row_ids");
-    builder
-        .Param("store", rowSetPtrType)
-        .Param("row_ids", ptrI64Type)
-        .Param("start", i64Type)
-        .Param("limit", i64Type)
-        .Param("out_rowset", rowSetRefType)
-        .Return(i64Type)
-        .Var("n", i64Type)
-        .Assign("n", Oz::Ident("limit"))
-        .Stmt(Oz::If(
-            Oz::Bin(TOperator("<="), Oz::Ident("n"), Int64Literal(0)),
-            Oz::Block({Oz::Return(Int64Literal(0))})))
-        .Var("columns", columnPtrType)
-        .Assign("columns", Oz::Call("sort_materialize_begin", {
-            Int64Literal(columnCount),
-            Int64Literal(ownedPtrCount),
-            Oz::Ident("n"),
-            Oz::Ident("out_rowset"),
-        }));
-
-    int64_t ownerIdx = 2;
-    for (size_t c = 0; c < inputType.Fields.size(); ++c) {
-        const auto& type = inputType.Fields[c].second;
-        const auto srcCol = Int64Literal(static_cast<int64_t>(c));
-        if (SortKeyIsString(type)) {
-            const int64_t offsetsOwner = ownerIdx++;
+    auto emitWindowColumns = [&](
+        Oz::TFunBuilder& builder,
+        const std::function<TExprPtr(size_t)>& column,
+        int64_t& ownerIdx)
+    {
+        for (size_t f = 0; f < funcs.size(); ++f) {
             const int64_t dataOwner = ownerIdx++;
-            const int64_t maskOwner = ownerIdx++;
-            builder.Stmt(Oz::Call("sort_materialize_string_column", {
-                Oz::Ident("store"), Oz::Ident("row_ids"), Oz::Ident("start"),
-                Oz::Ident("n"), srcCol, column(c), Oz::Ident("out_rowset"),
-                Int64Literal(offsetsOwner), Int64Literal(dataOwner),
-                Int64Literal(maskOwner),
-            }));
-            continue;
-        }
-        const int64_t dataOwner = ownerIdx++;
-        const int64_t maskOwner = ownerIdx++;
-        if (SortKeyIsBool(type)) {
-            builder.Stmt(Oz::Call("sort_materialize_bool_column", {
-                Oz::Ident("store"), Oz::Ident("row_ids"), Oz::Ident("start"),
-                Oz::Ident("n"), srcCol, column(c), Oz::Ident("out_rowset"),
-                Int64Literal(dataOwner), Int64Literal(maskOwner),
-            }));
-            continue;
-        }
-        if (SortValueIsBinInt(type)) {
-            builder.Stmt(Oz::Call("sort_materialize_binint_column", {
-                Oz::Ident("store"), Oz::Ident("row_ids"), Oz::Ident("start"),
-                Oz::Ident("n"), srcCol, column(c), Oz::Ident("out_rowset"),
-                Int64Literal(dataOwner), Int64Literal(maskOwner),
-            }));
-            continue;
-        }
-        auto coreType = SortCoreType(type);
-        const int64_t width = MaterializeFixedWidth(type);
-        if (!coreType || width == 0) {
-            throw NQumir::TError(
-                "BuildWindowMaterializeWrapperAst: unsupported column type " +
-                (type ? type->ToString() : std::string("<null>")));
-        }
-        builder.Stmt(Oz::Call("sort_materialize_fixed_column", {
-            Oz::Ident("store"), Oz::Ident("row_ids"), Oz::Ident("start"),
-            Oz::Ident("n"), srcCol, column(c), Oz::Ident("out_rowset"),
-            Int64Literal(dataOwner), Int64Literal(maskOwner),
-            Int64Literal(width), Cast(Int64Literal(0), Ptr(std::move(coreType))),
-        }));
-    }
-
-    for (size_t f = 0; f < funcs.size(); ++f) {
-        const int64_t dataOwner = ownerIdx++;
-        if (funcs[f].Func == "rank") {
-            builder.Stmt(Oz::Call("window_fill_rank", {
-                Oz::Ident("store"), Oz::Ident("row_ids"), Oz::Ident("start"),
-                Oz::Ident("n"),
-                column(static_cast<size_t>(inputColumnCount) + f),
-                Oz::Ident("out_rowset"), Int64Literal(dataOwner),
-            }));
-        } else if (funcs[f].Func == "avg_partition") {
-            const int64_t maskOwner = ownerIdx++;
-            const auto& argType =
-                inputType.Fields[static_cast<size_t>(funcs[f].ArgColumn)].second;
-            if (SortValueIsBinInt(argType)) {
-                // Scale the sum up to the result decimal's scale before dividing
-                // by the count, so the quotient keeps fractional precision. The
-                // delta is exactly the scale the result type added over the arg.
-                auto argSpec = DecimalSpecOfValueType(UnwrapNullableType(argType));
-                auto resSpec = DecimalSpecOfValueType(
-                    UnwrapNullableType(funcs[f].ResultType));
-                const int64_t scaleDelta =
-                    (argSpec && resSpec) ? (resSpec->Scale - argSpec->Scale) : 0;
-                builder.Stmt(Oz::Call("window_fill_partition_avg_binint", {
+            if (funcs[f].Func == "rank") {
+                builder.Stmt(Oz::Call("window_fill_rank", {
+                    Oz::Ident("store"), Oz::Ident("row_ids"), Oz::Ident("start"),
+                    Oz::Ident("n"),
+                    column(static_cast<size_t>(inputColumnCount) + f),
+                    Oz::Ident("out_rowset"), Int64Literal(dataOwner),
+                }));
+            } else if (funcs[f].Func == "avg_partition") {
+                const int64_t maskOwner = ownerIdx++;
+                const auto& argType =
+                    inputType.Fields[static_cast<size_t>(funcs[f].ArgColumn)].second;
+                if (SortValueIsBinInt(argType)) {
+                    // Scale the sum up to the result decimal's scale before dividing
+                    // by the count, so the quotient keeps fractional precision. The
+                    // delta is exactly the scale the result type added over the arg.
+                    auto argSpec = DecimalSpecOfValueType(UnwrapNullableType(argType));
+                    auto resSpec = DecimalSpecOfValueType(
+                        UnwrapNullableType(funcs[f].ResultType));
+                    const int64_t scaleDelta =
+                        (argSpec && resSpec) ? (resSpec->Scale - argSpec->Scale) : 0;
+                    builder.Stmt(Oz::Call("window_fill_partition_avg_binint", {
+                        Oz::Ident("store"), Oz::Ident("row_ids"), Oz::Ident("start"),
+                        Oz::Ident("n"),
+                        Int64Literal(static_cast<int64_t>(funcs[f].ArgColumn)),
+                        column(static_cast<size_t>(inputColumnCount) + f),
+                        Oz::Ident("out_rowset"), Int64Literal(dataOwner),
+                        Int64Literal(maskOwner),
+                        Int64Literal(scaleDelta),
+                    }));
+                    continue;
+                }
+                auto argCoreType = SortCoreType(argType);
+                if (!argCoreType) {
+                    throw NQumir::TError(
+                        "BuildWindowMaterializeWrapperAst: unsupported avg argument type " +
+                        (argType ? argType->ToString() : std::string("<null>")));
+                }
+                builder.Stmt(Oz::Call("window_fill_partition_avg_f64", {
                     Oz::Ident("store"), Oz::Ident("row_ids"), Oz::Ident("start"),
                     Oz::Ident("n"),
                     Int64Literal(static_cast<int64_t>(funcs[f].ArgColumn)),
+                    Cast(Int64Literal(0), Ptr(std::move(argCoreType))),
                     column(static_cast<size_t>(inputColumnCount) + f),
                     Oz::Ident("out_rowset"), Int64Literal(dataOwner),
                     Int64Literal(maskOwner),
-                    Int64Literal(scaleDelta),
                 }));
-                continue;
-            }
-            auto argCoreType = SortCoreType(argType);
-            if (!argCoreType) {
-                throw NQumir::TError(
-                    "BuildWindowMaterializeWrapperAst: unsupported avg argument type " +
-                    (argType ? argType->ToString() : std::string("<null>")));
-            }
-            builder.Stmt(Oz::Call("window_fill_partition_avg_f64", {
-                Oz::Ident("store"), Oz::Ident("row_ids"), Oz::Ident("start"),
-                Oz::Ident("n"),
-                Int64Literal(static_cast<int64_t>(funcs[f].ArgColumn)),
-                Cast(Int64Literal(0), Ptr(std::move(argCoreType))),
-                column(static_cast<size_t>(inputColumnCount) + f),
-                Oz::Ident("out_rowset"), Int64Literal(dataOwner),
-                Int64Literal(maskOwner),
-            }));
-        } else if (funcs[f].Func == "sum_prefix" ||
-                   funcs[f].Func == "sum_partition" ||
-                   funcs[f].Func == "max_prefix")
-        {
-            const int64_t maskOwner = ownerIdx++;
-            const auto& argType =
-                inputType.Fields[static_cast<size_t>(funcs[f].ArgColumn)].second;
-            const bool binInt = SortValueIsBinInt(argType);
-            const bool isPrefix = funcs[f].Func != "sum_partition";
-            if (binInt) {
+            } else if (funcs[f].Func == "sum_prefix" ||
+                       funcs[f].Func == "sum_partition" ||
+                       funcs[f].Func == "max_prefix")
+            {
+                const int64_t maskOwner = ownerIdx++;
+                const auto& argType =
+                    inputType.Fields[static_cast<size_t>(funcs[f].ArgColumn)].second;
+                const bool binInt = SortValueIsBinInt(argType);
+                const bool isPrefix = funcs[f].Func != "sum_partition";
+                if (binInt) {
+                    const char* filler = funcs[f].Func == "sum_prefix"
+                        ? "window_fill_prefix_sum_binint"
+                        : funcs[f].Func == "sum_partition"
+                            ? "window_fill_partition_sum_binint"
+                            : "window_fill_prefix_max_binint";
+                    std::vector<TExprPtr> args = {
+                        Oz::Ident("store"), Oz::Ident("row_ids"), Oz::Ident("start"),
+                        Oz::Ident("n"),
+                        Int64Literal(static_cast<int64_t>(funcs[f].ArgColumn)),
+                        column(static_cast<size_t>(inputColumnCount) + f),
+                        Oz::Ident("out_rowset"), Int64Literal(dataOwner),
+                        Int64Literal(maskOwner),
+                    };
+                    if (isPrefix) {
+                        args.push_back(Oz::Bool(funcs[f].PeerInclusive));
+                    }
+                    builder.Stmt(Oz::Call(filler, std::move(args)));
+                    continue;
+                }
+                auto argCoreType = SortCoreType(argType);
+                const int64_t width = MaterializeFixedWidth(argType);
+                if (!argCoreType || width == 0) {
+                    throw NQumir::TError(
+                        "BuildWindowMaterializeWrapperAst: unsupported window argument type " +
+                        (argType ? argType->ToString() : std::string("<null>")));
+                }
                 const char* filler = funcs[f].Func == "sum_prefix"
-                    ? "window_fill_prefix_sum_binint"
+                    ? "window_fill_prefix_sum_fixed"
                     : funcs[f].Func == "sum_partition"
-                        ? "window_fill_partition_sum_binint"
-                        : "window_fill_prefix_max_binint";
+                        ? "window_fill_partition_sum_fixed"
+                        : "window_fill_prefix_max_fixed";
+                const bool integerSum =
+                    (funcs[f].Func == "sum_prefix" || funcs[f].Func == "sum_partition") &&
+                    SortValueIsInteger(argType);
                 std::vector<TExprPtr> args = {
                     Oz::Ident("store"), Oz::Ident("row_ids"), Oz::Ident("start"),
-                    Oz::Ident("n"),
-                    Int64Literal(static_cast<int64_t>(funcs[f].ArgColumn)),
-                    column(static_cast<size_t>(inputColumnCount) + f),
-                    Oz::Ident("out_rowset"), Int64Literal(dataOwner),
-                    Int64Literal(maskOwner),
+                    Oz::Ident("n"), Int64Literal(static_cast<int64_t>(funcs[f].ArgColumn)),
+                    Cast(Int64Literal(0), Ptr(std::move(argCoreType))),
                 };
+                if (funcs[f].Func == "sum_prefix" || funcs[f].Func == "sum_partition") {
+                    auto outCoreType = integerSum
+                        ? std::make_shared<TIntegerType>()
+                        : SortCoreType(argType);
+                    const int64_t outWidth = integerSum ? 8 : width;
+                    if (!outCoreType || outWidth == 0) {
+                        throw NQumir::TError(
+                            "BuildWindowMaterializeWrapperAst: unsupported window sum result type " +
+                            (argType ? argType->ToString() : std::string("<null>")));
+                    }
+                    args.push_back(Cast(Int64Literal(0), Ptr(std::move(outCoreType))));
+                    args.push_back(Int64Literal(outWidth));
+                } else {
+                    args.push_back(Int64Literal(width));
+                }
+                args.push_back(column(static_cast<size_t>(inputColumnCount) + f));
+                args.push_back(Oz::Ident("out_rowset"));
+                args.push_back(Int64Literal(dataOwner));
+                args.push_back(Int64Literal(maskOwner));
                 if (isPrefix) {
                     args.push_back(Oz::Bool(funcs[f].PeerInclusive));
                 }
                 builder.Stmt(Oz::Call(filler, std::move(args)));
-                continue;
-            }
-            auto argCoreType = SortCoreType(argType);
-            const int64_t width = MaterializeFixedWidth(argType);
-            if (!argCoreType || width == 0) {
-                throw NQumir::TError(
-                    "BuildWindowMaterializeWrapperAst: unsupported window argument type " +
-                    (argType ? argType->ToString() : std::string("<null>")));
-            }
-            const char* filler = funcs[f].Func == "sum_prefix"
-                ? "window_fill_prefix_sum_fixed"
-                : funcs[f].Func == "sum_partition"
-                    ? "window_fill_partition_sum_fixed"
-                    : "window_fill_prefix_max_fixed";
-            const bool integerSum =
-                (funcs[f].Func == "sum_prefix" || funcs[f].Func == "sum_partition") &&
-                SortValueIsInteger(argType);
-            std::vector<TExprPtr> args = {
-                Oz::Ident("store"), Oz::Ident("row_ids"), Oz::Ident("start"),
-                Oz::Ident("n"), Int64Literal(static_cast<int64_t>(funcs[f].ArgColumn)),
-                Cast(Int64Literal(0), Ptr(std::move(argCoreType))),
-            };
-            if (funcs[f].Func == "sum_prefix" || funcs[f].Func == "sum_partition") {
-                auto outCoreType = integerSum
-                    ? std::make_shared<TIntegerType>()
-                    : SortCoreType(argType);
-                const int64_t outWidth = integerSum ? 8 : width;
-                if (!outCoreType || outWidth == 0) {
-                    throw NQumir::TError(
-                        "BuildWindowMaterializeWrapperAst: unsupported window sum result type " +
-                        (argType ? argType->ToString() : std::string("<null>")));
-                }
-                args.push_back(Cast(Int64Literal(0), Ptr(std::move(outCoreType))));
-                args.push_back(Int64Literal(outWidth));
             } else {
-                args.push_back(Int64Literal(width));
+                throw NQumir::TError(
+                    "BuildWindowMaterializeWrapperAst: unsupported window function " +
+                    funcs[f].Func);
             }
-            args.push_back(column(static_cast<size_t>(inputColumnCount) + f));
-            args.push_back(Oz::Ident("out_rowset"));
-            args.push_back(Int64Literal(dataOwner));
-            args.push_back(Int64Literal(maskOwner));
-            if (isPrefix) {
-                args.push_back(Oz::Bool(funcs[f].PeerInclusive));
-            }
-            builder.Stmt(Oz::Call(filler, std::move(args)));
-        } else {
-            throw NQumir::TError(
-                "BuildWindowMaterializeWrapperAst: unsupported window function " +
-                funcs[f].Func);
         }
-    }
+    };
 
-    builder.Stmt(Oz::Return(Oz::Ident("n")));
-    return std::move(builder).Build();
+    return BuildSortMaterializeWrapperAst(
+        inputType,
+        "window_materialize_row_ids",
+        static_cast<int64_t>(funcs.size()),
+        extraOwnerCount,
+        emitWindowColumns);
 }
 
 NQumir::NAst::TExprPtr BuildWindowKeyComparatorAst(
@@ -1246,61 +1195,6 @@ NQumir::NAst::TExprPtr BuildWindowKeyComparatorAst(
     return std::move(builder).Build();
 }
 
-// Like BuildSortRunWrapperAst but materializes via window_materialize_row_ids.
-NQumir::NAst::TExprPtr BuildWindowRunWrapperAst(
-    const std::vector<TSortRadixKeyInput>& keys,
-    bool nullable)
-{
-    using namespace NQumir::NAst;
-    namespace Oz = NKernel::NOz;
-
-    auto i64Type = std::make_shared<TIntegerType>();
-    auto u32Type = std::make_shared<TIntegerType>(TIntegerType::U32);
-    auto boolType = std::make_shared<TBoolType>();
-    auto rowSetPtrType = Ptr(QumirDbNamedType("TRowSet"));
-    auto rowSetRefType = std::make_shared<TReferenceType>(QumirDbNamedType("TRowSet"));
-    auto ptrI64Type = Ptr(i64Type);
-    auto ptrU32Type = Ptr(u32Type);
-    auto ptrBoolType = Ptr(boolType);
-
-    Oz::TFunBuilder builder("qdb_window_run");
-    builder
-        .Param("store", rowSetPtrType)
-        .Param("row_ids", ptrI64Type)
-        .Param("work", ptrI64Type)
-        .Param("counts", ptrU32Type)
-        .Param("n", i64Type)
-        .Param("descs", ptrBoolType)
-        .Param("nulls_firsts", ptrBoolType)
-        .Param("do_sort", boolType)
-        .Param("start", i64Type)
-        .Param("limit", i64Type)
-        .Param("out_rowset", rowSetRefType)
-        .Return(i64Type);
-
-    std::vector<TExprPtr> sortStmts;
-    for (size_t k = keys.size(); k > 0; --k) {
-        const size_t keyIdx = k - 1;
-        auto desc = Oz::Index("descs", Int64Literal(static_cast<int64_t>(keyIdx)));
-        auto nullsFirst = Oz::Index(
-            "nulls_firsts", Int64Literal(static_cast<int64_t>(keyIdx)));
-        sortStmts.push_back(BuildRowIdSortCall(
-            keys[keyIdx], nullable, std::move(desc), std::move(nullsFirst), "store"));
-    }
-    builder.Stmt(Oz::If(Oz::Ident("do_sort"), Oz::Block(std::move(sortStmts))));
-    builder.Stmt(Oz::If(
-        Oz::Bin(TOperator("<="), Oz::Ident("limit"), Int64Literal(0)),
-        Oz::Block({Oz::Return(Int64Literal(0))})));
-    builder.Stmt(Oz::Return(Oz::Call("window_materialize_row_ids", {
-        Oz::Ident("store"),
-        Oz::Ident("row_ids"),
-        Oz::Ident("start"),
-        Oz::Ident("limit"),
-        Oz::Ident("out_rowset"),
-    })));
-    return std::move(builder).Build();
-}
-
 } // namespace
 
 NQumir::NAst::TExprPtr BuildWindowProgramAst(
@@ -1342,7 +1236,8 @@ NQumir::NAst::TExprPtr BuildWindowProgramAst(
     // scatter a partition.
     const bool nullable = std::any_of(keys.begin(), keys.end(),
         [](const TSortRadixKeyInput& key) { return IsNullableType(key.Type); });
-    programStmts.push_back(BuildWindowRunWrapperAst(keys, nullable));
+    programStmts.push_back(BuildSortRunWrapperAst(
+        "qdb_window_run", keys, nullable, "window_materialize_row_ids"));
     return std::make_shared<TBlockExpr>(NQumir::TLocation{}, std::move(programStmts));
 }
 
@@ -1374,7 +1269,7 @@ NQumir::NAst::TExprPtr BuildRadixSortProgramAst(
     if (materializeType) {
         AddSortMaterializeLibrary(programStmts, "BuildRadixSortProgramAst");
         programStmts.push_back(BuildSortMaterializeWrapperAst(*materializeType));
-        programStmts.push_back(BuildSortRunWrapperAst(keys, false));
+        programStmts.push_back(BuildSortRunWrapperAst("qdb_sort_run", keys, false, "sort_materialize_row_ids"));
     }
     return std::make_shared<TBlockExpr>(NQumir::TLocation{}, std::move(programStmts));
 }
@@ -1407,7 +1302,7 @@ NQumir::NAst::TExprPtr BuildRadixSortNullableProgramAst(
     if (materializeType) {
         AddSortMaterializeLibrary(programStmts, "BuildRadixSortNullableProgramAst");
         programStmts.push_back(BuildSortMaterializeWrapperAst(*materializeType));
-        programStmts.push_back(BuildSortRunWrapperAst(keys, true));
+        programStmts.push_back(BuildSortRunWrapperAst("qdb_sort_run", keys, true, "sort_materialize_row_ids"));
     }
     return std::make_shared<TBlockExpr>(NQumir::TLocation{}, std::move(programStmts));
 }

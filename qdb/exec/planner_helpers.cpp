@@ -1,6 +1,7 @@
 #include <qdb/exec/planner_helpers.h>
 #include <qdb/exec/filter_exec.h>
 #include <qdb/exec/project_exec.h>
+#include <qdb/exec/sort_key_ops.h>
 #include <qdb/plan/ops/aggregate.h>
 #include <qdb/plan/ops/join.h>
 #include <qdb/plan/ops/limit.h>
@@ -78,13 +79,6 @@ bool IsRadixSortableType(const NQumir::NAst::TTypePtr& type) {
 }
 
 bool SortNullsFirst(const NKernel::TKernelSortKeySpec& key) {
-    if (key.Nulls != ESortNulls::Default) {
-        return key.Nulls == ESortNulls::First;
-    }
-    return key.Direction == ESortDirection::Desc;
-}
-
-bool SortNullsFirst(const TSortKey& key) {
     if (key.Nulls != ESortNulls::Default) {
         return key.Nulls == ESortNulls::First;
     }

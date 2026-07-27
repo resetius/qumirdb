@@ -1,6 +1,7 @@
 #include <qdb/exec/window_exec.h>
 
 #include <qdb/exec/kernel_rowset.h>
+#include <qdb/exec/sort_key_ops.h>
 #include <qdb/plan/types/nullable.h>
 
 #include <qumir/parser/type.h>
@@ -13,32 +14,6 @@
 namespace NQdb {
 
 using namespace NQumir::NAst;
-
-namespace {
-
-bool RowIsSelected(const TRowSet& batch, int32_t row) {
-    return !batch.Selection || batch.Selection[row] != 0;
-}
-
-// String radix keys sort {prefix, rowId} pairs and need 4 i64 work slots/row.
-size_t WorkStride(const std::vector<TSortColumnRef>& keyColumns) {
-    for (const auto& keyColumn : keyColumns) {
-        if (TMaybeType<TStringType>(UnwrapNamedType(UnwrapNullableType(keyColumn.Type)))) {
-            return 4;
-        }
-    }
-    return 1;
-}
-
-// PostgreSQL default: ASC → NULLS LAST, DESC → NULLS FIRST.
-bool NullsFirst(const TSortKey& key) {
-    if (key.Nulls != ESortNulls::Default) {
-        return key.Nulls == ESortNulls::First;
-    }
-    return key.Direction == ESortDirection::Desc;
-}
-
-} // namespace
 
 TWindowProcessor::TWindowProcessor(
     TTypePtr outputType,
@@ -58,7 +33,7 @@ void TWindowProcessor::Add(TRowSet& rowSet)
     }
     const int32_t batchIdx = Store_.PushBatch(rowSet);
     for (int32_t row = 0; row < rowSet.RowCount; ++row) {
-        if (RowIsSelected(rowSet, row)) {
+        if (RowSelected(rowSet, row)) {
             Rows_.push_back(MakeRowId(batchIdx, row));
         }
     }
@@ -88,13 +63,13 @@ bool TWindowProcessor::Next(TRowSet& rowSet)
     const bool nullable = std::any_of(
         KeyColumns_.begin(), KeyColumns_.end(),
         [](const TSortColumnRef& keyColumn) { return IsNullableType(keyColumn.Type); });
-    std::vector<TRowId> work(Rows_.size() * WorkStride(KeyColumns_));
+    std::vector<TRowId> work(Rows_.size() * RadixWorkStride(KeyColumns_));
     std::vector<uint32_t> counts(nullable ? 257 : 256);
     auto descs = std::make_unique<bool[]>(Keys_.size());
     auto nullsFirsts = std::make_unique<bool[]>(Keys_.size());
     for (size_t k = 0; k < Keys_.size(); ++k) {
         descs[k] = Keys_[k].Direction == ESortDirection::Desc;
-        nullsFirsts[k] = NullsFirst(Keys_[k]);
+        nullsFirsts[k] = SortNullsFirst(Keys_[k]);
     }
 
     // One call: sort the row-ids in place, then materialize the whole partition
