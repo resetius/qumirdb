@@ -211,8 +211,26 @@ struct TContext {
 TOperatorPtr Process(TOperatorPtr node, TContext ctx);
 
 TOperatorPtr ProcessAggregate(std::shared_ptr<TAggregateOperator> aggregate, TContext ctx) {
-    aggregate->MutableInput() = Process(aggregate->Input(), {{}, ctx.Mode});
-    return Materialize(aggregate, ctx.Conjucts);
+    if (!aggregate->GroupingSets().empty()) {
+        aggregate->MutableInput() = Process(aggregate->Input(), {{}, ctx.Mode});
+        return Materialize(aggregate, ctx.Conjucts);
+    }
+
+    std::unordered_set<std::string> groupCols(
+        aggregate->GroupKeys().begin(), aggregate->GroupKeys().end());
+
+    std::vector<TConjuct> pushable;
+    std::vector<TConjuct> keep;
+    for (auto& conj : ctx.Conjucts) {
+        if (!groupCols.empty() && Covers(ColumnsOf(conj), groupCols)) {
+            pushable.push_back(std::move(conj));
+        } else {
+            keep.push_back(std::move(conj));
+        }
+    }
+
+    aggregate->MutableInput() = Process(aggregate->Input(), {pushable, ctx.Mode});
+    return Materialize(aggregate, keep);
 }
 
 TOperatorPtr ProcessLimit(std::shared_ptr<TLimitOperator> limit, TContext ctx) {
