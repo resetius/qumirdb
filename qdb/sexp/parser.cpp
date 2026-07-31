@@ -5,6 +5,7 @@
 #include <qdb/plan/ops/join.h>
 #include <qdb/plan/ops/limit.h>
 #include <qdb/plan/ops/project.h>
+#include <qdb/plan/ops/union.h>
 #include <qdb/plan/ops/sort.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/ops/window.h>
@@ -134,6 +135,18 @@ TNodeParserMap MakeRelParsers(TRelParserOptions options) {
                 specs.push_back({projName.Name, std::move(projExpr)});
             }
             co_return std::make_shared<TProjectOperator>(std::move(input), std::move(specs));
+        }
+
+        if (*relName == TUnionAllOperator::OpId) {
+            std::vector<TOperatorPtr> inputs;
+            while (true) {
+                auto tok = h.Next();
+                if (IParseHandle::IsOp(tok, ')')) break;
+                h.Unget(tok);
+                auto branch = co_await h.Expr();
+                inputs.push_back(std::static_pointer_cast<IOperator>(std::move(branch)));
+            }
+            co_return std::make_shared<TUnionAllOperator>(std::move(inputs));
         }
 
         if (*relName == TSortOperator::OpId || *relName == TTopSortOperator::OpId) {

@@ -24,6 +24,7 @@ add_library(qumirdb
     sql/lexer.cpp
     sql/parser.cpp
     sql/printer.cpp
+    plan/passes/const_fold.cpp
     plan/passes/unbound_vars.cpp
     plan/passes/typing.cpp
     plan/passes/column_pruning.cpp
