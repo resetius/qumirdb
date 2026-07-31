@@ -218,7 +218,10 @@ void RemapIdents(NQumir::NAst::TExprPtr& expr, const std::unordered_map<std::str
         if (maybeRename != renameFromTo.end()) {
             auto target = maybeRename->second;
             if (target.Expr) {
-                expr = target.Expr;
+                // Clone: the substituted expression is shared with its source
+                // (a projection spec / branch constant) and must stay independent
+                // of further in-place rewrites of the pushed predicate.
+                expr = CloneExpr(target.Expr);
             } else {
                 ident->Name = target.Name;
             }
@@ -266,9 +269,44 @@ TOperatorPtr ProcessLimit(std::shared_ptr<TLimitOperator> limit, TContext ctx) {
     return Materialize(limit, ctx.Conjucts);
 }
 
+// In PushOnly mode a project is not a barrier: a predicate over its output
+// columns is rewritten into the input namespace (each output column replaced by
+// its defining projection expression) and pushed below.
 TOperatorPtr ProcessProject(std::shared_ptr<TProjectOperator> project, TContext ctx) {
-    project->MutableInput() = Process(project->Input(), {{}, ctx.Mode});
-    return Materialize(project, ctx.Conjucts);
+    // ExtractKeys keeps the barrier: its conjuncts carry equi-key info (the
+    // `equiv` flag lifted into join keys downstream); rewriting `col == col`
+    // through the projection would flatten it to a plain predicate and lose keys.
+    if (ctx.Mode != EMode::PushOnly) {
+        project->MutableInput() = Process(project->Input(), {{}, ctx.Mode});
+        return Materialize(project, ctx.Conjucts);
+    }
+
+    std::unordered_map<std::string, TRemapTarget> rewrite;
+    for (const auto& spec : project->Projections()) {
+        rewrite[spec.Name] = TRemapTarget{.Expr = spec.Expression};
+    }
+
+    std::vector<TConjuct> pushable;
+    std::vector<TConjuct> keep;
+    for (auto& conj : ctx.Conjucts) {
+        bool mapped = true;
+        for (const auto& col : ColumnsOf(conj)) {
+            if (!rewrite.count(col)) {
+                mapped = false;
+                break;
+            }
+        }
+        if (!mapped) {
+            keep.push_back(std::move(conj));
+            continue;
+        }
+        auto rewritten = CloneExpr(ConjuctExpr(conj));
+        RemapIdents(rewritten, rewrite);
+        pushable.push_back(TConjuct{std::move(rewritten)});
+    }
+
+    project->MutableInput() = Process(project->Input(), {std::move(pushable), ctx.Mode});
+    return Materialize(project, keep);
 }
 
 TOperatorPtr ProcessSort(std::shared_ptr<TSortOperator> sort, TContext ctx) {

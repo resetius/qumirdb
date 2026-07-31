@@ -14,6 +14,7 @@
 #include <qdb/plan/passes/equijoin.h>
 #include <qdb/plan/passes/join_order.h>
 #include <qdb/plan/passes/qualify_columns.h>
+#include <qdb/plan/passes/unbound_vars.h>
 #include <qdb/plan/passes/typing.h>
 #include <qdb/sexp/parser.h>
 
@@ -331,6 +332,31 @@ TEST(PushDown, WindowRecursesToChildJoin) {
         tables);
 
     EXPECT_EQ(Keys(root), (TKeys{{"a.aid", "b.bid"}}));
+}
+
+// A predicate over a project's output column is rewritten into the input
+// namespace (x -> aid) and pushed below the project onto the leaf.
+TEST(PushDown, ProjectRewritesAndPushesPredicate) {
+    NQdb::TMockSource a({"aid"});
+    std::map<std::string, ISource*> tables = {{"A", &a}};
+
+    auto root = PushDownPredicates(BuildAnnotated(
+        "(rel filter"
+        "  (rel project (rel source \"A\" \"a\") (x aid))"
+        "  (< x 5))",
+        tables));
+
+    ASSERT_EQ(AsFilter(root), nullptr);
+    auto project = dynamic_cast<const TProjectOperator*>(root.get());
+    ASSERT_NE(project, nullptr);
+    auto filter = AsFilter(project->Input());
+    ASSERT_NE(filter, nullptr);
+    ASSERT_NE(AsSource(filter->Input()), nullptr);
+    EXPECT_EQ(AsSource(filter->Input())->GetAlias(), "a");
+    // The pushed predicate is rewritten into the input column, not the output x.
+    auto vars = FindUnboundVars(filter->Predicate());
+    EXPECT_TRUE(vars.count("a.aid"));
+    EXPECT_FALSE(vars.count("a.x"));
 }
 
 // A predicate over a UNION ALL whose branches tag a constant column is pushed
