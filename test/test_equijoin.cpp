@@ -7,6 +7,7 @@
 #include <qdb/plan/ops/join.h>
 #include <qdb/plan/ops/limit.h>
 #include <qdb/plan/ops/operator.h>
+#include <qdb/plan/ops/project.h>
 #include <qdb/plan/ops/sort.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/ops/window.h>
@@ -330,6 +331,52 @@ TEST(PushDown, WindowRecursesToChildJoin) {
         tables);
 
     EXPECT_EQ(Keys(root), (TKeys{{"a.aid", "b.bid"}}));
+}
+
+// A predicate over a UNION ALL whose branches tag a constant column is pushed
+// into each branch; substituting the branch constant and const-folding prunes
+// the branches that cannot match, collapsing the union to the surviving one.
+TEST(PushDown, UnionAllPrunesConstantBranch) {
+    NQdb::TMockSource a({"aid"});
+    NQdb::TMockSource b({"bid"});
+    std::map<std::string, ISource*> tables = {{"A", &a}, {"B", &b}};
+
+    auto root = PushDownPredicates(BuildAnnotated(
+        "(rel filter"
+        "  (rel union-all"
+        "    (rel project (rel source \"A\" \"a\") (tag 1))"
+        "    (rel project (rel source \"B\" \"b\") (tag 2)))"
+        "  (== tag 1))",
+        tables));
+
+    // Only the first branch matches tag==1; the union collapses to it, with no
+    // residual filter and no union node left.
+    ASSERT_EQ(AsFilter(root), nullptr);
+    auto project = dynamic_cast<const TProjectOperator*>(root.get());
+    ASSERT_NE(project, nullptr);
+    auto source = dynamic_cast<const TSourceOperator*>(project->Input().get());
+    ASSERT_NE(source, nullptr);
+    EXPECT_EQ(source->GetAlias(), "a");
+}
+
+// When no branch can match the predicate, the union prunes to an empty relation
+// carrying its schema (limit 0).
+TEST(PushDown, UnionAllPrunesAllBranchesToEmpty) {
+    NQdb::TMockSource a({"aid"});
+    NQdb::TMockSource b({"bid"});
+    std::map<std::string, ISource*> tables = {{"A", &a}, {"B", &b}};
+
+    auto root = PushDownPredicates(BuildAnnotated(
+        "(rel filter"
+        "  (rel union-all"
+        "    (rel project (rel source \"A\" \"a\") (tag 1))"
+        "    (rel project (rel source \"B\" \"b\") (tag 2)))"
+        "  (== tag 3))",
+        tables));
+
+    auto limit = AsLimit(root);
+    ASSERT_NE(limit, nullptr);
+    EXPECT_EQ(limit->Limit(), 0);
 }
 
 int main(int argc, char** argv) {

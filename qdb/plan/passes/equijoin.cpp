@@ -8,12 +8,14 @@
 #include <qdb/plan/ops/sort.h>
 #include <qdb/plan/ops/union.h>
 #include <qdb/plan/ops/window.h>
+#include <qdb/plan/clone_expr.h>
 #include <qdb/plan/passes/unbound_vars.h>
 #include <qdb/utils/union_find.h>
 
 #include "factor_conjuncts.h"
 #include "flatten_conjuncts.h"
 #include "flatten_disjuncts.h"
+#include "const_fold.h"
 
 #include <stdexcept>
 #include <unordered_map>
@@ -203,6 +205,32 @@ TExprPtr DeriveSideFilter(const TExprPtr& expr, const std::unordered_set<std::st
     return Combine(parts, TOperator("||"));
 }
 
+struct TRemapTarget {
+    std::string Name;
+    NQumir::NAst::TExprPtr Expr;
+};
+
+void RemapIdents(NQumir::NAst::TExprPtr& expr, const std::unordered_map<std::string, TRemapTarget>& renameFromTo) {
+    if (auto maybeIdent = TMaybeNode<NQumir::NAst::TIdentExpr>(expr)) {
+        auto ident = maybeIdent.Cast();
+        auto name = ident->Name;
+        auto maybeRename = renameFromTo.find(name);
+        if (maybeRename != renameFromTo.end()) {
+            auto target = maybeRename->second;
+            if (target.Expr) {
+                expr = target.Expr;
+            } else {
+                ident->Name = target.Name;
+            }
+        }
+        return;
+    }
+
+    for (const auto& child : expr->MutableChildren()) {
+        RemapIdents(*child, renameFromTo);
+    }
+}
+
 struct TContext {
     std::vector<TConjuct> Conjucts;
     EMode Mode = EMode::ExtractKeys;
@@ -273,6 +301,103 @@ TOperatorPtr ProcessWindow(std::shared_ptr<TWindowOperator> window, TContext ctx
 
     window->MutableInput() = Process(window->Input(), {std::move(pushable), ctx.Mode});
     return Materialize(window, keep);
+}
+
+// A closed projection is a constant within its branch, so it can be substituted
+// for the column in a pushed predicate and then const-folded (e.g. the
+// `'s'`/`'c'`/`'w'` sale_type tags of a UNION ALL). Returns nullptr when the
+// branch has no top Project, `pos` is out of range, or the projection still
+// references input columns.
+TExprPtr ClosedBranchProjection(const TOperatorPtr& branch, size_t pos) {
+    auto project = TMaybeOp<TProjectOperator>(branch);
+    if (!project) {
+        return nullptr;
+    }
+    const auto& projections = project.Cast()->Projections();
+    if (pos >= projections.size()) {
+        return nullptr;
+    }
+    const auto& expr = projections[pos].Expression;
+    if (!expr || !FindUnboundVars(expr).empty()) {
+        return nullptr;
+    }
+    return expr;
+}
+
+TOperatorPtr ProcessUnion(std::shared_ptr<TUnionAllOperator> unionAll, TContext ctx) {
+    auto&& outFields = TMaybeType<NQumir::NAst::TStructType>(unionAll->OutputColumns()).Cast()->Fields;
+    // 1: build column name -> column id mapping
+    std::unordered_map<std::string, int> columnNameToId;
+    for (const auto& [field, _] : outFields) {
+        columnNameToId[field] = columnNameToId.size();
+    }
+
+    auto& branches = unionAll->MutableInputs();
+    std::vector<TOperatorPtr> newInputs; newInputs.reserve(branches.size());
+    for (auto& branch : branches) {
+        std::unordered_map<std::string, TRemapTarget> remapFromTo;
+        auto&& branchFields = TMaybeType<NQumir::NAst::TStructType>(branch->OutputColumns()).Cast()->Fields;
+        std::vector<TConjuct> branchConjucts;
+        branchConjucts.reserve(ctx.Conjucts.size());
+        std::vector<NQumir::NAst::TExprPtr> branchConstColumns(branchFields.size());
+        for (int i = 0; i < branchConstColumns.size(); ++i) {
+            branchConstColumns[i] = ClosedBranchProjection(branch, i);
+        }
+
+        bool branchIsDead = false;
+        // 2. build cloned predicates with remapped columns
+        for (const auto& conj : ctx.Conjucts) {
+            for (const auto& col : ColumnsOf(conj)) {
+                auto idx = columnNameToId.at(col);
+                if (branchConstColumns[idx]) {
+                    remapFromTo[col] = TRemapTarget {
+                        .Expr = branchConstColumns[idx]
+                    };
+                } else {
+                    remapFromTo[col] = TRemapTarget {
+                        .Name = branchFields[idx].first
+                    };
+                }
+            }
+
+            auto cloned = CloneExpr(conj.Expr);
+            RemapIdents(cloned, remapFromTo);
+            cloned = ConstFold(cloned);
+            std::optional<bool> branchValue;
+            if (auto maybeNumber = TMaybeNode<TNumberExpr>(cloned)) {
+                auto number = maybeNumber.Cast();
+                if (number->IsFloat()) {
+                    branchValue = number->FloatValue != 0.0;
+                } else {
+                    branchValue = number->IntValue != 0;
+                }
+            }
+
+            if (branchValue) {
+                if (*branchValue == false) {
+                    branchIsDead = true;
+                    break;
+                }
+            } else {
+                auto newConj = conj; newConj.Expr = std::move(cloned);
+                branchConjucts.push_back(std::move(newConj));
+            }
+        }
+
+        if (!branchIsDead) {
+            newInputs.emplace_back(Process(branch, {std::move(branchConjucts), ctx.Mode}));
+        }
+    }
+
+    if (newInputs.empty()) {
+        // all branches folded => empty operator
+        return std::make_shared<TLimitOperator>(branches.front(), 0);
+    }
+    if (newInputs.size() == 1) {
+        return newInputs[0];
+    }
+    branches = std::move(newInputs);
+    return Materialize(unionAll, {});
 }
 
 // Outer joins are excluded: pushing onto the null-extended side changes results.
@@ -546,14 +671,8 @@ TOperatorPtr Process(TOperatorPtr node, TContext ctx) {
         auto window = maybeWindow.Cast();
         return ProcessWindow(window, std::move(ctx));
     } else if (auto maybeUnion = TMaybeOp<TUnionAllOperator>(node)) {
-        // TODO: push ctx.Conjucts down into each branch. The predicate references
-        // the union output (first branch) names, so pushing into other branches
-        // needs positional column remapping. For now keep the predicate above the
-        // union and only optimize within each branch.
-        for (auto& branch : maybeUnion.Cast()->MutableInputs()) {
-            branch = Process(branch, {{}, ctx.Mode});
-        }
-        return Materialize(node, ctx.Conjucts);
+        auto unionAll = maybeUnion.Cast();
+        return ProcessUnion(unionAll, std::move(ctx));
     }
 
     return Materialize(node, ctx.Conjucts);
