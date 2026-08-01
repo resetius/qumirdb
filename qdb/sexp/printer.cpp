@@ -11,6 +11,7 @@
 #include <qdb/plan/ops/union.h>
 #include <qdb/plan/ops/window.h>
 #include <qdb/plan/ops/cte_ref.h>
+#include <qdb/plan/ops/cte_consumer.h>
 
 #include <stdexcept>
 
@@ -42,6 +43,13 @@ static void PrintRel(NQumir::NAst::TExpr& expr, TPrinter& printer, TPrintFrame f
     if (rel == TCteRef::OpId) {
         auto& ref = static_cast<TCteRef&>(op);
         out << "(rel cte-ref " << ref.Def()->Id << ')';
+        return;
+    }
+
+    if (rel == TCteConsumer::OpId) {
+        auto& consumer = static_cast<TCteConsumer&>(op);
+        out << "(rel cte-consumer " << consumer.Def()->Id
+            << " x" << consumer.Materialization()->RefCount << ')';
         return;
     }
 
