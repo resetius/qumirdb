@@ -8,8 +8,9 @@
 
 #include <qumir/parser/type.h>
 
-#include <cassert>
 #include <functional>
+#include <stdexcept>
+#include <vector>
 
 namespace NQdb {
 
@@ -80,6 +81,27 @@ void Prune(const TOperatorPtr& root, const TColumnSet* explicitRootDemand, TCteU
             return;
         }
 
+        // Relational-output pruning: drop projected columns the consumer doesn't
+        // need, which also narrows this project's own input demand. Skipped when
+        // nothing is needed (a zero-column projection would produce empty rowsets).
+        if (auto proj = TMaybeOp<TProjectOperator>(op)) {
+            auto& specs = proj.Cast()->MutableProjections();
+            size_t kept = 0;
+            for (const auto& spec : specs) {
+                if (needed.contains(spec.Name)) {
+                    ++kept;
+                }
+            }
+            if (kept > 0 && kept < specs.size()) {
+                std::erase_if(specs, [&](const TProjectionSpec& spec) {
+                    return !needed.contains(spec.Name);
+                });
+                if (fun) {
+                    fun->ReturnType = narrowStruct(fun->ReturnType, needed);
+                }
+            }
+        }
+
         auto children = op->Children();
         for (size_t i = 0; i < children.size(); ++i) {
             auto required = op->RequiredColumnsForChild(i, needed);
@@ -114,7 +136,10 @@ TCteUsageMap PropagateCteDemands(const TOperatorPtr& main) {
         // Every collected definition was reached through a TCteRef, so its usage
         // (with a non-zero refcount) must already be recorded.
         auto u = usage.find(it->get());
-        assert(u != usage.end() && u->second.StaticRefCount > 0);
+        if (u == usage.end() || u->second.StaticRefCount == 0) {
+            throw std::runtime_error(
+                "cte demand: definition reached with no recorded references");
+        }
         ApplyColumnPruning((*it)->Plan, &u->second.RequiredOutputs, &usage);
     }
     return usage;

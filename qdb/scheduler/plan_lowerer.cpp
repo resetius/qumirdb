@@ -27,7 +27,6 @@
 #include <qdb/scheduler/scan_split.h>
 
 #include <algorithm>
-#include <cassert>
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -655,10 +654,12 @@ public:
         return std::max<size_t>(Settings_.Queue.RowsetCapacityPerLane, 1);
     }
 
-    void AssertMaterializationsWired() const {
+    void CheckMaterializationsWired() const {
         for (const auto& entry : Materialized_) {
-            assert(entry.second.NextConsumerLane == entry.first->RefCount);
-            (void)entry;
+            if (entry.second.NextConsumerLane != entry.first->RefCount) {
+                throw std::runtime_error(
+                    "cte materialization: completion fan-out does not match RefCount");
+            }
         }
     }
 
@@ -970,7 +971,10 @@ private:
         auto& producer = it->second;
 
         const size_t lane = producer.NextConsumerLane++;
-        assert(lane < consumer.Materialization()->RefCount);
+        if (lane >= consumer.Materialization()->RefCount) {
+            throw std::runtime_error(
+                "cte materialization: more consumers lowered than RefCount");
+        }
         auto task = std::make_unique<NScheduler::TCteConsumerTask>(
             producer.State,
             NScheduler::TOutputPort{.Connection = &outConn, .Lane = outLaneOffset});
@@ -1019,7 +1023,10 @@ private:
                     return NScheduler::ETaskResult::FINISHED;
                 }
             });
-        assert(materialization->RefCount > 0);
+        if (materialization->RefCount == 0) {
+            throw std::runtime_error(
+                "cte materialization: lowered a producer with no consumers");
+        }
         auto& completion = AddConn<NScheduler::TBroadcastConnection>(
             1, materialization->RefCount, "cte-completion");
         auto task = std::make_unique<NScheduler::TBlockingTask>(
@@ -2172,7 +2179,7 @@ TLoweredPlan LowerPlanToGraph(
         finalRef = &graph->AddConnection(std::move(gather));
     }
     auto out = lowerer.Lower(root, *finalRef);
-    lowerer.AssertMaterializationsWired();
+    lowerer.CheckMaterializationsWired();
 
     return TLoweredPlan{
         .Graph = std::move(graph),
