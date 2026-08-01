@@ -3,6 +3,7 @@
 #include <qdb/plan/clone_operator.h>
 #include <qdb/plan/ops/aggregate.h>
 #include <qdb/plan/ops/cte_consumer.h>
+#include <qdb/plan/passes/estimate_stats.h>
 #include <qdb/plan/ops/filter.h>
 #include <qdb/plan/ops/join.h>
 #include <qdb/plan/ops/limit.h>
@@ -11,6 +12,7 @@
 #include <qdb/plan/ops/union.h>
 #include <qdb/plan/ops/window.h>
 
+#include <cassert>
 #include <stdexcept>
 #include <unordered_map>
 #include <utility>
@@ -151,6 +153,63 @@ TOperatorPtr Resolve(const TOperatorPtr& op, TResolveState& state) {
 
 } // namespace
 
+namespace {
+
+// Spool traffic cost per byte, in the abstract byte-work units EstimateStats
+// uses for Cost. Rough placeholders — they still need calibration against the
+// real memory-vs-scan cost ratio.
+constexpr double SpoolWriteCostPerByte = 1.0;
+constexpr double SpoolReadCostPerByte = 1.0;
+
+// Bytes actually spooled: the boundary projection narrows the producer to the
+// demanded columns (or the full schema when demand is empty), so cost the spool
+// over RequiredOutputs, not the definition's full output.
+double OutputBytes(const TCteDefinition& def, const std::unordered_set<std::string>& required) {
+    const TStatsPtr stats = def.Plan ? def.Plan->Stats_ : nullptr;
+    const double rows = stats ? static_cast<double>(stats->RowCount) : 0.0;
+    const bool keepFullSchema = required.empty();
+    double width = 0.0;
+    auto* schema = static_cast<TStructType*>(def.Plan->OutputColumns().get());
+    assert(schema); // a null schema would silently zero the spool cost
+    if (schema) {
+        for (const auto& [name, type] : schema->Fields) {
+            if (keepFullSchema || required.contains(name)) {
+                width += EstimateTypeWidth(type);
+            }
+        }
+    }
+    return rows * width;
+}
+
+// Inline re-executes the definition per reference; materialize runs it once and
+// pays spool traffic (one write + one read per consumer). Pick whichever is
+// cheaper. Without a cost estimate keep the safe reuse rule (materialize).
+//
+// StaticRefCount is the *syntactic* reference count, and decisions are made
+// independently on pre-reuse costs. Not modeled yet: nested inline multiplicity
+// (inlining a parent multiplies how often its dependencies run) and the reverse
+// (materializing a dependency lowers a parent's real cost). A later pass can
+// compute effective multiplicity and recompute decisions dependency-aware.
+ECteReuseMode ChooseMode(const TCteDefinition& def, const TCteUsageInfo& usage) {
+    if (usage.StaticRefCount < 2) {
+        return ECteReuseMode::Inline;
+    }
+    const TStatsPtr stats = def.Plan ? def.Plan->Stats_ : nullptr;
+    if (!stats) {
+        return ECteReuseMode::Materialize;
+    }
+    const double n = static_cast<double>(usage.StaticRefCount);
+    const double bytes = OutputBytes(def, usage.RequiredOutputs);
+    const double inlineCost = n * stats->Cost;
+    const double materializeCost = stats->Cost
+        + bytes * (SpoolWriteCostPerByte + n * SpoolReadCostPerByte);
+    return materializeCost < inlineCost
+        ? ECteReuseMode::Materialize
+        : ECteReuseMode::Inline;
+}
+
+} // namespace
+
 TCteReuseDecisions ChooseCteReuse(const TCteUsageMap& usage) {
     TCteReuseDecisions decisions;
     for (const auto& [def, info] : usage) {
@@ -158,9 +217,7 @@ TCteReuseDecisions ChooseCteReuse(const TCteUsageMap& usage) {
             throw std::runtime_error("cte reuse: definition recorded with no references");
         }
         decisions.emplace(def, TCteReuseDecision{
-            .Mode = info.StaticRefCount >= 2
-                ? ECteReuseMode::Materialize
-                : ECteReuseMode::Inline,
+            .Mode = ChooseMode(*def, info),
             .RequiredOutputs = info.RequiredOutputs,
         });
     }

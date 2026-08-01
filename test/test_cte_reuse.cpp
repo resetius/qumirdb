@@ -294,6 +294,58 @@ TEST(CteReuse, AggregateOutputPruningKeepsHavingAggregate) {
     EXPECT_EQ(agg->GroupKeys().size(), 1u);
 }
 
+// With real statistics the reuse decision is cost-based: a cheap definition is
+// re-executed (inline), an expensive one is materialized once and streamed.
+TEST(CteReuse, CostBasedReuseDecision) {
+    NQdb::TMockSource t({"a"});
+    std::map<std::string, ISource*> tables = {{"t", &t}};
+
+    auto plan = BuildSqlPlan(
+        "WITH x AS (SELECT a FROM t) SELECT p.a FROM x p JOIN x q ON p.a = q.a", tables);
+    auto usage = Analyze(plan);
+    auto defs = CollectCteDefinitions(plan);
+    ASSERT_EQ(defs.size(), 1u);
+
+    auto setCost = [&](double cost) {
+        defs[0]->Plan->Stats_ = std::make_shared<TStats>();
+        defs[0]->Plan->Stats_->RowCount = 1000; // one i64 column -> ~8000 output bytes
+        defs[0]->Plan->Stats_->Cost = cost;
+    };
+
+    setCost(100.0);
+    EXPECT_EQ(
+        ChooseCteReuse(usage).at(defs[0].get()).Mode, ECteReuseMode::Inline);
+
+    setCost(10'000'000.0);
+    EXPECT_EQ(
+        ChooseCteReuse(usage).at(defs[0].get()).Mode, ECteReuseMode::Materialize);
+}
+
+// The union keeps the definition's four-column output (branch pruning can't
+// narrow it), but only a is demanded, so the spool is one column. The cost is
+// tuned between the one-column and four-column materialize thresholds, so the
+// decision is Materialize only if the spool is costed over RequiredOutputs.
+TEST(CteReuse, CostBasedUsesNarrowedSpoolBytes) {
+    NQdb::TMockSource t({"a", "b", "c", "d"});
+    std::map<std::string, ISource*> tables = {{"t", &t}};
+
+    auto plan = BuildSqlPlan(
+        "WITH x AS (SELECT a, b, c, d FROM t UNION ALL SELECT a, b, c, d FROM t) "
+        "SELECT p.a FROM x p JOIN x q ON p.a = q.a", tables);
+    auto usage = Analyze(plan);
+    auto defs = CollectCteDefinitions(plan);
+    ASSERT_EQ(defs.size(), 1u);
+    ASSERT_EQ(FieldNames(defs[0]->Plan).size(), 4u);
+
+    defs[0]->Plan->Stats_ = std::make_shared<TStats>();
+    defs[0]->Plan->Stats_->RowCount = 1000;
+    // One-column threshold ~ 3*8*1000 = 24000; four-column ~ 3*32*1000 = 96000.
+    defs[0]->Plan->Stats_->Cost = 50'000.0;
+
+    EXPECT_EQ(
+        ChooseCteReuse(usage).at(defs[0].get()).Mode, ECteReuseMode::Materialize);
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
