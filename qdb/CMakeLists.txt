@@ -41,7 +41,7 @@ add_library(qumirdb
     plan/passes/flatten_joins.cpp
     plan/clone_expr.cpp
     plan/clone_operator.cpp
-    plan/passes/resolve_cte.cpp
+    plan/passes/cte_reuse.cpp
     plan/pipeline.cpp
     plan/plan_print.cpp
     plan/build.cpp
