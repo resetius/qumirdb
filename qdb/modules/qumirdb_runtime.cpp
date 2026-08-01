@@ -6,6 +6,8 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
+#include <stdexcept>
 #include <string_view>
 #include <type_traits>
 
@@ -27,6 +29,10 @@ qdb_bin_int FromI128(__int128 value) {
         .Lo = static_cast<uint64_t>(raw),
         .Hi = static_cast<uint64_t>(raw >> 64),
     };
+}
+
+bool IsI128Min(qdb_bin_int value) {
+    return value.Lo == 0 && value.Hi == (uint64_t{1} << 63);
 }
 
 __int128 Pow10I128(int64_t scale) {
@@ -254,6 +260,24 @@ double qdb_round(double value, int32_t digits) {
     return std::round(value * factor) / factor;
 }
 
+int32_t qdb_abs_i32(int32_t value) {
+    if (value == std::numeric_limits<int32_t>::min()) {
+        throw std::overflow_error("abs overflow for i32");
+    }
+    return value < 0 ? -value : value;
+}
+
+int64_t qdb_abs_i64(int64_t value) {
+    if (value == std::numeric_limits<int64_t>::min()) {
+        throw std::overflow_error("abs overflow for i64");
+    }
+    return value < 0 ? -value : value;
+}
+
+double qdb_fabs(double value) {
+    return std::fabs(value);
+}
+
 qdb_bin_int qdb_decimal_from_i64(int64_t value, int64_t scale) {
     return FromI128(static_cast<__int128>(value) * Pow10I128(scale));
 }
@@ -277,6 +301,9 @@ qdb_bin_int qdb_decimal_sub(qdb_bin_int left, qdb_bin_int right) {
 }
 
 qdb_bin_int qdb_decimal_neg(qdb_bin_int value) {
+    if (IsI128Min(value)) {
+        throw std::overflow_error("decimal negation overflow");
+    }
     return FromI128(-ToI128(value));
 }
 

@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <limits>
 #include <memory>
 #include <sstream>
 #include <stdexcept>
@@ -840,6 +841,266 @@ TEST(FilterE2E, NullableDecimalDivisionComparesWithFloatLiteral) {
     EXPECT_EQ(
         std::vector<uint8_t>(out.Selection, out.Selection + out.RowCount),
         (std::vector<uint8_t>{0xff, 0, 0}));
+    Release(&out);
+    EXPECT_FALSE(plan->Next(out));
+}
+
+TEST(FilterE2E, DecimalAbsDivisionComparesWithFloatLiteral) {
+    std::array<qdb_bin_int, 3> sumSales = {{
+        {.Lo = 1000, .Hi = 0},     // 10.00
+        {.Lo = 1950, .Hi = 0},     // 19.50
+        {.Lo = 3000, .Hi = 0},     // 30.00
+    }};
+    std::array<qdb_bin_int, 3> avgSales = {{
+        {.Lo = 20000000, .Hi = 0}, // 20.000000
+        {.Lo = 20000000, .Hi = 0}, // 20.000000
+        {.Lo = 20000000, .Hi = 0}, // 20.000000
+    }};
+    std::array<TColumn, 2> cols = {
+        TColumn{.Data = reinterpret_cast<char*>(sumSales.data())},
+        TColumn{.Data = reinterpret_cast<char*>(avgSales.data())},
+    };
+    TRowSet batch{.Columns = cols.data(), .ColumnCount = 2, .RowCount = 3, .RefCount = 1};
+    NQdb::TMockSource src(
+        {"sum_sales", "avg_sales"},
+        {std::make_shared<NQdb::TDecimal>(15, 2),
+         std::make_shared<NQdb::TDecimal>(19, 6)},
+        {batch});
+
+    auto plan = Plan(R"qdb(
+(rel filter (rel source "L")
+  (> (/ (call abs (- sum_sales avg_sales)) avg_sales)
+     0.10000000000000001))
+)qdb", src);
+
+    TRowSet out{};
+    ASSERT_TRUE(plan->Next(out));
+    ASSERT_NE(out.Selection, nullptr);
+    EXPECT_EQ(
+        std::vector<uint8_t>(out.Selection, out.Selection + out.RowCount),
+        (std::vector<uint8_t>{0xff, 0, 0xff}));
+    Release(&out);
+    EXPECT_FALSE(plan->Next(out));
+}
+
+TEST(FilterE2E, FloatAbsDivisionComparesWithFloatLiteral) {
+    std::array<double, 3> sumSales = {
+        10.0,
+        19.5,
+        30.0,
+    };
+    std::array<double, 3> avgSales = {
+        20.0,
+        20.0,
+        20.0,
+    };
+    std::array<TColumn, 2> cols = {
+        TColumn{.Data = reinterpret_cast<char*>(sumSales.data())},
+        TColumn{.Data = reinterpret_cast<char*>(avgSales.data())},
+    };
+    TRowSet batch{.Columns = cols.data(), .ColumnCount = 2, .RowCount = 3, .RefCount = 1};
+    NQdb::TMockSource src(
+        {"sum_sales", "avg_sales"},
+        {std::make_shared<NQumir::NAst::TFloatType>(),
+         std::make_shared<NQumir::NAst::TFloatType>()},
+        {batch});
+
+    auto plan = Plan(R"qdb(
+(rel filter (rel source "L")
+  (> (/ (call abs (- sum_sales avg_sales)) avg_sales)
+     0.10000000000000001))
+)qdb", src);
+
+    TRowSet out{};
+    ASSERT_TRUE(plan->Next(out));
+    ASSERT_NE(out.Selection, nullptr);
+    EXPECT_EQ(
+        std::vector<uint8_t>(out.Selection, out.Selection + out.RowCount),
+        (std::vector<uint8_t>{0xff, 0, 0xff}));
+    Release(&out);
+    EXPECT_FALSE(plan->Next(out));
+}
+
+TEST(FilterE2E, NullableFloatAbsDivisionComparesWithFloatLiteral) {
+    std::array<double, 4> sumSales = {
+        10.0,
+        19.5,
+        30.0,
+        50.0,
+    };
+    std::array<double, 4> avgSales = {
+        20.0,
+        20.0,
+        20.0,
+        50.0,
+    };
+    std::array<uint8_t, 1> sumMask = {0b00000111};
+    std::array<uint8_t, 1> avgMask = {0b00001111};
+    std::array<TColumn, 2> cols = {
+        TColumn{.Data = reinterpret_cast<char*>(sumSales.data()), .Mask = sumMask.data()},
+        TColumn{.Data = reinterpret_cast<char*>(avgSales.data()), .Mask = avgMask.data()},
+    };
+    TRowSet batch{.Columns = cols.data(), .ColumnCount = 2, .RowCount = 4, .RefCount = 1};
+    auto nullableF64 = std::make_shared<NQdb::TNullable>(
+        std::make_shared<NQumir::NAst::TFloatType>());
+    NQdb::TMockSource src(
+        {"sum_sales", "avg_sales"},
+        {nullableF64, nullableF64},
+        {batch});
+
+    auto plan = Plan(R"qdb(
+(rel filter (rel source "L")
+  (> (/ (call abs (- sum_sales avg_sales)) avg_sales)
+     0.10000000000000001))
+)qdb", src);
+
+    TRowSet out{};
+    ASSERT_TRUE(plan->Next(out));
+    ASSERT_NE(out.Selection, nullptr);
+    EXPECT_EQ(
+        std::vector<uint8_t>(out.Selection, out.Selection + out.RowCount),
+        (std::vector<uint8_t>{0xff, 0, 0xff, 0}));
+    Release(&out);
+    EXPECT_FALSE(plan->Next(out));
+}
+
+TEST(ProjectE2E, FloatAbsClearsNegativeZero) {
+    std::array<double, 2> values = {
+        -0.0,
+        -2.5,
+    };
+    std::array<TColumn, 1> cols = {
+        TColumn{.Data = reinterpret_cast<char*>(values.data())},
+    };
+    TRowSet batch{.Columns = cols.data(), .ColumnCount = 1, .RowCount = 2, .RefCount = 1};
+    NQdb::TMockSource src(
+        {"v"},
+        {std::make_shared<NQumir::NAst::TFloatType>()},
+        {batch});
+
+    auto plan = Plan(R"qdb(
+(rel project (rel source "L")
+  (a (call abs v)))
+)qdb", src);
+
+    TRowSet out{};
+    ASSERT_TRUE(plan->Next(out));
+    ASSERT_EQ(out.RowCount, 2);
+    const auto* absValues = reinterpret_cast<const double*>(out.Columns[0].Data);
+    EXPECT_FALSE(std::signbit(absValues[0]));
+    EXPECT_EQ(absValues[0], 0.0);
+    EXPECT_EQ(absValues[1], 2.5);
+    Release(&out);
+    EXPECT_FALSE(plan->Next(out));
+}
+
+TEST(RuntimeAbs, IntegerMinThrows) {
+    EXPECT_EQ(qdb_abs_i32(-7), 7);
+    EXPECT_EQ(qdb_abs_i64(-7), 7);
+    EXPECT_THROW(
+        qdb_abs_i32(std::numeric_limits<int32_t>::min()),
+        std::overflow_error);
+    EXPECT_THROW(
+        qdb_abs_i64(std::numeric_limits<int64_t>::min()),
+        std::overflow_error);
+}
+
+TEST(RuntimeAbs, DecimalMinThrows) {
+    qdb_bin_int minValue{.Lo = 0, .Hi = uint64_t{1} << 63};
+    EXPECT_THROW(qdb_decimal_neg(minValue), std::overflow_error);
+}
+
+TEST(FilterE2E, DecimalOutlierPredicateCombinesWithIntegerConjuncts) {
+    std::array<int64_t, 4> year = {1999, 2000, 2000, 2001};
+    std::array<qdb_bin_int, 4> sumSales = {{
+        {.Lo = 500, .Hi = 0},      // 5.00
+        {.Lo = 1000, .Hi = 0},     // 10.00
+        {.Lo = 3000, .Hi = 0},     // 30.00
+        {.Lo = 5000, .Hi = 0},     // 50.00
+    }};
+    std::array<qdb_bin_int, 4> avgSales = {{
+        {.Lo = 5000000, .Hi = 0},  // 5.000000
+        {.Lo = 20000000, .Hi = 0}, // 20.000000
+        {.Lo = 20000000, .Hi = 0}, // 20.000000
+        {.Lo = 50000000, .Hi = 0}, // 50.000000
+    }};
+    std::array<TColumn, 3> cols = {
+        TColumn{.Data = reinterpret_cast<char*>(year.data())},
+        TColumn{.Data = reinterpret_cast<char*>(sumSales.data())},
+        TColumn{.Data = reinterpret_cast<char*>(avgSales.data())},
+    };
+    TRowSet batch{.Columns = cols.data(), .ColumnCount = 3, .RowCount = 4, .RefCount = 1};
+    NQdb::TMockSource src(
+        {"y", "sum_sales", "avg_sales"},
+        {std::make_shared<NQumir::NAst::TIntegerType>(),
+         std::make_shared<NQdb::TDecimal>(15, 2),
+         std::make_shared<NQdb::TDecimal>(19, 6)},
+        {batch});
+
+    auto plan = Plan(R"qdb(
+(rel filter (rel source "L")
+  (&& (&&
+    (> (/ (call abs (- sum_sales avg_sales)) avg_sales)
+       0.10000000000000001)
+    (== y 2000))
+    (> avg_sales 0)))
+)qdb", src);
+
+    TRowSet out{};
+    ASSERT_TRUE(plan->Next(out));
+    ASSERT_NE(out.Selection, nullptr);
+    EXPECT_EQ(
+        std::vector<uint8_t>(out.Selection, out.Selection + out.RowCount),
+        (std::vector<uint8_t>{0, 0xff, 0xff, 0}));
+    Release(&out);
+    EXPECT_FALSE(plan->Next(out));
+}
+
+TEST(FilterE2E, DecimalOutlierPredicateWithCaseNull) {
+    std::array<int64_t, 4> year = {1999, 2000, 2000, 2001};
+    std::array<qdb_bin_int, 4> sumSales = {{
+        {.Lo = 500, .Hi = 0},      // 5.00
+        {.Lo = 1000, .Hi = 0},     // 10.00
+        {.Lo = 3000, .Hi = 0},     // 30.00
+        {.Lo = 5000, .Hi = 0},     // 50.00
+    }};
+    std::array<qdb_bin_int, 4> avgSales = {{
+        {.Lo = 5000000, .Hi = 0},  // 5.000000
+        {.Lo = 20000000, .Hi = 0}, // 20.000000
+        {.Lo = 20000000, .Hi = 0}, // 20.000000
+        {.Lo = 50000000, .Hi = 0}, // 50.000000
+    }};
+    std::array<TColumn, 3> cols = {
+        TColumn{.Data = reinterpret_cast<char*>(year.data())},
+        TColumn{.Data = reinterpret_cast<char*>(sumSales.data())},
+        TColumn{.Data = reinterpret_cast<char*>(avgSales.data())},
+    };
+    TRowSet batch{.Columns = cols.data(), .ColumnCount = 3, .RowCount = 4, .RefCount = 1};
+    NQdb::TMockSource src(
+        {"y", "sum_sales", "avg_sales"},
+        {std::make_shared<NQumir::NAst::TIntegerType>(),
+         std::make_shared<NQdb::TDecimal>(15, 2),
+         std::make_shared<NQdb::TDecimal>(19, 6)},
+        {batch});
+
+    auto plan = Plan(R"qdb(
+(rel filter (rel source "L")
+  (&& (&&
+    (== y 2000)
+    (> avg_sales 0))
+    (> (if
+        (call qdb_is_true (> avg_sales 0))
+        (/ (call abs (- sum_sales avg_sales)) avg_sales)
+        (call qdb_sql_null))
+      0.10000000000000001)))
+)qdb", src);
+
+    TRowSet out{};
+    ASSERT_TRUE(plan->Next(out));
+    ASSERT_NE(out.Selection, nullptr);
+    EXPECT_EQ(
+        std::vector<uint8_t>(out.Selection, out.Selection + out.RowCount),
+        (std::vector<uint8_t>{0, 0xff, 0xff, 0}));
     Release(&out);
     EXPECT_FALSE(plan->Next(out));
 }
