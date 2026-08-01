@@ -12,7 +12,7 @@ TCteConsumer::TCteConsumer(TCteDefinitionPtr def, TCteMaterializationPtr materia
     , Materialization_(std::move(materialization))
 {
     Type = std::make_shared<NQumir::NAst::TFunctionType>(
-        std::vector<NQumir::NAst::TTypePtr>{}, Def_->OutputType);
+        std::vector<NQumir::NAst::TTypePtr>{}, Materialization_->Plan->OutputColumns());
 }
 
 const std::string TCteConsumer::ToString() const {

@@ -11,7 +11,7 @@
 #include <qdb/plan/ops/union.h>
 #include <qdb/plan/ops/window.h>
 
-#include <cassert>
+#include <stdexcept>
 #include <unordered_map>
 #include <utility>
 
@@ -43,6 +43,50 @@ TOperatorPtr ResolveInline(const TCteDefinitionPtr& def, TResolveState& state) {
     return CloneOperator(it->second);
 }
 
+// Narrows the spool to the union of columns demanded by all consumers, in the
+// producer's own field order.
+TOperatorPtr WrapBoundaryProjection(
+    TOperatorPtr plan, const std::unordered_set<std::string>& required) {
+    auto* schema = static_cast<TStructType*>(plan->OutputColumns().get());
+    if (!schema) {
+        throw std::runtime_error(
+            "cte boundary projection: producer output is not a struct");
+    }
+    if (required.empty()) {
+        // Rowsets need >=1 physical column; keep the full schema until a
+        // row-count carrier exists.
+        return plan;
+    }
+
+    std::vector<TProjectionSpec> specs;
+    std::vector<std::pair<std::string, TTypePtr>> fields;
+    for (const auto& [name, type] : schema->Fields) {
+        if (!required.contains(name)) {
+            continue;
+        }
+        specs.push_back(TProjectionSpec{
+            .Name = name,
+            .Expression = std::make_shared<TIdentExpr>(NQumir::TLocation{}, name),
+        });
+        fields.emplace_back(name, type);
+    }
+    // Every demanded column must exist in the producer schema; a mismatch means
+    // demand analysis and the producer plan have diverged.
+    if (specs.size() != required.size()) {
+        throw std::runtime_error(
+            "cte boundary projection: demanded column missing from producer schema");
+    }
+    if (specs.size() == schema->Fields.size()) {
+        return plan;
+    }
+
+    auto project = std::make_shared<TProjectOperator>(std::move(plan), std::move(specs));
+    project->Type = std::make_shared<TFunctionType>(
+        std::vector<TTypePtr>{project->Input()->OutputColumns()},
+        std::make_shared<TStructType>(std::move(fields)));
+    return project;
+}
+
 TOperatorPtr ResolveMaterialized(const TCteDefinitionPtr& def, TResolveState& state) {
     auto it = state.Materialized.find(def.get());
     TCteMaterializationPtr mat;
@@ -51,7 +95,9 @@ TOperatorPtr ResolveMaterialized(const TCteDefinitionPtr& def, TResolveState& st
     } else {
         mat = std::make_shared<TCteMaterialization>();
         state.Materialized.emplace(def.get(), mat);
-        mat->Plan = Resolve(CloneOperator(def->Plan), state);
+        mat->Plan = WrapBoundaryProjection(
+            Resolve(CloneOperator(def->Plan), state),
+            state.Decisions.at(def.get()).RequiredOutputs);
     }
     return std::make_shared<TCteConsumer>(def, mat);
 }
@@ -108,7 +154,9 @@ TOperatorPtr Resolve(const TOperatorPtr& op, TResolveState& state) {
 TCteReuseDecisions ChooseCteReuse(const TCteUsageMap& usage) {
     TCteReuseDecisions decisions;
     for (const auto& [def, info] : usage) {
-        assert(info.StaticRefCount > 0);
+        if (info.StaticRefCount == 0) {
+            throw std::runtime_error("cte reuse: definition recorded with no references");
+        }
         decisions.emplace(def, TCteReuseDecision{
             .Mode = info.StaticRefCount >= 2
                 ? ECteReuseMode::Materialize

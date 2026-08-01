@@ -3,6 +3,7 @@
 
 #include <qdb/plan/build.h>
 #include <qdb/plan/ops/cte_ref.h>
+#include <qdb/plan/ops/cte_consumer.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/passes/column_pruning.h>
 #include <qdb/plan/passes/cte_reuse.h>
@@ -64,6 +65,56 @@ std::multiset<size_t> RefCounts(const TCteUsageMap& usage) {
         counts.insert(info.StaticRefCount);
     }
     return counts;
+}
+
+void CollectConsumers(
+    const TOperatorPtr& op, std::vector<std::shared_ptr<TCteConsumer>>& out) {
+    if (!op) {
+        return;
+    }
+    if (auto consumer = TMaybeOp<TCteConsumer>(op)) {
+        out.push_back(consumer.Cast());
+        return;
+    }
+    for (const auto& child : op->Children()) {
+        if (auto childOp = NQumir::NAst::TMaybeNode<IOperator>(child)) {
+            CollectConsumers(childOp.Cast(), out);
+        }
+    }
+}
+
+std::vector<std::shared_ptr<TCteConsumer>> FindConsumers(const TOperatorPtr& op) {
+    std::vector<std::shared_ptr<TCteConsumer>> out;
+    CollectConsumers(op, out);
+    return out;
+}
+
+TOperatorPtr FindSource(const TOperatorPtr& op) {
+    if (!op) {
+        return nullptr;
+    }
+    if (TMaybeOp<TSourceOperator>(op)) {
+        return op;
+    }
+    for (const auto& child : op->Children()) {
+        if (auto childOp = NQumir::NAst::TMaybeNode<IOperator>(child)) {
+            if (auto found = FindSource(childOp.Cast())) {
+                return found;
+            }
+        }
+    }
+    return nullptr;
+}
+
+std::vector<std::string> FieldNames(const TOperatorPtr& op) {
+    std::vector<std::string> names;
+    auto* schema = static_cast<NQumir::NAst::TStructType*>(op->OutputColumns().get());
+    if (schema) {
+        for (const auto& [name, _] : schema->Fields) {
+            names.push_back(name);
+        }
+    }
+    return names;
 }
 
 bool ContainsCteRef(const TOperatorPtr& op) {
@@ -136,6 +187,48 @@ TEST(CteReuse, ApplyRemovesEveryCteRef) {
     auto usage = Analyze(plan);
     auto resolved = ApplyCteReuse(std::move(plan), ChooseCteReuse(usage));
     EXPECT_FALSE(ContainsCteRef(resolved));
+}
+
+// Relational-output pruning narrows the reference wrappers to the demanded column,
+// so both references share one materialization whose spool (and source scan) drops
+// the unused b, keeping only a.
+TEST(CteReuse, MaterializeNarrowsSpoolAndSourceToDemand) {
+    NQdb::TMockSource t({"a", "b"});
+    std::map<std::string, ISource*> tables = {{"t", &t}};
+
+    auto plan = BuildSqlPlan(
+        "WITH x AS (SELECT a, b FROM t) SELECT p.a FROM x p JOIN x q ON p.a = q.a", tables);
+    auto usage = Analyze(plan);
+    auto resolved = ApplyCteReuse(std::move(plan), ChooseCteReuse(usage));
+
+    auto consumers = FindConsumers(resolved);
+    ASSERT_EQ(consumers.size(), 2u);
+    EXPECT_EQ(
+        consumers[0]->Materialization().get(), consumers[1]->Materialization().get());
+    EXPECT_EQ(consumers[0]->OutputColumns(), consumers[1]->OutputColumns());
+
+    EXPECT_EQ(FieldNames(consumers[0]), (std::vector<std::string>{"a"}));
+
+    auto source = FindSource(consumers[0]->Materialization()->Plan);
+    ASSERT_TRUE(source != nullptr);
+    EXPECT_EQ(FieldNames(source), (std::vector<std::string>{"t.a"}));
+}
+
+// The definition's top is a UNION ALL, whose outputs relational pruning cannot
+// narrow (branches stay aligned), so the boundary projection is what drops b.
+TEST(CteReuse, BoundaryProjectionNarrowsUnionSpool) {
+    NQdb::TMockSource t({"a", "b"});
+    std::map<std::string, ISource*> tables = {{"t", &t}};
+
+    auto plan = BuildSqlPlan(
+        "WITH x AS (SELECT a, b FROM t UNION ALL SELECT a, b FROM t) "
+        "SELECT p.a FROM x p JOIN x q ON p.a = q.a", tables);
+    auto usage = Analyze(plan);
+    auto resolved = ApplyCteReuse(std::move(plan), ChooseCteReuse(usage));
+
+    auto consumers = FindConsumers(resolved);
+    ASSERT_EQ(consumers.size(), 2u);
+    EXPECT_EQ(FieldNames(consumers[0]), (std::vector<std::string>{"a"}));
 }
 
 int main(int argc, char** argv) {
