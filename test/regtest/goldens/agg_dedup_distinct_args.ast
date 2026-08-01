@@ -1,0 +1,21 @@
+(query
+  (select
+    (select-list
+      (item
+        (call sum a)
+      )
+      (item
+        (call sum b)
+      )
+    )
+    (from
+      (table t)
+    )
+    (group-by
+      c
+    )
+    (having
+      (&& (> (call sum a) 1) (> (call sum b) 2))
+    )
+  )
+)

@@ -59,8 +59,7 @@
               (|ssales.netpaid| netpaid))
             (== i_color (: (cast "orchid" <named StringView>) <named StringView>)))
           (keys c_last_name c_first_name s_store_name)
-          (agg sum_0 sum netpaid)
-          (agg sum_1 sum netpaid))
+          (agg sum_0 sum netpaid))
         (rel project
           (rel aggregate
             (rel project
@@ -125,7 +124,7 @@
           (__scalar_0__ (* 0.050000000000000003 (/ sum_0 (cast count_1 f64)))))
         ()
         (inner))
-      (> sum_1 __scalar_0__))
+      (> sum_0 __scalar_0__))
     (c_last_name c_last_name)
     (c_first_name c_first_name)
     (s_store_name s_store_name)

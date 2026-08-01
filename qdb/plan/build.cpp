@@ -242,6 +242,23 @@ NSql::TSqlPtr<NSql::TWindowExpr> CloneSqlWindowExpr(
     return copy;
 }
 
+// Key for reusing a plain aggregate slot across SELECT/HAVING (no printer-format
+// / separator ambiguity, unlike a concatenated string key).
+struct TPlainAggKey {
+    std::string Func;
+    std::string Arg; // PrintAst(arg), or "*" for count(*)
+    bool operator==(const TPlainAggKey&) const = default;
+};
+
+struct TPlainAggKeyHash {
+    size_t operator()(const TPlainAggKey& key) const {
+        size_t result = std::hash<std::string>{}(key.Func);
+        result ^= std::hash<std::string>{}(key.Arg)
+            + 0x9e3779b9 + (result << 6) + (result >> 2);
+        return result;
+    }
+};
+
 // Replaces aggregate calls in an expression with references to synthetic
 // aggregate output columns, collecting the corresponding specs.
 class TAggCollector {
@@ -459,8 +476,16 @@ private:
         NAst::TExprPtr arg = (agg.Func == "count" && agg.Star)
             ? nullptr
             : agg.Arg;
+        TPlainAggKey key{
+            .Func = agg.Func,
+            .Arg = arg ? NAst::NCore::PrintAst(arg) : std::string("*"),
+        };
+        if (auto it = PlainSpecNames_.find(key); it != PlainSpecNames_.end()) {
+            return Ident(loc, it->second);
+        }
         std::string name = NextName(agg.Func);
         Specs_.push_back({ .Name = name, .Func = agg.Func, .Arg = std::move(arg) });
+        PlainSpecNames_.emplace(std::move(key), name);
         return Ident(loc, name);
     }
 
@@ -474,6 +499,9 @@ private:
     std::optional<std::string> DistinctColumn_;
     std::set<std::string> DistinctSpecNames_;
     bool HasNonDistinct_ = false;
+    // (Func, PrintAst(Arg)) -> slot name, so the same plain aggregate in SELECT
+    // and HAVING reuses one slot instead of emitting count_0/count_1.
+    std::unordered_map<TPlainAggKey, std::string, TPlainAggKeyHash> PlainSpecNames_;
 
 public:
     // Names of the aggregate specs realized as COUNT(DISTINCT); the rest are

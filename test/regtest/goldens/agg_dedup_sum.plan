@@ -1,0 +1,1 @@
+(rel project (rel filter (rel aggregate (rel source "t") (keys b) (agg sum_0 sum a)) (> sum_0 1)) (col0 sum_0))
