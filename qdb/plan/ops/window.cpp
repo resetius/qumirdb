@@ -99,9 +99,12 @@ TTypePtr ComputeWindowAvgResultType(const TTypePtr& argType) {
         return nullable ? std::make_shared<TNullable>(std::move(type)) : type;
     };
     if (auto spec = DecimalSpecOfValueType(UnwrapNullableType(argType))) {
-        const int32_t scale =
-            std::min(spec->Scale + kWindowAvgExtraScale, MaxDecimalPrecision);
-        return wrap(std::make_shared<TDecimal>(MaxDecimalPrecision, scale));
+        const int32_t intDigits = spec->Precision - spec->Scale;
+        const int32_t scale = std::min(
+            spec->Scale + WindowAvgExtraScale,
+            MaxDecimalPrecision - intDigits);
+        const int32_t precision = intDigits + scale;
+        return wrap(std::make_shared<TDecimal>(precision, scale));
     }
     return wrap(std::make_shared<TFloatType>());
 }

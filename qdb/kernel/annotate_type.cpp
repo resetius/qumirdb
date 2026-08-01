@@ -327,6 +327,27 @@ bool IsIntLiteral(const TExprPtr& e) {
     return n && !n.Cast()->IsFloat();
 }
 
+TTypePtr NumericPreservingUnaryCall(
+    const std::string& name,
+    const std::vector<TTypePtr>& argTypes)
+{
+    if (name != "abs" || argTypes.size() != 1) {
+        return nullptr;
+    }
+    TTypePtr value = ValueType(argTypes[0]);
+    if (!value) {
+        return nullptr;
+    }
+    if (DecimalSpecOfValueType(value)) {
+        return value;
+    }
+    value = UnwrapNamedType(value);
+    if (IsInt(value) || IsFloat(value)) {
+        return value;
+    }
+    return nullptr;
+}
+
 // Mirrors qumir NTypeAnnotation::CommonNumericType + WideningIntOK for the types qdb sees
 // (all ints signed). Float dominates; two ints widen to the wider. TODO(reuse): call
 // qumir's own BinaryNumericResultType once it is exposed (see NULL_PROPAGATION_PASS_PLAN.md).
@@ -573,6 +594,9 @@ TTypePtr InferType(const TExprPtr& e, const TStructType& schema) {
             TTypePtr s = std::make_shared<TStringType>();
             return nullable
                 ? std::static_pointer_cast<TType>(std::make_shared<TNullable>(s)) : s;
+        }
+        if (auto value = NumericPreservingUnaryCall(name, at)) {
+            return Propagate({at[0]}, value);
         }
         TTypePtr ret = Context().ExternReturnType(name);
         bool nullable = false;
@@ -964,6 +988,21 @@ TTypePtr Expand(TExprPtr& e, const TStructType& inputType, uint64_t& counter) {
         for (const auto& t : argTypes) {
             anyNull = anyNull || !t || IsNullableType(t);
         }
+        if (auto value = NumericPreservingUnaryCall(name, argTypes)) {
+            if (!anyNull) {
+                return value;
+            }
+            std::vector<std::pair<TExprPtr, bool>> operands;
+            for (size_t i = 0; i < node->Args.size(); ++i) {
+                operands.emplace_back(node->Args[i], !argTypes[i] || IsNullableType(argTypes[i]));
+            }
+            e = BuildNullStrict(operands,
+                [node](std::vector<TExprPtr> a) {
+                    return std::make_shared<TCallExpr>(
+                        node->Location, node->Callee, std::move(a));
+                }, value, counter, node->Location);
+            return std::make_shared<TNullable>(value);
+        }
         TTypePtr ret = Context().ExternReturnType(name);
         if (!ret) {
             return InferType(e, inputType); // unknown extern: leave the call, best-effort type
@@ -1297,6 +1336,14 @@ TTypePtr ExpandDecimalNode(TExprPtr& e, const TStructType& inputType, TTypeEnv& 
                 return value && allNullable
                     ? std::static_pointer_cast<TType>(std::make_shared<TNullable>(value))
                     : value;
+            }
+            if (auto value = NumericPreservingUnaryCall(cid.Cast()->Name, argTypes)) {
+                if (auto decimal = DecimalSpecOfValueType(value)) {
+                    node->Args[0] = DecimalValueAtScale(
+                        std::move(node->Args[0]), argTypes[0], decimal->Scale, node->Location);
+                    e = Call(cid.Cast()->Name, {std::move(node->Args[0])}, node->Location);
+                }
+                return Propagate({argTypes[0]}, value);
             }
             if (cid.Cast()->Name.rfind("qdb_decimal_", 0) == 0) {
                 if (cid.Cast()->Name == "qdb_decimal_lt" ||

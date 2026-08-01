@@ -61,6 +61,36 @@ std::unique_ptr<TTestRuntime> PlanJoin(
     return RunPlan(root, schedulerSettings);
 }
 
+std::unique_ptr<TTestRuntime> PlanJoin3(
+    const std::string& sexp,
+    ISource& left,
+    ISource& right,
+    ISource& third)
+{
+    TRelParserOptions opts;
+    opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
+        if (path == "L") {
+            return std::make_shared<TSourceOperator>(left, std::string(path));
+        }
+        if (path == "R") {
+            return std::make_shared<TSourceOperator>(right, std::string(path));
+        }
+        return std::make_shared<TSourceOperator>(third, std::string(path));
+    };
+    TParser parser;
+    for (auto& [name, fn] : MakeRelParsers(std::move(opts))) {
+        parser.NodeParsers[name] = std::move(fn);
+    }
+    std::istringstream in(sexp);
+    TTokenStream ts(in);
+    auto parsed = parser.Parse(ts);
+    if (!parsed) throw std::runtime_error(parsed.error().ToString());
+    auto root = std::static_pointer_cast<IOperator>(*parsed);
+    AnnotateTypes(root);
+    ApplyColumnPruning(root);
+    return RunPlan(root);
+}
+
 } // namespace
 
 TEST(JoinPlanner, InnerJoinE2E) {
@@ -92,6 +122,114 @@ TEST(JoinPlanner, InnerJoinE2E) {
         {1, 10, 1, 100}, {1, 10, 1, 200}, {1, 30, 1, 100}, {1, 30, 1, 200}};
     std::sort(got.begin(), got.end());
     std::sort(expected.begin(), expected.end());
+    EXPECT_EQ(got, expected);
+}
+
+TEST(JoinPlanner, InnerJoinHonorsLeftSelection) {
+    std::vector<int64_t> lk = {1, 2, 3, 4}, lv = {10, 20, 30, 40};
+    std::vector<int64_t> rk = {1, 2, 3, 4}, rv = {100, 200, 300, 400};
+    std::vector<uint8_t> selection = {1, 0, 1, 0};
+    std::vector<TColumn> lcols, rcols;
+    auto lbatch = KeyValBatch(lk.data(), lv.data(), 4, lcols);
+    lbatch.Selection = selection.data();
+    NQdb::TMockSource left({"lk", "lv"}, {lbatch});
+    NQdb::TMockSource right({"rk", "rv"}, {KeyValBatch(rk.data(), rv.data(), 4, rcols)});
+
+    auto plan = PlanJoin(R"qdb(
+(rel join (rel source "L") (rel source "R") ((lk rk)) (inner))
+)qdb", left, right);
+
+    std::vector<std::tuple<int64_t, int64_t, int64_t, int64_t>> got;
+    TRowSet out{};
+    while (plan->Next(out)) {
+        ASSERT_EQ(out.ColumnCount, 4);
+        for (int64_t i = 0; i < out.RowCount; ++i) {
+            got.emplace_back(
+                reinterpret_cast<const int64_t*>(out.Columns[0].Data)[i],
+                reinterpret_cast<const int64_t*>(out.Columns[1].Data)[i],
+                reinterpret_cast<const int64_t*>(out.Columns[2].Data)[i],
+                reinterpret_cast<const int64_t*>(out.Columns[3].Data)[i]);
+        }
+        Release(&out);
+    }
+
+    std::vector<std::tuple<int64_t, int64_t, int64_t, int64_t>> expected = {
+        {1, 10, 1, 100}, {3, 30, 3, 300}};
+    EXPECT_EQ(got, expected);
+}
+
+TEST(JoinPlanner, InnerJoinResidualHonorsLeftSelection) {
+    std::vector<int64_t> lk = {1, 1, 1, 1}, lv = {2, 1, 4, 3};
+    std::vector<int64_t> rk = {1, 1, 1, 1}, rv = {1, 2, 3, 4};
+    std::vector<uint8_t> selection = {1, 0, 0, 1};
+    std::vector<TColumn> lcols, rcols;
+    auto lbatch = KeyValBatch(lk.data(), lv.data(), 4, lcols);
+    lbatch.Selection = selection.data();
+    NQdb::TMockSource left({"lk", "lv"}, {lbatch});
+    NQdb::TMockSource right({"rk", "rv"}, {KeyValBatch(rk.data(), rv.data(), 4, rcols)});
+
+    auto plan = PlanJoin(R"qdb(
+(rel join (rel source "L") (rel source "R") ((lk rk)) (inner) (== lv (+ rv 1)))
+)qdb", left, right);
+
+    std::vector<std::tuple<int64_t, int64_t, int64_t, int64_t>> got;
+    TRowSet out{};
+    while (plan->Next(out)) {
+        ASSERT_EQ(out.ColumnCount, 4);
+        for (int64_t i = 0; i < out.RowCount; ++i) {
+            got.emplace_back(
+                reinterpret_cast<const int64_t*>(out.Columns[0].Data)[i],
+                reinterpret_cast<const int64_t*>(out.Columns[1].Data)[i],
+                reinterpret_cast<const int64_t*>(out.Columns[2].Data)[i],
+                reinterpret_cast<const int64_t*>(out.Columns[3].Data)[i]);
+        }
+        Release(&out);
+    }
+
+    std::vector<std::tuple<int64_t, int64_t, int64_t, int64_t>> expected = {
+        {1, 2, 1, 1}, {1, 3, 1, 2}};
+    EXPECT_EQ(got, expected);
+}
+
+TEST(JoinPlanner, ChainedInnerJoinResidualHonorsLeftSelection) {
+    std::vector<int64_t> lk = {1, 1, 1, 1}, lv = {2, 1, 4, 3};
+    std::vector<int64_t> rk = {1, 1, 1, 1}, rv = {1, 2, 3, 4};
+    std::vector<int64_t> sk = {1, 1, 1, 1}, sv = {1, 2, 3, 4};
+    std::vector<uint8_t> selection = {1, 0, 0, 1};
+    std::vector<TColumn> lcols, rcols, scols;
+    auto lbatch = KeyValBatch(lk.data(), lv.data(), 4, lcols);
+    lbatch.Selection = selection.data();
+    NQdb::TMockSource left({"lk", "lv"}, {lbatch});
+    NQdb::TMockSource right({"rk", "rv"}, {KeyValBatch(rk.data(), rv.data(), 4, rcols)});
+    NQdb::TMockSource third({"sk", "sv"}, {KeyValBatch(sk.data(), sv.data(), 4, scols)});
+
+    auto plan = PlanJoin3(R"qdb(
+(rel join
+  (rel join (rel source "L") (rel source "R") ((lk rk)) (inner) (== lv (+ rv 1)))
+  (rel source "S")
+  ((lk sk))
+  (inner)
+  (== lv (- sv 1)))
+)qdb", left, right, third);
+
+    std::vector<std::tuple<int64_t, int64_t, int64_t, int64_t, int64_t, int64_t>> got;
+    TRowSet out{};
+    while (plan->Next(out)) {
+        ASSERT_EQ(out.ColumnCount, 6);
+        for (int64_t i = 0; i < out.RowCount; ++i) {
+            got.emplace_back(
+                reinterpret_cast<const int64_t*>(out.Columns[0].Data)[i],
+                reinterpret_cast<const int64_t*>(out.Columns[1].Data)[i],
+                reinterpret_cast<const int64_t*>(out.Columns[2].Data)[i],
+                reinterpret_cast<const int64_t*>(out.Columns[3].Data)[i],
+                reinterpret_cast<const int64_t*>(out.Columns[4].Data)[i],
+                reinterpret_cast<const int64_t*>(out.Columns[5].Data)[i]);
+        }
+        Release(&out);
+    }
+
+    std::vector<std::tuple<int64_t, int64_t, int64_t, int64_t, int64_t, int64_t>> expected = {
+        {1, 2, 1, 1, 1, 3}, {1, 3, 1, 2, 1, 4}};
     EXPECT_EQ(got, expected);
 }
 
