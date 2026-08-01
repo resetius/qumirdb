@@ -3,6 +3,7 @@
 #include <qdb/plan/passes/column_pruning.h>
 #include <qdb/plan/passes/equijoin.h>
 #include <qdb/plan/passes/estimate_stats.h>
+#include <qdb/plan/passes/flatten_joins.h>
 #include <qdb/plan/passes/join_order.h>
 #include <qdb/plan/passes/qualify_columns.h>
 #include <qdb/plan/passes/top_sort.h>
@@ -28,6 +29,10 @@ void ApplyPlanPasses(TOperatorPtr& plan, TPlanPassOptions options) {
     AssignSourceAliases(plan); stage("AssignSourceAliases");
     QualifyColumns(plan); stage("QualifyColumns");
     AnnotateTypes(plan);
+    if (options.EnableCbo) {
+        plan = FlattenInnerJoins(plan); stage("FlattenInnerJoins");
+        AnnotateTypes(plan); // re-annotate: inner-join regions were reassociated
+    }
     plan = PushDownPredicates(plan); stage("PushDownPredicates");
     AnnotateTypes(plan); // re-annotate: pushdown moved filters onto leaves
     EstimateStats(plan); // leaf cardinalities for cost-based ReorderJoins

@@ -575,8 +575,12 @@ TJoinCardinality EstimateEquiJoin(
         ndvL *= leftNdv;
         ndvR *= rightNdv;
     }
-    ndvL = std::min(ndvL, leftRows);
-    ndvR = std::min(ndvR, rightRows);
+    // The inner-join denominator uses the key DOMAIN (uncapped ndv). A filter
+    // reduces a side's row count but not its key domain (ColumnStats ndv is not
+    // rescaled), so capping ndv to the filtered row count would collapse the
+    // domain and make a PK–FK join look non-reducing — e.g. a filtered dimension
+    // whose surviving rows exceed the fact-side FK ndv (TPC-DS q72). For an
+    // unfiltered base table ndv <= rows already, so this leaves it unchanged.
     double denom = std::max({ndvL, ndvR, 1.0});
     double rows = leftRows * rightRows / denom;
     if (keyNdvs.size() > 1) {
@@ -593,6 +597,10 @@ TJoinCardinality EstimateEquiJoin(
             rows = std::max(rows, std::max(leftRows, rightRows));
         }
     }
+    // Returned distinct counts are clamped to input rows (distinct-in-input) for
+    // semi/anti fractions and output column stats.
+    ndvL = std::min(ndvL, leftRows);
+    ndvR = std::min(ndvR, rightRows);
     return {rows, ndvL, ndvR};
 }
 
