@@ -5,31 +5,7 @@
         (rel join
           (rel join
             (rel project
-              (rel project
-                (rel aggregate
-                  (rel filter
-                    (rel join
-                      (rel join
-                        (rel source "store_sales")
-                        (rel source "store_returns")
-                        ()
-                        (left)
-                        (&& (== sr_ticket_number ss_ticket_number) (== ss_item_sk sr_item_sk)))
-                      (rel source "date_dim")
-                      ()
-                      (inner)
-                      (== ss_sold_date_sk d_date_sk))
-                    (call qdb_is_null sr_ticket_number))
-                  (keys d_year ss_item_sk ss_customer_sk)
-                  (agg sum_0 sum ss_quantity)
-                  (agg sum_1 sum ss_wholesale_cost)
-                  (agg sum_2 sum ss_sales_price))
-                (ss_sold_year d_year)
-                (ss_item_sk ss_item_sk)
-                (ss_customer_sk ss_customer_sk)
-                (ss_qty sum_0)
-                (ss_wc sum_1)
-                (ss_sp sum_2))
+              (rel cte-ref 0)
               (|ss.ss_sold_year| ss_sold_year)
               (|ss.ss_item_sk| ss_item_sk)
               (|ss.ss_customer_sk| ss_customer_sk)
@@ -37,31 +13,7 @@
               (|ss.ss_wc| ss_wc)
               (|ss.ss_sp| ss_sp))
             (rel project
-              (rel project
-                (rel aggregate
-                  (rel filter
-                    (rel join
-                      (rel join
-                        (rel source "web_sales")
-                        (rel source "web_returns")
-                        ()
-                        (left)
-                        (&& (== wr_order_number ws_order_number) (== ws_item_sk wr_item_sk)))
-                      (rel source "date_dim")
-                      ()
-                      (inner)
-                      (== ws_sold_date_sk d_date_sk))
-                    (call qdb_is_null wr_order_number))
-                  (keys d_year ws_item_sk ws_bill_customer_sk)
-                  (agg sum_0 sum ws_quantity)
-                  (agg sum_1 sum ws_wholesale_cost)
-                  (agg sum_2 sum ws_sales_price))
-                (ws_sold_year d_year)
-                (ws_item_sk ws_item_sk)
-                (ws_customer_sk ws_bill_customer_sk)
-                (ws_qty sum_0)
-                (ws_wc sum_1)
-                (ws_sp sum_2))
+              (rel cte-ref 1)
               (|ws.ws_sold_year| ws_sold_year)
               (|ws.ws_item_sk| ws_item_sk)
               (|ws.ws_customer_sk| ws_customer_sk)
@@ -72,31 +24,7 @@
             (left)
             (&& (&& (== ws_sold_year ss_sold_year) (== ws_item_sk ss_item_sk)) (== ws_customer_sk ss_customer_sk)))
           (rel project
-            (rel project
-              (rel aggregate
-                (rel filter
-                  (rel join
-                    (rel join
-                      (rel source "catalog_sales")
-                      (rel source "catalog_returns")
-                      ()
-                      (left)
-                      (&& (== cr_order_number cs_order_number) (== cs_item_sk cr_item_sk)))
-                    (rel source "date_dim")
-                    ()
-                    (inner)
-                    (== cs_sold_date_sk d_date_sk))
-                  (call qdb_is_null cr_order_number))
-                (keys d_year cs_item_sk cs_bill_customer_sk)
-                (agg sum_0 sum cs_quantity)
-                (agg sum_1 sum cs_wholesale_cost)
-                (agg sum_2 sum cs_sales_price))
-              (cs_sold_year d_year)
-              (cs_item_sk cs_item_sk)
-              (cs_customer_sk cs_bill_customer_sk)
-              (cs_qty sum_0)
-              (cs_wc sum_1)
-              (cs_sp sum_2))
+            (rel cte-ref 2)
             (|cs.cs_sold_year| cs_sold_year)
             (|cs.cs_item_sk| cs_item_sk)
             (|cs.cs_customer_sk| cs_customer_sk)

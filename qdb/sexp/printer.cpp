@@ -10,6 +10,7 @@
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/ops/union.h>
 #include <qdb/plan/ops/window.h>
+#include <qdb/plan/ops/cte_ref.h>
 
 #include <stdexcept>
 
@@ -35,6 +36,12 @@ static void PrintRel(NQumir::NAst::TExpr& expr, TPrinter& printer, TPrintFrame f
             printer.PrintString(src.GetAlias(), '"');
         }
         out << ')';
+        return;
+    }
+
+    if (rel == TCteRef::OpId) {
+        auto& ref = static_cast<TCteRef&>(op);
+        out << "(rel cte-ref " << ref.Def()->Id << ')';
         return;
     }
 

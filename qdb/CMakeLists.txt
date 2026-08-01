@@ -18,6 +18,7 @@ add_library(qumirdb
     plan/ops/sort.cpp
     plan/ops/limit.cpp
     plan/ops/window.cpp
+    plan/ops/cte_ref.cpp
     sexp/printer.cpp
     sexp/parser.cpp
     sql/ast.cpp
@@ -39,6 +40,8 @@ add_library(qumirdb
     plan/passes/factor_conjuncts.cpp
     plan/passes/flatten_joins.cpp
     plan/clone_expr.cpp
+    plan/clone_operator.cpp
+    plan/passes/resolve_cte.cpp
     plan/pipeline.cpp
     plan/plan_print.cpp
     plan/build.cpp

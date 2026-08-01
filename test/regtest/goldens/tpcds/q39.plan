@@ -3,60 +3,7 @@
     (rel filter
       (rel join
         (rel project
-          (rel project
-            (rel filter
-              (rel project
-                (rel project
-                  (rel aggregate
-                    (rel project
-                      (rel filter
-                        (rel join
-                          (rel join
-                            (rel join (rel source "inventory") (rel source "item") () (inner))
-                            (rel source "warehouse")
-                            ()
-                            (inner))
-                          (rel source "date_dim")
-                          ()
-                          (inner))
-                        (&& (&& (&& (== inv_item_sk i_item_sk) (== inv_warehouse_sk w_warehouse_sk))
-                            (== inv_date_sk d_date_sk))
-                          (== d_year 1998)))
-                      (w_warehouse_name w_warehouse_name)
-                      (w_warehouse_sk w_warehouse_sk)
-                      (i_item_sk i_item_sk)
-                      (d_moy d_moy)
-                      (inv_quantity_on_hand inv_quantity_on_hand)
-                      (arg_0 (* inv_quantity_on_hand inv_quantity_on_hand)))
-                    (keys w_warehouse_name w_warehouse_sk i_item_sk d_moy)
-                    (agg sum_0 sum inv_quantity_on_hand)
-                    (agg sum_1 sum arg_0)
-                    (agg count_2 count inv_quantity_on_hand)
-                    (agg sum_3 sum inv_quantity_on_hand)
-                    (agg count_4 count inv_quantity_on_hand))
-                  (w_warehouse_name w_warehouse_name)
-                  (w_warehouse_sk w_warehouse_sk)
-                  (i_item_sk i_item_sk)
-                  (d_moy d_moy)
-                  (stdev (if
-                      (< count_2 2)
-                      (call qdb_sql_null)
-                      (call qdb_sqrt (/ (- sum_1 (/ (* sum_0 sum_0) (cast count_2 f64))) (- (cast count_2 f64) 1)))))
-                  (mean (/ sum_3 (cast count_4 f64))))
-                (|foo.w_warehouse_name| w_warehouse_name)
-                (|foo.w_warehouse_sk| w_warehouse_sk)
-                (|foo.i_item_sk| i_item_sk)
-                (|foo.d_moy| d_moy)
-                (|foo.stdev| stdev)
-                (|foo.mean| mean))
-              (> (if (call qdb_is_true (== mean 0)) 0 (/ stdev mean)) 1))
-            (w_warehouse_name w_warehouse_name)
-            (w_warehouse_sk w_warehouse_sk)
-            (i_item_sk i_item_sk)
-            (d_moy d_moy)
-            (stdev stdev)
-            (mean mean)
-            (cov (if (call qdb_is_true (== mean 0)) (call qdb_sql_null) (/ stdev mean))))
+          (rel cte-ref 0)
           (|inv1.w_warehouse_name| w_warehouse_name)
           (|inv1.w_warehouse_sk| w_warehouse_sk)
           (|inv1.i_item_sk| i_item_sk)
@@ -65,60 +12,7 @@
           (|inv1.mean| mean)
           (|inv1.cov| cov))
         (rel project
-          (rel project
-            (rel filter
-              (rel project
-                (rel project
-                  (rel aggregate
-                    (rel project
-                      (rel filter
-                        (rel join
-                          (rel join
-                            (rel join (rel source "inventory") (rel source "item") () (inner))
-                            (rel source "warehouse")
-                            ()
-                            (inner))
-                          (rel source "date_dim")
-                          ()
-                          (inner))
-                        (&& (&& (&& (== inv_item_sk i_item_sk) (== inv_warehouse_sk w_warehouse_sk))
-                            (== inv_date_sk d_date_sk))
-                          (== d_year 1998)))
-                      (w_warehouse_name w_warehouse_name)
-                      (w_warehouse_sk w_warehouse_sk)
-                      (i_item_sk i_item_sk)
-                      (d_moy d_moy)
-                      (inv_quantity_on_hand inv_quantity_on_hand)
-                      (arg_0 (* inv_quantity_on_hand inv_quantity_on_hand)))
-                    (keys w_warehouse_name w_warehouse_sk i_item_sk d_moy)
-                    (agg sum_0 sum inv_quantity_on_hand)
-                    (agg sum_1 sum arg_0)
-                    (agg count_2 count inv_quantity_on_hand)
-                    (agg sum_3 sum inv_quantity_on_hand)
-                    (agg count_4 count inv_quantity_on_hand))
-                  (w_warehouse_name w_warehouse_name)
-                  (w_warehouse_sk w_warehouse_sk)
-                  (i_item_sk i_item_sk)
-                  (d_moy d_moy)
-                  (stdev (if
-                      (< count_2 2)
-                      (call qdb_sql_null)
-                      (call qdb_sqrt (/ (- sum_1 (/ (* sum_0 sum_0) (cast count_2 f64))) (- (cast count_2 f64) 1)))))
-                  (mean (/ sum_3 (cast count_4 f64))))
-                (|foo.w_warehouse_name| w_warehouse_name)
-                (|foo.w_warehouse_sk| w_warehouse_sk)
-                (|foo.i_item_sk| i_item_sk)
-                (|foo.d_moy| d_moy)
-                (|foo.stdev| stdev)
-                (|foo.mean| mean))
-              (> (if (call qdb_is_true (== mean 0)) 0 (/ stdev mean)) 1))
-            (w_warehouse_name w_warehouse_name)
-            (w_warehouse_sk w_warehouse_sk)
-            (i_item_sk i_item_sk)
-            (d_moy d_moy)
-            (stdev stdev)
-            (mean mean)
-            (cov (if (call qdb_is_true (== mean 0)) (call qdb_sql_null) (/ stdev mean))))
+          (rel cte-ref 0)
           (|inv2.w_warehouse_name| w_warehouse_name)
           (|inv2.w_warehouse_sk| w_warehouse_sk)
           (|inv2.i_item_sk| i_item_sk)
