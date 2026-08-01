@@ -1,5 +1,7 @@
 #include <qdb/plan/plan_print.h>
 
+#include <qdb/plan/ops/cte_consumer.h>
+#include <qdb/plan/ops/cte_ref.h>
 #include <qdb/plan/ops/filter.h>
 #include <qdb/plan/ops/project.h>
 #include <qdb/plan/ops/source.h>
@@ -180,6 +182,13 @@ std::string PlanLabel(const TOperatorPtr& op) {
     if (auto window = TMaybeOp<TWindowOperator>(op)) {
         return WindowPlanLabel(*window.Cast());
     }
+    if (auto ref = TMaybeOp<TCteRef>(op)) {
+        return "cte-ref #" + std::to_string(ref.Cast()->Def()->Id);
+    }
+    if (auto consumer = TMaybeOp<TCteConsumer>(op)) {
+        return "cte-consumer #" + std::to_string(consumer.Cast()->Def()->Id)
+            + " (×" + std::to_string(consumer.Cast()->Materialization()->RefCount) + ")";
+    }
     return std::string(op->RelName());
 }
 
@@ -216,6 +225,26 @@ void PrintPlanTree(
     for (size_t i = 0; i < children.size(); ++i) {
         PrintPlanTree(out, children[i], childPrefix, i + 1 == children.size(), false);
     }
+}
+
+void PrintPlanTreeWithCtes(std::ostream& out, const TOperatorPtr& plan) {
+    // Pre-reuse plans carry TCteRef definitions; post-reuse plans carry
+    // TCteConsumer nodes over shared materializations. Print whichever applies.
+    auto defs = CollectCteDefinitions(plan);
+    for (const auto& def : defs) {
+        out << "cte #" << def->Id << ":\n";
+        PrintPlanTree(out, def->Plan);
+    }
+    auto mats = CollectMaterializations(plan);
+    for (const auto& mat : mats) {
+        out << "cte #" << mat.Id << " (materialized, ×"
+            << mat.Materialization->RefCount << "):\n";
+        PrintPlanTree(out, mat.Materialization->Plan);
+    }
+    if (!defs.empty() || !mats.empty()) {
+        out << "main:\n";
+    }
+    PrintPlanTree(out, plan);
 }
 
 } // namespace NQdb

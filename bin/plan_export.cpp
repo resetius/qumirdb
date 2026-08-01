@@ -903,7 +903,7 @@ std::expected<NQdb::TOperatorPtr, NQumir::TError> ParseSql(
 std::string LogicalPlanTreeText(const NQdb::TOperatorPtr& plan) {
     std::ostringstream out;
     try {
-        PrintPlanTree(out, plan);
+        PrintPlanTreeWithCtes(out, plan);
     } catch (const std::exception& e) {
         out << "<unprintable logical plan: " << e.what() << ">\n";
     }
@@ -913,12 +913,7 @@ std::string LogicalPlanTreeText(const NQdb::TOperatorPtr& plan) {
 std::string LogicalPlanAstText(const NQdb::TOperatorPtr& plan) {
     std::ostringstream out;
     try {
-        NQumir::NAst::NCore::PrintAst(
-            out,
-            plan,
-            NQumir::NAst::NCore::TPrintOptions{
-                .NodePrinters = NQdb::NSexp::MakeRelPrinters(),
-            });
+        NQdb::NSexp::PrintRelPlan(out, plan);
     } catch (const std::exception& e) {
         out << "<unprintable logical ast: " << e.what() << ">";
     }

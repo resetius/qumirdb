@@ -1,30 +1,48 @@
-(rel sort
-  (rel project
-    (rel filter
-      (rel join
-        (rel join
-          (rel source "supplier")
-          (rel project (rel cte-ref 0) (|revenue0.supplier_no| supplier_no) (|revenue0.total_revenue| total_revenue))
-          ()
-          (inner))
+(query
+  (cte 0
+    (rel project
+      (rel aggregate
         (rel project
-          (rel aggregate
-            (rel project
+          (rel filter
+            (rel source "lineitem")
+            (&& (>= l_shipdate (: 9190 i32)) (< l_shipdate (+ (: 9190 i32) (: 90 i32)))))
+          (l_suppkey l_suppkey)
+          (arg_0 (* l_extendedprice (- 1 l_discount))))
+        (keys l_suppkey)
+        (agg sum_0 sum arg_0))
+      (supplier_no l_suppkey)
+      (total_revenue sum_0)))
+  (main
+    (rel sort
+      (rel project
+        (rel filter
+          (rel join
+            (rel join
+              (rel source "supplier")
               (rel project
                 (rel cte-ref 0)
                 (|revenue0.supplier_no| supplier_no)
                 (|revenue0.total_revenue| total_revenue))
-              (total_revenue total_revenue)
-              (__group__ 1))
-            (keys __group__)
-            (agg max_0 max total_revenue))
-          (__scalar_0__ max_0))
-        ()
-        (inner))
-      (&& (== s_suppkey supplier_no) (== total_revenue __scalar_0__)))
-    (s_suppkey s_suppkey)
-    (s_name s_name)
-    (s_address s_address)
-    (s_phone s_phone)
-    (total_revenue total_revenue))
-  (s_suppkey asc nulls-default))
+              ()
+              (inner))
+            (rel project
+              (rel aggregate
+                (rel project
+                  (rel project
+                    (rel cte-ref 0)
+                    (|revenue0.supplier_no| supplier_no)
+                    (|revenue0.total_revenue| total_revenue))
+                  (total_revenue total_revenue)
+                  (__group__ 1))
+                (keys __group__)
+                (agg max_0 max total_revenue))
+              (__scalar_0__ max_0))
+            ()
+            (inner))
+          (&& (== s_suppkey supplier_no) (== total_revenue __scalar_0__)))
+        (s_suppkey s_suppkey)
+        (s_name s_name)
+        (s_address s_address)
+        (s_phone s_phone)
+        (total_revenue total_revenue))
+      (s_suppkey asc nulls-default))))

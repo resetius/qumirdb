@@ -1,26 +1,109 @@
-(rel limit
-  (rel sort
+(query
+  (cte 0
     (rel project
       (rel aggregate
-        (rel project
-          (rel union-all
+        (rel filter
+          (rel join
+            (rel join
+              (rel join
+                (rel join (rel source "store_sales") (rel source "date_dim") () (inner))
+                (rel source "customer_address")
+                ()
+                (inner))
+              (rel source "item")
+              ()
+              (inner))
             (rel project
-              (rel project (rel cte-ref 0) (|ss.i_manufact_id| i_manufact_id) (|ss.total_sales| total_sales))
-              (i_manufact_id |ss.i_manufact_id|)
-              (total_sales |ss.total_sales|))
-            (rel project
-              (rel project (rel cte-ref 1) (|cs.i_manufact_id| i_manufact_id) (|cs.total_sales| total_sales))
-              (i_manufact_id |cs.i_manufact_id|)
-              (total_sales |cs.total_sales|))
-            (rel project
-              (rel project (rel cte-ref 2) (|ws.i_manufact_id| i_manufact_id) (|ws.total_sales| total_sales))
-              (i_manufact_id |ws.i_manufact_id|)
-              (total_sales |ws.total_sales|)))
-          (|tmp1.i_manufact_id| i_manufact_id)
-          (|tmp1.total_sales| total_sales))
+              (rel filter (rel source "item") (== i_category (: (cast "Books" <named StringView>) <named StringView>)))
+              (__qdb_in__i_manufact_id i_manufact_id))
+            ()
+            (left_semi)
+            (== i_manufact_id __qdb_in__i_manufact_id))
+          (&& (&& (&& (&& (&& (== ss_item_sk i_item_sk) (== ss_sold_date_sk d_date_sk)) (== d_year 1999)) (== d_moy 3))
+              (== ss_addr_sk ca_address_sk))
+            (== ca_gmt_offset (- 5))))
         (keys i_manufact_id)
-        (agg sum_0 sum total_sales))
+        (agg sum_0 sum ss_ext_sales_price))
       (i_manufact_id i_manufact_id)
-      (total_sales sum_0))
-    (total_sales asc nulls-default))
-  (limit 100))
+      (total_sales sum_0)))
+  (cte 1
+    (rel project
+      (rel aggregate
+        (rel filter
+          (rel join
+            (rel join
+              (rel join
+                (rel join (rel source "catalog_sales") (rel source "date_dim") () (inner))
+                (rel source "customer_address")
+                ()
+                (inner))
+              (rel source "item")
+              ()
+              (inner))
+            (rel project
+              (rel filter (rel source "item") (== i_category (: (cast "Books" <named StringView>) <named StringView>)))
+              (__qdb_in__i_manufact_id i_manufact_id))
+            ()
+            (left_semi)
+            (== i_manufact_id __qdb_in__i_manufact_id))
+          (&& (&& (&& (&& (&& (== cs_item_sk i_item_sk) (== cs_sold_date_sk d_date_sk)) (== d_year 1999)) (== d_moy 3))
+              (== cs_bill_addr_sk ca_address_sk))
+            (== ca_gmt_offset (- 5))))
+        (keys i_manufact_id)
+        (agg sum_0 sum cs_ext_sales_price))
+      (i_manufact_id i_manufact_id)
+      (total_sales sum_0)))
+  (cte 2
+    (rel project
+      (rel aggregate
+        (rel filter
+          (rel join
+            (rel join
+              (rel join
+                (rel join (rel source "web_sales") (rel source "date_dim") () (inner))
+                (rel source "customer_address")
+                ()
+                (inner))
+              (rel source "item")
+              ()
+              (inner))
+            (rel project
+              (rel filter (rel source "item") (== i_category (: (cast "Books" <named StringView>) <named StringView>)))
+              (__qdb_in__i_manufact_id i_manufact_id))
+            ()
+            (left_semi)
+            (== i_manufact_id __qdb_in__i_manufact_id))
+          (&& (&& (&& (&& (&& (== ws_item_sk i_item_sk) (== ws_sold_date_sk d_date_sk)) (== d_year 1999)) (== d_moy 3))
+              (== ws_bill_addr_sk ca_address_sk))
+            (== ca_gmt_offset (- 5))))
+        (keys i_manufact_id)
+        (agg sum_0 sum ws_ext_sales_price))
+      (i_manufact_id i_manufact_id)
+      (total_sales sum_0)))
+  (main
+    (rel limit
+      (rel sort
+        (rel project
+          (rel aggregate
+            (rel project
+              (rel union-all
+                (rel project
+                  (rel project (rel cte-ref 0) (|ss.i_manufact_id| i_manufact_id) (|ss.total_sales| total_sales))
+                  (i_manufact_id |ss.i_manufact_id|)
+                  (total_sales |ss.total_sales|))
+                (rel project
+                  (rel project (rel cte-ref 1) (|cs.i_manufact_id| i_manufact_id) (|cs.total_sales| total_sales))
+                  (i_manufact_id |cs.i_manufact_id|)
+                  (total_sales |cs.total_sales|))
+                (rel project
+                  (rel project (rel cte-ref 2) (|ws.i_manufact_id| i_manufact_id) (|ws.total_sales| total_sales))
+                  (i_manufact_id |ws.i_manufact_id|)
+                  (total_sales |ws.total_sales|)))
+              (|tmp1.i_manufact_id| i_manufact_id)
+              (|tmp1.total_sales| total_sales))
+            (keys i_manufact_id)
+            (agg sum_0 sum total_sales))
+          (i_manufact_id i_manufact_id)
+          (total_sales sum_0))
+        (total_sales asc nulls-default))
+      (limit 100))))

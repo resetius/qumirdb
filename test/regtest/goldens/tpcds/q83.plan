@@ -1,25 +1,123 @@
-(rel limit
-  (rel sort
+(query
+  (cte 0
     (rel project
-      (rel filter
-        (rel join
+      (rel aggregate
+        (rel filter
           (rel join
-            (rel project (rel cte-ref 0) (|sr_items.item_id| item_id) (|sr_items.sr_item_qty| sr_item_qty))
-            (rel project (rel cte-ref 1) (|cr_items.item_id| item_id) (|cr_items.cr_item_qty| cr_item_qty))
+            (rel join
+              (rel join (rel source "store_returns") (rel source "item") () (inner))
+              (rel source "date_dim")
+              ()
+              (inner))
+            (rel project
+              (rel join
+                (rel source "date_dim")
+                (rel project
+                  (rel filter
+                    (rel source "date_dim")
+                    (|| (|| (== d_date (: (cast "1998-01-02" <named StringView>) <named StringView>))
+                        (== d_date (: (cast "1998-10-15" <named StringView>) <named StringView>)))
+                      (== d_date (: (cast "1998-11-10" <named StringView>) <named StringView>))))
+                  (__qdb_in__d_week_seq d_week_seq))
+                ()
+                (left_semi)
+                (== d_week_seq __qdb_in__d_week_seq))
+              (__qdb_in__d_date d_date))
             ()
-            (inner))
-          (rel project (rel cte-ref 2) (|wr_items.item_id| item_id) (|wr_items.wr_item_qty| wr_item_qty))
-          ()
-          (inner))
-        (&& (== |sr_items.item_id| |cr_items.item_id|) (== |sr_items.item_id| |wr_items.item_id|)))
-      (item_id |sr_items.item_id|)
-      (sr_item_qty sr_item_qty)
-      (sr_dev (* (/ (/ sr_item_qty (+ (+ sr_item_qty cr_item_qty) wr_item_qty)) 3) 100))
-      (cr_item_qty cr_item_qty)
-      (cr_dev (* (/ (/ cr_item_qty (+ (+ sr_item_qty cr_item_qty) wr_item_qty)) 3) 100))
-      (wr_item_qty wr_item_qty)
-      (wr_dev (* (/ (/ wr_item_qty (+ (+ sr_item_qty cr_item_qty) wr_item_qty)) 3) 100))
-      (average (/ (+ (+ sr_item_qty cr_item_qty) wr_item_qty) 3)))
-    (item_id asc nulls-default)
-    (sr_item_qty asc nulls-default))
-  (limit 100))
+            (left_semi)
+            (== d_date __qdb_in__d_date))
+          (&& (== sr_item_sk i_item_sk) (== sr_returned_date_sk d_date_sk)))
+        (keys i_item_id)
+        (agg sum_0 sum sr_return_quantity))
+      (item_id i_item_id)
+      (sr_item_qty sum_0)))
+  (cte 1
+    (rel project
+      (rel aggregate
+        (rel filter
+          (rel join
+            (rel join
+              (rel join (rel source "catalog_returns") (rel source "item") () (inner))
+              (rel source "date_dim")
+              ()
+              (inner))
+            (rel project
+              (rel join
+                (rel source "date_dim")
+                (rel project
+                  (rel filter
+                    (rel source "date_dim")
+                    (|| (|| (== d_date (: (cast "1998-01-02" <named StringView>) <named StringView>))
+                        (== d_date (: (cast "1998-10-15" <named StringView>) <named StringView>)))
+                      (== d_date (: (cast "1998-11-10" <named StringView>) <named StringView>))))
+                  (__qdb_in__d_week_seq d_week_seq))
+                ()
+                (left_semi)
+                (== d_week_seq __qdb_in__d_week_seq))
+              (__qdb_in__d_date d_date))
+            ()
+            (left_semi)
+            (== d_date __qdb_in__d_date))
+          (&& (== cr_item_sk i_item_sk) (== cr_returned_date_sk d_date_sk)))
+        (keys i_item_id)
+        (agg sum_0 sum cr_return_quantity))
+      (item_id i_item_id)
+      (cr_item_qty sum_0)))
+  (cte 2
+    (rel project
+      (rel aggregate
+        (rel filter
+          (rel join
+            (rel join
+              (rel join (rel source "web_returns") (rel source "item") () (inner))
+              (rel source "date_dim")
+              ()
+              (inner))
+            (rel project
+              (rel join
+                (rel source "date_dim")
+                (rel project
+                  (rel filter
+                    (rel source "date_dim")
+                    (|| (|| (== d_date (: (cast "1998-01-02" <named StringView>) <named StringView>))
+                        (== d_date (: (cast "1998-10-15" <named StringView>) <named StringView>)))
+                      (== d_date (: (cast "1998-11-10" <named StringView>) <named StringView>))))
+                  (__qdb_in__d_week_seq d_week_seq))
+                ()
+                (left_semi)
+                (== d_week_seq __qdb_in__d_week_seq))
+              (__qdb_in__d_date d_date))
+            ()
+            (left_semi)
+            (== d_date __qdb_in__d_date))
+          (&& (== wr_item_sk i_item_sk) (== wr_returned_date_sk d_date_sk)))
+        (keys i_item_id)
+        (agg sum_0 sum wr_return_quantity))
+      (item_id i_item_id)
+      (wr_item_qty sum_0)))
+  (main
+    (rel limit
+      (rel sort
+        (rel project
+          (rel filter
+            (rel join
+              (rel join
+                (rel project (rel cte-ref 0) (|sr_items.item_id| item_id) (|sr_items.sr_item_qty| sr_item_qty))
+                (rel project (rel cte-ref 1) (|cr_items.item_id| item_id) (|cr_items.cr_item_qty| cr_item_qty))
+                ()
+                (inner))
+              (rel project (rel cte-ref 2) (|wr_items.item_id| item_id) (|wr_items.wr_item_qty| wr_item_qty))
+              ()
+              (inner))
+            (&& (== |sr_items.item_id| |cr_items.item_id|) (== |sr_items.item_id| |wr_items.item_id|)))
+          (item_id |sr_items.item_id|)
+          (sr_item_qty sr_item_qty)
+          (sr_dev (* (/ (/ sr_item_qty (+ (+ sr_item_qty cr_item_qty) wr_item_qty)) 3) 100))
+          (cr_item_qty cr_item_qty)
+          (cr_dev (* (/ (/ cr_item_qty (+ (+ sr_item_qty cr_item_qty) wr_item_qty)) 3) 100))
+          (wr_item_qty wr_item_qty)
+          (wr_dev (* (/ (/ wr_item_qty (+ (+ sr_item_qty cr_item_qty) wr_item_qty)) 3) 100))
+          (average (/ (+ (+ sr_item_qty cr_item_qty) wr_item_qty) 3)))
+        (item_id asc nulls-default)
+        (sr_item_qty asc nulls-default))
+      (limit 100))))

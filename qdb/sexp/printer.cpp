@@ -287,5 +287,35 @@ TPrintExprFactory MakeRelPrinters() {
     return {{IOperator::NodeId, PrintRel}};
 }
 
+void PrintRelPlan(std::ostream& out, const TOperatorPtr& plan) {
+    if (!CollectMaterializations(plan).empty()) {
+        throw std::runtime_error(
+            "PrintRelPlan: materialized CTE plans are not serializable yet");
+    }
+
+    auto defs = CollectCteDefinitions(plan);
+    NQumir::NAst::NCore::TPrintOptions options{.NodePrinters = MakeRelPrinters()};
+    if (defs.empty()) {
+        NQumir::NAst::NCore::PrintAst(out, plan, options);
+        return;
+    }
+    // (query (cte <id> <def-plan>) ... (main <main-plan>)): definitions are
+    // dependency-first so a nested (rel cte-ref N) is always defined earlier.
+    TPrinter printer(out, std::move(options));
+    out << "(query";
+    for (const auto& def : defs) {
+        printer.Separator(1);
+        out << "(cte " << def->Id;
+        printer.Separator(2);
+        printer.PrintExpr(def->Plan, true, 2);
+        out << ')';
+    }
+    printer.Separator(1);
+    out << "(main";
+    printer.Separator(2);
+    printer.PrintExpr(plan, true, 2);
+    out << "))";
+}
+
 } // namespace NSexp
 } // namespace NQdb

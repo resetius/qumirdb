@@ -74,7 +74,8 @@ std::optional<EFrameBoundKind> ParseFrameBoundKind(std::string_view name) {
 }
 
 TNodeParserMap MakeRelParsers(TRelParserOptions options) {
-    return {{"rel", [opts = std::move(options)](IParseHandle& h, TLocation loc) -> TAstTask {
+    TNodeParserMap parsers;
+    parsers["rel"] = [opts = options](IParseHandle& h, TLocation loc) -> TAstTask {
         auto nameTok = h.Next();
         auto relName = ReadIdentifier(h, nameTok);
         if (!relName) {
@@ -106,6 +107,22 @@ TNodeParserMap MakeRelParsers(TRelParserOptions options) {
                 }
             }
             co_return opExpr;
+        }
+
+        if (*relName == TCteRef::OpId) {
+            auto idTok = h.Next();
+            if (idTok.Type != TToken::Integer) {
+                co_return IParseHandle::MakeError(idTok, "(rel cte-ref) expects an integer id");
+            }
+            co_await h.Take(')');
+            if (!opts.CteRegistry) {
+                co_return TError(loc, "(rel cte-ref) requires a CTE registry");
+            }
+            auto it = opts.CteRegistry->find(static_cast<uint32_t>(idTok.Value.i64));
+            if (it == opts.CteRegistry->end()) {
+                co_return TError(loc, "(rel cte-ref) references unknown CTE id");
+            }
+            co_return std::make_shared<TCteRef>(it->second);
         }
 
         if (*relName == TFilterOperator::OpId) {
@@ -468,7 +485,57 @@ TNodeParserMap MakeRelParsers(TRelParserOptions options) {
         }
 
         co_return IParseHandle::MakeError(nameTok, "unknown rel operator: " + *relName);
-    }}};
+    };
+
+    // (query (cte <id> <plan>) ... (main <plan>)): register each definition (so
+    // later (rel cte-ref <id>) resolves), then return the main plan.
+    parsers["query"] = [opts = std::move(options)](IParseHandle& h, TLocation loc) -> TAstTask {
+        if (!opts.CteRegistry) {
+            co_return TError(loc, "(query) requires a CTE registry");
+        }
+        TOperatorPtr main;
+        while (true) {
+            auto open = h.Next();
+            if (IParseHandle::IsOp(open, ')')) {
+                break;
+            }
+            if (!IParseHandle::IsOp(open, '(')) {
+                co_return IParseHandle::MakeError(open, "expected '(cte ...)' or '(main ...)'");
+            }
+            auto headTok = h.Next();
+            auto head = ReadIdentifier(h, headTok);
+            if (head && *head == "cte") {
+                auto idTok = h.Next();
+                if (idTok.Type != TToken::Integer) {
+                    co_return IParseHandle::MakeError(idTok, "(cte) expects an integer id");
+                }
+                auto planExpr = co_await h.Expr();
+                co_await h.Take(')');
+                auto def = std::make_shared<TCteDefinition>();
+                def->Id = static_cast<uint32_t>(idTok.Value.i64);
+                def->Plan = std::static_pointer_cast<IOperator>(std::move(planExpr));
+                def->OutputType = def->Plan->OutputColumns();
+                auto [it, inserted] = opts.CteRegistry->emplace(def->Id, def);
+                if (!inserted) {
+                    co_return TError(loc, "duplicate CTE id");
+                }
+            } else if (head && *head == "main") {
+                auto planExpr = co_await h.Expr();
+                co_await h.Take(')'); // close (main ...)
+                main = std::static_pointer_cast<IOperator>(std::move(planExpr));
+                co_await h.Take(')'); // close (query ...)
+                break;
+            } else {
+                co_return IParseHandle::MakeError(headTok, "expected 'cte' or 'main'");
+            }
+        }
+        if (!main) {
+            co_return TError(loc, "(query) missing (main ...)");
+        }
+        co_return main;
+    };
+
+    return parsers;
 }
 
 } // namespace NSexp

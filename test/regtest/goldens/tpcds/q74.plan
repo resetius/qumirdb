@@ -1,80 +1,120 @@
-(rel limit
-  (rel project
-    (rel sort
+(query
+  (cte 0
+    (rel union-all
       (rel project
-        (rel filter
-          (rel join
+        (rel aggregate
+          (rel filter
             (rel join
-              (rel join
-                (rel project
-                  (rel cte-ref 0)
-                  (|t_s_firstyear.customer_id| customer_id)
-                  (|t_s_firstyear.customer_first_name| customer_first_name)
-                  (|t_s_firstyear.customer_last_name| customer_last_name)
-                  (|t_s_firstyear.year| year)
-                  (|t_s_firstyear.year_total| year_total)
-                  (|t_s_firstyear.sale_type| sale_type))
-                (rel project
-                  (rel cte-ref 0)
-                  (|t_s_secyear.customer_id| customer_id)
-                  (|t_s_secyear.customer_first_name| customer_first_name)
-                  (|t_s_secyear.customer_last_name| customer_last_name)
-                  (|t_s_secyear.year| year)
-                  (|t_s_secyear.year_total| year_total)
-                  (|t_s_secyear.sale_type| sale_type))
-                ()
-                (inner))
-              (rel project
-                (rel cte-ref 0)
-                (|t_w_firstyear.customer_id| customer_id)
-                (|t_w_firstyear.customer_first_name| customer_first_name)
-                (|t_w_firstyear.customer_last_name| customer_last_name)
-                (|t_w_firstyear.year| year)
-                (|t_w_firstyear.year_total| year_total)
-                (|t_w_firstyear.sale_type| sale_type))
+              (rel join (rel source "customer") (rel source "store_sales") () (inner))
+              (rel source "date_dim")
               ()
               (inner))
-            (rel project
-              (rel cte-ref 0)
-              (|t_w_secyear.customer_id| customer_id)
-              (|t_w_secyear.customer_first_name| customer_first_name)
-              (|t_w_secyear.customer_last_name| customer_last_name)
-              (|t_w_secyear.year| year)
-              (|t_w_secyear.year_total| year_total)
-              (|t_w_secyear.sale_type| sale_type))
-            ()
-            (inner))
-          (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (== |t_s_secyear.customer_id| |t_s_firstyear.customer_id|)
-                                    (== |t_s_firstyear.customer_id| |t_w_secyear.customer_id|))
-                                  (== |t_s_firstyear.customer_id| |t_w_firstyear.customer_id|))
-                                (== |t_s_firstyear.sale_type| (: (cast "s" <named StringView>) <named StringView>)))
-                              (== |t_w_firstyear.sale_type| (: (cast "w" <named StringView>) <named StringView>)))
-                            (== |t_s_secyear.sale_type| (: (cast "s" <named StringView>) <named StringView>)))
-                          (== |t_w_secyear.sale_type| (: (cast "w" <named StringView>) <named StringView>)))
-                        (== |t_s_firstyear.year| 2001))
-                      (== |t_s_secyear.year| (+ 2001 1)))
-                    (== |t_w_firstyear.year| 2001))
-                  (== |t_w_secyear.year| (+ 2001 1)))
-                (> |t_s_firstyear.year_total| 0))
-              (> |t_w_firstyear.year_total| 0))
-            (> (if
-                (call qdb_is_true (> |t_w_firstyear.year_total| 0))
-                (/ |t_w_secyear.year_total| |t_w_firstyear.year_total|)
-                (call qdb_sql_null))
-              (if
-                (call qdb_is_true (> |t_s_firstyear.year_total| 0))
-                (/ |t_s_secyear.year_total| |t_s_firstyear.year_total|)
-                (call qdb_sql_null)))))
-        (customer_id |t_s_secyear.customer_id|)
-        (customer_first_name |t_s_secyear.customer_first_name|)
-        (customer_last_name |t_s_secyear.customer_last_name|)
-        (__sort_0 2)
-        (__sort_1 1)
-        (__sort_2 3))
-      (__sort_0 asc nulls-default)
-      (__sort_1 asc nulls-default)
-      (__sort_2 asc nulls-default))
-    (customer_id customer_id)
-    (customer_first_name customer_first_name)
-    (customer_last_name customer_last_name))
-  (limit 100))
+            (&& (&& (== c_customer_sk ss_customer_sk) (== ss_sold_date_sk d_date_sk))
+              (|| (== d_year 2001) (== d_year (+ 2001 1)))))
+          (keys c_customer_id c_first_name c_last_name d_year)
+          (agg max_0 max ss_net_paid))
+        (customer_id c_customer_id)
+        (customer_first_name c_first_name)
+        (customer_last_name c_last_name)
+        (year d_year)
+        (year_total max_0)
+        (sale_type (: (cast "s" <named StringView>) <named StringView>)))
+      (rel project
+        (rel aggregate
+          (rel filter
+            (rel join
+              (rel join (rel source "customer") (rel source "web_sales") () (inner))
+              (rel source "date_dim")
+              ()
+              (inner))
+            (&& (&& (== c_customer_sk ws_bill_customer_sk) (== ws_sold_date_sk d_date_sk))
+              (|| (== d_year 2001) (== d_year (+ 2001 1)))))
+          (keys c_customer_id c_first_name c_last_name d_year)
+          (agg max_0 max ws_net_paid))
+        (customer_id c_customer_id)
+        (customer_first_name c_first_name)
+        (customer_last_name c_last_name)
+        (year d_year)
+        (year_total max_0)
+        (sale_type (: (cast "w" <named StringView>) <named StringView>)))))
+  (main
+    (rel limit
+      (rel project
+        (rel sort
+          (rel project
+            (rel filter
+              (rel join
+                (rel join
+                  (rel join
+                    (rel project
+                      (rel cte-ref 0)
+                      (|t_s_firstyear.customer_id| customer_id)
+                      (|t_s_firstyear.customer_first_name| customer_first_name)
+                      (|t_s_firstyear.customer_last_name| customer_last_name)
+                      (|t_s_firstyear.year| year)
+                      (|t_s_firstyear.year_total| year_total)
+                      (|t_s_firstyear.sale_type| sale_type))
+                    (rel project
+                      (rel cte-ref 0)
+                      (|t_s_secyear.customer_id| customer_id)
+                      (|t_s_secyear.customer_first_name| customer_first_name)
+                      (|t_s_secyear.customer_last_name| customer_last_name)
+                      (|t_s_secyear.year| year)
+                      (|t_s_secyear.year_total| year_total)
+                      (|t_s_secyear.sale_type| sale_type))
+                    ()
+                    (inner))
+                  (rel project
+                    (rel cte-ref 0)
+                    (|t_w_firstyear.customer_id| customer_id)
+                    (|t_w_firstyear.customer_first_name| customer_first_name)
+                    (|t_w_firstyear.customer_last_name| customer_last_name)
+                    (|t_w_firstyear.year| year)
+                    (|t_w_firstyear.year_total| year_total)
+                    (|t_w_firstyear.sale_type| sale_type))
+                  ()
+                  (inner))
+                (rel project
+                  (rel cte-ref 0)
+                  (|t_w_secyear.customer_id| customer_id)
+                  (|t_w_secyear.customer_first_name| customer_first_name)
+                  (|t_w_secyear.customer_last_name| customer_last_name)
+                  (|t_w_secyear.year| year)
+                  (|t_w_secyear.year_total| year_total)
+                  (|t_w_secyear.sale_type| sale_type))
+                ()
+                (inner))
+              (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (== |t_s_secyear.customer_id| |t_s_firstyear.customer_id|)
+                                        (== |t_s_firstyear.customer_id| |t_w_secyear.customer_id|))
+                                      (== |t_s_firstyear.customer_id| |t_w_firstyear.customer_id|))
+                                    (== |t_s_firstyear.sale_type| (: (cast "s" <named StringView>) <named StringView>)))
+                                  (== |t_w_firstyear.sale_type| (: (cast "w" <named StringView>) <named StringView>)))
+                                (== |t_s_secyear.sale_type| (: (cast "s" <named StringView>) <named StringView>)))
+                              (== |t_w_secyear.sale_type| (: (cast "w" <named StringView>) <named StringView>)))
+                            (== |t_s_firstyear.year| 2001))
+                          (== |t_s_secyear.year| (+ 2001 1)))
+                        (== |t_w_firstyear.year| 2001))
+                      (== |t_w_secyear.year| (+ 2001 1)))
+                    (> |t_s_firstyear.year_total| 0))
+                  (> |t_w_firstyear.year_total| 0))
+                (> (if
+                    (call qdb_is_true (> |t_w_firstyear.year_total| 0))
+                    (/ |t_w_secyear.year_total| |t_w_firstyear.year_total|)
+                    (call qdb_sql_null))
+                  (if
+                    (call qdb_is_true (> |t_s_firstyear.year_total| 0))
+                    (/ |t_s_secyear.year_total| |t_s_firstyear.year_total|)
+                    (call qdb_sql_null)))))
+            (customer_id |t_s_secyear.customer_id|)
+            (customer_first_name |t_s_secyear.customer_first_name|)
+            (customer_last_name |t_s_secyear.customer_last_name|)
+            (__sort_0 2)
+            (__sort_1 1)
+            (__sort_2 3))
+          (__sort_0 asc nulls-default)
+          (__sort_1 asc nulls-default)
+          (__sort_2 asc nulls-default))
+        (customer_id customer_id)
+        (customer_first_name customer_first_name)
+        (customer_last_name customer_last_name))
+      (limit 100))))
