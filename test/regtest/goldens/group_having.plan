@@ -1,4 +1,4 @@
 (rel project
-  (rel filter (rel aggregate (rel source "t") (keys a) (agg count_0 count) (agg count_1 count)) (> count_1 1))
+  (rel filter (rel aggregate (rel source "t") (keys a) (agg count_0 count)) (> count_0 1))
   (a a)
   (col1 count_0))
