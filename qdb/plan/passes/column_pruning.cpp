@@ -102,6 +102,34 @@ void Prune(const TOperatorPtr& root, const TColumnSet* explicitRootDemand, TCteU
             }
         }
 
+        // Relational-output pruning for aggregates: drop aggregate outputs the
+        // consumer doesn't need. Group keys stay — they define the grouping and
+        // remain output columns. Dropping an aggregate also removes its argument
+        // from this node's input demand.
+        if (auto aggOp = TMaybeOp<TAggregateOperator>(op)) {
+            auto aggregate = aggOp.Cast();
+            auto& aggs = aggregate->MutableAggs();
+            size_t kept = 0;
+            for (const auto& spec : aggs) {
+                if (needed.contains(spec.Name)) {
+                    ++kept;
+                }
+            }
+            const bool keepsAnyOutput = kept > 0 || !aggregate->GroupKeys().empty();
+            if (kept < aggs.size() && keepsAnyOutput) {
+                std::erase_if(aggs, [&](const TAggregateSpec& spec) {
+                    return !needed.contains(spec.Name);
+                });
+                if (fun) {
+                    TColumnSet keptOutputs = needed;
+                    for (const auto& key : aggregate->GroupKeys()) {
+                        keptOutputs.insert(key);
+                    }
+                    fun->ReturnType = narrowStruct(fun->ReturnType, keptOutputs);
+                }
+            }
+        }
+
         auto children = op->Children();
         for (size_t i = 0; i < children.size(); ++i) {
             auto required = op->RequiredColumnsForChild(i, needed);
