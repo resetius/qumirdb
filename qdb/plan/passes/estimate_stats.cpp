@@ -3,6 +3,7 @@
 #include "unbound_vars.h"
 
 #include <qdb/plan/ops/source.h>
+#include <qdb/plan/ops/cte_ref.h>
 #include <qdb/plan/ops/filter.h>
 #include <qdb/plan/ops/project.h>
 #include <qdb/plan/ops/join.h>
@@ -544,6 +545,9 @@ TStatsPtr ComputeUnionStats(const std::shared_ptr<TUnionAllOperator>& un) {
 TStatsPtr ComputeStatsFor(TOperatorPtr op) {
     if (auto source = TMaybeOp<TSourceOperator>(op)) {
         return ComputeSourceStats(source.Cast());
+    }
+    if (auto ref = TMaybeOp<TCteRef>(op)) {
+        return ref.Cast()->Def()->Plan->Stats_;
     }
     if (auto maybeUnion = TMaybeOp<TUnionAllOperator>(op)) {
         return ComputeUnionStats(maybeUnion.Cast());

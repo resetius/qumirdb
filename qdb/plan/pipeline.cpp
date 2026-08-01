@@ -6,6 +6,7 @@
 #include <qdb/plan/passes/flatten_joins.h>
 #include <qdb/plan/passes/join_order.h>
 #include <qdb/plan/passes/qualify_columns.h>
+#include <qdb/plan/passes/resolve_cte.h>
 #include <qdb/plan/passes/top_sort.h>
 #include <qdb/plan/passes/typing.h>
 #include <qdb/plan/plan_print.h>
@@ -15,7 +16,9 @@
 
 namespace NQdb {
 
-void ApplyPlanPasses(TOperatorPtr& plan, TPlanPassOptions options) {
+namespace {
+
+void OptimizeOne(TOperatorPtr& plan, TPlanPassOptions options) {
     // QDB_DUMP_PASSES=1 dumps the plan after each pass to stderr (debugging).
     const bool dump = std::getenv("QDB_DUMP_PASSES") != nullptr;
     auto stage = [&](const char* name) {
@@ -53,6 +56,17 @@ void ApplyPlanPasses(TOperatorPtr& plan, TPlanPassOptions options) {
     ApplyColumnPruning(plan); stage("ApplyColumnPruning");
 
     EstimateStats(plan);
+}
+
+} // namespace
+
+void ApplyPlanPasses(TOperatorPtr& plan, TPlanPassOptions options) {
+    for (const auto& def : CollectCteDefinitions(plan)) {
+        OptimizeOne(def->Plan, options);
+        def->OutputType = def->Plan->OutputColumns();
+    }
+    OptimizeOne(plan, options);
+    plan = ResolveCteRefs(plan);
 }
 
 } // namespace NQdb

@@ -7,6 +7,7 @@
 #include <qdb/plan/ops/project.h>
 #include <qdb/plan/ops/sort.h>
 #include <qdb/plan/ops/source.h>
+#include <qdb/plan/ops/cte_ref.h>
 #include <qdb/plan/ops/union.h>
 #include <qdb/plan/ops/window.h>
 #include <qdb/plan/types/nullable.h>
@@ -69,6 +70,14 @@ void AnnotateTypes(const TOperatorPtr& root) {
         root->Type = std::make_shared<TFunctionType>(
             std::vector<TTypePtr>{},
             StructTypeFromSchema(src->GetSource().Schema()));
+        return;
+    }
+
+    if (auto maybe = TMaybeOp<TCteRef>(root)) {
+        // Re-derive from the definition, whose schema may have shifted while it
+        // was optimized (e.g. set-op branch coercion).
+        root->Type = std::make_shared<TFunctionType>(
+            std::vector<TTypePtr>{}, maybe.Cast()->Def()->OutputType);
         return;
     }
 

@@ -9,44 +9,12 @@
                 (rel project
                   (rel join
                     (rel project
-                      (rel project
-                        (rel window
-                          (rel aggregate
-                            (rel filter
-                              (rel join (rel source "web_sales") (rel source "date_dim") () (inner))
-                              (&& (&& (&& (== ws_sold_date_sk d_date_sk) (<= 1212 d_month_seq))
-                                  (<= d_month_seq (+ 1212 11)))
-                                (! (call qdb_is_null ws_item_sk))))
-                            (keys ws_item_sk d_date)
-                            (agg sum_0 sum ws_sales_price))
-                          (partition ws_item_sk)
-                          (order (d_date asc nulls-default))
-                          (frame rows (start unbounded-preceding) (end current-row))
-                          (fn w_0 sum sum_0))
-                        (item_sk ws_item_sk)
-                        (d_date d_date)
-                        (cume_sales w_0))
+                      (rel cte-ref 0)
                       (|web.item_sk| item_sk)
                       (|web.d_date| d_date)
                       (|web.cume_sales| cume_sales))
                     (rel project
-                      (rel project
-                        (rel window
-                          (rel aggregate
-                            (rel filter
-                              (rel join (rel source "store_sales") (rel source "date_dim") () (inner))
-                              (&& (&& (&& (== ss_sold_date_sk d_date_sk) (<= 1212 d_month_seq))
-                                  (<= d_month_seq (+ 1212 11)))
-                                (! (call qdb_is_null ss_item_sk))))
-                            (keys ss_item_sk d_date)
-                            (agg sum_0 sum ss_sales_price))
-                          (partition ss_item_sk)
-                          (order (d_date asc nulls-default))
-                          (frame rows (start unbounded-preceding) (end current-row))
-                          (fn w_0 sum sum_0))
-                        (item_sk ss_item_sk)
-                        (d_date d_date)
-                        (cume_sales w_0))
+                      (rel cte-ref 1)
                       (|store.item_sk| item_sk)
                       (|store.d_date| d_date)
                       (|store.cume_sales| cume_sales))

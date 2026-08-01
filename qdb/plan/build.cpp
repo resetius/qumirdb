@@ -8,6 +8,7 @@
 #include <qdb/plan/ops/sort.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/ops/union.h>
+#include <qdb/plan/ops/cte_ref.h>
 #include <qdb/plan/ops/window.h>
 
 #include <qdb/kernel/annotate_type.h>
@@ -2255,51 +2256,6 @@ std::expected<TOperatorPtr, TError> BuildSelect(
     return distinct ? ApplyDistinct(std::move(projected), outputNames) : projected;
 }
 
-// Deep-clones the expressions embedded in an operator subtree, so a sub-plan
-// inlined more than once (a CTE) does not share mutable expression nodes between
-// copies — QualifyColumns rewrites idents in place.
-void CloneOperatorExprs(const TOperatorPtr& op) {
-    if (!op) {
-        return;
-    }
-    for (const auto& child : op->Children()) {
-        if (auto childOp = NAst::TMaybeNode<IOperator>(child)) {
-            CloneOperatorExprs(childOp.Cast());
-        }
-    }
-    if (auto filter = TMaybeOp<TFilterOperator>(op)) {
-        filter.Cast()->MutablePredicate() = CloneExpr(filter.Cast()->Predicate());
-    } else if (auto project = TMaybeOp<TProjectOperator>(op)) {
-        for (auto& spec : project.Cast()->MutableProjections()) {
-            spec.Expression = CloneExpr(spec.Expression);
-        }
-    } else if (auto aggregate = TMaybeOp<TAggregateOperator>(op)) {
-        for (auto& spec : aggregate.Cast()->MutableAggs()) {
-            if (spec.Arg) {
-                spec.Arg = CloneExpr(spec.Arg);
-            }
-        }
-    } else if (auto join = TMaybeOp<TJoinOperator>(op)) {
-        if (join.Cast()->Filter()) {
-            join.Cast()->MutableFilter() = CloneExpr(join.Cast()->Filter());
-        }
-    } else if (auto maybeWindow = TMaybeOp<TWindowOperator>(op)) {
-        auto window = maybeWindow.Cast();
-        for (auto& func : window->MutableFunctions()) {
-            if (func.Arg) {
-                func.Arg = CloneExpr(func.Arg);
-            }
-        }
-        if (auto& frame = window->MutableFrame()) {
-            if (frame->Start.Offset) {
-                frame->Start.Offset = CloneExpr(frame->Start.Offset);
-            }
-            if (frame->End.Offset) {
-                frame->End.Offset = CloneExpr(frame->End.Offset);
-            }
-        }
-    }
-}
 
 bool HasOutputColumn(const TOperatorPtr& op, const std::string& name) {
     auto* output = static_cast<NAst::TStructType*>(op->OutputColumns().get());
@@ -2618,26 +2574,38 @@ std::expected<TOperatorPtr, TError> BuildQuery(
         ctes[ToLower(cte->Name)] = cte;
     }
 
-    // CTE-aware factory: a CTE name builds a fresh inlined copy of its query
-    // (applying the optional column-alias list); other names fall back to the
-    // base sources. Stack-local, so the recursive self-reference stays valid for
-    // the duration of the BuildSelect call below.
+    // CTE-aware factory: a CTE name is built once as a canonical definition
+    // (shared by every reference via TCteRef); other names fall back to the base
+    // sources. Nested CTEs memoize into a DAG. Stack-local — definitions survive
+    // via the shared_ptr the TCteRef holds.
+    std::map<std::string, TCteDefinitionPtr> builtDefs;
     TTableSourceFactory factory =
         [&](std::string_view name) -> std::expected<TOperatorPtr, TError> {
-        auto it = ctes.find(ToLower(std::string(name)));
+        const std::string lower = ToLower(std::string(name));
+        auto it = ctes.find(lower);
         if (it == ctes.end()) {
             return sources(name);
         }
-        auto plan = BuildQuery(*it->second->Query, factory);
-        if (!plan) {
-            return plan;
+        auto cached = builtDefs.find(lower);
+        if (cached == builtDefs.end()) {
+            auto plan = BuildQuery(*it->second->Query, factory);
+            if (!plan) {
+                return std::unexpected(plan.error());
+            }
+            TOperatorPtr def = std::move(*plan);
+            if (it->second->Columns) {
+                auto aliased = ApplyColumnAliases(std::move(def), it->second->Columns->Items);
+                if (!aliased) {
+                    return std::unexpected(aliased.error());
+                }
+                def = std::move(*aliased);
+            }
+            auto definition = std::make_shared<TCteDefinition>();
+            definition->OutputType = def->OutputColumns();
+            definition->Plan = std::move(def);
+            cached = builtDefs.emplace(lower, std::move(definition)).first;
         }
-        // Each inlined copy must own independent expression nodes.
-        CloneOperatorExprs(*plan);
-        if (it->second->Columns) {
-            return ApplyColumnAliases(std::move(*plan), it->second->Columns->Items);
-        }
-        return plan;
+        return std::make_shared<TCteRef>(cached->second);
     };
 
     auto plan = BuildQueryBody(query.Body, factory);
@@ -2661,7 +2629,11 @@ std::expected<TOperatorPtr, TError> BuildPlan(
     if (!root) {
         return std::unexpected(TError("expected a query"));
     }
-    return BuildQuery(*root.Cast(), sources);
+    auto plan = BuildQuery(*root.Cast(), sources);
+    if (plan) {
+        AssignCteIds(*plan);
+    }
+    return plan;
 }
 
 } // namespace NQdb
