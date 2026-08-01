@@ -66,6 +66,7 @@ void ApplyPlanPasses(TOperatorPtr& plan, TPlanPassOptions options) {
         def->OutputType = def->Plan->OutputColumns();
     }
     OptimizeOne(plan, options);
+    PropagateCteDemands(plan);
     plan = ResolveCteRefs(plan);
 }
 

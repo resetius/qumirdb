@@ -5,7 +5,9 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 namespace NQdb {
 
@@ -34,6 +36,13 @@ public:
 private:
     TCteDefinitionPtr Def_;
 };
+
+// Analysis result persisted for the reuse phase.
+struct TCteUsageInfo {
+    size_t StaticRefCount = 0;
+    std::unordered_set<std::string> RequiredOutputs;
+};
+using TCteUsageMap = std::unordered_map<TCteDefinition*, TCteUsageInfo>;
 
 // Every distinct definition reachable from the plan, transitively through nested
 // definitions; dependency-first.
