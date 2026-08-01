@@ -17,6 +17,7 @@
 #include <qdb/plan/ops/union.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/ops/window.h>
+#include <qdb/plan/ops/cte_consumer.h>
 #include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
 #include <qdb/scheduler/connection.h>
@@ -26,6 +27,7 @@
 #include <qdb/scheduler/scan_split.h>
 
 #include <algorithm>
+#include <cassert>
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -441,6 +443,9 @@ public:
         if (auto n = TMaybeOp<TSourceOperator>(op)) {
             return std::max<size_t>(ScanSplits(*n.Cast()).size(), 1);
         }
+        if (TMaybeOp<TCteConsumer>(op)) {
+            return 1;
+        }
         if (auto n = TMaybeOp<TFilterOperator>(op)) {
             return OutputLanes(n.Cast()->Input());
         }
@@ -562,6 +567,9 @@ public:
         if (auto n = TMaybeOp<TSourceOperator>(op)) {
             return LowerSource(*n.Cast(), outConn, outLaneOffset);
         }
+        if (auto n = TMaybeOp<TCteConsumer>(op)) {
+            return LowerCteConsumer(*n.Cast(), outConn, outLaneOffset);
+        }
         if (auto n = TMaybeOp<TFilterOperator>(op)) {
             auto filter = n.Cast();
             auto stageGroup = StageGroup("filter", filter.get());
@@ -645,6 +653,13 @@ public:
 
     size_t QueueCapacity() const {
         return std::max<size_t>(Settings_.Queue.RowsetCapacityPerLane, 1);
+    }
+
+    void AssertMaterializationsWired() const {
+        for (const auto& entry : Materialized_) {
+            assert(entry.second.NextConsumerLane == entry.first->RefCount);
+            (void)entry;
+        }
     }
 
 private:
@@ -931,6 +946,102 @@ private:
             result.Producers.push_back(&node);
         }
         return result;
+    }
+
+    struct TMaterializedProducer {
+        std::shared_ptr<NScheduler::TCteSharedState> State;
+        NScheduler::TTaskNode* Producer = nullptr;
+        NScheduler::IConnection* Completion = nullptr;
+        size_t NextConsumerLane = 0;
+        NQumir::NAst::TTypePtr OutputType;
+    };
+
+    TLoweredOutput LowerCteConsumer(
+        TCteConsumer& consumer,
+        NScheduler::IConnection& outConn,
+        size_t outLaneOffset)
+    {
+        const auto* mat = consumer.Materialization().get();
+        auto it = Materialized_.find(mat);
+        if (it == Materialized_.end()) {
+            it = Materialized_.emplace(
+                mat, BuildMaterializedProducer(consumer)).first;
+        }
+        auto& producer = it->second;
+
+        const size_t lane = producer.NextConsumerLane++;
+        assert(lane < consumer.Materialization()->RefCount);
+        auto task = std::make_unique<NScheduler::TCteConsumerTask>(
+            producer.State,
+            NScheduler::TOutputPort{.Connection = &outConn, .Lane = outLaneOffset});
+        auto& node = Graph_.AddOwnedNode(std::move(task));
+        MarkNode(node,
+            "cte-consumer",
+            StageGroup("cte-consumer", mat),
+            "cte-consumer " + std::to_string(consumer.Def()->Id));
+        Graph_.AddEdge(*producer.Producer, node, *producer.Completion, 0, lane);
+        return TLoweredOutput{
+            .Producers = {&node},
+            .OutputType = producer.OutputType,
+        };
+    }
+
+    TMaterializedProducer BuildMaterializedProducer(TCteConsumer& consumer) {
+        const auto& materialization = consumer.Materialization();
+        const size_t lanes = OutputLanes(materialization->Plan);
+        NScheduler::IConnection* inputConn = nullptr;
+        if (lanes == 1) {
+            inputConn = &AddConn<NScheduler::TOneToOneConnection>(
+                1, 1, "cte-producer-input");
+        } else {
+            inputConn = &AddConn<NScheduler::TGatherConnection>(
+                lanes, 1, "cte-producer-gather");
+        }
+        auto planOut = Lower(materialization->Plan, *inputConn);
+
+        auto state = std::make_shared<NScheduler::TCteSharedState>();
+        auto code = std::make_shared<NScheduler::TBlockingCode>(
+            [](void* st, NScheduler::TInputPort& input, TRowSet&) {
+                auto* shared = static_cast<NScheduler::TCteSharedState*>(st);
+                for (;;) {
+                    TRowSet batch{};
+                    auto fetch = input.Fetch(batch);
+                    if (fetch == NScheduler::EFetchResult::OK) {
+                        shared->Batches.push_back(batch);
+                        continue;
+                    }
+                    if (fetch == NScheduler::EFetchResult::NO_DATA) {
+                        return NScheduler::ETaskResult::NEED_DATA;
+                    }
+                    shared->Status.store(
+                        NScheduler::TCteSharedState::EStatus::Ready,
+                        std::memory_order_release);
+                    return NScheduler::ETaskResult::FINISHED;
+                }
+            });
+        assert(materialization->RefCount > 0);
+        auto& completion = AddConn<NScheduler::TBroadcastConnection>(
+            1, materialization->RefCount, "cte-completion");
+        auto task = std::make_unique<NScheduler::TBlockingTask>(
+            code,
+            state,
+            NScheduler::TInputPort{.Connection = inputConn, .Lane = 0},
+            NScheduler::TOutputPort{.Connection = &completion, .Lane = 0});
+        auto& node = Graph_.AddOwnedNode(std::move(task));
+        MarkNode(node,
+            "cte-producer",
+            StageGroup("cte-producer", materialization.get()),
+            "cte-producer " + std::to_string(consumer.Def()->Id));
+        for (size_t p = 0; p < lanes; ++p) {
+            Graph_.AddEdge(*planOut.Producers[p], node, *inputConn, p, 0);
+        }
+        return TMaterializedProducer{
+            .State = std::move(state),
+            .Producer = &node,
+            .Completion = &completion,
+            .NextConsumerLane = 0,
+            .OutputType = std::move(planOut.OutputType),
+        };
     }
 
     template <typename TStageBuilder>
@@ -1974,6 +2085,7 @@ private:
     NScheduler::TSettings Settings_;
     std::ostream* Diagnostics_;
     std::vector<TGeneratedKernel>* KernelSink_ = nullptr;
+    std::unordered_map<const TCteMaterialization*, TMaterializedProducer> Materialized_;
 };
 
 } // namespace
@@ -2060,6 +2172,7 @@ TLoweredPlan LowerPlanToGraph(
         finalRef = &graph->AddConnection(std::move(gather));
     }
     auto out = lowerer.Lower(root, *finalRef);
+    lowerer.AssertMaterializationsWired();
 
     return TLoweredPlan{
         .Graph = std::move(graph),

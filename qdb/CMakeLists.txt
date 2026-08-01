@@ -19,6 +19,7 @@ add_library(qumirdb
     plan/ops/limit.cpp
     plan/ops/window.cpp
     plan/ops/cte_ref.cpp
+    plan/ops/cte_consumer.cpp
     sexp/printer.cpp
     sexp/parser.cpp
     sql/ast.cpp

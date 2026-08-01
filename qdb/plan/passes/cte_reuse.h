@@ -23,8 +23,8 @@ using TCteReuseDecisions = std::unordered_map<TCteDefinition*, TCteReuseDecision
 // >=2 references -> Materialize, else Inline.
 TCteReuseDecisions ChooseCteReuse(const TCteUsageMap& usage);
 
-// Realizes each TCteRef per its decision. Materialize is not physical yet, so it
-// currently falls back to an independent inline clone (like Inline).
+// Realizes each TCteRef per its decision: Inline splices a private clone,
+// Materialize leaves a TCteConsumer sharing one TCteMaterialization.
 TOperatorPtr ApplyCteReuse(TOperatorPtr plan, const TCteReuseDecisions& decisions);
 
 } // namespace NQdb

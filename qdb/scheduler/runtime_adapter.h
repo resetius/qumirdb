@@ -6,6 +6,7 @@
 
 #include <qumir/parser/type.h>
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -267,6 +268,37 @@ private:
     std::vector<TPendingOutput> Pending_;
     size_t PendingIndex_ = 0;
     bool OutputFinished_ = false;
+};
+
+// Consumers push non-owning views of Batches, so the spool must outlive every
+// consumer's downstream (the graph owns both, so it does).
+struct TCteSharedState {
+    enum class EStatus {
+        Building,
+        Ready,
+    };
+
+    std::atomic<EStatus> Status = EStatus::Building;
+    std::vector<TRowSet> Batches;
+
+    ~TCteSharedState() {
+        for (auto& batch : Batches) {
+            Release(&batch);
+        }
+    }
+};
+
+class TCteConsumerTask final : public ITaskNode {
+public:
+    TCteConsumerTask(std::shared_ptr<const TCteSharedState> state, TOutputPort output);
+
+    ETaskResult Execute() override;
+
+private:
+    std::shared_ptr<const TCteSharedState> State_;
+    TOutputPort Output_;
+    size_t NextBatch_ = 0;
+    bool Finished_ = false;
 };
 
 } // namespace NScheduler
