@@ -6,7 +6,7 @@
 #include <qdb/plan/passes/flatten_joins.h>
 #include <qdb/plan/passes/join_order.h>
 #include <qdb/plan/passes/qualify_columns.h>
-#include <qdb/plan/passes/resolve_cte.h>
+#include <qdb/plan/passes/cte_reuse.h>
 #include <qdb/plan/passes/top_sort.h>
 #include <qdb/plan/passes/typing.h>
 #include <qdb/plan/plan_print.h>
@@ -66,8 +66,9 @@ void ApplyPlanPasses(TOperatorPtr& plan, TPlanPassOptions options) {
         def->OutputType = def->Plan->OutputColumns();
     }
     OptimizeOne(plan, options);
-    PropagateCteDemands(plan);
-    plan = ResolveCteRefs(plan);
+    auto usage = PropagateCteDemands(plan);
+    auto decisions = ChooseCteReuse(usage);
+    plan = ApplyCteReuse(std::move(plan), decisions);
 }
 
 } // namespace NQdb
