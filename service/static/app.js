@@ -66,6 +66,7 @@ let runningJob = null;
 const runQueue = [];
 let jobSeq = 0;
 let browserExplainPrefetchActive = 0;
+let browserExecWorker = null;
 
 window.addEventListener('DOMContentLoaded', () => {
   window.lucide?.createIcons();
@@ -1662,7 +1663,7 @@ function cancelBrowserJob(job) {
     postJson(`/api/cancel?runId=${encodeURIComponent(job.runId)}`, {}).catch(() => {});
   }
   if (job.activeWorker) {
-    job.activeWorker.terminate();
+    closeBrowserExecWorker(job.activeWorker);
     job.activeWorker = null;
   }
   if (job.rejectWorker) {
@@ -1855,30 +1856,54 @@ function resolveExecArtifacts(exec, artifacts) {
 
 function runBrowserWorker(exec, dataset, onProgress, onWorker) {
   return new Promise((resolve, reject) => {
-    const worker = new Worker(new URL('./browser_worker.js', import.meta.url), {
-      type: 'module'
-    });
-    onWorker?.(worker, reject);
+    const worker = getBrowserExecWorker();
+    let settled = false;
+    const finish = callback => value => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      worker.onmessage = null;
+      worker.onerror = null;
+      callback(value);
+    };
+    const resolveOnce = finish(resolve);
+    const rejectOnce = finish(reject);
+    onWorker?.(worker, rejectOnce);
     worker.onmessage = event => {
       const message = event.data || {};
       if (message.type === 'progress') {
         onProgress(message.progress);
       } else if (message.type === 'result') {
-        worker.terminate();
-        resolve(message.result);
+        resolveOnce(message.result);
       } else if (message.type === 'error') {
-        worker.terminate();
         const error = new Error(message.error?.message || 'browser worker failed');
         error.stack = message.error?.stack || error.stack;
-        reject(error);
+        rejectOnce(error);
       }
     };
     worker.onerror = event => {
-      worker.terminate();
-      reject(new Error(event.message || 'browser worker failed'));
+      closeBrowserExecWorker(worker);
+      rejectOnce(new Error(event.message || 'browser worker failed'));
     };
     worker.postMessage({ type: 'run', exec, dataset });
   });
+}
+
+function getBrowserExecWorker() {
+  if (!browserExecWorker) {
+    browserExecWorker = new Worker(new URL('./browser_worker.js', import.meta.url), {
+      type: 'module'
+    });
+  }
+  return browserExecWorker;
+}
+
+function closeBrowserExecWorker(worker) {
+  if (browserExecWorker === worker) {
+    browserExecWorker = null;
+  }
+  worker.terminate();
 }
 
 function renderBrowserResult(result, elapsedMs) {

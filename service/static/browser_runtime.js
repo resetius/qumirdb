@@ -705,6 +705,7 @@ function createSharedMemory(layout) {
   return {
     memory,
     arena: new Arena(memory, Number(spec.heapBase)),
+    cteSpools: new Map(),
   };
 }
 
@@ -841,6 +842,49 @@ function ensureRowSetSelection(arena, layout, rowsetPtr, rowCount) {
   return selectionPtr;
 }
 
+function aliasWasmRowSetDescriptor(arena, layout, rowSet) {
+  const wasm = rowSet?.batch?.wasm;
+  if (!wasm) {
+    return null;
+  }
+  assertLiveWasmRowSetHandle(wasm);
+  const dv = arena.view();
+  const rs = layout.rowset;
+  const sourcePtr = wasm.rowsetPtr;
+  const sourceColumns = readPointer(dv, sourcePtr + rs.columns);
+  const columnCount = Number(dv.getBigInt64(sourcePtr + rs.columnCount, true));
+  const rowCount = Number(dv.getBigInt64(sourcePtr + rs.rowCount, true));
+  const columnsBase = arena.alloc(Math.max(columnCount, 1) * layout.column.size, 8);
+  arena.bytes().set(
+    arena.bytes().subarray(
+      sourceColumns,
+      sourceColumns + columnCount * layout.column.size),
+    columnsBase);
+
+  const rowsetPtr = arena.alloc(rs.size, 8);
+  arena.bytes().fill(0, rowsetPtr, rowsetPtr + rs.size);
+  writePointer(arena.view(), rowsetPtr + rs.columns, columnsBase);
+  arena.view().setBigInt64(rowsetPtr + rs.columnCount, BigInt(columnCount), true);
+  arena.view().setBigInt64(rowsetPtr + rs.rowCount, BigInt(rowCount), true);
+  if (rowSet.selection) {
+    const selectionPtr = arena.alloc(Math.max(rowCount, 1), 8);
+    copySelectionToMemory(arena, selectionPtr, rowSet.selection, rowCount);
+    writePointer(arena.view(), rowsetPtr + rs.selection, selectionPtr);
+  }
+
+  return {
+    rowsetPtr,
+    destroy: () => {
+      const selectionPtr = readPointer(arena.view(), rowsetPtr + rs.selection);
+      if (selectionPtr) {
+        arena.free(selectionPtr);
+      }
+      arena.free(columnsBase);
+      arena.free(rowsetPtr);
+    },
+  };
+}
+
 function shapeColumns(output) {
   return (output || []).map(column => ({
     name: column.name,
@@ -910,6 +954,26 @@ function releaseWasmRowSet(rowSet) {
   if (!rowSet?.wasmReleaseMoved) {
     releaseWasmRowSetHandle(rowSet?.batch?.wasm);
   }
+}
+
+function cloneRetainedRowSetView(rowSet) {
+  const batch = rowSet?.batch;
+  if (!batch) {
+    throw new Error('cannot retain an empty rowset');
+  }
+  if (!batch.wasm) {
+    throw new Error('CTE spool requires a WASM-backed rowset');
+  }
+  const wasm = retainWasmRowSetHandle(batch.wasm);
+  return {
+    batch: {
+      ...batch,
+      columns: batch.columns,
+      wasm,
+    },
+    selection: rowSet.selection || null,
+    sharedView: true,
+  };
 }
 
 function releaseWasmBatch(batch) {
@@ -1409,6 +1473,9 @@ function marshalRowSet(arena, layout, columns, rowCount, wantSelection, selectio
 }
 
 function reusableFilterWasm(rowSet, pinned) {
+  if (rowSet?.sharedView) {
+    return null;
+  }
   const wasm = wasmRowSetForSelection(rowSet.batch, rowSet.selection);
   return wasm && (wasm.pinned || !pinned) ? wasm : null;
 }
@@ -1428,6 +1495,14 @@ export function runFilter(kernel, layout, rowSet, writer, options = {}) {
     rowsetPtr = wasm.rowsetPtr;
     selectionPtr = ensureRowSetSelection(arena, layout, rowsetPtr, batch.rowCount);
     destroy = wasm.destroy || null;
+  } else if (rowSet.sharedView && batch.wasm) {
+    const alias = aliasWasmRowSetDescriptor(arena, layout, rowSet);
+    if (!alias) {
+      throw new Error('shared rowset view has no wasm descriptor');
+    }
+    rowsetPtr = alias.rowsetPtr;
+    selectionPtr = ensureRowSetSelection(arena, layout, rowsetPtr, batch.rowCount);
+    destroy = alias.destroy;
   } else if (pinned) {
     const marshalled = marshalRowSet(
       arena, layout, batch.columns, batch.rowCount, true, selection);
@@ -1456,6 +1531,22 @@ function stableProjectInput(rowSet, arena, layout) {
     return {
       rowsetPtr: wasm.rowsetPtr,
       release: takeRowSetRelease(rowSet),
+    };
+  }
+  if (wasm) {
+    const alias = aliasWasmRowSetDescriptor(arena, layout, rowSet);
+    if (!alias) {
+      throw new Error('wasm project input has no rowset descriptor');
+    }
+    const releaseInput = takeRowSetRelease(rowSet);
+    return {
+      rowsetPtr: alias.rowsetPtr,
+      release: () => {
+        alias.destroy();
+        if (releaseInput) {
+          releaseInput();
+        }
+      },
     };
   }
   const marshalled = marshalRowSet(
@@ -2848,6 +2939,7 @@ function canConsumeWasmOutput(task) {
   return kind === 'filter' ||
     kind === 'project' ||
     kind === 'aggregate' ||
+    kind === 'cte-producer' ||
     kind === 'union-all' ||
     kind === 'window' ||
     kind === 'join' ||
@@ -3032,6 +3124,107 @@ class UnionAllTask {
     output.finish();
     this.done = true;
     return TaskResult.FINISHED;
+  }
+}
+
+class CteSpoolState {
+  constructor(id) {
+    this.id = id;
+    this.ready = false;
+    this.rowSets = [];
+  }
+
+  destroy() {
+    releaseWasmRowSets(this.rowSets, 0);
+    this.rowSets = [];
+    this.ready = false;
+  }
+}
+
+function cteSpool(shared, id) {
+  const key = Number(id);
+  let spool = shared.cteSpools.get(key);
+  if (!spool) {
+    spool = new CteSpoolState(key);
+    shared.cteSpools.set(key, spool);
+  }
+  return spool;
+}
+
+class CteProducerTask {
+  constructor(stage, shared) {
+    this.stage = stage;
+    this.shared = shared;
+    this.spool = cteSpool(shared, stage.materialization);
+    this.done = false;
+    this.rows = 0;
+  }
+
+  async execute() {
+    if (this.done) return TaskResult.FINISHED;
+    const input = this.node.inbound[0].connection;
+    const fetched = input.fetch();
+    if (fetched.result === FetchResult.NO_DATA) return TaskResult.NEED_DATA;
+    if (fetched.result === FetchResult.OK) {
+      this.spool.rowSets.push(fetched.rowSet);
+      this.rows += fetched.rowSet.batch.rowCount;
+      return TaskResult.OK;
+    }
+
+    this.spool.ready = true;
+    for (const edge of this.node.outbound) {
+      edge.connection.finish();
+    }
+    this.done = true;
+    return TaskResult.FINISHED;
+  }
+
+  destroy() {
+    if (this.shared.cteSpools.get(this.spool.id) === this.spool) {
+      this.shared.cteSpools.delete(this.spool.id);
+    }
+    this.spool.destroy();
+  }
+}
+
+class CteConsumerTask {
+  constructor(stage, shared) {
+    this.stage = stage;
+    this.shared = shared;
+    this.spool = cteSpool(shared, stage.materialization);
+    this.ready = false;
+    this.nextBatch = 0;
+    this.done = false;
+    this.rows = 0;
+  }
+
+  async execute() {
+    if (this.done) return TaskResult.FINISHED;
+    const output = this.node.outbound[0].connection;
+    if (!this.ready) {
+      const completion = this.node.inbound[0].connection;
+      const fetched = completion.fetch();
+      if (fetched.result === FetchResult.NO_DATA) return TaskResult.NEED_DATA;
+      if (fetched.result === FetchResult.OK) {
+        releaseWasmRowSet(fetched.rowSet);
+        return TaskResult.OK;
+      }
+      if (!this.spool.ready) {
+        throw new Error('CTE completion arrived before spool became ready');
+      }
+      this.ready = true;
+    }
+    if (this.nextBatch >= this.spool.rowSets.length) {
+      output.finish();
+      this.done = true;
+      return TaskResult.FINISHED;
+    }
+    if (!output.canPush()) return TaskResult.BLOCKED_OUTPUT;
+    const view = cloneRetainedRowSetView(this.spool.rowSets[this.nextBatch]);
+    ++this.nextBatch;
+    this.rows += view.batch.rowCount;
+    output.push(view);
+    return TaskResult.OK;
   }
 }
 
@@ -3763,6 +3956,12 @@ function stageLabel(stage) {
   if (stage.kind === 'union-all') {
     return 'union-all';
   }
+  if (stage.kind === 'cte-producer') {
+    return stage.label || `cte-producer #${stage.cteId ?? '?'}`;
+  }
+  if (stage.kind === 'cte-consumer') {
+    return stage.label || `cte-consumer #${stage.cteId ?? '?'}`;
+  }
   if (stage.kind === 'window') {
     return 'window';
   }
@@ -3807,6 +4006,12 @@ function taskNodeForStage(stage, layout, readSourceBatches, onProgress, shared) 
   if (stage.kind === 'union-all') {
     return makeNode(new UnionAllTask(stage), stageLabel(stage));
   }
+  if (stage.kind === 'cte-producer') {
+    return makeNode(new CteProducerTask(stage, shared), stageLabel(stage));
+  }
+  if (stage.kind === 'cte-consumer') {
+    return makeNode(new CteConsumerTask(stage, shared), stageLabel(stage));
+  }
   if (stage.kind === 'window') {
     return makeNode(new WindowTask(stage, layout, shared), stageLabel(stage));
   }
@@ -3844,7 +4049,11 @@ function buildScheduledGraph(exec, readSourceBatches, options, layout, shared) {
       src,
       dst,
       createConnection(edge.kind || ConnectionKind.OneToOne),
-      { persistent: dst.task?.stage?.kind === 'join' });
+      {
+        persistent:
+          dst.task?.stage?.kind === 'join' ||
+          dst.task?.stage?.kind === 'cte-producer'
+      });
   }
   const root = nodesById.get(Number(exec.root));
   if (!root) {
@@ -3908,16 +4117,12 @@ export async function executeBrowserPipelineScheduled(exec, readSourceBatches, o
   const { roots, sink, nodes } =
     buildScheduledGraph(exec, readSourceBatches, options, layout, shared);
   const scheduler = new SingleThreadedScheduler(roots);
-  let completed = false;
   let result;
   try {
     await scheduler.run();
     result = sink.task.result();
-    completed = true;
   } finally {
-    if (!completed) {
-      cleanupScheduledGraph(nodes);
-    }
+    cleanupScheduledGraph(nodes);
   }
   result.timings = nodes.map(node => ({
     stage: node.label,
