@@ -10,29 +10,7 @@
                   (rel join (rel source "catalog_sales") (rel source "date_dim") () (inner))
                   (rel project
                     (rel project
-                      (rel project
-                        (rel filter
-                          (rel aggregate
-                            (rel project
-                              (rel filter
-                                (rel join
-                                  (rel join (rel source "store_sales") (rel source "date_dim") () (inner))
-                                  (rel source "item")
-                                  ()
-                                  (inner))
-                                (&& (&& (== ss_sold_date_sk d_date_sk) (== ss_item_sk i_item_sk))
-                                  (|| (|| (|| (== d_year 1999) (== d_year (+ 1999 1))) (== d_year (+ 1999 2)))
-                                    (== d_year (+ 1999 3)))))
-                              (gb_0 (call substr i_item_desc 1 30))
-                              (i_item_sk i_item_sk)
-                              (d_date d_date))
-                            (keys gb_0 i_item_sk d_date)
-                            (agg count_0 count))
-                          (> count_0 4))
-                        (itemdesc gb_0)
-                        (item_sk i_item_sk)
-                        (solddate d_date)
-                        (cnt count_0))
+                      (rel cte-ref 0)
                       (|frequent_ss_items.itemdesc| itemdesc)
                       (|frequent_ss_items.item_sk| item_sk)
                       (|frequent_ss_items.solddate| solddate)
@@ -43,53 +21,7 @@
                   (== cs_item_sk __qdb_in__item_sk))
                 (rel project
                   (rel project
-                    (rel project
-                      (rel filter
-                        (rel join
-                          (rel aggregate
-                            (rel project
-                              (rel filter
-                                (rel join (rel source "store_sales") (rel source "customer") () (inner))
-                                (== ss_customer_sk c_customer_sk))
-                              (c_customer_sk c_customer_sk)
-                              (arg_0 (* ss_quantity ss_sales_price)))
-                            (keys c_customer_sk)
-                            (agg sum_0 sum arg_0))
-                          (rel project
-                            (rel project
-                              (rel project
-                                (rel aggregate
-                                  (rel project
-                                    (rel project
-                                      (rel aggregate
-                                        (rel project
-                                          (rel filter
-                                            (rel join
-                                              (rel join (rel source "store_sales") (rel source "customer") () (inner))
-                                              (rel source "date_dim")
-                                              ()
-                                              (inner))
-                                            (&& (&& (== ss_customer_sk c_customer_sk) (== ss_sold_date_sk d_date_sk))
-                                              (|| (|| (|| (== d_year 1999) (== d_year (+ 1999 1))) (== d_year (+ 1999 2)))
-                                                (== d_year (+ 1999 3)))))
-                                          (c_customer_sk c_customer_sk)
-                                          (arg_0 (* ss_quantity ss_sales_price)))
-                                        (keys c_customer_sk)
-                                        (agg sum_0 sum arg_0))
-                                      (c_customer_sk c_customer_sk)
-                                      (csales sum_0))
-                                    (csales csales)
-                                    (__group__ 1))
-                                  (keys __group__)
-                                  (agg max_0 max csales))
-                                (tpcds_cmax max_0))
-                              (|max_store_sales.tpcds_cmax| tpcds_cmax))
-                            (__scalar_0__ |max_store_sales.tpcds_cmax|))
-                          ()
-                          (inner))
-                        (> sum_0 (* (/ 95 100) __scalar_0__)))
-                      (c_customer_sk c_customer_sk)
-                      (ssales sum_0))
+                    (rel cte-ref 2)
                     (|best_ss_customer.c_customer_sk| c_customer_sk)
                     (|best_ss_customer.ssales| ssales))
                   (__qdb_in__c_customer_sk c_customer_sk))
@@ -105,29 +37,7 @@
                   (rel join (rel source "web_sales") (rel source "date_dim") () (inner))
                   (rel project
                     (rel project
-                      (rel project
-                        (rel filter
-                          (rel aggregate
-                            (rel project
-                              (rel filter
-                                (rel join
-                                  (rel join (rel source "store_sales") (rel source "date_dim") () (inner))
-                                  (rel source "item")
-                                  ()
-                                  (inner))
-                                (&& (&& (== ss_sold_date_sk d_date_sk) (== ss_item_sk i_item_sk))
-                                  (|| (|| (|| (== d_year 1999) (== d_year (+ 1999 1))) (== d_year (+ 1999 2)))
-                                    (== d_year (+ 1999 3)))))
-                              (gb_0 (call substr i_item_desc 1 30))
-                              (i_item_sk i_item_sk)
-                              (d_date d_date))
-                            (keys gb_0 i_item_sk d_date)
-                            (agg count_0 count))
-                          (> count_0 4))
-                        (itemdesc gb_0)
-                        (item_sk i_item_sk)
-                        (solddate d_date)
-                        (cnt count_0))
+                      (rel cte-ref 0)
                       (|frequent_ss_items.itemdesc| itemdesc)
                       (|frequent_ss_items.item_sk| item_sk)
                       (|frequent_ss_items.solddate| solddate)
@@ -138,20 +48,7 @@
                   (== ws_item_sk __qdb_in__item_sk))
                 (rel project
                   (rel project
-                    (rel project
-                      (rel filter
-                        (rel aggregate
-                          (rel project
-                            (rel filter
-                              (rel join (rel source "store_sales") (rel source "customer") () (inner))
-                              (== ss_customer_sk c_customer_sk))
-                            (c_customer_sk c_customer_sk)
-                            (arg_0 (* ss_quantity ss_sales_price)))
-                          (keys c_customer_sk)
-                          (agg sum_0 sum arg_0))
-                        (> sum_0 (* (/ 95 100) __scalar_0__)))
-                      (c_customer_sk c_customer_sk)
-                      (ssales sum_0))
+                    (rel cte-ref 2)
                     (|best_ss_customer.c_customer_sk| c_customer_sk)
                     (|best_ss_customer.ssales| ssales))
                   (__qdb_in__c_customer_sk c_customer_sk))

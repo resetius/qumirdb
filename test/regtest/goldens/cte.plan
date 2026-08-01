@@ -1,1 +1,1 @@
-(rel project (rel project (rel project (rel source "t") (a a)) (|x.a| a)) (a a))
+(rel project (rel project (rel cte-ref 0) (|x.a| a)) (a a))

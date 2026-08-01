@@ -18,14 +18,7 @@
                     (inner))
                   (rel project
                     (rel project
-                      (rel project
-                        (rel filter
-                          (rel join (rel source "web_sales" "ws1") (rel source "web_sales" "ws2") () (inner))
-                          (&& (== |ws1.ws_order_number| |ws2.ws_order_number|)
-                            (!= |ws1.ws_warehouse_sk| |ws2.ws_warehouse_sk|)))
-                        (ws_order_number |ws1.ws_order_number|)
-                        (wh1 |ws1.ws_warehouse_sk|)
-                        (wh2 |ws2.ws_warehouse_sk|))
+                      (rel cte-ref 0)
                       (|ws_wh.ws_order_number| ws_order_number)
                       (|ws_wh.wh1| wh1)
                       (|ws_wh.wh2| wh2))
@@ -38,14 +31,7 @@
                     (rel join
                       (rel source "web_returns")
                       (rel project
-                        (rel project
-                          (rel filter
-                            (rel join (rel source "web_sales" "ws1") (rel source "web_sales" "ws2") () (inner))
-                            (&& (== |ws1.ws_order_number| |ws2.ws_order_number|)
-                              (!= |ws1.ws_warehouse_sk| |ws2.ws_warehouse_sk|)))
-                          (ws_order_number |ws1.ws_order_number|)
-                          (wh1 |ws1.ws_warehouse_sk|)
-                          (wh2 |ws2.ws_warehouse_sk|))
+                        (rel cte-ref 0)
                         (|ws_wh.ws_order_number| ws_order_number)
                         (|ws_wh.wh1| wh1)
                         (|ws_wh.wh2| wh2))
