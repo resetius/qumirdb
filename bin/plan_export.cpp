@@ -5,6 +5,7 @@
 #include <qdb/plan/plan_print.h>
 #include <qdb/plan/stats_codec.h>
 #include <qdb/plan/ops/aggregate.h>
+#include <qdb/plan/ops/cte_consumer.h>
 #include <qdb/plan/ops/filter.h>
 #include <qdb/plan/ops/join.h>
 #include <qdb/plan/ops/limit.h>
@@ -1836,14 +1837,22 @@ struct TExecGraphBuildResult {
     NQumir::NAst::TTypePtr OutputType;
 };
 
+struct TExecMaterialization {
+    int64_t Id = -1;
+    int64_t ProducerNodeId = -1;
+    NQumir::NAst::TTypePtr OutputType;
+};
+
 struct TExecGraphBuilder {
     const TKernelIndex& Kernels;
     bool EmbedWasm = false;
     llvm::json::Array Nodes;
     llvm::json::Array Edges;
     int64_t NextNodeId = 0;
+    int64_t NextMaterializationId = 0;
     std::optional<llvm::json::Object> Unsupported;
     std::optional<llvm::json::Object> Limit;
+    std::unordered_map<const TCteMaterialization*, TExecMaterialization> Materialized;
 
     int64_t AddNode(llvm::json::Object node) {
         const int64_t id = NextNodeId++;
@@ -1859,6 +1868,39 @@ struct TExecGraphBuilder {
             {"input", input},
             {"kind", "one-to-one"},
         });
+    }
+
+    const TExecMaterialization& BuildCteProducer(const TCteConsumer& consumer) {
+        const auto* mat = consumer.Materialization().get();
+        auto it = Materialized.find(mat);
+        if (it != Materialized.end()) {
+            return it->second;
+        }
+
+        auto input = Build(consumer.Materialization()->Plan);
+        if (Unsupported) {
+            static const TExecMaterialization empty;
+            return empty;
+        }
+        auto* outStruct =
+            static_cast<NQumir::NAst::TStructType*>(input.OutputType.get());
+        const int64_t materializationId = NextMaterializationId++;
+        const int64_t id = AddNode(llvm::json::Object{
+            {"kind", "cte-producer"},
+            {"label", "cte-producer " + std::to_string(consumer.Def()->Id)},
+            {"materialization", materializationId},
+            {"cteId", static_cast<int64_t>(consumer.Def()->Id)},
+            {"output", StructColumnsJson(*outStruct)},
+        });
+        AddEdge(input.NodeId, id, 0);
+        auto [inserted, _] = Materialized.emplace(
+            mat,
+            TExecMaterialization{
+                .Id = materializationId,
+                .ProducerNodeId = id,
+                .OutputType = input.OutputType,
+            });
+        return inserted->second;
     }
 
     // Keyless join = cross product (a scalar-subquery broadcast in practice).
@@ -1940,6 +1982,22 @@ struct TExecGraphBuilder {
         }
 
         try {
+            if (auto consumer = TMaybeOp<TCteConsumer>(op)) {
+                const auto& producer = BuildCteProducer(*consumer.Cast());
+                if (Unsupported) return {};
+                auto* outStruct =
+                    static_cast<NQumir::NAst::TStructType*>(producer.OutputType.get());
+                const int64_t id = AddNode(llvm::json::Object{
+                    {"kind", "cte-consumer"},
+                    {"label", "cte-consumer " + std::to_string(consumer.Cast()->Def()->Id)},
+                    {"materialization", producer.Id},
+                    {"cteId", static_cast<int64_t>(consumer.Cast()->Def()->Id)},
+                    {"output", StructColumnsJson(*outStruct)},
+                });
+                AddEdge(producer.ProducerNodeId, id, 0);
+                return {.NodeId = id, .OutputType = producer.OutputType};
+            }
+
             if (auto source = TMaybeOp<TSourceOperator>(op)) {
                 auto outputType = BuildSourceRuntimeType(*source.Cast());
                 const int64_t id = AddNode(llvm::json::Object{
