@@ -3,6 +3,7 @@
 #include <qdb/plan/clone_expr.h>
 #include <qdb/plan/ops/aggregate.h>
 #include <qdb/plan/ops/cte_ref.h>
+#include <qdb/plan/ops/cte_consumer.h>
 #include <qdb/plan/ops/filter.h>
 #include <qdb/plan/ops/join.h>
 #include <qdb/plan/ops/limit.h>
@@ -88,6 +89,10 @@ TOperatorPtr Reconstruct(const TOperatorPtr& op) {
     }
     if (auto n = TMaybeOp<TCteRef>(op)) {
         return std::make_shared<TCteRef>(n.Cast()->Def());
+    }
+    if (auto n = TMaybeOp<TCteConsumer>(op)) {
+        return std::make_shared<TCteConsumer>(
+            n.Cast()->Def(), n.Cast()->Materialization());
     }
     if (auto n = TMaybeOp<TFilterOperator>(op)) {
         return std::make_shared<TFilterOperator>(
