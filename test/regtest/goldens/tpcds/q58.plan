@@ -1,38 +1,133 @@
-(rel limit
-  (rel sort
+(query
+  (cte 0
     (rel project
-      (rel filter
-        (rel join
+      (rel aggregate
+        (rel filter
           (rel join
-            (rel project (rel cte-ref 0) (|ss_items.item_id| item_id) (|ss_items.ss_item_rev| ss_item_rev))
-            (rel project (rel cte-ref 1) (|cs_items.item_id| item_id) (|cs_items.cs_item_rev| cs_item_rev))
+            (rel join
+              (rel join (rel source "store_sales") (rel source "item") () (inner))
+              (rel source "date_dim")
+              ()
+              (inner))
+            (rel project
+              (rel filter
+                (rel join
+                  (rel source "date_dim")
+                  (rel project
+                    (rel filter
+                      (rel source "date_dim")
+                      (== d_date (: (cast "1998-02-19" <named StringView>) <named StringView>)))
+                    (__scalar_0__ d_week_seq))
+                  ()
+                  (inner))
+                (== d_week_seq __scalar_0__))
+              (__qdb_in__d_date d_date))
             ()
-            (inner))
-          (rel project (rel cte-ref 2) (|ws_items.item_id| item_id) (|ws_items.ws_item_rev| ws_item_rev))
-          ()
-          (inner))
-        (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (== |ss_items.item_id| |cs_items.item_id|)
-                                  (== |ss_items.item_id| |ws_items.item_id|))
-                                (<= (* 0.90000000000000002 cs_item_rev) ss_item_rev))
-                              (<= ss_item_rev (* 1.1000000000000001 cs_item_rev)))
-                            (<= (* 0.90000000000000002 ws_item_rev) ss_item_rev))
-                          (<= ss_item_rev (* 1.1000000000000001 ws_item_rev)))
-                        (<= (* 0.90000000000000002 ss_item_rev) cs_item_rev))
-                      (<= cs_item_rev (* 1.1000000000000001 ss_item_rev)))
-                    (<= (* 0.90000000000000002 ws_item_rev) cs_item_rev))
-                  (<= cs_item_rev (* 1.1000000000000001 ws_item_rev)))
-                (<= (* 0.90000000000000002 ss_item_rev) ws_item_rev))
-              (<= ws_item_rev (* 1.1000000000000001 ss_item_rev)))
-            (<= (* 0.90000000000000002 cs_item_rev) ws_item_rev))
-          (<= ws_item_rev (* 1.1000000000000001 cs_item_rev))))
-      (item_id |ss_items.item_id|)
-      (ss_item_rev ss_item_rev)
-      (ss_dev (* (/ ss_item_rev (/ (+ (+ ss_item_rev cs_item_rev) ws_item_rev) 3)) 100))
-      (cs_item_rev cs_item_rev)
-      (cs_dev (* (/ cs_item_rev (/ (+ (+ ss_item_rev cs_item_rev) ws_item_rev) 3)) 100))
-      (ws_item_rev ws_item_rev)
-      (ws_dev (* (/ ws_item_rev (/ (+ (+ ss_item_rev cs_item_rev) ws_item_rev) 3)) 100))
-      (average (/ (+ (+ ss_item_rev cs_item_rev) ws_item_rev) 3)))
-    (item_id asc nulls-default)
-    (ss_item_rev asc nulls-default))
-  (limit 100))
+            (left_semi)
+            (== d_date __qdb_in__d_date))
+          (&& (== ss_item_sk i_item_sk) (== ss_sold_date_sk d_date_sk)))
+        (keys i_item_id)
+        (agg sum_0 sum ss_ext_sales_price))
+      (item_id i_item_id)
+      (ss_item_rev sum_0)))
+  (cte 1
+    (rel project
+      (rel aggregate
+        (rel filter
+          (rel join
+            (rel join
+              (rel join (rel source "catalog_sales") (rel source "item") () (inner))
+              (rel source "date_dim")
+              ()
+              (inner))
+            (rel project
+              (rel filter
+                (rel join
+                  (rel source "date_dim")
+                  (rel project
+                    (rel filter
+                      (rel source "date_dim")
+                      (== d_date (: (cast "1998-02-19" <named StringView>) <named StringView>)))
+                    (__scalar_0__ d_week_seq))
+                  ()
+                  (inner))
+                (== d_week_seq __scalar_0__))
+              (__qdb_in__d_date d_date))
+            ()
+            (left_semi)
+            (== d_date __qdb_in__d_date))
+          (&& (== cs_item_sk i_item_sk) (== cs_sold_date_sk d_date_sk)))
+        (keys i_item_id)
+        (agg sum_0 sum cs_ext_sales_price))
+      (item_id i_item_id)
+      (cs_item_rev sum_0)))
+  (cte 2
+    (rel project
+      (rel aggregate
+        (rel filter
+          (rel join
+            (rel join
+              (rel join (rel source "web_sales") (rel source "item") () (inner))
+              (rel source "date_dim")
+              ()
+              (inner))
+            (rel project
+              (rel filter
+                (rel join
+                  (rel source "date_dim")
+                  (rel project
+                    (rel filter
+                      (rel source "date_dim")
+                      (== d_date (: (cast "1998-02-19" <named StringView>) <named StringView>)))
+                    (__scalar_0__ d_week_seq))
+                  ()
+                  (inner))
+                (== d_week_seq __scalar_0__))
+              (__qdb_in__d_date d_date))
+            ()
+            (left_semi)
+            (== d_date __qdb_in__d_date))
+          (&& (== ws_item_sk i_item_sk) (== ws_sold_date_sk d_date_sk)))
+        (keys i_item_id)
+        (agg sum_0 sum ws_ext_sales_price))
+      (item_id i_item_id)
+      (ws_item_rev sum_0)))
+  (main
+    (rel limit
+      (rel sort
+        (rel project
+          (rel filter
+            (rel join
+              (rel join
+                (rel project (rel cte-ref 0) (|ss_items.item_id| item_id) (|ss_items.ss_item_rev| ss_item_rev))
+                (rel project (rel cte-ref 1) (|cs_items.item_id| item_id) (|cs_items.cs_item_rev| cs_item_rev))
+                ()
+                (inner))
+              (rel project (rel cte-ref 2) (|ws_items.item_id| item_id) (|ws_items.ws_item_rev| ws_item_rev))
+              ()
+              (inner))
+            (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (== |ss_items.item_id| |cs_items.item_id|)
+                                      (== |ss_items.item_id| |ws_items.item_id|))
+                                    (<= (* 0.90000000000000002 cs_item_rev) ss_item_rev))
+                                  (<= ss_item_rev (* 1.1000000000000001 cs_item_rev)))
+                                (<= (* 0.90000000000000002 ws_item_rev) ss_item_rev))
+                              (<= ss_item_rev (* 1.1000000000000001 ws_item_rev)))
+                            (<= (* 0.90000000000000002 ss_item_rev) cs_item_rev))
+                          (<= cs_item_rev (* 1.1000000000000001 ss_item_rev)))
+                        (<= (* 0.90000000000000002 ws_item_rev) cs_item_rev))
+                      (<= cs_item_rev (* 1.1000000000000001 ws_item_rev)))
+                    (<= (* 0.90000000000000002 ss_item_rev) ws_item_rev))
+                  (<= ws_item_rev (* 1.1000000000000001 ss_item_rev)))
+                (<= (* 0.90000000000000002 cs_item_rev) ws_item_rev))
+              (<= ws_item_rev (* 1.1000000000000001 cs_item_rev))))
+          (item_id |ss_items.item_id|)
+          (ss_item_rev ss_item_rev)
+          (ss_dev (* (/ ss_item_rev (/ (+ (+ ss_item_rev cs_item_rev) ws_item_rev) 3)) 100))
+          (cs_item_rev cs_item_rev)
+          (cs_dev (* (/ cs_item_rev (/ (+ (+ ss_item_rev cs_item_rev) ws_item_rev) 3)) 100))
+          (ws_item_rev ws_item_rev)
+          (ws_dev (* (/ ws_item_rev (/ (+ (+ ss_item_rev cs_item_rev) ws_item_rev) 3)) 100))
+          (average (/ (+ (+ ss_item_rev cs_item_rev) ws_item_rev) 3)))
+        (item_id asc nulls-default)
+        (ss_item_rev asc nulls-default))
+      (limit 100))))

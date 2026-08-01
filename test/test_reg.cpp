@@ -110,10 +110,7 @@ std::string BuildPlan(std::istream& in) {
     }
 
     std::ostringstream out;
-    NQumir::NAst::NCore::PrintAst(
-        out,
-        plan.value(),
-        NQumir::NAst::NCore::TPrintOptions{ .NodePrinters = NQdb::NSexp::MakeRelPrinters() });
+    NQdb::NSexp::PrintRelPlan(out, plan.value());
     out << "\n";
     return out.str();
 }

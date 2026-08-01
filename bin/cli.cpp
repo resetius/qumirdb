@@ -7,6 +7,7 @@
 #include <qdb/plan/pipeline.h>
 #include <qdb/plan/plan_print.h>
 #include <qdb/plan/ops/aggregate.h>
+#include <qdb/plan/ops/cte_consumer.h>
 #include <qdb/plan/ops/filter.h>
 #include <qdb/plan/ops/join.h>
 #include <qdb/plan/ops/project.h>
@@ -286,24 +287,20 @@ int RunQuery(ESyntax syntax, std::istream& in, const TConfig& config) {
 
     if (config.Verbose) {
         std::cerr << "========== LOGICAL PLAN ==========\n";
-        NQumir::NAst::NCore::PrintAst(
-            std::cerr,
-            *plan,
-            NQumir::NAst::NCore::TPrintOptions{
-                .NodePrinters = NQdb::NSexp::MakeRelPrinters(),
-            });
+        if (NQdb::CollectMaterializations(*plan).empty()) {
+            NQdb::NSexp::PrintRelPlan(std::cerr, *plan);
+        } else {
+            NQdb::PrintPlanTreeWithCtes(std::cerr, *plan);
+        }
         std::cerr << "\n==================================\n";
     }
 
     if (explain) {
-        NQumir::NAst::NCore::PrintAst(
-            std::cout,
-            *plan,
-            NQumir::NAst::NCore::TPrintOptions{
-                .NodePrinters = NQdb::NSexp::MakeRelPrinters(),
-            });
-        std::cout << "\n\n";
-        PrintPlanTree(std::cout, *plan);
+        if (NQdb::CollectMaterializations(*plan).empty()) {
+            NQdb::NSexp::PrintRelPlan(std::cout, *plan);
+            std::cout << "\n\n";
+        }
+        PrintPlanTreeWithCtes(std::cout, *plan);
         return 0;
     }
 

@@ -2,13 +2,16 @@
 #include "mock_source.h"
 
 #include <qdb/plan/ops/aggregate.h>
+#include <qdb/plan/ops/cte_consumer.h>
 #include <qdb/plan/ops/filter.h>
 #include <qdb/plan/ops/join.h>
 #include <qdb/plan/ops/limit.h>
 #include <qdb/plan/ops/project.h>
 #include <qdb/plan/ops/sort.h>
 #include <qdb/plan/ops/source.h>
+#include <qdb/plan/ops/union.h>
 #include <qdb/plan/ops/window.h>
+#include <qdb/plan/plan_print.h>
 #include <qdb/sexp/parser.h>
 #include <qdb/sexp/printer.h>
 
@@ -18,6 +21,7 @@
 #include <qumir/parser/type.h>
 
 #include <sstream>
+#include <stdexcept>
 
 using namespace NQdb;
 using namespace NQdb::NSexp;
@@ -425,6 +429,139 @@ TEST(SexpParser, JoinRejectsEmptyKeysWithNonInnerType) {
         "(rel join (rel source \"left.parquet\") (rel source \"right.parquet\") () (left_semi))");
     TTokenStream ts(in);
     EXPECT_FALSE(p.Parse(ts).has_value());
+}
+
+// --- CTE envelope round-trip ---
+
+TEST(SexpCte, EnvelopeRoundTrips) {
+    NQdb::TMockSource src({"a"});
+
+    auto makeOpts = [&] {
+        TRelParserOptions opts;
+        opts.CteRegistry =
+            std::make_shared<std::unordered_map<uint32_t, TCteDefinitionPtr>>();
+        opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
+            return std::make_shared<TSourceOperator>(src, std::string(path));
+        };
+        return opts;
+    };
+
+    auto p = MakeParser(makeOpts());
+    auto expr = Parse(p,
+        "(query"
+        "  (cte 0 (rel source \"t\"))"
+        "  (main (rel join (rel cte-ref 0) (rel cte-ref 0) () (inner))))");
+    ASSERT_NE(expr, nullptr);
+
+    // Both references resolve to the one shared definition.
+    auto join = TMaybeOp<TJoinOperator>(std::static_pointer_cast<IOperator>(expr));
+    ASSERT_TRUE(join);
+    auto left = TMaybeOp<TCteRef>(join.Cast()->Left());
+    auto right = TMaybeOp<TCteRef>(join.Cast()->Right());
+    ASSERT_TRUE(left);
+    ASSERT_TRUE(right);
+    EXPECT_EQ(left.Cast()->Def().get(), right.Cast()->Def().get());
+    EXPECT_NE(left.Cast()->Def()->OutputType, nullptr);
+
+    std::ostringstream out1;
+    PrintRelPlan(out1, std::static_pointer_cast<IOperator>(expr));
+    EXPECT_NE(out1.str().find("(query"), std::string::npos);
+    EXPECT_NE(out1.str().find("(cte 0"), std::string::npos);
+
+    // Re-parse the printed form (fresh registry) and print again: idempotent.
+    auto p2 = MakeParser(makeOpts());
+    auto expr2 = Parse(p2, out1.str());
+    ASSERT_NE(expr2, nullptr);
+    std::ostringstream out2;
+    PrintRelPlan(out2, std::static_pointer_cast<IOperator>(expr2));
+    EXPECT_EQ(out2.str(), out1.str());
+}
+
+TEST(SexpCte, NestedDefinitionsRoundTrip) {
+    NQdb::TMockSource src({"a"});
+
+    auto makeOpts = [&] {
+        TRelParserOptions opts;
+        opts.CteRegistry =
+            std::make_shared<std::unordered_map<uint32_t, TCteDefinitionPtr>>();
+        opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
+            return std::make_shared<TSourceOperator>(src, std::string(path));
+        };
+        return opts;
+    };
+
+    auto p = MakeParser(makeOpts());
+    auto expr = Parse(p,
+        "(query"
+        "  (cte 0 (rel source \"base\"))"
+        "  (cte 1 (rel project (rel cte-ref 0) (a a)))"
+        "  (main (rel cte-ref 1)))");
+    ASSERT_NE(expr, nullptr);
+
+    auto defs = CollectCteDefinitions(std::static_pointer_cast<IOperator>(expr));
+    ASSERT_EQ(defs.size(), 2u);
+    EXPECT_EQ(defs[0]->Id, 0u);
+    EXPECT_EQ(defs[1]->Id, 1u);
+    EXPECT_NE(defs[0]->OutputType, nullptr);
+    EXPECT_NE(defs[1]->OutputType, nullptr);
+
+    std::ostringstream out1;
+    PrintRelPlan(out1, std::static_pointer_cast<IOperator>(expr));
+
+    auto p2 = MakeParser(makeOpts());
+    auto expr2 = Parse(p2, out1.str());
+    ASSERT_NE(expr2, nullptr);
+    std::ostringstream out2;
+    PrintRelPlan(out2, std::static_pointer_cast<IOperator>(expr2));
+    EXPECT_EQ(out2.str(), out1.str());
+}
+
+TEST(SexpCte, DuplicateDefinitionIdFails) {
+    NQdb::TMockSource src({"a"});
+
+    TRelParserOptions opts;
+    opts.CteRegistry =
+        std::make_shared<std::unordered_map<uint32_t, TCteDefinitionPtr>>();
+    opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
+        return std::make_shared<TSourceOperator>(src, std::string(path));
+    };
+    auto p = MakeParser(std::move(opts));
+
+    std::istringstream in(
+        "(query"
+        "  (cte 0 (rel source \"a\"))"
+        "  (cte 0 (rel source \"b\"))"
+        "  (main (rel cte-ref 0)))");
+    TTokenStream ts(in);
+    auto result = p.Parse(ts);
+    ASSERT_FALSE(result.has_value());
+    EXPECT_NE(result.error().ToString().find("duplicate CTE id"), std::string::npos);
+}
+
+TEST(SexpCte, MaterializedPlanIsNotRelPlanSerializable) {
+    NQdb::TMockSource src({"a"});
+    auto producer = std::make_shared<TSourceOperator>(src, "base");
+
+    auto def = std::make_shared<TCteDefinition>();
+    def->Id = 0;
+    def->Plan = producer;
+    def->OutputType = producer->OutputColumns();
+
+    auto materialization = std::make_shared<TCteMaterialization>();
+    materialization->Plan = producer;
+    materialization->RefCount = 2;
+
+    std::vector<TOperatorPtr> inputs;
+    inputs.push_back(std::make_shared<TCteConsumer>(def, materialization));
+    inputs.push_back(std::make_shared<TCteConsumer>(def, materialization));
+    auto plan = std::make_shared<TUnionAllOperator>(std::move(inputs));
+
+    std::ostringstream sexp;
+    EXPECT_THROW(PrintRelPlan(sexp, plan), std::runtime_error);
+
+    std::ostringstream tree;
+    PrintPlanTreeWithCtes(tree, plan);
+    EXPECT_NE(tree.str().find("cte #0 (materialized, ×2):"), std::string::npos);
 }
 
 int main(int argc, char** argv) {
