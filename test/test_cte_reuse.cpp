@@ -2,6 +2,7 @@
 #include "mock_source.h"
 
 #include <qdb/plan/build.h>
+#include <qdb/plan/ops/aggregate.h>
 #include <qdb/plan/ops/cte_ref.h>
 #include <qdb/plan/ops/cte_consumer.h>
 #include <qdb/plan/ops/source.h>
@@ -99,6 +100,23 @@ TOperatorPtr FindSource(const TOperatorPtr& op) {
     for (const auto& child : op->Children()) {
         if (auto childOp = NQumir::NAst::TMaybeNode<IOperator>(child)) {
             if (auto found = FindSource(childOp.Cast())) {
+                return found;
+            }
+        }
+    }
+    return nullptr;
+}
+
+TOperatorPtr FindAggregate(const TOperatorPtr& op) {
+    if (!op) {
+        return nullptr;
+    }
+    if (TMaybeOp<TAggregateOperator>(op)) {
+        return op;
+    }
+    for (const auto& child : op->Children()) {
+        if (auto childOp = NQumir::NAst::TMaybeNode<IOperator>(child)) {
+            if (auto found = FindAggregate(childOp.Cast())) {
                 return found;
             }
         }
@@ -229,6 +247,51 @@ TEST(CteReuse, BoundaryProjectionNarrowsUnionSpool) {
     auto consumers = FindConsumers(resolved);
     ASSERT_EQ(consumers.size(), 2u);
     EXPECT_EQ(FieldNames(consumers[0]), (std::vector<std::string>{"a"}));
+}
+
+// Partial reduction: the outer query needs the group key a and the count c but
+// not the sum s, so only sum(b) is dropped from the aggregate.
+TEST(CteReuse, AggregateOutputPruningDropsOnlyUnusedAggregate) {
+    NQdb::TMockSource t({"a", "b"});
+    std::map<std::string, ISource*> tables = {{"t", &t}};
+
+    auto plan = BuildSqlPlan(
+        "WITH x AS (SELECT a, count(*) AS c, sum(b) AS s FROM t GROUP BY a) "
+        "SELECT p.a, p.c FROM x p JOIN x q ON p.a = q.a", tables);
+    auto usage = Analyze(plan);
+    auto resolved = ApplyCteReuse(std::move(plan), ChooseCteReuse(usage));
+
+    auto consumers = FindConsumers(resolved);
+    ASSERT_FALSE(consumers.empty());
+    auto aggregate = FindAggregate(consumers[0]->Materialization()->Plan);
+    ASSERT_TRUE(aggregate != nullptr);
+    auto* agg = static_cast<TAggregateOperator*>(aggregate.get());
+    ASSERT_EQ(agg->Aggs().size(), 1u);
+    EXPECT_EQ(agg->Aggs()[0].Func, "count");
+    EXPECT_EQ(agg->GroupKeys().size(), 1u);
+}
+
+// An aggregate consumed only by HAVING must survive pruning: the definition's
+// Filter adds count(*) to the demand even though the outer query selects only a.
+TEST(CteReuse, AggregateOutputPruningKeepsHavingAggregate) {
+    NQdb::TMockSource t({"a", "b"});
+    std::map<std::string, ISource*> tables = {{"t", &t}};
+
+    auto plan = BuildSqlPlan(
+        "WITH x AS (SELECT a, count(*) AS c, sum(b) AS s FROM t "
+        "GROUP BY a HAVING count(*) > 1) "
+        "SELECT p.a FROM x p JOIN x q ON p.a = q.a", tables);
+    auto usage = Analyze(plan);
+    auto resolved = ApplyCteReuse(std::move(plan), ChooseCteReuse(usage));
+
+    auto consumers = FindConsumers(resolved);
+    ASSERT_FALSE(consumers.empty());
+    auto aggregate = FindAggregate(consumers[0]->Materialization()->Plan);
+    ASSERT_TRUE(aggregate != nullptr);
+    auto* agg = static_cast<TAggregateOperator*>(aggregate.get());
+    ASSERT_EQ(agg->Aggs().size(), 1u);
+    EXPECT_EQ(agg->Aggs()[0].Func, "count");
+    EXPECT_EQ(agg->GroupKeys().size(), 1u);
 }
 
 int main(int argc, char** argv) {
