@@ -221,6 +221,25 @@
     (attrs extern (operator "-")) (block))
   (fun qdb_decimal_neg ((var value BinInt)) -> BinInt
     (attrs extern (operator "-")) (block))
+  (fun qdb_abs_i32 ((var value i32)) -> i32
+    (attrs extern) (block))
+  (fun qdb_abs_i64 ((var value i64)) -> i64
+    (attrs extern) (block))
+  (fun qdb_fabs ((var value f64)) -> f64
+    (attrs extern) (block))
+  ;; TODO(qumir): `abs [T]` should work as `zero = cast(0, T); zero - value`,
+  ;; but generic arithmetic is still rejected in real kernels. Keep concrete
+  ;; overloads until generic numeric constraints/body checking are fixed.
+  (fun abs ((var value i32)) -> i32
+    (block (return (call qdb_abs_i32 value))))
+  (fun abs ((var value i64)) -> i64
+    (block (return (call qdb_abs_i64 value))))
+  (fun abs ((var value f64)) -> f64
+    (block (return (call qdb_fabs value))))
+  (fun abs ((var value BinInt)) -> BinInt
+    (block
+      (var zero = (cast (struct ((Lo (: 0 u64)) (Hi (: 0 u64)))) BinInt))
+      (return (if (< value zero) (call qdb_decimal_neg value) value))))
   (fun qdb_decimal_mul_i64 ((var left BinInt) (var right i64)) -> BinInt
     (attrs extern (operator "*")) (block))
   (fun qdb_decimal_i64_mul ((var left i64) (var right BinInt)) -> BinInt

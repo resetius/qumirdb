@@ -1280,6 +1280,13 @@ function createQdbEnv(getMemory, holder) {
     writeDecimalResult(out, binIntArg(lo, hi) * pow10(delta));
   const decimalBinary = (out, llo, lhi, rlo, rhi, op) =>
     writeDecimalResult(out, op(binIntArg(llo, lhi), binIntArg(rlo, rhi)));
+  const decimalNeg = (out, lo, hi) => {
+    const value = binIntArg(lo, hi);
+    if (value === -(1n << 127n)) {
+      throw new Error('decimal negation overflow');
+    }
+    writeDecimalResult(out, -value);
+  };
   const decimalMulI64 = (out, lo, hi, rhs) =>
     writeDecimalResult(out, binIntArg(lo, hi) * BigInt(rhs));
   const decimalDivI64 = (out, lo, hi, rhs) =>
@@ -1312,6 +1319,21 @@ function createQdbEnv(getMemory, holder) {
       const x = value * factor;
       return (Math.sign(x) * Math.round(Math.abs(x))) / factor;
     },
+    qdb_abs_i32: (value) => {
+      value = Number(value) | 0;
+      if (value === -2147483648) {
+        throw new Error('abs overflow for i32');
+      }
+      return Math.abs(value) | 0;
+    },
+    qdb_abs_i64: (value) => {
+      value = BigInt.asIntN(64, BigInt(value));
+      if (value === -(1n << 63n)) {
+        throw new Error('abs overflow for i64');
+      }
+      return value < 0n ? -value : value;
+    },
+    qdb_fabs: Math.abs,
     qdb_decimal_from_i64: decimalFromI64,
     qdb_decimal_from_f64: decimalFromF64,
     qdb_decimal_scale_up: decimalScaleUp,
@@ -1319,8 +1341,7 @@ function createQdbEnv(getMemory, holder) {
       decimalBinary(out, llo, lhi, rlo, rhi, (l, r) => l + r),
     qdb_decimal_sub: (out, llo, lhi, rlo, rhi) =>
       decimalBinary(out, llo, lhi, rlo, rhi, (l, r) => l - r),
-    qdb_decimal_neg: (out, lo, hi) =>
-      writeDecimalResult(out, -binIntArg(lo, hi)),
+    qdb_decimal_neg: decimalNeg,
     qdb_decimal_mul_i64: decimalMulI64,
     qdb_decimal_div_i64: decimalDivI64,
     qdb_decimal_div: (out, llo, lhi, rlo, rhi) =>

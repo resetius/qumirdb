@@ -207,6 +207,33 @@ TEST(CteMaterialize, SortBranchDoesNotCorruptSpool) {
     EXPECT_EQ(CountRows(*runtime), 24);
 }
 
+TEST(CteMaterialize, ChainedSelfJoinHonorsFilteredConsumerSelection) {
+    std::vector<int64_t> keys = {1, 1, 1, 1};
+    std::vector<int64_t> rn = {1, 2, 3, 4};
+    std::vector<TColumn> cols = {
+        TColumn{.Data = reinterpret_cast<char*>(keys.data())},
+        TColumn{.Data = reinterpret_cast<char*>(rn.data())},
+    };
+    TRowSet batch{
+        .Columns = cols.data(),
+        .ColumnCount = 2,
+        .RowCount = 4,
+        .RefCount = 1,
+    };
+    TMockSource t({"k", "rn"}, {batch});
+    std::unordered_map<std::string, ISource*> sources = {{"t", &t}};
+
+    auto runtime = RunSql(R"sql(
+WITH x AS (SELECT k, rn FROM t)
+SELECT v1.rn
+FROM x v1
+JOIN x lag ON v1.k = lag.k AND v1.rn = lag.rn + 1
+JOIN x lead ON v1.k = lead.k AND v1.rn = lead.rn - 1
+WHERE v1.rn = 2 OR v1.rn = 3
+)sql", sources);
+    EXPECT_EQ(CountRows(*runtime), 2);
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     NQumir::NCodeGen::TLLVMInitializer initializer;

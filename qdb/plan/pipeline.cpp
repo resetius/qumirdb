@@ -75,6 +75,10 @@ void ApplyPlanPasses(TOperatorPtr& plan, TPlanPassOptions options) {
     }
     auto decisions = ChooseCteReuse(usage);
     plan = ApplyCteReuse(std::move(plan), decisions);
+    if (std::getenv("QDB_DUMP_PASSES") != nullptr) {
+        std::cerr << "\n===== after ApplyCteReuse =====\n";
+        PrintPlanTreeWithCtes(std::cerr, plan);
+    }
 }
 
 } // namespace NQdb
