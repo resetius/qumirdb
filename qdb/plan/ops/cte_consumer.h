@@ -40,4 +40,13 @@ private:
 // completion fan-out at lowering.
 void AssignMaterializationRefCounts(const TOperatorPtr& plan);
 
+struct TMaterializationRef {
+    uint32_t Id; // the shared definition's id, as shown on TCteConsumer
+    TCteMaterializationPtr Materialization;
+};
+
+// Every distinct materialization reachable through TCteConsumer nodes (and nested
+// producer plans); dependency-first.
+std::vector<TMaterializationRef> CollectMaterializations(const TOperatorPtr& plan);
+
 } // namespace NQdb

@@ -31,4 +31,8 @@ void PrintPlanTree(
     bool isLast = true,
     bool isRoot = true);
 
+// Prints each CTE definition tree followed by the main tree, so references
+// (cte-ref/cte-consumer #id) can be looked up.
+void PrintPlanTreeWithCtes(std::ostream& out, const TOperatorPtr& plan);
+
 } // namespace NQdb
