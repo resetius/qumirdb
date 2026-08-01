@@ -67,6 +67,12 @@ void ApplyPlanPasses(TOperatorPtr& plan, TPlanPassOptions options) {
     }
     OptimizeOne(plan, options);
     auto usage = PropagateCteDemands(plan);
+    // PropagateCteDemands narrowed definition schemas; refresh their cost
+    // (dependency-first, so nested definitions are estimated before their users)
+    // for the cost-based reuse decision.
+    for (const auto& def : CollectCteDefinitions(plan)) {
+        EstimateStats(def->Plan);
+    }
     auto decisions = ChooseCteReuse(usage);
     plan = ApplyCteReuse(std::move(plan), decisions);
 }
