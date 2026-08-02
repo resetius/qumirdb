@@ -459,10 +459,9 @@ public:
             // Grouped aggregate over a parallel input is hash-shuffled by group
             // key into partition-local aggregates (disjoint groups), so its
             // output keeps the shuffle partition count. Global aggregates
-            // (`__group__` constant) stay single.
-            // Grouping sets are not shuffled yet (the shuffle key would need the
-            // set id) — gather to a single lane.
-            if (!IsGlobalAggregate(*n.Cast()) && n.Cast()->GroupingSets().empty() &&
+            // (`__group__` constant) stay single. Grouping sets shuffle their
+            // partials by (__grouping_id__ + keys), so they too keep the count.
+            if (!IsGlobalAggregate(*n.Cast()) &&
                 !n.Cast()->GroupKeys().empty() && childLanes > 1)
             {
                 return JoinPartitions(childLanes);
@@ -1263,6 +1262,23 @@ private:
             aggregate.Input(), aggregate.GroupKeys(), std::move(combineAggs));
     }
 
+    // Combine phase for a parallelized grouping-sets aggregate: a plain grouped
+    // aggregate over the partials, keyed by the synthetic `__grouping_id__`
+    // (leading key that keeps masked-NULL sets distinct) plus the original keys.
+    std::shared_ptr<TAggregateOperator> BuildGroupingSetsCombineAggregate(
+        TAggregateOperator& aggregate)
+    {
+        auto combineAggs = BuildCombineAggregate(aggregate)->Aggs();
+        std::vector<std::string> keys;
+        keys.reserve(aggregate.GroupKeys().size() + 1);
+        keys.push_back("__grouping_id__");
+        for (const auto& key : aggregate.GroupKeys()) {
+            keys.push_back(key);
+        }
+        return std::make_shared<TAggregateOperator>(
+            aggregate.Input(), std::move(keys), std::move(combineAggs));
+    }
+
     // child[N] -> partial-aggregate[N] -> gather(N->1) -> final-combine[1].
     TLoweredOutput LowerAggregateCascade(
         TAggregateOperator& aggregate,
@@ -1329,6 +1345,103 @@ private:
         };
     }
 
+    // child[N] -> partial grouping-sets aggregate[N] -> hash-shuffle by
+    // (__grouping_id__ + keys) into `parts` -> grouped combine[parts]. Raw input
+    // cannot be shuffled (coarse rollup sets group by a key prefix, scattering a
+    // group across partitions); the partial materializes the masked keys and set
+    // id first, so the (already small) partials shuffle into disjoint groups.
+    TLoweredOutput LowerGroupingSetsCascade(
+        TAggregateOperator& aggregate,
+        size_t childLanes,
+        NScheduler::IConnection& outConn,
+        size_t outLaneOffset)
+    {
+        // Must match OutputLanes: with no group keys (only the empty set) there is
+        // nothing to shuffle by, so the partials gather (N->1) into one global
+        // group and the aggregate stays single-lane.
+        const size_t parts =
+            aggregate.GroupKeys().empty() ? 1 : JoinPartitions(childLanes);
+
+        auto& childRef = AddConn<NScheduler::TOneToOneConnection>(
+            childLanes, childLanes, "grouping-sets-partial-input");
+        auto childOut = Lower(aggregate.Input(), childRef);
+
+        const auto partialGroup = StageGroup("aggregate-partial", &aggregate);
+        TBlockingTail partialTail =
+            [&]() {
+                TStageDiagnosticsScope diagnosticsScope(Diagnostics_, partialGroup);
+                return BuildAggregateTail(childOut.OutputType, aggregate, partialGroup);
+            }();
+        auto partialType = partialTail.OutputType;
+        auto* partialStruct =
+            static_cast<NQumir::NAst::TStructType*>(partialType.get());
+        if (!partialStruct) {
+            throw std::runtime_error("grouping-sets partial output must have TStructType");
+        }
+
+        auto& partialRef = AddConn<NScheduler::TOneToOneConnection>(
+            childLanes, childLanes, "grouping-sets-partial");
+        std::vector<NScheduler::TTaskNode*> partialNodes;
+        partialNodes.reserve(childLanes);
+        for (size_t i = 0; i < childLanes; ++i) {
+            auto task = std::make_unique<NScheduler::TBlockingTask>(
+                partialTail.Code,
+                partialTail.MakeState(),
+                NScheduler::TInputPort{.Connection = &childRef, .Lane = i},
+                NScheduler::TOutputPort{.Connection = &partialRef, .Lane = i});
+            auto& node = Graph_.AddOwnedNode(std::move(task));
+            MarkNode(node, "aggregate", partialGroup, "aggregate partial");
+            Graph_.AddEdge(*childOut.Producers[i], node, childRef, i, i);
+            partialNodes.push_back(&node);
+        }
+
+        auto combineAgg = BuildGroupingSetsCombineAggregate(aggregate);
+        auto groupHash = MakeGroupKeyHash(*partialStruct, combineAgg->GroupKeys());
+        auto hashCode = MakeHashShuffleCode(std::move(groupHash), partialType);
+        auto& shufRef = AddConn<NScheduler::THashShuffleConnection>(
+            childLanes, parts, "grouping-sets-shuffle");
+        std::vector<NScheduler::TTaskNode*> shufNodes;
+        shufNodes.reserve(childLanes);
+        for (size_t i = 0; i < childLanes; ++i) {
+            auto task = std::make_unique<NScheduler::THashShuffleTask>(
+                hashCode,
+                std::make_shared<int>(0),
+                NScheduler::TInputPort{.Connection = &partialRef, .Lane = i},
+                shufRef,
+                i);
+            auto& node = Graph_.AddOwnedNode(std::move(task));
+            MarkNode(node, "hash-shuffle",
+                StageGroup("aggregate-shuffle", &aggregate), "hash-shuffle");
+            Graph_.AddEdge(*partialNodes[i], node, partialRef, i, i);
+            shufNodes.push_back(&node);
+        }
+
+        const auto combineGroup = StageGroup("aggregate-combine", &aggregate);
+        TBlockingTail combineTail =
+            [&]() {
+                TStageDiagnosticsScope diagnosticsScope(Diagnostics_, combineGroup);
+                return BuildAggregateTail(partialType, *combineAgg, combineGroup);
+            }();
+
+        TLoweredOutput result;
+        result.OutputType = combineTail.OutputType;
+        result.Producers.reserve(parts);
+        for (size_t m = 0; m < parts; ++m) {
+            auto task = std::make_unique<NScheduler::TBlockingTask>(
+                combineTail.Code,
+                combineTail.MakeState(),
+                NScheduler::TInputPort{.Connection = &shufRef, .Lane = m},
+                NScheduler::TOutputPort{.Connection = &outConn, .Lane = m + outLaneOffset});
+            auto& node = Graph_.AddOwnedNode(std::move(task));
+            MarkNode(node, "aggregate", combineGroup, "aggregate combine");
+            for (size_t s = 0; s < childLanes; ++s) {
+                Graph_.AddEdge(*shufNodes[s], node, shufRef, s, m);
+            }
+            result.Producers.push_back(&node);
+        }
+        return result;
+    }
+
     TLoweredOutput LowerAggregate(
         TAggregateOperator& aggregate,
         NScheduler::IConnection& outConn,
@@ -1349,19 +1462,10 @@ private:
                 outLaneOffset);
         }
 
-        // Grouping sets: gather to one lane and run a single grouping-sets pass
-        // (no shuffle/cascade yet).
+        // Grouping sets over a parallel input: partial -> shuffle -> combine
+        // cascade (the partial materializes the masked keys so they can shuffle).
         if (!aggregate.GroupingSets().empty()) {
-            auto group = StageGroup("aggregate", &aggregate);
-            return LowerBlocking(
-                aggregate.Input(),
-                "aggregate",
-                group,
-                [&, group](const NQumir::NAst::TTypePtr& childType) {
-                    return BuildAggregateTail(childType, aggregate, group);
-                },
-                outConn,
-                outLaneOffset);
+            return LowerGroupingSetsCascade(aggregate, childLanes, outConn, outLaneOffset);
         }
 
         // Ungrouped or global (`__group__`) aggregate over a parallel input.
