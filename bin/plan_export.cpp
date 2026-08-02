@@ -1055,6 +1055,12 @@ llvm::json::Array SortKeysJson(const std::vector<NQdb::TSortKey>& keys) {
 }
 
 std::string LogicalNodeKind(const NQdb::TOperatorPtr& op) {
+    if (auto ref = TMaybeOp<TCteRef>(op)) {
+        return "cte-ref #" + std::to_string(ref.Cast()->Def()->Id);
+    }
+    if (auto consumer = TMaybeOp<TCteConsumer>(op)) {
+        return "cte-consumer #" + std::to_string(consumer.Cast()->Def()->Id);
+    }
     return std::string(op->RelName());
 }
 
@@ -1130,6 +1136,17 @@ llvm::json::Object LogicalNodeDetails(const NQdb::TOperatorPtr& op) {
         return llvm::json::Object{
             {"limit", limit.Cast()->Limit()},
             {"offset", limit.Cast()->Offset()},
+        };
+    }
+    if (auto ref = TMaybeOp<TCteRef>(op)) {
+        return llvm::json::Object{
+            {"cteId", static_cast<int64_t>(ref.Cast()->Def()->Id)},
+        };
+    }
+    if (auto consumer = TMaybeOp<TCteConsumer>(op)) {
+        return llvm::json::Object{
+            {"cteId", static_cast<int64_t>(consumer.Cast()->Def()->Id)},
+            {"refCount", static_cast<int64_t>(consumer.Cast()->Materialization()->RefCount)},
         };
     }
     return llvm::json::Object{};
@@ -1311,7 +1328,8 @@ std::string AddLogicalGraphNode(
     llvm::json::Array& edges,
     TArtifactStore& artifacts,
     size_t& nextNodeId,
-    size_t& nextConnectionId)
+    size_t& nextConnectionId,
+    std::vector<std::string>* sectionNodes = nullptr)
 {
     std::vector<std::string> childIds;
     for (const auto& child : ChildOps(op)) {
@@ -1321,7 +1339,8 @@ std::string AddLogicalGraphNode(
             edges,
             artifacts,
             nextNodeId,
-            nextConnectionId));
+            nextConnectionId,
+            sectionNodes));
     }
 
     const std::string nodeId = "ln" + std::to_string(nextNodeId++);
@@ -1342,6 +1361,9 @@ std::string AddLogicalGraphNode(
         {"inputCount", static_cast<int64_t>(childIds.size())},
         {"outputCount", 1},
     });
+    if (sectionNodes) {
+        sectionNodes->push_back(nodeId);
+    }
 
     for (const auto& childId : childIds) {
         const auto connectionId = "lc" + std::to_string(nextConnectionId++);
@@ -1356,21 +1378,87 @@ std::string AddLogicalGraphNode(
     return nodeId;
 }
 
+void AddLogicalGraphSection(
+    llvm::json::Array& sections,
+    std::string id,
+    std::string kind,
+    std::string label,
+    const std::vector<std::string>& nodeIds)
+{
+    if (nodeIds.empty()) {
+        return;
+    }
+    llvm::json::Array nodes;
+    for (const auto& nodeId : nodeIds) {
+        nodes.push_back(nodeId);
+    }
+    sections.push_back(llvm::json::Object{
+        {"id", std::move(id)},
+        {"kind", std::move(kind)},
+        {"label", std::move(label)},
+        {"nodeIds", std::move(nodes)},
+    });
+}
+
 llvm::json::Object LogicalGraphJson(
     const NQdb::TOperatorPtr& plan,
     TArtifactStore& artifacts)
 {
     llvm::json::Array nodes;
     llvm::json::Array edges;
+    llvm::json::Array sections;
     size_t nextNodeId = 0;
     size_t nextConnectionId = 0;
+    for (const auto& def : CollectCteDefinitions(plan)) {
+        std::vector<std::string> sectionNodes;
+        AddLogicalGraphNode(
+            def->Plan,
+            nodes,
+            edges,
+            artifacts,
+            nextNodeId,
+            nextConnectionId,
+            &sectionNodes);
+        AddLogicalGraphSection(
+            sections,
+            "cte-" + std::to_string(def->Id),
+            "cte",
+            "cte #" + std::to_string(def->Id),
+            sectionNodes);
+    }
+    for (const auto& mat : CollectMaterializations(plan)) {
+        std::vector<std::string> sectionNodes;
+        AddLogicalGraphNode(
+            mat.Materialization->Plan,
+            nodes,
+            edges,
+            artifacts,
+            nextNodeId,
+            nextConnectionId,
+            &sectionNodes);
+        AddLogicalGraphSection(
+            sections,
+            "cte-" + std::to_string(mat.Id),
+            "materialized-cte",
+            "cte #" + std::to_string(mat.Id) + " (materialized, x" +
+                std::to_string(mat.Materialization->RefCount) + ")",
+            sectionNodes);
+    }
+    std::vector<std::string> mainNodes;
     const auto rootId = AddLogicalGraphNode(
         plan,
         nodes,
         edges,
         artifacts,
         nextNodeId,
-        nextConnectionId);
+        nextConnectionId,
+        &mainNodes);
+    AddLogicalGraphSection(
+        sections,
+        "main",
+        "main",
+        "main",
+        mainNodes);
 
     llvm::json::Array connections;
     for (size_t i = 0; i < nextConnectionId; ++i) {
@@ -1385,6 +1473,7 @@ llvm::json::Object LogicalGraphJson(
 
     return llvm::json::Object{
         {"nodes", std::move(nodes)},
+        {"sections", std::move(sections)},
         {"connections", std::move(connections)},
         {"edges", std::move(edges)},
         {"result", llvm::json::Object{
