@@ -4,6 +4,9 @@ const NODE_R = 46;
 const LAYER_GAP = 190;
 const ROW_GAP = 128;
 const PAD = 90;
+const SECTION_PAD_X = 44;
+const SECTION_PAD_TOP = 62;
+const SECTION_PAD_BOTTOM = 34;
 
 export function renderGraph(svg, graph, onSelect) {
   while (svg.firstChild) {
@@ -12,6 +15,7 @@ export function renderGraph(svg, graph, onSelect) {
 
   const nodes = graph?.nodes || [];
   const edges = graph?.edges || [];
+  const sections = graph?.sections || [];
   const connections = new Map((graph?.connections || []).map(item => [item.id, item]));
   const width = Math.max(svg.clientWidth || 640, 360);
   const height = Math.max(svg.clientHeight || 260, 220);
@@ -23,9 +27,32 @@ export function renderGraph(svg, graph, onSelect) {
     return;
   }
 
-  const layout = layoutGraph(nodes, edges);
+  const layout = layoutGraph(nodes, edges, sections);
+  const sectionRects = layoutSections(sections, layout.nodes);
+  layout.bounds = boundsWithSections(layout.bounds, sectionRects);
   const content = svgEl('g', { class: 'graph-content' });
   svg.appendChild(content);
+
+  for (const section of sectionRects) {
+    const group = svgEl('g', { class: 'graph-section-group' });
+    group.appendChild(svgEl('rect', {
+      x: section.x,
+      y: section.y,
+      width: section.width,
+      height: section.height,
+      rx: 8,
+      ry: 8,
+      class: `graph-section graph-section-${section.kind || 'section'}`
+    }));
+    const label = svgEl('text', {
+      x: section.x + 18,
+      y: section.y + 26,
+      class: 'graph-section-label'
+    });
+    label.textContent = section.label || section.id || '';
+    group.appendChild(label);
+    content.appendChild(group);
+  }
 
   for (const edge of edges) {
     const from = layout.nodes.get(edge.from);
@@ -93,7 +120,59 @@ export function renderGraph(svg, graph, onSelect) {
   ensureInteractions(svg);
 }
 
-function layoutGraph(nodes, edges) {
+function layoutGraph(nodes, edges, sections = []) {
+  if (sections.length) {
+    const sectioned = layoutSectionedGraph(nodes, edges, sections);
+    if (sectioned) {
+      return sectioned;
+    }
+  }
+  return layoutGraphRaw(nodes, edges);
+}
+
+function layoutSectionedGraph(nodes, edges, sections) {
+  const byId = new Map(nodes.map(node => [node.id, node]));
+  const positioned = new Map();
+  let maxWidth = 1;
+  let cursorY = 0;
+  let placed = false;
+
+  for (const section of sections) {
+    const sectionIds = new Set((section.nodeIds || []).filter(id => byId.has(id)));
+    if (!sectionIds.size) {
+      continue;
+    }
+    const sectionNodes = nodes.filter(node => sectionIds.has(node.id));
+    const sectionEdges = edges.filter(edge => sectionIds.has(edge.from) && sectionIds.has(edge.to));
+    const local = layoutGraphRaw(sectionNodes, sectionEdges);
+    for (const [id, item] of local.nodes) {
+      positioned.set(id, {
+        node: item.node,
+        x: item.x,
+        y: item.y + cursorY
+      });
+    }
+    maxWidth = Math.max(maxWidth, local.bounds.width);
+    cursorY += local.bounds.height + ROW_GAP;
+    placed = true;
+  }
+
+  if (!placed) {
+    return null;
+  }
+
+  return {
+    nodes: positioned,
+    bounds: {
+      x: 0,
+      y: 0,
+      width: maxWidth,
+      height: Math.max(cursorY - ROW_GAP, 1)
+    }
+  };
+}
+
+function layoutGraphRaw(nodes, edges) {
   const byId = new Map(nodes.map((node, index) => [node.id, { node, index }]));
   const outgoing = new Map(nodes.map(node => [node.id, []]));
   const indegree = new Map(nodes.map(node => [node.id, 0]));
@@ -166,6 +245,59 @@ function layoutGraph(nodes, edges) {
       width: PAD * 2 + maxLayer * LAYER_GAP,
       height: PAD * 2 + worldHeight
     }
+  };
+}
+
+function layoutSections(sections, positioned) {
+  const out = [];
+  for (const section of sections || []) {
+    const nodeIds = section.nodeIds || [];
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minY = Infinity;
+    let maxY = -Infinity;
+    for (const id of nodeIds) {
+      const item = positioned.get(id);
+      if (!item) {
+        continue;
+      }
+      minX = Math.min(minX, item.x - NODE_R);
+      maxX = Math.max(maxX, item.x + NODE_R);
+      minY = Math.min(minY, item.y - NODE_R);
+      maxY = Math.max(maxY, item.y + NODE_R);
+    }
+    if (!Number.isFinite(minX)) {
+      continue;
+    }
+    out.push({
+      id: section.id,
+      kind: section.kind,
+      label: section.label,
+      x: minX - SECTION_PAD_X,
+      y: minY - SECTION_PAD_TOP,
+      width: Math.max(maxX - minX + SECTION_PAD_X * 2, 180),
+      height: maxY - minY + SECTION_PAD_TOP + SECTION_PAD_BOTTOM
+    });
+  }
+  return out;
+}
+
+function boundsWithSections(bounds, sections) {
+  let minX = bounds.x;
+  let minY = bounds.y;
+  let maxX = bounds.x + bounds.width;
+  let maxY = bounds.y + bounds.height;
+  for (const section of sections) {
+    minX = Math.min(minX, section.x);
+    minY = Math.min(minY, section.y);
+    maxX = Math.max(maxX, section.x + section.width);
+    maxY = Math.max(maxY, section.y + section.height);
+  }
+  return {
+    x: minX,
+    y: minY,
+    width: maxX - minX,
+    height: maxY - minY
   };
 }
 

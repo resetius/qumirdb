@@ -342,6 +342,33 @@ button:hover {
   cursor: grabbing;
 }
 
+.graph-section-group {
+  pointer-events: none;
+}
+
+.graph-section {
+  fill: rgba(255, 255, 255, 0.025);
+  stroke: #3b4652;
+  stroke-width: 1.5;
+  stroke-dasharray: 7 6;
+}
+
+.graph-section-materialized-cte {
+  stroke: #7a8ea6;
+  fill: rgba(122, 142, 166, 0.06);
+}
+
+.graph-section-main {
+  stroke: #55606c;
+}
+
+.graph-section-label {
+  fill: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0;
+}
+
 .graph-node {
   fill: #222832;
   stroke: var(--accent);
