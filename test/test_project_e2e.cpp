@@ -356,6 +356,40 @@ TEST(SqlGroupingE2E, RollupGroupingColumns) {
     }));
 }
 
+// Duplicate grouping sets must produce duplicate rows: the aggregate keeps them
+// distinct by the ordinal grouping-set id (not a column bitmask), which the
+// parallel combine also keys on, so the parallelized path preserves this too.
+TEST(SqlGroupingE2E, DuplicateGroupingSetsAreNotCollapsed) {
+    std::array<int64_t, 3> a = {1, 1, 2};
+    std::array<TColumn, 1> cols = {
+        TColumn{.Data = reinterpret_cast<char*>(a.data())},
+    };
+    TRowSet batch{.Columns = cols.data(), .ColumnCount = 1, .RowCount = 3, .RefCount = 1};
+    TMockSource t({"a"}, {batch});
+
+    auto plan = SqlPlan(
+        "select a, count(*) c from t group by grouping sets ((a), (a));",
+        {{"t", &t}});
+
+    std::vector<std::array<int64_t, 2>> rows;
+    TRowSet out{};
+    while (plan->Next(out)) {
+        const auto* a = reinterpret_cast<const int64_t*>(out.Columns[0].Data);
+        const auto* c = reinterpret_cast<const int64_t*>(out.Columns[1].Data);
+        for (int64_t i = 0; i < out.RowCount; ++i) {
+            rows.push_back({a[i], c[i]});
+        }
+        Release(&out);
+    }
+    std::sort(rows.begin(), rows.end());
+    EXPECT_EQ(rows, (std::vector<std::array<int64_t, 2>>{
+        {1, 2},
+        {1, 2},
+        {2, 1},
+        {2, 1},
+    }));
+}
+
 TEST(SqlGroupingE2E, GroupingExpressionSurvivesWindowExtraction) {
     const std::string categories = "aabb";
     std::array<int64_t, 5> categoryOffsets = {0, 1, 2, 3, 4};
