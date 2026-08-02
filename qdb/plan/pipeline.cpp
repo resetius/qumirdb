@@ -66,6 +66,7 @@ void ApplyPlanPasses(TOperatorPtr& plan, TPlanPassOptions options) {
         def->OutputType = def->Plan->OutputColumns();
     }
     OptimizeOne(plan, options);
+    PushConsumerPredicatesIntoDefinitions(plan);
     auto usage = PropagateCteDemands(plan);
     // PropagateCteDemands narrowed definition schemas; refresh their cost
     // (dependency-first, so nested definitions are estimated before their users)

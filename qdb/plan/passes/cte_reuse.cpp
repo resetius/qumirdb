@@ -1,9 +1,14 @@
 #include <qdb/plan/passes/cte_reuse.h>
 
+#include <qdb/plan/clone_expr.h>
 #include <qdb/plan/clone_operator.h>
 #include <qdb/plan/ops/aggregate.h>
 #include <qdb/plan/ops/cte_consumer.h>
+#include <qdb/plan/passes/equijoin.h>
 #include <qdb/plan/passes/estimate_stats.h>
+#include <qdb/plan/passes/flatten_conjuncts.h>
+#include <qdb/plan/passes/typing.h>
+#include <qdb/plan/passes/unbound_vars.h>
 #include <qdb/plan/ops/filter.h>
 #include <qdb/plan/ops/join.h>
 #include <qdb/plan/ops/limit.h>
@@ -12,10 +17,13 @@
 #include <qdb/plan/ops/union.h>
 #include <qdb/plan/ops/window.h>
 
+#include <qumir/parser/core/printer.h>
+
 #include <cassert>
 #include <stdexcept>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 namespace NQdb {
 
@@ -209,6 +217,134 @@ ECteReuseMode ChooseMode(const TCteDefinition& def, const TCteUsageInfo& usage) 
 }
 
 } // namespace
+
+namespace {
+
+using TRefPredicates = std::unordered_map<TCteDefinition*, std::vector<TExprPtr>>;
+
+// One entry per reference; nullptr marks a reference with no filter directly
+// above it (needs every row, so nothing is shareable for its definition).
+void CollectRefPredicates(const TOperatorPtr& op, TRefPredicates& out) {
+    if (!op) {
+        return;
+    }
+    if (auto filter = TMaybeOp<TFilterOperator>(op)) {
+        if (auto ref = TMaybeOp<TCteRef>(filter.Cast()->Input())) {
+            out[ref.Cast()->Def().get()].push_back(filter.Cast()->Predicate());
+            return;
+        }
+    }
+    if (auto ref = TMaybeOp<TCteRef>(op)) {
+        out[ref.Cast()->Def().get()].push_back(nullptr);
+        return;
+    }
+    for (const auto& child : op->Children()) {
+        if (auto childOp = TMaybeNode<IOperator>(child)) {
+            CollectRefPredicates(childOp.Cast(), out);
+        }
+    }
+}
+
+TExprPtr Reduce(std::vector<TExprPtr> parts, const char* op) {
+    TExprPtr acc;
+    for (auto& part : parts) {
+        acc = acc
+            ? std::make_shared<TBinaryExpr>(NQumir::TLocation{}, TOperator(op), acc, part)
+            : std::move(part);
+    }
+    return acc;
+}
+
+// Per column, OR the references' constraints; AND the columns. A column
+// qualifies only if every reference constrains it with a single-column conjunct.
+TExprPtr BuildPushablePredicate(const TCteDefinition& def, const std::vector<TExprPtr>& refs) {
+    const size_t n = refs.size();
+    if (n < 2) {
+        return nullptr;
+    }
+    for (const auto& pred : refs) {
+        if (!pred) {
+            return nullptr;
+        }
+    }
+    auto* schema = static_cast<TStructType*>(def.OutputType.get());
+    if (!schema) {
+        return nullptr;
+    }
+    std::unordered_set<std::string> outputs;
+    for (const auto& [name, type] : schema->Fields) {
+        outputs.insert(name);
+    }
+
+    std::vector<std::unordered_map<std::string, std::vector<TExprPtr>>> byColumn(n);
+    for (size_t i = 0; i < n; ++i) {
+        std::vector<TExprPtr> conjuncts;
+        FlattenConjuncts(refs[i], conjuncts);
+        for (const auto& conj : conjuncts) {
+            auto vars = FindUnboundVars(conj);
+            if (vars.size() != 1) {
+                continue;
+            }
+            const std::string& col = *vars.begin();
+            if (outputs.contains(col)) {
+                byColumn[i][col].push_back(conj);
+            }
+        }
+    }
+
+    std::vector<TExprPtr> columnPredicates;
+    for (const auto& [name, type] : schema->Fields) {
+        bool constrainedEverywhere = true;
+        for (size_t i = 0; i < n; ++i) {
+            if (!byColumn[i].contains(name)) {
+                constrainedEverywhere = false;
+                break;
+            }
+        }
+        if (!constrainedEverywhere) {
+            continue;
+        }
+        std::vector<TExprPtr> perRef;
+        std::unordered_set<std::string> seen; // distinct constraints only
+        for (size_t i = 0; i < n; ++i) {
+            std::vector<TExprPtr> cloned;
+            for (const auto& conj : byColumn[i].at(name)) {
+                cloned.push_back(CloneExpr(conj));
+            }
+            auto conjoined = Reduce(std::move(cloned), "&&");
+            if (seen.insert(NQumir::NAst::NCore::PrintAst(conjoined)).second) {
+                perRef.push_back(std::move(conjoined));
+            }
+        }
+        columnPredicates.push_back(Reduce(std::move(perRef), "||"));
+    }
+    return Reduce(std::move(columnPredicates), "&&");
+}
+
+} // namespace
+
+void PushConsumerPredicatesIntoDefinitions(const TOperatorPtr& main) {
+    TRefPredicates refs;
+    CollectRefPredicates(main, refs);
+    auto defs = CollectCteDefinitions(main);
+    for (const auto& def : defs) {
+        CollectRefPredicates(def->Plan, refs);
+    }
+    for (const auto& def : defs) {
+        auto it = refs.find(def.get());
+        if (it == refs.end()) {
+            continue;
+        }
+        auto pushable = BuildPushablePredicate(*def, it->second);
+        if (!pushable) {
+            continue;
+        }
+        def->Plan = PushDownPredicates(
+            std::make_shared<TFilterOperator>(def->Plan, std::move(pushable)));
+        AnnotateTypes(def->Plan);
+        EstimateStats(def->Plan);
+    }
+}
 
 TCteReuseDecisions ChooseCteReuse(const TCteUsageMap& usage) {
     TCteReuseDecisions decisions;

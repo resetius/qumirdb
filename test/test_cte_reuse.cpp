@@ -5,11 +5,13 @@
 #include <qdb/plan/ops/aggregate.h>
 #include <qdb/plan/ops/cte_ref.h>
 #include <qdb/plan/ops/cte_consumer.h>
+#include <qdb/plan/ops/filter.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/passes/column_pruning.h>
 #include <qdb/plan/passes/cte_reuse.h>
 #include <qdb/plan/passes/qualify_columns.h>
 #include <qdb/plan/passes/typing.h>
+#include <qdb/plan/pipeline.h>
 #include <qdb/sql/parser.h>
 
 #include <expected>
@@ -100,6 +102,23 @@ TOperatorPtr FindSource(const TOperatorPtr& op) {
     for (const auto& child : op->Children()) {
         if (auto childOp = NQumir::NAst::TMaybeNode<IOperator>(child)) {
             if (auto found = FindSource(childOp.Cast())) {
+                return found;
+            }
+        }
+    }
+    return nullptr;
+}
+
+std::shared_ptr<TFilterOperator> FindFilter(const TOperatorPtr& op) {
+    if (!op) {
+        return nullptr;
+    }
+    if (auto filter = TMaybeOp<TFilterOperator>(op)) {
+        return filter.Cast();
+    }
+    for (const auto& child : op->Children()) {
+        if (auto childOp = NQumir::NAst::TMaybeNode<IOperator>(child)) {
+            if (auto found = FindFilter(childOp.Cast())) {
                 return found;
             }
         }
@@ -344,6 +363,40 @@ TEST(CteReuse, CostBasedUsesNarrowedSpoolBytes) {
 
     EXPECT_EQ(
         ChooseCteReuse(usage).at(defs[0].get()).Mode, ECteReuseMode::Materialize);
+}
+
+// Every reference filters b, so their disjunction (deduped to b = 1) is pushed
+// into the shared definition and lands on the source, shrinking the producer.
+TEST(CteReuse, ConsumerPredicatePushedToDefinitionSource) {
+    NQdb::TMockSource t({"a", "b"});
+    std::map<std::string, ISource*> tables = {{"t", &t}};
+
+    auto plan = BuildSqlPlan(
+        "WITH x AS (SELECT a, b FROM t) "
+        "SELECT p.a FROM x p JOIN x q ON p.a = q.a WHERE p.b = 1 AND q.b = 1", tables);
+    ApplyPlanPasses(plan);
+
+    auto consumers = FindConsumers(plan);
+    ASSERT_EQ(consumers.size(), 2u);
+    auto filter = FindFilter(consumers[0]->Materialization()->Plan);
+    ASSERT_TRUE(filter != nullptr);
+    EXPECT_TRUE(TMaybeOp<TSourceOperator>(filter->Input()));
+}
+
+// One reference is unconstrained (q has no predicate), so it needs every row;
+// nothing is safely shareable and the definition source stays unfiltered.
+TEST(CteReuse, AsymmetricPredicateNotPushed) {
+    NQdb::TMockSource t({"a", "b"});
+    std::map<std::string, ISource*> tables = {{"t", &t}};
+
+    auto plan = BuildSqlPlan(
+        "WITH x AS (SELECT a, b FROM t) "
+        "SELECT p.a FROM x p JOIN x q ON p.a = q.a WHERE p.b = 1", tables);
+    ApplyPlanPasses(plan);
+
+    auto consumers = FindConsumers(plan);
+    ASSERT_EQ(consumers.size(), 2u);
+    EXPECT_TRUE(FindFilter(consumers[0]->Materialization()->Plan) == nullptr);
 }
 
 int main(int argc, char** argv) {
