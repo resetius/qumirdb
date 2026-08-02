@@ -5,6 +5,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
+#include <vector>
 
 namespace NQdb {
 namespace NScheduler {
@@ -172,6 +173,27 @@ bool TTaskGraph::Validate(std::string* error) const {
             SetError(error, "task graph contains an invalid destination lane id");
             return false;
         }
+    }
+
+    // The threaded scheduler stops once the single root (sink) is Finished, so
+    // every node must be an ancestor of the root; an orphan branch would be
+    // silently abandoned. (Guaranteed for an acyclic single-root graph, but a
+    // cycle disconnected from the root would slip past the root-count check.)
+    std::unordered_set<const TTaskNode*> reaches;
+    std::vector<const TTaskNode*> stack{Root_};
+    reaches.insert(Root_);
+    while (!stack.empty()) {
+        const auto* node = stack.back();
+        stack.pop_back();
+        for (const auto* edge : node->Inbound) {
+            if (reaches.insert(edge->Src).second) {
+                stack.push_back(edge->Src);
+            }
+        }
+    }
+    if (reaches.size() != Nodes_.size()) {
+        SetError(error, "task graph has nodes that cannot reach the root");
+        return false;
     }
 
     return true;

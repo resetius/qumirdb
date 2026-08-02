@@ -131,12 +131,24 @@ void TThreadedScheduler::ScheduleOutput(TTaskNode* node) {
 }
 
 void TThreadedScheduler::Work() {
-    const size_t nodeCount = Graph_.Nodes().size();
+    // Terminate once the root (sink) is Finished: all output the query needs has
+    // been produced. Nodes still unfinished at that point are upstream branches
+    // abandoned by early termination (a satisfied LIMIT stops pulling, leaving
+    // its producers blocked on a Finished consumer) — waiting for them to finish
+    // would deadlock. The single-threaded scheduler equivalently stops when no
+    // work remains queued.
+    // Run() only reaches Work() after a successful Validate(), which guarantees
+    // exactly one root.
+    auto* root = Graph_.Root();
+    assert(root);
+    auto done = [&] {
+        return root->State.load(std::memory_order_acquire) == ETaskState::Finished;
+    };
     // Brief spin on the work permit before blocking, so bursts of scheduling
     // are picked up without an OS wakeup; then park on the semaphore.
     constexpr int acquireSpin = 64;
     for (;;) {
-        if (FinishedCount_.load(std::memory_order_acquire) == nodeCount) {
+        if (done()) {
             return;
         }
         bool gotPermit = false;
@@ -149,7 +161,7 @@ void TThreadedScheduler::Work() {
         if (!gotPermit) {
             WorkAvailable_.acquire();
         }
-        if (FinishedCount_.load(std::memory_order_acquire) == nodeCount) {
+        if (done()) {
             return;
         }
 
@@ -158,10 +170,18 @@ void TThreadedScheduler::Work() {
         // MPMC gap or the termination wakeup).
         auto* node = PopReady();
         while (!node) {
-            if (FinishedCount_.load(std::memory_order_acquire) == nodeCount) {
+            if (done()) {
                 return;
             }
             node = PopReady();
+        }
+
+        // The root may have finished while this node sat queued; abandon it
+        // rather than start (possibly heavy) upstream work no consumer needs, so
+        // cancellation after a satisfied LIMIT is prompt. Leaving it unrun is
+        // safe — the graph is being torn down.
+        if (done()) {
+            return;
         }
 
         auto expected = ETaskState::Queued;
@@ -213,10 +233,11 @@ bool TThreadedScheduler::FinishRun(TTaskNode* node) {
 void TThreadedScheduler::FinishNode(TTaskNode* node) {
     auto previous = node->State.exchange(ETaskState::Finished, std::memory_order_acq_rel);
     assert(previous == ETaskState::Running || previous == ETaskState::Reschedule);
-    auto finished = FinishedCount_.fetch_add(1, std::memory_order_acq_rel) + 1;
-    if (finished == Graph_.Nodes().size()) {
-        // Graph is complete: wake every worker so they observe termination and
-        // exit instead of blocking on the permit forever.
+    FinishedCount_.fetch_add(1, std::memory_order_acq_rel);
+    if (node == Graph_.Root()) {
+        // The sink is done: the query's output is complete. Wake every worker so
+        // they observe termination and exit instead of parking on the permit
+        // while upstream branches sit unfinished (abandoned by early termination).
         WorkAvailable_.release(static_cast<ptrdiff_t>(WorkerCount_));
     }
 }
