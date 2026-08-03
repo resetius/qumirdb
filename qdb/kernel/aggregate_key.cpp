@@ -67,7 +67,10 @@ NQumir::NAst::TTypePtr StringHandleType(const std::string& name) {
 std::string KeyTypeName(const std::vector<TAggregateKeyField>& fields) {
     std::string name = "AggKey";
     for (const auto& field : fields) {
-        name += "_" + field.ColumnName + "_" + field.Type->ToString();
+        // Nullability changes the hash/equal body, so it must be part of the
+        // type name (and thus the cache symbol).
+        name += "_" + field.ColumnName + "_"
+              + (field.IsNullable ? "n_" : "") + field.Type->ToString();
     }
     for (char& c : name) {
         if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_') {
