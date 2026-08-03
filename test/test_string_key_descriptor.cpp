@@ -280,8 +280,33 @@ TEST(StringKeyDescriptor, RewritesNestedStringLeaves) {
     ASSERT_NE(stored, nullptr);
     EXPECT_EQ(lookup->Fields.front().first, "valid_0");
     EXPECT_EQ(lookup->Fields.back().first, "key_0");
+    EXPECT_EQ(key.TypeName, "AggKey_nStruct2_i64_string");
     EXPECT_EQ(key.Size, 32u);
     EXPECT_EQ(key.Alignment, 8u);
+}
+
+TEST(StringKeyDescriptor, NestedCompositeTypeNamesKeepComposition) {
+    auto i32 = std::make_shared<TIntegerType>(TIntegerType::I32);
+    auto pair = std::make_shared<TStructType>(
+        std::vector<std::pair<std::string, TTypePtr>>{
+            {"a", i32}, {"b", i32}});
+    auto wrappedPair = std::make_shared<TStructType>(
+        std::vector<std::pair<std::string, TTypePtr>>{
+            {"pair", pair}});
+    auto wrappedScalarAndScalar = std::make_shared<TStructType>(
+        std::vector<std::pair<std::string, TTypePtr>>{
+            {"first", std::make_shared<TStructType>(
+                std::vector<std::pair<std::string, TTypePtr>>{{"a", i32}})},
+            {"second", i32}});
+
+    TStructType leftInput({{"k", wrappedPair}});
+    TStructType rightInput({{"k", wrappedScalarAndScalar}});
+    auto left = NQdb::NKernel::BuildAggregateKeyDescriptor(leftInput, {"k"});
+    auto right = NQdb::NKernel::BuildAggregateKeyDescriptor(rightInput, {"k"});
+
+    EXPECT_EQ(left.TypeName, "AggKey_Struct1_Struct2_i32_i32");
+    EXPECT_EQ(right.TypeName, "AggKey_Struct2_Struct1_i32_i32");
+    EXPECT_NE(left.TypeName, right.TypeName);
 }
 
 TEST(StringKeyDescriptor, KeepsFixedWidthRepresentationShared) {
@@ -311,6 +336,7 @@ TEST(StringKeyDescriptor, AddsValidityOnlyForNullableFields) {
 
     auto stored = StructOf(key.StoredType);
     ASSERT_NE(stored, nullptr);
+    EXPECT_EQ(key.TypeName, "AggKey_i64_ni64");
     EXPECT_EQ(key.Size, 24u);
     EXPECT_FALSE(key.Fields[0].IsNullable);
     EXPECT_TRUE(key.Fields[1].IsNullable);

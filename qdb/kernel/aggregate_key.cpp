@@ -64,23 +64,68 @@ NQumir::NAst::TTypePtr StringHandleType(const std::string& name) {
     return std::make_shared<TNamedType>(name, std::move(structure));
 }
 
-std::string KeyTypeName(const std::vector<TAggregateKeyField>& fields) {
-    std::string name = "AggKey";
-    for (const auto& field : fields) {
-        // Nullability changes the hash/equal body, so it must be part of the
-        // type name (and thus the cache symbol).
-        name += "_" + field.ColumnName + "_"
-              + (field.IsNullable ? "n_" : "") + field.Type->ToString();
+std::string PhysicalKeyComponentName(const NQumir::NAst::TTypePtr& type);
+
+std::string PhysicalKeyInnerComponentName(const NQumir::NAst::TTypePtr& original) {
+    using namespace NQumir::NAst;
+
+    if (!original) {
+        throw NQumir::TError("key type name is not supported: <null>");
     }
-    for (char& c : name) {
-        if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_') {
-            c = '_';
+    if (IsBinIntStorageType(original)) {
+        return "BinInt";
+    }
+    auto type = UnwrapNamedType(original);
+    if (auto integer = TMaybeType<TIntegerType>(type)) {
+        return integer.Cast()->ToString();
+    }
+    if (TMaybeType<TFloatType>(type)) {
+        return "f64";
+    }
+    if (TMaybeType<TBoolType>(type)) {
+        return "bool";
+    }
+    if (TMaybeType<TStringType>(type)) {
+        return "string";
+    }
+    if (auto structure = TMaybeType<TStructType>(type)) {
+        std::string result = "Struct" + std::to_string(structure.Cast()->Fields.size());
+        for (const auto& [_, fieldType] : structure.Cast()->Fields) {
+            result += "_" + PhysicalKeyComponentName(fieldType);
         }
+        return result;
     }
-    return name;
+    throw NQumir::TError(
+        "key type name is not supported: " +
+        (original ? original->ToString() : std::string("<null>")));
+}
+
+std::string PhysicalKeyComponentName(const NQumir::NAst::TTypePtr& type) {
+    if (IsNullableType(type)) {
+        return "n" + PhysicalKeyInnerComponentName(UnwrapNullableType(type));
+    }
+    return PhysicalKeyInnerComponentName(type);
 }
 
 } // namespace
+
+std::string PhysicalKeyTypeName(
+    const std::vector<std::pair<NQumir::NAst::TTypePtr, bool>>& fields)
+{
+    // Name by field type + nullability + order only (not column names): the
+    // compiled hash/equal address fields by offset, so structurally-identical
+    // keys share one cache symbol regardless of which columns they came from.
+    std::string name = "AggKey";
+    for (const auto& [type, nullable] : fields) {
+        const auto componentType = nullable
+            ? std::static_pointer_cast<NQumir::NAst::TType>(
+                  std::make_shared<NQdb::TNullable>(type))
+            : type;
+        name += "_";
+        name += PhysicalKeyComponentName(componentType);
+    }
+    return name;
+}
 
 TRepresentedKeyType RepresentKeyType(const NQumir::NAst::TTypePtr& original) {
     using namespace NQumir::NAst;
@@ -225,7 +270,12 @@ TAggregateKeyDescriptor BuildAggregateKeyDescriptor(
 
     result.Alignment = std::min<size_t>(maxAlignment, 8);
     result.Size = AlignUp(offset, result.Alignment);
-    result.TypeName = KeyTypeName(result.Fields);
+    std::vector<std::pair<TTypePtr, bool>> keyNameFields;
+    keyNameFields.reserve(result.Fields.size());
+    for (const auto& field : result.Fields) {
+        keyNameFields.emplace_back(field.Type, field.IsNullable);
+    }
+    result.TypeName = PhysicalKeyTypeName(keyNameFields);
     const bool hasDistinctType = std::any_of(
         result.Fields.begin(), result.Fields.end(),
         [](const auto& field) { return field.LookupType != field.StoredType; });

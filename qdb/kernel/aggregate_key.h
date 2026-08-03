@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace NQdb::NKernel {
@@ -34,6 +35,11 @@ size_t AlignUp(size_t value, size_t alignment);
 // type (integer/f64/bool/string/composite). Throws NQumir::TError for
 // unsupported types.
 TRepresentedKeyType RepresentKeyType(const NQumir::NAst::TTypePtr& original);
+
+// Shared physical key type name for aggregation and join descriptors. The name
+// is structural: component type, nullability, and order only.
+std::string PhysicalKeyTypeName(
+    const std::vector<std::pair<NQumir::NAst::TTypePtr, bool>>& fields);
 
 struct TAggregateKeyField {
     std::string ColumnName;
