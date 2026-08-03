@@ -87,11 +87,11 @@ query_enabled() {
 # error to stderr, so the timing is parsed from the stderr stream.
 run_query() {
     local label="$1"; shift
-    local out_file err_file rc seconds
+    local out_file err_file rc seconds plan build llvm
     out_file="$(mktemp "$tmpdir/qdb_output.XXXXXX")"
     err_file="$(mktemp "$tmpdir/qdb_stderr.XXXXXX")"
     set +e
-    "$QDB_BIN" "$@" > "$out_file" 2> "$err_file"
+    "$QDB_BIN" --timing "$@" > "$out_file" 2> "$err_file"
     rc=$?
     set -e
     printf '\n=== %s (rc=%s) ===\n' "$label" "$rc" >> "$RESULT_FILE"
@@ -99,14 +99,19 @@ run_query() {
     printf '\n=== %s (rc=%s) ===\n' "$label" "$rc" >> "$LOG_FILE"
     cat "$err_file" >> "$LOG_FILE"
     printf '\n' >> "$LOG_FILE"
+    # Execution total (processing only) — the existing metric.
     seconds=$(
         sed -nE \
             -e 's/.*Returned [0-9]+ rows in ([0-9]+([.][0-9]+)?) seconds.*/\1/p' \
             -e 's/.*Processed [0-9]+ rowsets in ([0-9]+([.][0-9]+)?).*/\1/p' \
             "$err_file" | tail -n 1
     )
-    seconds="${seconds:-0}"
-    echo "$seconds $rc"
+    # Per-phase compile timings (--timing), excluded from the processing total.
+    plan=$(sed -nE 's/.*Planning: ([0-9]+([.][0-9]+)?) seconds.*/\1/p' "$err_file" | tail -n 1)
+    build=$(sed -nE 's/.*KernelBuild: ([0-9]+([.][0-9]+)?) seconds.*/\1/p' "$err_file" | tail -n 1)
+    llvm=$(sed -nE 's/.*JitLLVM: ([0-9]+([.][0-9]+)?) seconds.*/\1/p' "$err_file" | tail -n 1)
+    seconds="${seconds:-0}"; plan="${plan:-0}"; build="${build:-0}"; llvm="${llvm:-0}"
+    echo "$seconds $plan $build $llvm $rc"
 }
 
 mkdir -p "$OUT_DIR"
@@ -125,10 +130,15 @@ for scale in "${SCALES[@]}"; do
 
     echo "[qdb] tpcds scale=$sf_num parquet=$data_dir" | tee -a "$LOG_FILE" >&2
 
-    printf "%-6s  %-12s  %s\n" "Query" "Time(s)" "Status"
-    printf "%-6s  %-12s  %s\n" "------" "------------" "------"
+    # Exec(s) = processing (execution only). Plan/KBuild/LLVM are the pre-execution
+    # phases, shown for insight but NOT added to the processing total.
+    printf "%-8s  %-9s  %-9s  %-9s  %-9s  %s\n" "Query" "Plan(s)" "KBuild(s)" "LLVM(s)" "Exec(s)" "Status"
+    printf "%-8s  %-9s  %-9s  %-9s  %-9s  %s\n" "------" "-------" "---------" "-------" "-------" "------"
 
     total_s="0"
+    plan_s="0"
+    build_s="0"
+    llvm_s="0"
     failed=0
 
     for template in "$SQL_DIR"/q*.sql; do
@@ -137,21 +147,20 @@ for scale in "${SCALES[@]}"; do
         q_num="${base#q}"
         query_enabled "$q_num" || continue
 
-        read -r seconds rc <<< "$(run_query "${base} sf${sf_num}" \
+        read -r seconds plan build llvm rc <<< "$(run_query "${base} sf${sf_num}" \
             ${EXTRA_QDB_ARGS[@]+"${EXTRA_QDB_ARGS[@]}"} --sql -i "$template" --data "$data_dir")"
 
         total_s=$(python3 -c "print(round($total_s + $seconds, 3))")
+        plan_s=$(python3 -c "print(round($plan_s + $plan, 3))")
+        build_s=$(python3 -c "print(round($build_s + $build, 3))")
+        llvm_s=$(python3 -c "print(round($llvm_s + $llvm, 3))")
 
-        if [[ $rc -eq 0 ]]; then
-            printf "%-6s  %-12s  OK\n" "$base" "${seconds}s"
-            echo "[qdb] ${base} ${seconds}s OK" >> "$LOG_FILE"
-        else
-            printf "%-6s  %-12s  FAILED\n" "$base" "${seconds}s"
-            echo "[qdb] ${base} FAILED" >> "$LOG_FILE"
-            (( failed++ )) || true
-        fi
+        if [[ $rc -eq 0 ]]; then status="OK"; else status="FAILED"; (( failed++ )) || true; fi
+        printf "%-8s  %-9s  %-9s  %-9s  %-9s  %s\n" "$base" "$plan" "$build" "$llvm" "$seconds" "$status"
+        echo "[qdb] ${base} plan=${plan}s kbuild=${build}s llvm=${llvm}s exec=${seconds}s ${status}" >> "$LOG_FILE"
     done
 
-    printf "Total: %ss,  Failed: %s\n" "$total_s" "$failed"
+    printf "Total (processing): %ss,  Failed: %s\n" "$total_s" "$failed"
+    printf "Compile (excluded from processing): plan=%ss  kbuild=%ss  llvm=%ss\n" "$plan_s" "$build_s" "$llvm_s"
     echo "[qdb] log: $LOG_FILE  results: $RESULT_FILE" >&2
 done
