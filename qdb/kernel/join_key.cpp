@@ -3,7 +3,6 @@
 #include <qumir/error.h>
 
 #include <algorithm>
-#include <cctype>
 
 namespace NQdb::NKernel {
 
@@ -19,24 +18,6 @@ int32_t FindColumn(const TStructType& schema, const std::string& name, TTypePtr&
         }
     }
     return -1;
-}
-
-// Column-name-independent name: components by type only, so left and right
-// instantiate the same Key (and the same rh_hash/rh_key_equal overloads).
-std::string JoinKeyTypeName(const std::vector<TJoinKeyField>& fields) {
-    std::string name = "JoinKey";
-    for (const auto& field : fields) {
-        name += "_" + field.Type->ToString();
-        if (field.IsNullable) {
-            name += "_n";
-        }
-    }
-    for (char& c : name) {
-        if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_') {
-            c = '_';
-        }
-    }
-    return name;
 }
 
 } // namespace
@@ -110,7 +91,12 @@ TJoinKeyDescriptor BuildJoinKeyDescriptor(
 
     result.Alignment = std::min<size_t>(maxAlignment, 8);
     result.Size = AlignUp(offset, result.Alignment);
-    result.TypeName = JoinKeyTypeName(result.Fields);
+    std::vector<std::pair<TTypePtr, bool>> keyNameFields;
+    keyNameFields.reserve(result.Fields.size());
+    for (const auto& field : result.Fields) {
+        keyNameFields.emplace_back(field.Type, field.IsNullable);
+    }
+    result.TypeName = PhysicalKeyTypeName(keyNameFields);
     const bool hasDistinctType = std::any_of(
         result.Fields.begin(), result.Fields.end(),
         [](const auto& field) { return field.LookupType != field.StoredType; });
