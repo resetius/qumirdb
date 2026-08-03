@@ -1,12 +1,28 @@
 #include <qdb/kernel/finalize.h>
 
 #include <qdb/kernel/compiler.h>
+#include <qdb/kernel/finalize_fused.h>
 
 #include <cstdlib>
+#include <memory>
 #include <ostream>
 #include <stdexcept>
+#include <string>
+#include <unordered_map>
+#include <utility>
+#include <vector>
 
 namespace NQdb {
+
+namespace {
+
+// Kept alive as long as any bound slot lives; owns the fused AST + payloads.
+struct TFusedKernelStorage {
+    NQumir::NAst::TExprPtr Program;
+    std::vector<std::shared_ptr<void>> KernelStorage;
+};
+
+} // namespace
 
 void JitFinalizeKernels(
     std::span<TGeneratedKernel> kernels,
@@ -15,6 +31,9 @@ void JitFinalizeKernels(
     const char* cacheDirEnv = std::getenv("QDB_JIT_CACHE_DIR");
     const std::string cacheDir = (cacheDirEnv && *cacheDirEnv) ? cacheDirEnv : "";
 
+    std::vector<TGeneratedKernel*> unique;
+    std::vector<std::pair<TGeneratedKernel*, size_t>> bindings;
+    std::unordered_map<std::string, size_t> uniqueByKey;
     for (auto& kernel : kernels) {
         if (!kernel.Slot) {
             throw std::logic_error(
@@ -23,41 +42,84 @@ void JitFinalizeKernels(
         if (kernel.Slot->Runner) {
             continue; // already bound
         }
-        if (diagnostics) {
-            *diagnostics << "\n========== RUNTIME FINALIZE: " << kernel.Name
-                         << " (" << kernel.Stage << ") ==========\n";
-        }
 
-        auto options = KernelRunnerOptions();
-        options.NativeCode = true;
-        options.EnablePerfJitEventListener = true;
-        options.PrintIr = diagnostics != nullptr;
-        options.PrintLlvm = diagnostics != nullptr;
-        auto runner = std::make_shared<NQumir::TLLVMRunner>(std::move(options));
+        std::string key = MakeKernelDedupKey(kernel);
+        auto [it, inserted] = uniqueByKey.emplace(std::move(key), unique.size());
+        if (inserted) {
+            unique.push_back(&kernel);
+        }
+        bindings.emplace_back(&kernel, it->second);
+    }
 
-        std::string error;
-        std::unordered_map<std::string, void*> fns;
-        if (!cacheDir.empty()) {
-            auto linked = CompileKernelAstCached(
-                *runner, kernel.Ast, kernel.Entrypoints, cacheDir, &error);
-            fns = std::move(linked.Entries);
-            kernel.Slot->JitLifetime = std::move(linked.Lifetime);
-        } else {
-            fns = CompileKernelAst(*runner, kernel.Ast, kernel.Entrypoints, &error);
+    if (unique.empty()) {
+        return;
+    }
+
+    auto fused = BuildFusedProgram(unique);
+
+    if (diagnostics) {
+        *diagnostics << "\n========== RUNTIME FUSED FINALIZE ==========\n"
+                     << "[kernel-fusion] kernels: " << bindings.size()
+                     << ", unique kernels: " << unique.size()
+                     << ", type decls: " << fused.TypeDeclCount
+                     << ", function decls: " << fused.FunctionDeclCount
+                     << ", entrypoints: " << fused.Entrypoints.size()
+                     << (cacheDir.empty() ? "" : ", cache: on")
+                     << "\n";
+    }
+
+    auto options = KernelRunnerOptions();
+    options.NativeCode = true;
+    options.EnablePerfJitEventListener = true;
+    options.PrintIr = diagnostics != nullptr;
+    options.PrintLlvm = diagnostics != nullptr;
+    auto runner = std::make_shared<NQumir::TLLVMRunner>(std::move(options));
+
+    auto storage = std::make_shared<TFusedKernelStorage>();
+    storage->KernelStorage.reserve(bindings.size());
+    for (const auto& [kernel, uniqueIndex] : bindings) {
+        (void)uniqueIndex;
+        if (kernel->Storage) {
+            storage->KernelStorage.push_back(kernel->Storage);
         }
-        if (diagnostics) {
-            *diagnostics << "========== END RUNTIME FINALIZE ==========\n";
-        }
-        for (size_t i = 0; i < kernel.Entrypoints.size(); ++i) {
-            auto it = fns.find(kernel.Entrypoints[i]);
+    }
+    storage->Program = std::move(fused.Program);
+
+    std::string error;
+    std::unordered_map<std::string, void*> fns;
+    std::shared_ptr<void> jitLifetime;
+    if (!cacheDir.empty()) {
+        auto linked = CompileKernelAstCached(
+            *runner, storage->Program, fused.Entrypoints, cacheDir, &error);
+        fns = std::move(linked.Entries);
+        jitLifetime = std::move(linked.Lifetime);
+    } else {
+        fns = CompileKernelAst(*runner, storage->Program, fused.Entrypoints, &error);
+    }
+    if (diagnostics) {
+        *diagnostics << "========== END RUNTIME FUSED FINALIZE ==========\n";
+    }
+
+    std::vector<std::vector<void*>> uniqueFns(unique.size());
+    for (size_t u = 0; u < unique.size(); ++u) {
+        const auto& fusedEntrypoints = fused.UniqueEntrypoints[u];
+        uniqueFns[u].resize(fusedEntrypoints.size(), nullptr);
+        for (size_t i = 0; i < fusedEntrypoints.size(); ++i) {
+            auto it = fns.find(fusedEntrypoints[i]);
             if (it == fns.end() || !it->second) {
                 throw std::runtime_error(
-                    "kernel '" + kernel.Name + "' entry '" +
-                    kernel.Entrypoints[i] + "' compilation failed: " + error);
+                    "kernel '" + unique[u]->Name + "' entry '" +
+                    unique[u]->Entrypoints[i] + "' compilation failed: " + error);
             }
-            kernel.Slot->Fns[i] = it->second;
+            uniqueFns[u][i] = it->second;
         }
-        kernel.Slot->Runner = std::move(runner);
+    }
+
+    for (const auto& [kernel, uniqueIndex] : bindings) {
+        kernel->Slot->Fns = uniqueFns[uniqueIndex];
+        kernel->Slot->Runner = runner;
+        kernel->Slot->JitLifetime = jitLifetime;
+        kernel->Storage = storage;
     }
 }
 
