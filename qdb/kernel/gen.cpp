@@ -642,6 +642,7 @@ std::vector<NQumir::NAst::TExprPtr> GenKeyOperationFunDecls(
             std::make_shared<TBlockExpr>(loc, std::move(body)), i64Type);
         function->Type = std::make_shared<TFunctionType>(
             std::vector<TTypePtr>{type}, i64Type);
+        function->Cacheable = true;
         return function;
     };
     auto makeEqual = [&](const TTypePtr& leftType,
@@ -660,6 +661,7 @@ std::vector<NQumir::NAst::TExprPtr> GenKeyOperationFunDecls(
             boolType);
         function->Type = std::make_shared<TFunctionType>(
             std::vector<TTypePtr>{leftType, rightType}, boolType);
+        function->Cacheable = true;
         return function;
     };
 
@@ -695,6 +697,7 @@ std::vector<NQumir::NAst::TExprPtr> GenKeyOwnershipFunDecls(
         i64Type);
     bytes->Type = std::make_shared<TFunctionType>(
         std::vector<TTypePtr>{key.LookupType}, i64Type);
+    bytes->Cacheable = true;
 
     std::vector<TExprPtr> cloneBody;
     TExprPtr cloneValue;
@@ -721,6 +724,7 @@ std::vector<NQumir::NAst::TExprPtr> GenKeyOwnershipFunDecls(
         std::make_shared<TBlockExpr>(loc, std::move(cloneBody)), key.StoredType);
     clone->Type = std::make_shared<TFunctionType>(
         std::vector<TTypePtr>{key.LookupType, ptrU8Type}, key.StoredType);
+    clone->Cacheable = true;
 
     return {std::move(bytes), std::move(clone)};
 }
