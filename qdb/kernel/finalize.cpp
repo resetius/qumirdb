@@ -2,6 +2,7 @@
 
 #include <qdb/kernel/compiler.h>
 
+#include <cstdlib>
 #include <ostream>
 #include <stdexcept>
 
@@ -11,6 +12,9 @@ void JitFinalizeKernels(
     std::span<TGeneratedKernel> kernels,
     std::ostream* diagnostics)
 {
+    const char* cacheDirEnv = std::getenv("QDB_JIT_CACHE_DIR");
+    const std::string cacheDir = (cacheDirEnv && *cacheDirEnv) ? cacheDirEnv : "";
+
     for (auto& kernel : kernels) {
         if (!kernel.Slot) {
             throw std::logic_error(
@@ -32,7 +36,15 @@ void JitFinalizeKernels(
         auto runner = std::make_shared<NQumir::TLLVMRunner>(std::move(options));
 
         std::string error;
-        auto fns = CompileKernelAst(*runner, kernel.Ast, kernel.Entrypoints, &error);
+        std::unordered_map<std::string, void*> fns;
+        if (!cacheDir.empty()) {
+            auto linked = CompileKernelAstCached(
+                *runner, kernel.Ast, kernel.Entrypoints, cacheDir, &error);
+            fns = std::move(linked.Entries);
+            kernel.Slot->JitLifetime = std::move(linked.Lifetime);
+        } else {
+            fns = CompileKernelAst(*runner, kernel.Ast, kernel.Entrypoints, &error);
+        }
         if (diagnostics) {
             *diagnostics << "========== END RUNTIME FINALIZE ==========\n";
         }

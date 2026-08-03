@@ -45,6 +45,16 @@ std::unordered_map<std::string, void*> CompileKernelAst(
     const std::vector<std::string>& entryNames,
     std::string* error);
 
+// Cache-backed native-JIT compilation: cacheable dependency symbols are loaded
+// from / persisted to `cacheDir`; the query kernel is recompiled and linked.
+// Entries stay valid while the returned lifetime handle is held.
+NQumir::NCodeGen::TLlvmRunner::TLinkedModule CompileKernelAstCached(
+    NQumir::TLLVMRunner& runner,
+    NQumir::NAst::TExprPtr ast,
+    const std::vector<std::string>& entryNames,
+    const std::string& cacheDir,
+    std::string* error);
+
 // Like the native CompileKernelAst, but emits a target object (per
 // runner.Options.TargetTriple) instead of JIT. Returns object bytes.
 std::optional<std::string> CompileKernelAstToObject(

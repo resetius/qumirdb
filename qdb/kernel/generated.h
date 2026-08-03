@@ -20,6 +20,8 @@ struct TKernelSlot {
     std::vector<void*> Fns;
     // Owns the JIT'd code: the pointers are valid while this lives.
     std::shared_ptr<NQumir::TLLVMRunner> Runner;
+    // Cache path only: keeps the query's LLJIT alive (the runner does not).
+    std::shared_ptr<void> JitLifetime;
 };
 
 // One kernel program attached to the physical plan as an AST. A finalizer
