@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <qdb/kernel/join_key.h>
+#include <qdb/plan/types/nullable.h>
 
 #include <qumir/error.h>
 #include <qumir/parser/type.h>
@@ -17,6 +18,7 @@ namespace {
 TTypePtr I(TIntegerType::EKind k) { return std::make_shared<TIntegerType>(k); }
 TTypePtr F64() { return std::make_shared<TFloatType>(); }
 TTypePtr Str() { return std::make_shared<TStringType>(); }
+TTypePtr Nullable(TTypePtr type) { return std::make_shared<NQdb::TNullable>(std::move(type)); }
 
 TStructType Schema(std::vector<std::pair<std::string, TTypePtr>> fields) {
     return TStructType(std::move(fields));
@@ -60,6 +62,27 @@ TEST(JoinKeyDescriptor, DifferentColumnNamesSameKeyType) {
         Schema({{"y", I(TIntegerType::I32)}}), {{"x", "y"}});
     EXPECT_EQ(a.TypeName, b.TypeName); // depends on type only, not column names
     EXPECT_EQ(a.TypeName.find("custkey"), std::string::npos);
+}
+
+TEST(JoinKeyDescriptor, NullableTypeNameUsesNullableTypeToken) {
+    auto d = BuildJoinKeyDescriptor(
+        Schema({{"lk", Nullable(I(TIntegerType::I64))}}),
+        Schema({{"rk", I(TIntegerType::I64)}}), {{"lk", "rk"}});
+    EXPECT_EQ(d.TypeName, "AggKey_ni64");
+}
+
+TEST(JoinKeyDescriptor, ReusesAggregatePhysicalTypeName) {
+    auto agg = BuildAggregateKeyDescriptor(
+        Schema({{"id", Nullable(I(TIntegerType::I64))}, {"name", Nullable(Str())}}),
+        {"id", "name"});
+    auto join = BuildJoinKeyDescriptor(
+        Schema({{"left_id", Nullable(I(TIntegerType::I64))}, {"left_name", Nullable(Str())}}),
+        Schema({{"right_id", I(TIntegerType::I64)}, {"right_name", Nullable(Str())}}),
+        {{"left_id", "right_id"}, {"left_name", "right_name"}});
+
+    EXPECT_EQ(join.TypeName, agg.TypeName);
+    EXPECT_EQ(join.LookupTypeName, agg.LookupTypeName);
+    EXPECT_EQ(join.StoredTypeName, agg.StoredTypeName);
 }
 
 TEST(JoinKeyDescriptor, ScalarF64) {

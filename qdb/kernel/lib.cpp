@@ -162,11 +162,22 @@ ParseFunctionLibrary(
         return std::unexpected(TError("kernel library: expected top-level (block ...)"));
     }
 
+    // Per-query override points that must resolve by bare name in every query
+    // (a cached generic calls them by name); never mark these cacheable.
+    static const std::unordered_set<std::string> KeepBare = {"jt_residual_filter"};
+
     std::vector<TExprPtr> result;
     for (auto& stmt : block.Cast()->Stmts) {
         auto fun = TMaybeNode<TFunDecl>(stmt);
-        if (fun && exclude.contains(fun.Cast()->Name)) {
-            continue;
+        if (fun) {
+            if (exclude.contains(fun.Cast()->Name)) {
+                continue;
+            }
+            // Library functions are stable across compilations, so cache them
+            // (generics are already content-addressed by their instance name).
+            if (fun.Cast()->GenericParams.empty() && !KeepBare.contains(fun.Cast()->Name)) {
+                fun.Cast()->Cacheable = true;
+            }
         }
         result.push_back(std::move(stmt));
     }
