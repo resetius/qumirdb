@@ -84,6 +84,25 @@ std::unordered_map<std::string, void*> CompileKernelAst(
     return runner.CompileKernelAst(std::move(ast), entryNames, error);
 }
 
+namespace {
+constexpr const char* CacheSchemaVersion = "v1";
+// Bump when the generated key helpers or the .oz kernel libraries change.
+constexpr const char* KernelLibVersion = "1";
+} // namespace
+
+NQumir::NCodeGen::TLlvmRunner::TLinkedModule CompileKernelAstCached(
+    NQumir::TLLVMRunner& runner,
+    NQumir::NAst::TExprPtr ast,
+    const std::vector<std::string>& entryNames,
+    const std::string& cacheDir,
+    std::string* error)
+{
+    NQumir::NRegistry::EnsureQumirDbRuntimeSymbolsLinked();
+    EnsureQumirDbUse(ast);
+    return runner.CompileFusedKernelsCached(
+        std::move(ast), entryNames, cacheDir, CacheSchemaVersion, KernelLibVersion, error);
+}
+
 TGeneratedKernel TKernelCompiler::EmitKernel(
     std::string name,
     std::vector<std::string> entrypoints,
