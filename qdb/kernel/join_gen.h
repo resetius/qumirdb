@@ -42,7 +42,8 @@ NQumir::NAst::TExprPtr GenJoinFinalizeSemiAntiAst(
 //
 // Signature of the generated function:
 //   <funcName>(own: <ref HashTable>, opp: <ref HashTable>,
-//              batch: <ref TRowSet>, batch_idx: i64, pairs: <ref PairBuffer>) -> bool
+//              batch: <ref TRowSet>, key_columns: <ptr i64>,
+//              batch_idx: i64, pairs: <ref PairBuffer>) -> bool
 //
 NQumir::NAst::TExprPtr GenJoinProcessAst(
     const TJoinKeyDescriptor& key,
@@ -93,17 +94,25 @@ NQumir::NAst::TExprPtr GenJoinProbeMarkAst(
     NQumir::NAst::TTypePtr pairBufferType,
     NQumir::NAst::TTypePtr stringViewType);
 
-// Generates one side's rowset hash helper for shuffle:
-//   <funcName>(batch: <ref TRowSet>, hashes: <ptr u64>) -> bool
+// Generates the cacheable rowset hash worker for shuffle:
+//   <funcName>(batch: <ref TRowSet>, hashes: <ptr u64>,
+//              key_columns: <ptr i64>, witness: <ptr LookupKey>) -> bool
 // Fills hashes[i] for every physical row i in the batch. Selection is not
-// applied here; shuffle/scatter code must skip unselected rows itself.
+// applied here; shuffle/scatter code must skip unselected rows itself. The
+// unused witness makes the physical key type part of automatic cache mangling.
 NQumir::NAst::TExprPtr GenJoinHashBatchAst(
     const TJoinKeyDescriptor& key,
-    bool isLeft,
     const std::string& funcName,
     NQumir::NAst::TTypePtr columnType,
     NQumir::NAst::TTypePtr rowSetType,
     NQumir::NAst::TTypePtr stringViewType);
+
+// Generates a thin query entrypoint forwarding to a typed GenJoinHashBatchAst
+// overload. Its external ABI keeps the type witness internal.
+NQumir::NAst::TExprPtr GenJoinHashEntrypointAst(
+    const TJoinKeyDescriptor& key,
+    const std::string& funcName,
+    NQumir::NAst::TTypePtr rowSetType);
 
 // Generates the rh_hash / rh_key_equal overloads for the join key type, reusing
 // the aggregation key-ops generator (GenKeyOperationFunDecls).
@@ -125,12 +134,13 @@ std::vector<NQumir::NAst::TExprPtr> GenJoinKeyTypeDecls(const TJoinKeyDescriptor
 // complete output TRowSet: allocates every buffer with qdb_alloc (recorded in
 // an owners list stored in out.Private), decodes packed row ids (id == -1 is
 // outer-join null padding; batch index -1 reads the stream_* batch instead of
-// the store), and writes fixed-width values, string payloads (two passes:
-// sizes into Offsets, then bytes), and validity masks. Output columns are the
-// left fields followed by the right fields (right omitted for semi/anti); the
-// per-column read/write code is fully specialized at generation time. Returns
-// the number of rows materialized (0 leaves `out` untouched). The caller
-// assigns out.Destroy (the kernel sets it to null).
+// the store), and calls cacheable physical-type workers for fixed-width, bool,
+// BinInt, and string columns. Output columns are the left fields followed by
+// the right fields (right omitted for semi/anti); source column positions and
+// pair sides are runtime worker arguments, while fixed-width worker types are
+// selected through a pointer witness. Returns the number of rows materialized
+// (0 leaves `out` untouched). The caller assigns out.Destroy (the kernel sets
+// it to null).
 NQumir::NAst::TExprPtr GenJoinMaterializeAst(
     const NQumir::NAst::TStructType& leftType,
     const NQumir::NAst::TStructType& rightType,
@@ -142,7 +152,7 @@ NQumir::NAst::TExprPtr GenJoinMaterializeAst(
 
 // Generates the single external join entrypoint:
 //   jt_dispatch(left, right, batch, batch_idx, pairs, left_store, right_store,
-//               arg, op) -> bool
+//               left_key_columns, right_key_columns, arg, op) -> bool
 // It dispatches init/update/stream/finalize/destroy to the internal generated
 // and library helpers. Join type and key size are compile-time constants.
 NQumir::NAst::TExprPtr GenJoinDispatchAst(
