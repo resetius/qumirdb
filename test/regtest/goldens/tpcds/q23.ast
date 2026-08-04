@@ -24,7 +24,7 @@
           )
           (where
             (&& (&& (== ss_sold_date_sk d_date_sk) (== ss_item_sk i_item_sk))
-              (|| (|| (|| (== d_year 1999) (== d_year (+ 1999 1))) (== d_year (+ 1999 2))) (== d_year (+ 1999 3))))
+              (call qdb_in_list d_year 1999 (+ 1999 1) (+ 1999 2) (+ 1999 3)))
           )
           (group-by
             (call substr i_item_desc 1 30)
@@ -64,7 +64,7 @@
                   )
                   (where
                     (&& (&& (== ss_customer_sk c_customer_sk) (== ss_sold_date_sk d_date_sk))
-                      (|| (|| (|| (== d_year 1999) (== d_year (+ 1999 1))) (== d_year (+ 1999 2))) (== d_year (+ 1999 3))))
+                      (call qdb_in_list d_year 1999 (+ 1999 1) (+ 1999 2) (+ 1999 3)))
                   )
                   (group-by
                     c_customer_sk

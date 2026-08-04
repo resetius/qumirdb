@@ -15,9 +15,12 @@
                 (rel project
                   (rel filter
                     (rel source "date_dim")
-                    (|| (|| (== d_date (: (cast "1998-01-02" <named StringView>) <named StringView>))
-                        (== d_date (: (cast "1998-10-15" <named StringView>) <named StringView>)))
-                      (== d_date (: (cast "1998-11-10" <named StringView>) <named StringView>))))
+                    (call
+                      qdb_in_list
+                      d_date
+                      (: (cast "1998-01-02" <named StringView>) <named StringView>)
+                      (: (cast "1998-10-15" <named StringView>) <named StringView>)
+                      (: (cast "1998-11-10" <named StringView>) <named StringView>)))
                   (__qdb_in__d_week_seq d_week_seq))
                 ()
                 (left_semi)
@@ -47,9 +50,12 @@
                 (rel project
                   (rel filter
                     (rel source "date_dim")
-                    (|| (|| (== d_date (: (cast "1998-01-02" <named StringView>) <named StringView>))
-                        (== d_date (: (cast "1998-10-15" <named StringView>) <named StringView>)))
-                      (== d_date (: (cast "1998-11-10" <named StringView>) <named StringView>))))
+                    (call
+                      qdb_in_list
+                      d_date
+                      (: (cast "1998-01-02" <named StringView>) <named StringView>)
+                      (: (cast "1998-10-15" <named StringView>) <named StringView>)
+                      (: (cast "1998-11-10" <named StringView>) <named StringView>)))
                   (__qdb_in__d_week_seq d_week_seq))
                 ()
                 (left_semi)
@@ -79,9 +85,12 @@
                 (rel project
                   (rel filter
                     (rel source "date_dim")
-                    (|| (|| (== d_date (: (cast "1998-01-02" <named StringView>) <named StringView>))
-                        (== d_date (: (cast "1998-10-15" <named StringView>) <named StringView>)))
-                      (== d_date (: (cast "1998-11-10" <named StringView>) <named StringView>))))
+                    (call
+                      qdb_in_list
+                      d_date
+                      (: (cast "1998-01-02" <named StringView>) <named StringView>)
+                      (: (cast "1998-10-15" <named StringView>) <named StringView>)
+                      (: (cast "1998-11-10" <named StringView>) <named StringView>)))
                   (__qdb_in__d_week_seq d_week_seq))
                 ()
                 (left_semi)

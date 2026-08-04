@@ -33,9 +33,12 @@
     )
     (where
       (&& (&& (&& (&& (== |c.c_current_addr_sk| |ca.ca_address_sk|)
-              (|| (|| (== ca_state (: (cast "CO" <named StringView>) <named StringView>))
-                  (== ca_state (: (cast "IL" <named StringView>) <named StringView>)))
-                (== ca_state (: (cast "MN" <named StringView>) <named StringView>))))
+              (call
+                qdb_in_list
+                ca_state
+                (: (cast "CO" <named StringView>) <named StringView>)
+                (: (cast "IL" <named StringView>) <named StringView>)
+                (: (cast "MN" <named StringView>) <named StringView>)))
             (== cd_demo_sk |c.c_current_cdemo_sk|))
           (subquery exists (query
         (select
