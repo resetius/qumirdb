@@ -1834,21 +1834,18 @@ async function executeBrowserJob(job) {
 }
 
 function resolveExecArtifacts(exec, artifacts) {
-  const resolveWasm = item => {
-    const artifactId = item.wasm;
+  if (Array.isArray(exec.nodes)) {
+    const artifactId = exec.wasm;
     if (!artifactId) {
-      return item;
+      throw new Error('exec plan is missing query wasm artifact');
     }
     const data = artifacts?.[artifactId]?.data;
     if (!data) {
       throw new Error(`exec artifact is missing: ${artifactId}`);
     }
-    return { ...item, wasm: data };
-  };
-  if (Array.isArray(exec.nodes)) {
     return {
       ...exec,
-      nodes: exec.nodes.map(resolveWasm)
+      wasm: data
     };
   }
   throw new Error('exec plan is missing graph nodes');

@@ -696,7 +696,7 @@ function createMemory64(initialPages) {
   throw new Error(`memory64 is not available (${errors.join('; ')})`);
 }
 
-function createSharedMemory(layout) {
+function createSharedMemory(layout, wasm) {
   const spec = layout.sharedMemory;
   if (!spec) {
     throw new Error('exec layout is missing sharedMemory');
@@ -705,6 +705,9 @@ function createSharedMemory(layout) {
   return {
     memory,
     arena: new Arena(memory, Number(spec.heapBase)),
+    wasm,
+    kernelInstance: null,
+    kernelInstancePromise: null,
     cteSpools: new Map(),
   };
 }
@@ -1370,33 +1373,69 @@ function createQdbEnv(getMemory, holder) {
   };
 }
 
-// Compile + instantiate a kernel module, wiring the `env` runtime. Any import
-// we do not implement is reported immediately instead of running a partial link.
-export async function instantiateKernel(base64, entryName, shared) {
-  const module = await WebAssembly.compile(base64ToBytes(base64));
+// Compile + instantiate the query-level kernel module once, wiring the `env`
+// runtime. Any import we do not implement is reported immediately.
+async function instantiateQueryKernel(shared) {
+  if (shared.kernelInstance) {
+    return shared.kernelInstance;
+  }
+  if (!shared.wasm) {
+    throw new Error('exec plan is missing query wasm module');
+  }
+  if (shared.kernelInstancePromise) {
+    return shared.kernelInstancePromise;
+  }
   const holder = { memory: shared.memory, arena: shared.arena };
-  const env = createQdbEnv(() => holder.memory, holder);
-  env.memory = shared.memory;
-  for (const imp of WebAssembly.Module.imports(module)) {
-    if (imp.module !== 'env') {
-      throw new Error(`kernel needs unsupported import: ${imp.module}.${imp.name}`);
+  shared.kernelInstancePromise = (async () => {
+    const module = await WebAssembly.compile(base64ToBytes(shared.wasm));
+    const env = createQdbEnv(() => holder.memory, holder);
+    env.memory = shared.memory;
+    for (const imp of WebAssembly.Module.imports(module)) {
+      if (imp.module !== 'env') {
+        throw new Error(`kernel needs unsupported import: ${imp.module}.${imp.name}`);
+      }
+      if (imp.name === 'memory' && imp.kind === 'memory') {
+        continue;
+      }
+      if (typeof env[imp.name] !== 'function') {
+        throw new Error(`kernel needs unsupported import: ${imp.module}.${imp.name}`);
+      }
     }
-    if (imp.name === 'memory' && imp.kind === 'memory') {
-      continue;
+    const instance = await WebAssembly.instantiate(module, { env });
+    if (instance.exports.__wasm_call_ctors) {
+      instance.exports.__wasm_call_ctors();
     }
-    if (typeof env[imp.name] !== 'function') {
-      throw new Error(`kernel needs unsupported import: ${imp.module}.${imp.name}`);
-    }
-  }
-  const instance = await WebAssembly.instantiate(module, { env });
-  if (instance.exports.__wasm_call_ctors) {
-    instance.exports.__wasm_call_ctors();
-  }
-  const fn = instance.exports[entryName];
+    shared.kernelInstance = { instance, holder };
+    return shared.kernelInstance;
+  })();
+  return shared.kernelInstancePromise;
+}
+
+// Return one entry from the shared query-level wasm instance.
+export async function instantiateKernel(entryName, shared) {
+  const kernel = await instantiateQueryKernel(shared);
+  const fn = kernel.instance.exports[entryName];
   if (typeof fn !== 'function') {
     throw new Error(`kernel is missing entry ${entryName}`);
   }
-  return { instance, fn, holder };
+  return { ...kernel, fn };
+}
+
+function stageEntrypoint(stage, name) {
+  const entry = stage?.entrypoints?.[name];
+  if (typeof entry !== 'string' || entry.length === 0) {
+    throw new Error(`${stage?.kind || 'stage'} stage is missing entrypoint ${name}`);
+  }
+  return entry;
+}
+
+function kernelExport(kernel, stage, name) {
+  const entry = stageEntrypoint(stage, name);
+  const fn = kernel.instance.exports[entry];
+  if (typeof fn !== 'function') {
+    throw new Error(`${stage?.kind || 'stage'} kernel is missing entry ${entry}`);
+  }
+  return fn;
 }
 
 // Marshal `columns` (source column order) into a fresh, pinned TRowSet inside `arena`.
@@ -1904,11 +1943,8 @@ export function runAggregate(kernel, layout, batch, selection, stage) {
 }
 
 function createAggregateState(kernel, layout, stage) {
-  const dispatch = kernel.instance.exports['agg_dispatch'];
-  const finishRowSet = kernel.instance.exports['agg_finish_rowset'];
-  if (!dispatch || !finishRowSet) {
-    throw new Error('aggregate kernel is missing an entry');
-  }
+  const dispatch = kernelExport(kernel, stage, 'agg_dispatch');
+  const finishRowSet = kernelExport(kernel, stage, 'agg_finish_rowset');
 
   const arena = kernel.holder.arena; // qdb_alloc draws from the shared bump pointer
 
@@ -2118,12 +2154,8 @@ function createJoinState(kernel, layout, stage) {
     throw new Error(`browser join type is not implemented: ${stage.joinType}` +
       (stage.hasResidual ? ' with residual' : ''));
   }
-  const exports = kernel.instance.exports;
-  const dispatch = exports.jt_dispatch;
-  const materialize = exports.jt_materialize;
-  if (typeof dispatch !== 'function' || typeof materialize !== 'function') {
-    throw new Error('join kernel is missing an entry');
-  }
+  const dispatch = kernelExport(kernel, stage, 'jt_dispatch');
+  const materialize = kernelExport(kernel, stage, 'jt_materialize');
 
   const arena = kernel.holder.arena;
   const leftTable = arena.alloc(layout.hashTable.size, 8);
@@ -2379,12 +2411,8 @@ function finishJoinState(state) {
 }
 
 function createCrossJoinState(kernel, layout, stage) {
-  const exports = kernel.instance.exports;
-  const dispatch = exports.xj_dispatch;
-  const materialize = exports.jt_materialize;
-  if (typeof dispatch !== 'function' || typeof materialize !== 'function') {
-    throw new Error('cross join kernel is missing an entry');
-  }
+  const dispatch = kernelExport(kernel, stage, 'xj_dispatch');
+  const materialize = kernelExport(kernel, stage, 'jt_materialize');
 
   const arena = kernel.holder.arena;
   const pairBuffer = arena.alloc(layout.pairBuffer.size, 8);
@@ -3043,7 +3071,8 @@ class FilterTask {
       return TaskResult.FINISHED;
     }
     if (!this.kernel) {
-      this.kernel = await instantiateKernel(this.stage.wasm, '<kernel>', this.shared);
+      this.kernel = await instantiateKernel(
+        stageEntrypoint(this.stage, 'filter'), this.shared);
     }
     assertStreamingWasmEdge(outEdge);
     const reusesInput = reusableFilterWasm(
@@ -3094,11 +3123,9 @@ class ProjectTask {
 
     const hasComputed = this.stage.output.some(col => col.source === 'computed');
     if (hasComputed) {
-      if (!this.stage.wasm) {
-        throw new Error('project stage is missing wasm kernel');
-      }
       if (!this.kernel) {
-        this.kernel = await instantiateKernel(this.stage.wasm, '<project>', this.shared);
+        this.kernel = await instantiateKernel(
+          stageEntrypoint(this.stage, 'project'), this.shared);
       }
     }
     if (fetched.rowSet.batch.wasm && !fetched.rowSet.batch.wasm.pinned) {
@@ -3282,12 +3309,11 @@ class WindowTask {
       return TaskResult.OK;
     }
 
-    if (!this.stage.wasm || !Array.isArray(this.stage.radixKeys)) {
+    if (!Array.isArray(this.stage.radixKeys)) {
       throw new Error('window stage is missing wasm kernel');
     }
     const kernel = await instantiateKernel(
-      this.stage.wasm,
-      'qdb_window_run',
+      stageEntrypoint(this.stage, 'qdb_window_run'),
       this.shared);
     const inputs = this.inputs;
     this.inputs = [];
@@ -3338,7 +3364,7 @@ class AggregateTask {
       if (!this.state) {
         if (!this.kernel) {
           this.kernel = await instantiateKernel(
-            this.stage.wasm, 'agg_dispatch', this.shared);
+            stageEntrypoint(this.stage, 'agg_dispatch'), this.shared);
         }
         this.state = createAggregateState(this.kernel, this.layout, this.stage);
       }
@@ -3349,7 +3375,7 @@ class AggregateTask {
 
     if (!this.kernel) {
       this.kernel = await instantiateKernel(
-        this.stage.wasm, 'agg_dispatch', this.shared);
+        stageEntrypoint(this.stage, 'agg_dispatch'), this.shared);
       this.state = createAggregateState(this.kernel, this.layout, this.stage);
     }
     if (fetched.rowSet.batch.wasm && !fetched.rowSet.batch.wasm.pinned) {
@@ -3403,7 +3429,8 @@ class JoinTask {
 
     if (!this.state) {
       if (!this.kernel) {
-        this.kernel = await instantiateKernel(this.stage.wasm, 'jt_dispatch', this.shared);
+        this.kernel = await instantiateKernel(
+          stageEntrypoint(this.stage, 'jt_dispatch'), this.shared);
       }
       this.state = createJoinState(this.kernel, this.layout, this.stage);
     }
@@ -3634,11 +3661,9 @@ class CrossJoinTask {
     }
 
     if (!this.state) {
-      if (!this.stage.wasm) {
-        throw new Error('cross join stage is missing wasm kernel');
-      }
       if (!this.kernel) {
-        this.kernel = await instantiateKernel(this.stage.wasm, 'xj_dispatch', this.shared);
+        this.kernel = await instantiateKernel(
+          stageEntrypoint(this.stage, 'xj_dispatch'), this.shared);
       }
       this.state = createCrossJoinState(this.kernel, this.layout, this.stage);
     }
@@ -3706,13 +3731,12 @@ class TopSortWasmState {
   }
 
   async ensureKernels() {
-    if (!this.stage.wasm || !Array.isArray(this.stage.radixKeys)) {
+    if (!Array.isArray(this.stage.radixKeys)) {
       throw new Error('top-sort stage is missing wasm kernel');
     }
     if (!this.kernel) {
       this.kernel = await instantiateKernel(
-        this.stage.wasm,
-        'qdb_top_sort_update',
+        stageEntrypoint(this.stage, 'qdb_top_sort_update'),
         this.shared);
     }
   }
@@ -3864,13 +3888,12 @@ class SortTask {
       return this.execute();
     }
 
-    if (!this.stage.wasm || !Array.isArray(this.stage.radixKeys)) {
+    if (!Array.isArray(this.stage.radixKeys)) {
       throw new Error(`${this.stage.kind} stage is missing wasm radix sort kernel`);
     }
     const radixNullable = !!this.stage.radixNullable;
     const kernel = await instantiateKernel(
-      this.stage.wasm,
-      'qdb_sort_run',
+      stageEntrypoint(this.stage, 'qdb_sort_run'),
       this.shared);
     kernel.nullable = radixNullable;
     const inputs = this.inputs;
@@ -4134,7 +4157,7 @@ export async function executeBrowserPipelineScheduled(exec, readSourceBatches, o
   if (!Array.isArray(exec.nodes)) {
     throw new Error('exec plan is missing graph nodes');
   }
-  const shared = createSharedMemory(layout);
+  const shared = createSharedMemory(layout, exec.wasm);
   const { roots, sink, nodes } =
     buildScheduledGraph(exec, readSourceBatches, options, layout, shared);
   const scheduler = new SingleThreadedScheduler(roots);
