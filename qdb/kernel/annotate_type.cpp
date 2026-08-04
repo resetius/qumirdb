@@ -588,6 +588,16 @@ TTypePtr InferType(const TExprPtr& e, const TStructType& schema) {
             return allNullable
                 ? std::static_pointer_cast<TType>(std::make_shared<TNullable>(v)) : v;
         }
+        if (name == "qdb_in_list") {
+            bool nullable = false;
+            for (const auto& t : at) {
+                nullable = nullable || !t || IsNullableType(t);
+            }
+            auto result = std::make_shared<TBoolType>();
+            return nullable
+                ? std::static_pointer_cast<TType>(std::make_shared<TNullable>(result))
+                : std::static_pointer_cast<TType>(result);
+        }
         if (name == "strcat") {
             bool nullable = false;
             for (const auto& t : at) nullable = nullable || !t || IsNullableType(t);
@@ -757,6 +767,86 @@ TExprPtr CoerceBranch(const TExprPtr& branch, const TTypePtr& branchType, bool i
 }
 
 TTypePtr Expand(TExprPtr& e, const TStructType& inputType, uint64_t& counter);
+
+// qdb_in_list(lhs, item...) preserves the SQL IN boundary until operand types are
+// known. Hoist lhs validity once, compare its plain value to every item, and only
+// retain per-item 3VL when an item itself can be NULL.
+std::pair<TExprPtr, TTypePtr> ExpandInList(const TCallExpr& node,
+    const TStructType& inputType, uint64_t& counter)
+{
+    const TLocation loc = node.Location;
+    auto boolType = std::make_shared<TBoolType>();
+    auto nullableBool = std::make_shared<TNullable>(boolType);
+    if (node.Args.size() < 2) {
+        throw NQumir::TError("qdb_in_list expects an lhs and at least one item");
+    }
+
+    TExprPtr lhs = node.Args.front();
+    TTypePtr lhsType = Expand(lhs, inputType, counter);
+    if (!lhsType) {
+        return {
+            std::make_shared<TCastExpr>(loc, MakeNull(loc), NullableQ(boolType)),
+            nullableBool,
+        };
+    }
+
+    std::vector<TExprPtr> stmts;
+    TExprPtr lhsRef = BindTemp(lhs, stmts, counter, loc);
+    TExprPtr lhsValue = IsNullableType(lhsType)
+        ? FieldOf(lhsRef, "Value", loc)
+        : lhsRef;
+
+    TExprPtr result;
+    TTypePtr resultType;
+    for (size_t i = 1; i < node.Args.size(); ++i) {
+        TExprPtr item = node.Args[i];
+        TTypePtr itemType = Expand(item, inputType, counter);
+
+        TExprPtr equal;
+        TTypePtr equalType;
+        if (!itemType) {
+            equal = std::make_shared<TCastExpr>(
+                loc, MakeNull(loc), NullableQ(boolType));
+            equalType = nullableBool;
+        } else if (IsNullableType(itemType)) {
+            equal = BuildNullStrict({{item, true}},
+                [lhsValue, loc](std::vector<TExprPtr> args) {
+                    return Bin("==", CloneExpr(lhsValue), std::move(args[0]), loc);
+                }, boolType, counter, loc);
+            equalType = nullableBool;
+        } else {
+            equal = Bin("==", CloneExpr(lhsValue), std::move(item), loc);
+            equalType = boolType;
+        }
+
+        if (!result) {
+            result = std::move(equal);
+            resultType = equalType;
+        } else if (IsNullableType(resultType) || IsNullableType(equalType)) {
+            result = Build3VL(
+                /*isAnd=*/false, result, resultType, equal, equalType, counter, loc);
+            resultType = nullableBool;
+        } else {
+            result = Bin("||", std::move(result), std::move(equal), loc);
+            resultType = boolType;
+        }
+    }
+
+    if (IsNullableType(lhsType)) {
+        result = std::make_shared<TIfExpr>(
+            loc,
+            FieldOf(lhsRef, "Valid", loc),
+            CoerceBranch(result, resultType, /*isNull=*/false, boolType, counter, loc),
+            std::make_shared<TCastExpr>(loc, MakeNull(loc), NullableQ(boolType)));
+        resultType = nullableBool;
+    }
+
+    stmts.push_back(std::move(result));
+    return {
+        std::make_shared<TBlockExpr>(loc, std::move(stmts)),
+        resultType,
+    };
+}
 
 // COALESCE(a, b, ...) -> an `if`-chain: return the first arg with `.Valid`; once a
 // non-nullable arg is reached it is returned directly (result becomes non-nullable).
@@ -947,6 +1037,11 @@ TTypePtr Expand(TExprPtr& e, const TStructType& inputType, uint64_t& counter) {
         }
         if (name == "coalesce") {
             auto [expr, type] = ExpandCoalesce(*node, inputType, counter);
+            e = expr;
+            return type;
+        }
+        if (name == "qdb_in_list") {
+            auto [expr, type] = ExpandInList(*node, inputType, counter);
             e = expr;
             return type;
         }
@@ -1424,14 +1519,17 @@ bool ContainsNull(const TExprPtr& e) {
 }
 
 // Constructs Expand always rewrites regardless of nullability — the fast path must not
-// skip Expand when one is present: coalesce → if-chain, strcat → qdb_string_concat, and a
-// cast to a nullable target → nullable_from_value (the raw planner TNullable won't compile).
+// skip Expand when one is present: coalesce → if-chain, qdb_in_list → typed
+// comparisons, strcat → qdb_string_concat, and a cast to a nullable target →
+// nullable_from_value (the raw planner TNullable won't compile).
 bool ContainsMustExpandCall(const TExprPtr& e) {
     if (!e) return false;
     if (auto call = TMaybeNode<TCallExpr>(e)) {
         if (auto id = TMaybeNode<TIdentExpr>(call.Cast()->Callee)) {
             const std::string& name = id.Cast()->Name;
-            if (name == "coalesce" || name == "strcat") return true;
+            if (name == "coalesce" || name == "qdb_in_list" || name == "strcat") {
+                return true;
+            }
         }
     }
     if (auto cast = TMaybeNode<TCastExpr>(e)) {

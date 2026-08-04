@@ -21,10 +21,7 @@
                   qdb_string_view_sql_like
                   p_type
                   (: (cast "PROMO ANODIZED%" <named StringView>) <named StringView>))))
-            (|| (|| (|| (|| (|| (|| (|| (== p_size 24) (== p_size 47)) (== p_size 25)) (== p_size 36)) (== p_size 22))
-                  (== p_size 26))
-                (== p_size 49))
-              (== p_size 40))))
+            (call qdb_in_list p_size 24 47 25 36 22 26 49 40)))
         (keys p_brand p_type p_size ps_suppkey))
       (keys p_brand p_type p_size)
       (agg count_0 count ps_suppkey))

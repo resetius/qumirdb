@@ -255,8 +255,11 @@
                         (== ws_ship_mode_sk sm_ship_mode_sk))
                       (== d_year 2002))
                     (&& (<= 49530 t_time) (<= t_time (+ 49530 28800))))
-                  (|| (== sm_carrier (: (cast "DIAMOND" <named StringView>) <named StringView>))
-                    (== sm_carrier (: (cast "AIRBORNE" <named StringView>) <named StringView>))))
+                  (call
+                    qdb_in_list
+                    sm_carrier
+                    (: (cast "DIAMOND" <named StringView>) <named StringView>)
+                    (: (cast "AIRBORNE" <named StringView>) <named StringView>)))
               )
               (group-by
                 w_warehouse_name
@@ -385,8 +388,11 @@
                         (== cs_ship_mode_sk sm_ship_mode_sk))
                       (== d_year 2002))
                     (&& (<= 49530 t_time) (<= t_time (+ 49530 28800))))
-                  (|| (== sm_carrier (: (cast "DIAMOND" <named StringView>) <named StringView>))
-                    (== sm_carrier (: (cast "AIRBORNE" <named StringView>) <named StringView>))))
+                  (call
+                    qdb_in_list
+                    sm_carrier
+                    (: (cast "DIAMOND" <named StringView>) <named StringView>)
+                    (: (cast "AIRBORNE" <named StringView>) <named StringView>)))
               )
               (group-by
                 w_warehouse_name

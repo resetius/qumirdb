@@ -52,7 +52,7 @@
                         (== |store_sales.ss_hdemo_sk| |household_demographics.hd_demo_sk|))
                       (|| (== |household_demographics.hd_dep_count| 8) (> |household_demographics.hd_vehicle_count| 0)))
                     (== |date_dim.d_dow| 1))
-                  (|| (|| (== |date_dim.d_year| 1998) (== |date_dim.d_year| (+ 1998 1))) (== |date_dim.d_year| (+ 1998 2))))
+                  (call qdb_in_list |date_dim.d_year| 1998 (+ 1998 1) (+ 1998 2)))
                 (&& (<= 200 |store.s_number_employees|) (<= |store.s_number_employees| 295)))
             )
             (group-by

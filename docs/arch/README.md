@@ -46,3 +46,5 @@ Physical execution:
   kernel/dispatcher ownership split.
 - [String values](string_values.md) - proposed borrowed/owned string ABI for
   filtering and aggregation, including dual lookup/storage key types.
+- [SQL expression pseudo-calls](sql_pseudo_calls.md) - call-shaped parser and
+  typing markers for `IN`, concatenation, and SQL NULL semantics.

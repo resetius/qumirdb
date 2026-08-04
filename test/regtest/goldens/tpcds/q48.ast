@@ -25,21 +25,30 @@
               (&& (<= 150 ss_sales_price) (<= ss_sales_price 200)))))
         (|| (|| (&& (&& (&& (== ss_addr_sk ca_address_sk)
                   (== ca_country (: (cast "United States" <named StringView>) <named StringView>)))
-                (|| (|| (== ca_state (: (cast "KY" <named StringView>) <named StringView>))
-                    (== ca_state (: (cast "GA" <named StringView>) <named StringView>)))
-                  (== ca_state (: (cast "NM" <named StringView>) <named StringView>))))
+                (call
+                  qdb_in_list
+                  ca_state
+                  (: (cast "KY" <named StringView>) <named StringView>)
+                  (: (cast "GA" <named StringView>) <named StringView>)
+                  (: (cast "NM" <named StringView>) <named StringView>)))
               (&& (<= 0 ss_net_profit) (<= ss_net_profit 2000)))
             (&& (&& (&& (== ss_addr_sk ca_address_sk)
                   (== ca_country (: (cast "United States" <named StringView>) <named StringView>)))
-                (|| (|| (== ca_state (: (cast "MT" <named StringView>) <named StringView>))
-                    (== ca_state (: (cast "OR" <named StringView>) <named StringView>)))
-                  (== ca_state (: (cast "IN" <named StringView>) <named StringView>))))
+                (call
+                  qdb_in_list
+                  ca_state
+                  (: (cast "MT" <named StringView>) <named StringView>)
+                  (: (cast "OR" <named StringView>) <named StringView>)
+                  (: (cast "IN" <named StringView>) <named StringView>)))
               (&& (<= 150 ss_net_profit) (<= ss_net_profit 3000))))
           (&& (&& (&& (== ss_addr_sk ca_address_sk)
                 (== ca_country (: (cast "United States" <named StringView>) <named StringView>)))
-              (|| (|| (== ca_state (: (cast "WI" <named StringView>) <named StringView>))
-                  (== ca_state (: (cast "MO" <named StringView>) <named StringView>)))
-                (== ca_state (: (cast "WV" <named StringView>) <named StringView>))))
+              (call
+                qdb_in_list
+                ca_state
+                (: (cast "WI" <named StringView>) <named StringView>)
+                (: (cast "MO" <named StringView>) <named StringView>)
+                (: (cast "WV" <named StringView>) <named StringView>)))
             (&& (<= 50 ss_net_profit) (<= ss_net_profit 25000)))))
     )
   )

@@ -55,15 +55,18 @@
                         (/ |household_demographics.hd_dep_count| |household_demographics.hd_vehicle_count|)
                         (call qdb_sql_null))
                       1.2))
-                  (|| (|| (== |date_dim.d_year| 1998) (== |date_dim.d_year| (+ 1998 1))) (== |date_dim.d_year| (+ 1998 2))))
-                (|| (|| (|| (|| (|| (|| (|| (== |store.s_county| (: (cast "Williamson County" <named StringView>) <named StringView>))
-                              (== |store.s_county| (: (cast "Williamson County" <named StringView>) <named StringView>)))
-                            (== |store.s_county| (: (cast "Williamson County" <named StringView>) <named StringView>)))
-                          (== |store.s_county| (: (cast "Williamson County" <named StringView>) <named StringView>)))
-                        (== |store.s_county| (: (cast "Williamson County" <named StringView>) <named StringView>)))
-                      (== |store.s_county| (: (cast "Williamson County" <named StringView>) <named StringView>)))
-                    (== |store.s_county| (: (cast "Williamson County" <named StringView>) <named StringView>)))
-                  (== |store.s_county| (: (cast "Williamson County" <named StringView>) <named StringView>))))
+                  (call qdb_in_list |date_dim.d_year| 1998 (+ 1998 1) (+ 1998 2)))
+                (call
+                  qdb_in_list
+                  |store.s_county|
+                  (: (cast "Williamson County" <named StringView>) <named StringView>)
+                  (: (cast "Williamson County" <named StringView>) <named StringView>)
+                  (: (cast "Williamson County" <named StringView>) <named StringView>)
+                  (: (cast "Williamson County" <named StringView>) <named StringView>)
+                  (: (cast "Williamson County" <named StringView>) <named StringView>)
+                  (: (cast "Williamson County" <named StringView>) <named StringView>)
+                  (: (cast "Williamson County" <named StringView>) <named StringView>)
+                  (: (cast "Williamson County" <named StringView>) <named StringView>)))
             )
             (group-by
               ss_ticket_number
