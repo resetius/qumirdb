@@ -133,6 +133,8 @@ NQumir::TLLVMRunnerOptions KernelRunnerOptions() {
     opts.CoreInput = true;
     opts.ResolveCoreInput = true;
     opts.AllowOverloads = true;
+    // TODO: Fix definite-assignment performance on large fused ASTs and re-enable it.
+    opts.RunDefiniteAssignment = false;
     opts.OptLevel = 3;
     opts.ModuleFiles = {std::string(QDB_SOURCE_DIR) + "/modules/qumirdb.oz"};
     return opts;
