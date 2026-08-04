@@ -18,19 +18,31 @@
                       ()
                       (inner))
                     (&& (&& (&& (&& (== ss_item_sk i_item_sk) (== ss_sold_date_sk d_date_sk)) (== ss_store_sk s_store_sk))
-                        (== d_year 2000))
-                      (|| (&& (|| (|| (== i_category (: (cast "Home" <named StringView>) <named StringView>))
-                              (== i_category (: (cast "Books" <named StringView>) <named StringView>)))
-                            (== i_category (: (cast "Electronics" <named StringView>) <named StringView>)))
-                          (|| (|| (== i_class (: (cast "wallpaper" <named StringView>) <named StringView>))
-                              (== i_class (: (cast "parenting" <named StringView>) <named StringView>)))
-                            (== i_class (: (cast "musical" <named StringView>) <named StringView>))))
-                        (&& (|| (|| (== i_category (: (cast "Shoes" <named StringView>) <named StringView>))
-                              (== i_category (: (cast "Jewelry" <named StringView>) <named StringView>)))
-                            (== i_category (: (cast "Men" <named StringView>) <named StringView>)))
-                          (|| (|| (== i_class (: (cast "womens" <named StringView>) <named StringView>))
-                              (== i_class (: (cast "birdal" <named StringView>) <named StringView>)))
-                            (== i_class (: (cast "pants" <named StringView>) <named StringView>)))))))
+                        (call qdb_in_list d_year 2000))
+                      (|| (&& (call
+                            qdb_in_list
+                            i_category
+                            (: (cast "Home" <named StringView>) <named StringView>)
+                            (: (cast "Books" <named StringView>) <named StringView>)
+                            (: (cast "Electronics" <named StringView>) <named StringView>))
+                          (call
+                            qdb_in_list
+                            i_class
+                            (: (cast "wallpaper" <named StringView>) <named StringView>)
+                            (: (cast "parenting" <named StringView>) <named StringView>)
+                            (: (cast "musical" <named StringView>) <named StringView>)))
+                        (&& (call
+                            qdb_in_list
+                            i_category
+                            (: (cast "Shoes" <named StringView>) <named StringView>)
+                            (: (cast "Jewelry" <named StringView>) <named StringView>)
+                            (: (cast "Men" <named StringView>) <named StringView>))
+                          (call
+                            qdb_in_list
+                            i_class
+                            (: (cast "womens" <named StringView>) <named StringView>)
+                            (: (cast "birdal" <named StringView>) <named StringView>)
+                            (: (cast "pants" <named StringView>) <named StringView>))))))
                   (keys i_category i_class i_brand s_store_name s_company_name d_moy)
                   (agg sum_0 sum ss_sales_price))
                 (partition i_category i_brand s_store_name s_company_name)

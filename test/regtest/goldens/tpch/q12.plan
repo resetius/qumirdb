@@ -5,8 +5,11 @@
         (rel filter
           (rel join (rel source "orders") (rel source "lineitem") () (inner))
           (&& (&& (&& (&& (&& (== o_orderkey l_orderkey)
-                    (|| (== l_shipmode (: (cast "TRUCK" <named StringView>) <named StringView>))
-                      (== l_shipmode (: (cast "AIR" <named StringView>) <named StringView>))))
+                    (call
+                      qdb_in_list
+                      l_shipmode
+                      (: (cast "TRUCK" <named StringView>) <named StringView>)
+                      (: (cast "AIR" <named StringView>) <named StringView>)))
                   (< l_commitdate l_receiptdate))
                 (< l_shipdate l_commitdate))
               (>= l_receiptdate (: 8401 i32)))

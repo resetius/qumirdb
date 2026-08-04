@@ -1,8 +1,9 @@
 (rel project
   (rel filter
     (rel source "customer_address")
-    (block
-      (var __qdb_sql_in = (call substr ca_zip 1 5))
-      (|| (== __qdb_sql_in (: (cast "89436" <named StringView>) <named StringView>))
-        (== __qdb_sql_in (: (cast "30868" <named StringView>) <named StringView>)))))
+    (call
+      qdb_in_list
+      (call substr ca_zip 1 5)
+      (: (cast "89436" <named StringView>) <named StringView>)
+      (: (cast "30868" <named StringView>) <named StringView>)))
   (ca_zip ca_zip))

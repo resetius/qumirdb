@@ -37,12 +37,15 @@
               (== cd_marital_status (: (cast "W" <named StringView>) <named StringView>)))
             (== cd_education_status (: (cast "Primary" <named StringView>) <named StringView>)))
           (== d_year 1998))
-        (|| (|| (|| (|| (|| (== s_state (: (cast "TN" <named StringView>) <named StringView>))
-                  (== s_state (: (cast "TN" <named StringView>) <named StringView>)))
-                (== s_state (: (cast "TN" <named StringView>) <named StringView>)))
-              (== s_state (: (cast "TN" <named StringView>) <named StringView>)))
-            (== s_state (: (cast "TN" <named StringView>) <named StringView>)))
-          (== s_state (: (cast "TN" <named StringView>) <named StringView>))))
+        (call
+          qdb_in_list
+          s_state
+          (: (cast "TN" <named StringView>) <named StringView>)
+          (: (cast "TN" <named StringView>) <named StringView>)
+          (: (cast "TN" <named StringView>) <named StringView>)
+          (: (cast "TN" <named StringView>) <named StringView>)
+          (: (cast "TN" <named StringView>) <named StringView>)
+          (: (cast "TN" <named StringView>) <named StringView>)))
     )
     (group-by
       (rollup

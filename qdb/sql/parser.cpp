@@ -374,32 +374,15 @@ NQumir::NAst::TExprPtr BuildInListPredicate(
     NQumir::NAst::TExprPtr lhs,
     const std::vector<NQumir::NAst::TExprPtr>& items)
 {
-    const bool simpleLhs =
-        static_cast<bool>(NQumir::NAst::TMaybeNode<NQumir::NAst::TIdentExpr>(lhs));
-    const std::string tempName = "__qdb_sql_in";
-
-    NQumir::NAst::TExprPtr disjunction = nullptr;
+    std::vector<NQumir::NAst::TExprPtr> args;
+    args.reserve(items.size() + 1);
+    args.push_back(std::move(lhs));
     for (const auto& item : items) {
-        auto left = simpleLhs
-            ? lhs
-            : std::static_pointer_cast<NQumir::NAst::TExpr>(
-                std::make_shared<NQumir::NAst::TIdentExpr>(loc, tempName));
-        auto eq = binary(loc, "=="_op, std::move(left), item);
-        disjunction = disjunction ? binary(loc, "||"_op, std::move(disjunction), eq) : eq;
+        args.push_back(item);
     }
-
-    if (simpleLhs) {
-        return disjunction;
-    }
-
-    auto temp = std::make_shared<NQumir::NAst::TVarStmt>(
-        loc, tempName, NQumir::NAst::TTypePtr{});
-    temp->Init = std::move(lhs);
-    std::vector<NQumir::NAst::TExprPtr> stmts;
-    stmts.reserve(2);
-    stmts.push_back(std::move(temp));
-    stmts.push_back(std::move(disjunction));
-    return std::make_shared<NQumir::NAst::TBlockExpr>(loc, std::move(stmts));
+    // Keep the IN boundary until kernel type expansion. Expanding to OR here loses
+    // the fact that one nullable lhs guard can cover every comparison in the list.
+    return call(loc, "qdb_in_list", std::move(args));
 }
 
 // builds a column reference as a single dotted ident (a.b.c -> "a.b.c"), the
@@ -1262,7 +1245,7 @@ TAstExprTask comparison_expr(TParserContext& ctx) {
             node->Operand = ret;
             ret = node;
         } else {
-            // ret IN (a, b, c) -> ret == a || ret == b || ret == c
+            // Keep scalar IN as a pseudo-call until typed kernel expansion.
             auto block = std::static_pointer_cast<NQumir::NAst::TBlockExpr>(items);
             ret = BuildInListPredicate(loc, std::move(ret), block->Stmts);
         }

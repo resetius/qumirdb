@@ -14,6 +14,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 
 using namespace NQdb::NKernel;
 using namespace NQumir::NAst;
@@ -68,6 +69,15 @@ TTypePtr NullableInner(const TTypePtr& t) {
 bool IsI32(const TTypePtr& t) {
     auto integer = TMaybeType<TIntegerType>(t).Cast();
     return integer && integer->Kind == TIntegerType::I32;
+}
+
+size_t CountOccurrences(std::string_view text, std::string_view needle) {
+    size_t count = 0;
+    for (size_t pos = 0; (pos = text.find(needle, pos)) != std::string_view::npos;
+         pos += needle.size()) {
+        ++count;
+    }
+    return count;
 }
 
 } // namespace
@@ -130,6 +140,31 @@ TEST(ProjectType, NullableBoolMixedOverloadAnnotates) {
 
 TEST(ProjectType, NullableIsNullAnnotates) {
     EXPECT_TRUE(IsBool(AnnotateExprType(Parse("(call qdb_is_null a)"), NullableSchema())));
+}
+
+TEST(ProjectType, InListResultTracksOperandNullability) {
+    auto nullable = AnnotateExprType(
+        Parse("(call qdb_in_list a 1 2 3)"), NullableSchema());
+    ASSERT_TRUE(IsNullable(nullable));
+    EXPECT_TRUE(IsBool(NullableInner(nullable)));
+
+    auto plain = AnnotateExprType(
+        Parse("(call qdb_in_list k 1 2 3)"), Schema());
+    EXPECT_TRUE(IsBool(plain));
+    EXPECT_FALSE(IsNullable(plain));
+}
+
+TEST(ProjectType, InListExpansionUsesOneNullableLhsGuard) {
+    auto [expr, type] = ExpandNullable(
+        Parse("(call qdb_in_list a 1 2 3)"), NullableSchema());
+
+    ASSERT_TRUE(IsNullable(type));
+    EXPECT_TRUE(IsBool(NullableInner(type)));
+    const std::string printed = NQumir::NAst::NCore::PrintAst(expr);
+    EXPECT_EQ(printed.find("qdb_in_list"), std::string::npos);
+    EXPECT_EQ(CountOccurrences(printed, "qdb_sql_null"), 1u);
+    EXPECT_EQ(CountOccurrences(printed, "(field __nx0 Valid)"), 1u);
+    EXPECT_EQ(CountOccurrences(printed, "(||"), 2u);
 }
 
 TEST(ProjectType, DecimalArithmeticAnnotates) {

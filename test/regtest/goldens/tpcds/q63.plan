@@ -17,39 +17,61 @@
                     ()
                     (inner))
                   (&& (&& (&& (&& (== ss_item_sk i_item_sk) (== ss_sold_date_sk d_date_sk)) (== ss_store_sk s_store_sk))
-                      (|| (|| (|| (|| (|| (|| (|| (|| (|| (|| (|| (== d_month_seq 1212) (== d_month_seq (+ 1212 1)))
-                                          (== d_month_seq (+ 1212 2)))
-                                        (== d_month_seq (+ 1212 3)))
-                                      (== d_month_seq (+ 1212 4)))
-                                    (== d_month_seq (+ 1212 5)))
-                                  (== d_month_seq (+ 1212 6)))
-                                (== d_month_seq (+ 1212 7)))
-                              (== d_month_seq (+ 1212 8)))
-                            (== d_month_seq (+ 1212 9)))
-                          (== d_month_seq (+ 1212 10)))
-                        (== d_month_seq (+ 1212 11))))
-                    (|| (&& (&& (|| (|| (== i_category (: (cast "Books" <named StringView>) <named StringView>))
-                              (== i_category (: (cast "Children" <named StringView>) <named StringView>)))
-                            (== i_category (: (cast "Electronics" <named StringView>) <named StringView>)))
-                          (|| (|| (|| (== i_class (: (cast "personal" <named StringView>) <named StringView>))
-                                (== i_class (: (cast "portable" <named StringView>) <named StringView>)))
-                              (== i_class (: (cast "reference" <named StringView>) <named StringView>)))
-                            (== i_class (: (cast "self-help" <named StringView>) <named StringView>))))
-                        (|| (|| (|| (== i_brand (: (cast "scholaramalgamalg #14" <named StringView>) <named StringView>))
-                              (== i_brand (: (cast "scholaramalgamalg #7" <named StringView>) <named StringView>)))
-                            (== i_brand (: (cast "exportiunivamalg #9" <named StringView>) <named StringView>)))
-                          (== i_brand (: (cast "scholaramalgamalg #9" <named StringView>) <named StringView>))))
-                      (&& (&& (|| (|| (== i_category (: (cast "Women" <named StringView>) <named StringView>))
-                              (== i_category (: (cast "Music" <named StringView>) <named StringView>)))
-                            (== i_category (: (cast "Men" <named StringView>) <named StringView>)))
-                          (|| (|| (|| (== i_class (: (cast "accessories" <named StringView>) <named StringView>))
-                                (== i_class (: (cast "classical" <named StringView>) <named StringView>)))
-                              (== i_class (: (cast "fragrances" <named StringView>) <named StringView>)))
-                            (== i_class (: (cast "pants" <named StringView>) <named StringView>))))
-                        (|| (|| (|| (== i_brand (: (cast "amalgimporto #1" <named StringView>) <named StringView>))
-                              (== i_brand (: (cast "edu packscholar #1" <named StringView>) <named StringView>)))
-                            (== i_brand (: (cast "exportiimporto #1" <named StringView>) <named StringView>)))
-                          (== i_brand (: (cast "importoamalg #1" <named StringView>) <named StringView>)))))))
+                      (call
+                        qdb_in_list
+                        d_month_seq
+                        1212
+                        (+ 1212 1)
+                        (+ 1212 2)
+                        (+ 1212 3)
+                        (+ 1212 4)
+                        (+ 1212 5)
+                        (+ 1212 6)
+                        (+ 1212 7)
+                        (+ 1212 8)
+                        (+ 1212 9)
+                        (+ 1212 10)
+                        (+ 1212 11)))
+                    (|| (&& (&& (call
+                            qdb_in_list
+                            i_category
+                            (: (cast "Books" <named StringView>) <named StringView>)
+                            (: (cast "Children" <named StringView>) <named StringView>)
+                            (: (cast "Electronics" <named StringView>) <named StringView>))
+                          (call
+                            qdb_in_list
+                            i_class
+                            (: (cast "personal" <named StringView>) <named StringView>)
+                            (: (cast "portable" <named StringView>) <named StringView>)
+                            (: (cast "reference" <named StringView>) <named StringView>)
+                            (: (cast "self-help" <named StringView>) <named StringView>)))
+                        (call
+                          qdb_in_list
+                          i_brand
+                          (: (cast "scholaramalgamalg #14" <named StringView>) <named StringView>)
+                          (: (cast "scholaramalgamalg #7" <named StringView>) <named StringView>)
+                          (: (cast "exportiunivamalg #9" <named StringView>) <named StringView>)
+                          (: (cast "scholaramalgamalg #9" <named StringView>) <named StringView>)))
+                      (&& (&& (call
+                            qdb_in_list
+                            i_category
+                            (: (cast "Women" <named StringView>) <named StringView>)
+                            (: (cast "Music" <named StringView>) <named StringView>)
+                            (: (cast "Men" <named StringView>) <named StringView>))
+                          (call
+                            qdb_in_list
+                            i_class
+                            (: (cast "accessories" <named StringView>) <named StringView>)
+                            (: (cast "classical" <named StringView>) <named StringView>)
+                            (: (cast "fragrances" <named StringView>) <named StringView>)
+                            (: (cast "pants" <named StringView>) <named StringView>)))
+                        (call
+                          qdb_in_list
+                          i_brand
+                          (: (cast "amalgimporto #1" <named StringView>) <named StringView>)
+                          (: (cast "edu packscholar #1" <named StringView>) <named StringView>)
+                          (: (cast "exportiimporto #1" <named StringView>) <named StringView>)
+                          (: (cast "importoamalg #1" <named StringView>) <named StringView>))))))
                 (keys i_manager_id d_moy)
                 (agg sum_0 sum ss_sales_price))
               (partition i_manager_id)

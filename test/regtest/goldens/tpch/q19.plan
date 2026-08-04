@@ -5,39 +5,57 @@
         (rel join (rel source "lineitem") (rel source "part") () (inner))
         (|| (|| (&& (&& (&& (&& (&& (&& (&& (== p_partkey l_partkey)
                           (== p_brand (: (cast "Brand#35" <named StringView>) <named StringView>)))
-                        (|| (|| (|| (== p_container (: (cast "SM CASE" <named StringView>) <named StringView>))
-                              (== p_container (: (cast "SM BOX" <named StringView>) <named StringView>)))
-                            (== p_container (: (cast "SM PACK" <named StringView>) <named StringView>)))
-                          (== p_container (: (cast "SM PKG" <named StringView>) <named StringView>))))
+                        (call
+                          qdb_in_list
+                          p_container
+                          (: (cast "SM CASE" <named StringView>) <named StringView>)
+                          (: (cast "SM BOX" <named StringView>) <named StringView>)
+                          (: (cast "SM PACK" <named StringView>) <named StringView>)
+                          (: (cast "SM PKG" <named StringView>) <named StringView>)))
                       (>= l_quantity 10))
                     (<= l_quantity (+ 10 10)))
                   (&& (<= 1 p_size) (<= p_size 5)))
-                (|| (== l_shipmode (: (cast "AIR" <named StringView>) <named StringView>))
-                  (== l_shipmode (: (cast "AIR REG" <named StringView>) <named StringView>))))
+                (call
+                  qdb_in_list
+                  l_shipmode
+                  (: (cast "AIR" <named StringView>) <named StringView>)
+                  (: (cast "AIR REG" <named StringView>) <named StringView>)))
               (== l_shipinstruct (: (cast "DELIVER IN PERSON" <named StringView>) <named StringView>)))
             (&& (&& (&& (&& (&& (&& (&& (== p_partkey l_partkey)
                           (== p_brand (: (cast "Brand#34" <named StringView>) <named StringView>)))
-                        (|| (|| (|| (== p_container (: (cast "MED BAG" <named StringView>) <named StringView>))
-                              (== p_container (: (cast "MED BOX" <named StringView>) <named StringView>)))
-                            (== p_container (: (cast "MED PKG" <named StringView>) <named StringView>)))
-                          (== p_container (: (cast "MED PACK" <named StringView>) <named StringView>))))
+                        (call
+                          qdb_in_list
+                          p_container
+                          (: (cast "MED BAG" <named StringView>) <named StringView>)
+                          (: (cast "MED BOX" <named StringView>) <named StringView>)
+                          (: (cast "MED PKG" <named StringView>) <named StringView>)
+                          (: (cast "MED PACK" <named StringView>) <named StringView>)))
                       (>= l_quantity 18))
                     (<= l_quantity (+ 18 10)))
                   (&& (<= 1 p_size) (<= p_size 10)))
-                (|| (== l_shipmode (: (cast "AIR" <named StringView>) <named StringView>))
-                  (== l_shipmode (: (cast "AIR REG" <named StringView>) <named StringView>))))
+                (call
+                  qdb_in_list
+                  l_shipmode
+                  (: (cast "AIR" <named StringView>) <named StringView>)
+                  (: (cast "AIR REG" <named StringView>) <named StringView>)))
               (== l_shipinstruct (: (cast "DELIVER IN PERSON" <named StringView>) <named StringView>))))
           (&& (&& (&& (&& (&& (&& (&& (== p_partkey l_partkey)
                         (== p_brand (: (cast "Brand#23" <named StringView>) <named StringView>)))
-                      (|| (|| (|| (== p_container (: (cast "LG CASE" <named StringView>) <named StringView>))
-                            (== p_container (: (cast "LG BOX" <named StringView>) <named StringView>)))
-                          (== p_container (: (cast "LG PACK" <named StringView>) <named StringView>)))
-                        (== p_container (: (cast "LG PKG" <named StringView>) <named StringView>))))
+                      (call
+                        qdb_in_list
+                        p_container
+                        (: (cast "LG CASE" <named StringView>) <named StringView>)
+                        (: (cast "LG BOX" <named StringView>) <named StringView>)
+                        (: (cast "LG PACK" <named StringView>) <named StringView>)
+                        (: (cast "LG PKG" <named StringView>) <named StringView>)))
                     (>= l_quantity 24))
                   (<= l_quantity (+ 24 10)))
                 (&& (<= 1 p_size) (<= p_size 15)))
-              (|| (== l_shipmode (: (cast "AIR" <named StringView>) <named StringView>))
-                (== l_shipmode (: (cast "AIR REG" <named StringView>) <named StringView>))))
+              (call
+                qdb_in_list
+                l_shipmode
+                (: (cast "AIR" <named StringView>) <named StringView>)
+                (: (cast "AIR REG" <named StringView>) <named StringView>)))
             (== l_shipinstruct (: (cast "DELIVER IN PERSON" <named StringView>) <named StringView>)))))
       (arg_0 (* l_extendedprice (- 1 l_discount)))
       (__group__ 1))

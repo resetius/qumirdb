@@ -29,9 +29,12 @@
                   (table item)
                 )
                 (where
-                  (|| (|| (== i_color (: (cast "orchid" <named StringView>) <named StringView>))
-                      (== i_color (: (cast "chiffon" <named StringView>) <named StringView>)))
-                    (== i_color (: (cast "lace" <named StringView>) <named StringView>)))
+                  (call
+                    qdb_in_list
+                    i_color
+                    (: (cast "orchid" <named StringView>) <named StringView>)
+                    (: (cast "chiffon" <named StringView>) <named StringView>)
+                    (: (cast "lace" <named StringView>) <named StringView>))
                 )
               )
             )
@@ -78,9 +81,12 @@
                   (table item)
                 )
                 (where
-                  (|| (|| (== i_color (: (cast "orchid" <named StringView>) <named StringView>))
-                      (== i_color (: (cast "chiffon" <named StringView>) <named StringView>)))
-                    (== i_color (: (cast "lace" <named StringView>) <named StringView>)))
+                  (call
+                    qdb_in_list
+                    i_color
+                    (: (cast "orchid" <named StringView>) <named StringView>)
+                    (: (cast "chiffon" <named StringView>) <named StringView>)
+                    (: (cast "lace" <named StringView>) <named StringView>))
                 )
               )
             )
@@ -127,9 +133,12 @@
                   (table item)
                 )
                 (where
-                  (|| (|| (== i_color (: (cast "orchid" <named StringView>) <named StringView>))
-                      (== i_color (: (cast "chiffon" <named StringView>) <named StringView>)))
-                    (== i_color (: (cast "lace" <named StringView>) <named StringView>)))
+                  (call
+                    qdb_in_list
+                    i_color
+                    (: (cast "orchid" <named StringView>) <named StringView>)
+                    (: (cast "chiffon" <named StringView>) <named StringView>)
+                    (: (cast "lace" <named StringView>) <named StringView>))
                 )
               )
             )

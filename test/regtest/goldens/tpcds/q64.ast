@@ -131,12 +131,15 @@
                         (== |hd1.hd_income_band_sk| |ib1.ib_income_band_sk|))
                       (== |hd2.hd_income_band_sk| |ib2.ib_income_band_sk|))
                     (!= |cd1.cd_marital_status| |cd2.cd_marital_status|))
-                  (|| (|| (|| (|| (|| (== i_color (: (cast "maroon" <named StringView>) <named StringView>))
-                            (== i_color (: (cast "burnished" <named StringView>) <named StringView>)))
-                          (== i_color (: (cast "dim" <named StringView>) <named StringView>)))
-                        (== i_color (: (cast "steel" <named StringView>) <named StringView>)))
-                      (== i_color (: (cast "navajo" <named StringView>) <named StringView>)))
-                    (== i_color (: (cast "chocolate" <named StringView>) <named StringView>))))
+                  (call
+                    qdb_in_list
+                    i_color
+                    (: (cast "maroon" <named StringView>) <named StringView>)
+                    (: (cast "burnished" <named StringView>) <named StringView>)
+                    (: (cast "dim" <named StringView>) <named StringView>)
+                    (: (cast "steel" <named StringView>) <named StringView>)
+                    (: (cast "navajo" <named StringView>) <named StringView>)
+                    (: (cast "chocolate" <named StringView>) <named StringView>)))
                 (&& (<= 35 i_current_price) (<= i_current_price (+ 35 10))))
               (&& (<= (+ 35 1) i_current_price) (<= i_current_price (+ 35 15))))
           )

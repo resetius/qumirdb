@@ -186,6 +186,33 @@ TEST(FilterKernel, AppliesSqlThreeValuedLogicToNullableColumns) {
         (std::array<uint8_t, 6>{0xff, 0, 0, 0, 0, 0xff}));
 }
 
+TEST(FilterKernel, InListHoistsNullableLhsGuard) {
+    EXPECT_EQ(RunNullableIntegerFilter(
+        "(call qdb_in_list left 1 92)"),
+        (std::array<uint8_t, 6>{0, 0xff, 0, 0, 0xff, 0}));
+    EXPECT_EQ(RunNullableIntegerFilter(
+        "(! (call qdb_in_list left 1 92))"),
+        (std::array<uint8_t, 6>{0xff, 0, 0, 0, 0, 0xff}));
+}
+
+TEST(FilterKernel, InListPreservesNullableItemSemantics) {
+    EXPECT_EQ(RunNullableIntegerFilter(
+        "(call qdb_in_list left (+ right 1))"),
+        (std::array<uint8_t, 6>{0, 0, 0, 0, 0, 0}));
+    EXPECT_EQ(RunNullableIntegerFilter(
+        "(! (call qdb_in_list left (+ right 1)))"),
+        (std::array<uint8_t, 6>{0, 0, 0, 0, 0xff, 0xff}));
+}
+
+TEST(FilterKernel, InListPreservesBareNullItemSemantics) {
+    EXPECT_EQ(RunNullableIntegerFilter(
+        "(call qdb_in_list left 1 (call qdb_sql_null))"),
+        (std::array<uint8_t, 6>{0, 0xff, 0, 0, 0xff, 0}));
+    EXPECT_EQ(RunNullableIntegerFilter(
+        "(! (call qdb_in_list left 1 (call qdb_sql_null)))"),
+        (std::array<uint8_t, 6>{0, 0, 0, 0, 0, 0}));
+}
+
 TEST(FilterKernel, CompilesFromKernelSpec) {
     std::array<int64_t, 4> values = {0, 1, 2, 3};
     std::array<TColumn, 1> columns = {

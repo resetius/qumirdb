@@ -39,14 +39,17 @@
     (where
       (&& (&& (&& (&& (== |d1.d_year| 2000) (== |d1.d_date_sk| ss_sold_date_sk)) (== i_item_sk ss_item_sk))
           (== s_store_sk ss_store_sk))
-        (|| (|| (|| (|| (|| (|| (|| (== s_state (: (cast "TN" <named StringView>) <named StringView>))
-                      (== s_state (: (cast "TN" <named StringView>) <named StringView>)))
-                    (== s_state (: (cast "TN" <named StringView>) <named StringView>)))
-                  (== s_state (: (cast "TN" <named StringView>) <named StringView>)))
-                (== s_state (: (cast "TN" <named StringView>) <named StringView>)))
-              (== s_state (: (cast "TN" <named StringView>) <named StringView>)))
-            (== s_state (: (cast "TN" <named StringView>) <named StringView>)))
-          (== s_state (: (cast "TN" <named StringView>) <named StringView>))))
+        (call
+          qdb_in_list
+          s_state
+          (: (cast "TN" <named StringView>) <named StringView>)
+          (: (cast "TN" <named StringView>) <named StringView>)
+          (: (cast "TN" <named StringView>) <named StringView>)
+          (: (cast "TN" <named StringView>) <named StringView>)
+          (: (cast "TN" <named StringView>) <named StringView>)
+          (: (cast "TN" <named StringView>) <named StringView>)
+          (: (cast "TN" <named StringView>) <named StringView>)
+          (: (cast "TN" <named StringView>) <named StringView>)))
     )
     (group-by
       (rollup

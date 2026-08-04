@@ -14,7 +14,9 @@
               ()
               (inner))
             (rel project
-              (rel filter (rel source "item") (== i_category (: (cast "Books" <named StringView>) <named StringView>)))
+              (rel filter
+                (rel source "item")
+                (call qdb_in_list i_category (: (cast "Books" <named StringView>) <named StringView>)))
               (__qdb_in__i_manufact_id i_manufact_id))
             ()
             (left_semi)
@@ -41,7 +43,9 @@
               ()
               (inner))
             (rel project
-              (rel filter (rel source "item") (== i_category (: (cast "Books" <named StringView>) <named StringView>)))
+              (rel filter
+                (rel source "item")
+                (call qdb_in_list i_category (: (cast "Books" <named StringView>) <named StringView>)))
               (__qdb_in__i_manufact_id i_manufact_id))
             ()
             (left_semi)
@@ -68,7 +72,9 @@
               ()
               (inner))
             (rel project
-              (rel filter (rel source "item") (== i_category (: (cast "Books" <named StringView>) <named StringView>)))
+              (rel filter
+                (rel source "item")
+                (call qdb_in_list i_category (: (cast "Books" <named StringView>) <named StringView>)))
               (__qdb_in__i_manufact_id i_manufact_id))
             ()
             (left_semi)

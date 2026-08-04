@@ -52,19 +52,28 @@
                     (== |cd1.cd_education_status| |cd2.cd_education_status|))
                   (&& (<= 150 ws_sales_price) (<= ws_sales_price 200)))))
             (|| (|| (&& (&& (== ca_country (: (cast "United States" <named StringView>) <named StringView>))
-                    (|| (|| (== ca_state (: (cast "KY" <named StringView>) <named StringView>))
-                        (== ca_state (: (cast "GA" <named StringView>) <named StringView>)))
-                      (== ca_state (: (cast "NM" <named StringView>) <named StringView>))))
+                    (call
+                      qdb_in_list
+                      ca_state
+                      (: (cast "KY" <named StringView>) <named StringView>)
+                      (: (cast "GA" <named StringView>) <named StringView>)
+                      (: (cast "NM" <named StringView>) <named StringView>)))
                   (&& (<= 100 ws_net_profit) (<= ws_net_profit 200)))
                 (&& (&& (== ca_country (: (cast "United States" <named StringView>) <named StringView>))
-                    (|| (|| (== ca_state (: (cast "MT" <named StringView>) <named StringView>))
-                        (== ca_state (: (cast "OR" <named StringView>) <named StringView>)))
-                      (== ca_state (: (cast "IN" <named StringView>) <named StringView>))))
+                    (call
+                      qdb_in_list
+                      ca_state
+                      (: (cast "MT" <named StringView>) <named StringView>)
+                      (: (cast "OR" <named StringView>) <named StringView>)
+                      (: (cast "IN" <named StringView>) <named StringView>)))
                   (&& (<= 150 ws_net_profit) (<= ws_net_profit 300))))
               (&& (&& (== ca_country (: (cast "United States" <named StringView>) <named StringView>))
-                  (|| (|| (== ca_state (: (cast "WI" <named StringView>) <named StringView>))
-                      (== ca_state (: (cast "MO" <named StringView>) <named StringView>)))
-                    (== ca_state (: (cast "WV" <named StringView>) <named StringView>))))
+                  (call
+                    qdb_in_list
+                    ca_state
+                    (: (cast "WI" <named StringView>) <named StringView>)
+                    (: (cast "MO" <named StringView>) <named StringView>)
+                    (: (cast "WV" <named StringView>) <named StringView>)))
                 (&& (<= 50 ws_net_profit) (<= ws_net_profit 250))))))
         (keys r_reason_desc)
         (agg sum_0 sum ws_quantity)
