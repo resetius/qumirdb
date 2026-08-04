@@ -2437,17 +2437,22 @@ struct TExecGraphBuilder {
                     static_cast<NQumir::NAst::TStructType*>(right.OutputType.get());
                 auto* outStruct =
                     static_cast<NQumir::NAst::TStructType*>(outputType->get());
-                llvm::json::Array keys;
                 std::vector<std::pair<std::string, std::string>> keyPairs;
                 for (const auto& key : join.Cast()->Keys()) {
                     keyPairs.emplace_back(key.Left, key.Right);
-                    keys.push_back(llvm::json::Object{
-                        {"left", BareColumnName(key.Left)},
-                        {"right", BareColumnName(key.Right)},
-                    });
                 }
                 const auto keyDesc =
                     NKernel::BuildJoinKeyDescriptor(*leftStruct, *rightStruct, keyPairs);
+                llvm::json::Array keys;
+                for (size_t i = 0; i < join.Cast()->Keys().size(); ++i) {
+                    const auto& key = join.Cast()->Keys()[i];
+                    keys.push_back(llvm::json::Object{
+                        {"left", BareColumnName(key.Left)},
+                        {"right", BareColumnName(key.Right)},
+                        {"leftIndex", keyDesc.Fields[i].LeftColumnIndex},
+                        {"rightIndex", keyDesc.Fields[i].RightColumnIndex},
+                    });
+                }
                 const int64_t id = AddNode(llvm::json::Object{
                     {"kind", "join"},
                     {"label", JoinPlanLabel(*join.Cast())},

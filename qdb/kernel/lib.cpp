@@ -85,6 +85,9 @@ BuildJoinLibraryBase() {
     if (auto e = AddParsedKernel(library, ReadJoinKernel("join_table.oz"))) {
         return std::unexpected(*e);
     }
+    if (auto e = AddParsedKernel(library, ReadJoinKernel("materialize.oz"))) {
+        return std::unexpected(*e);
+    }
     return library;
 }
 

@@ -52,6 +52,7 @@
     (Data <ptr i64>)>)
 
   (fun bitoff ((var bitmap <ptr u8>) (var index i64) (var bit_offset i64)) -> bool
+    (attrs cacheable)
     (block
       (var bit_index = (+ index bit_offset))
       (var byte_index = (>> bit_index (: 3 i64)))

@@ -87,7 +87,7 @@ std::unordered_map<std::string, void*> CompileKernelAst(
 namespace {
 constexpr const char* CacheSchemaVersion = "v1";
 // Bump when the generated key helpers or the .oz kernel libraries change.
-constexpr const char* KernelLibVersion = "1";
+constexpr const char* KernelLibVersion = "2";
 } // namespace
 
 NQumir::NCodeGen::TLlvmRunner::TLinkedModule CompileKernelAstCached(
@@ -2029,19 +2029,11 @@ TJoinHashKernels TKernelCompiler::CompileJoinHash(
             program.push_back(std::move(f));
         }
         program.push_back(NKernel::GenJoinHashBatchAst(
-            keyDesc,
-            /*isLeft=*/true,
-            "jt_hash_left",
-            columnType,
-            rowSetType,
-            stringViewType));
-        program.push_back(NKernel::GenJoinHashBatchAst(
-            keyDesc,
-            /*isLeft=*/false,
-            "jt_hash_right",
-            columnType,
-            rowSetType,
-            stringViewType));
+            keyDesc, "jt_hash_batch", columnType, rowSetType, stringViewType));
+        program.push_back(NKernel::GenJoinHashEntrypointAst(
+            keyDesc, "jt_hash_left", rowSetType));
+        program.push_back(NKernel::GenJoinHashEntrypointAst(
+            keyDesc, "jt_hash_right", rowSetType));
         return program;
     };
 
@@ -2052,13 +2044,26 @@ TJoinHashKernels TKernelCompiler::CompileJoinHash(
         "join_hash", {"jt_hash_left", "jt_hash_right"}, std::move(program));
     FinishKernelDiagnostics(Diagnostics_);
 
-    using THashFn = bool(*)(TRowSet*, uint64_t*);
+    auto leftKeyColumns = std::make_shared<std::vector<int64_t>>();
+    auto rightKeyColumns = std::make_shared<std::vector<int64_t>>();
+    leftKeyColumns->reserve(keyDesc.Fields.size());
+    rightKeyColumns->reserve(keyDesc.Fields.size());
+    for (const auto& field : keyDesc.Fields) {
+        leftKeyColumns->push_back(field.LeftColumnIndex);
+        rightKeyColumns->push_back(field.RightColumnIndex);
+    }
+
+    using THashFn = bool(*)(TRowSet*, uint64_t*, const int64_t*);
     return {
-        .Left = [slot = kernel.Slot](TRowSet* batch, uint64_t* hashes) {
-            return reinterpret_cast<THashFn>(slot->Fns[0])(batch, hashes);
+        .Left = [slot = kernel.Slot, keyColumns = std::move(leftKeyColumns)](
+                    TRowSet* batch, uint64_t* hashes) {
+            return reinterpret_cast<THashFn>(slot->Fns[0])(
+                batch, hashes, keyColumns->data());
         },
-        .Right = [slot = kernel.Slot](TRowSet* batch, uint64_t* hashes) {
-            return reinterpret_cast<THashFn>(slot->Fns[1])(batch, hashes);
+        .Right = [slot = kernel.Slot, keyColumns = std::move(rightKeyColumns)](
+                     TRowSet* batch, uint64_t* hashes) {
+            return reinterpret_cast<THashFn>(slot->Fns[1])(
+                batch, hashes, keyColumns->data());
         },
     };
 }
@@ -2087,6 +2092,14 @@ TJoinKernels TKernelCompiler::CompileJoin(
     // incompatible types / missing columns.
     const auto keyDesc = NKernel::BuildJoinKeyDescriptor(leftType, rightType, keys);
     const int64_t keySize = static_cast<int64_t>(keyDesc.Size);
+    auto leftKeyColumns = std::make_shared<std::vector<int64_t>>();
+    auto rightKeyColumns = std::make_shared<std::vector<int64_t>>();
+    leftKeyColumns->reserve(keyDesc.Fields.size());
+    rightKeyColumns->reserve(keyDesc.Fields.size());
+    for (const auto& field : keyDesc.Fields) {
+        leftKeyColumns->push_back(field.LeftColumnIndex);
+        rightKeyColumns->push_back(field.RightColumnIndex);
+    }
 
     auto columnType = QumirDbNamedType("TColumn");
     auto rowSetType = QumirDbNamedType("TRowSet");
@@ -2210,12 +2223,15 @@ TJoinKernels TKernelCompiler::CompileJoin(
 
     auto slot = kernel.Slot;
     using TDispatchFn = bool(*)(
-        void*, void*, TRowSet*, int64_t, void*, TRowSet*, TRowSet*, int64_t, int64_t);
+        void*, void*, TRowSet*, int64_t, void*, TRowSet*, TRowSet*,
+        const int64_t*, const int64_t*, int64_t, int64_t);
     using TMaterializeFn = int64_t(*)(
         void*, TRowSet*, TRowSet*, TRowSet*, TRowSet*, int64_t, int64_t, TRowSet*);
 
     TJoinKernels kernels;
-    kernels.Dispatch = [slot](
+    kernels.Dispatch = [slot,
+                        leftKeyColumns = std::move(leftKeyColumns),
+                        rightKeyColumns = std::move(rightKeyColumns)](
         void* left,
         void* right,
         TRowSet* batch,
@@ -2226,7 +2242,8 @@ TJoinKernels TKernelCompiler::CompileJoin(
         int64_t arg,
         int64_t op) {
         return reinterpret_cast<TDispatchFn>(slot->Fns[0])(
-            left, right, batch, batchIdx, pairs, leftStore, rightStore, arg, op);
+            left, right, batch, batchIdx, pairs, leftStore, rightStore,
+            leftKeyColumns->data(), rightKeyColumns->data(), arg, op);
     };
     kernels.Materialize = [slot](
         void* pairs,
