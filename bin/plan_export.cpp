@@ -24,6 +24,7 @@
 #include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
 #include <qdb/kernel/compiler.h>
+#include <qdb/kernel/finalize_fused.h>
 #include <qdb/kernel/join_key.h>
 #include <qdb/kernel/annotate_type.h>
 #include <qdb/scheduler/plan_lowerer.h>
@@ -47,7 +48,9 @@
 #include <qumir/semantics/transform/transform.h>
 
 #include <llvm/Support/Base64.h>
+#include <llvm/Support/Error.h>
 #include <llvm/Support/JSON.h>
+#include <llvm/Object/Wasm.h>
 #include <llvm/Support/raw_ostream.h>
 
 #include <algorithm>
@@ -79,7 +82,6 @@ using namespace NQdb;
 
 constexpr int64_t WasmPageSize = 65536;
 constexpr int64_t WasmSlot0 = 1 << 20;
-constexpr int64_t WasmSlotSize = 1 << 20;
 constexpr int64_t WasmStackSize = 262144;
 constexpr int64_t WasmInitialSlackPages = 256;
 
@@ -283,6 +285,13 @@ struct TKernelArtifacts {
     std::string Ir;
     std::string Llvm;
     std::string Wasm;
+    std::unordered_map<std::string, std::string> Entrypoints;
+};
+
+struct TWasmFinalizeResult {
+    std::vector<TKernelArtifacts> Kernels;
+    std::string QueryWasm;
+    int64_t HeapBase = 0;
 };
 
 class TArtifactStore {
@@ -474,11 +483,63 @@ std::expected<std::monostate, std::string> RunWasmLd(
     return std::monostate{};
 }
 
+std::expected<int64_t, std::string> ExtractWasmHeapBase(const std::string& wasm) {
+    llvm::Error parseError = llvm::Error::success();
+    llvm::object::WasmObjectFile object(
+        llvm::MemoryBufferRef(
+            llvm::StringRef(wasm.data(), wasm.size()), "qdb-fused.wasm"),
+        parseError);
+    if (parseError) {
+        return std::unexpected(llvm::toString(std::move(parseError)));
+    }
+
+    uint32_t heapBaseGlobalIndex = 0;
+    bool foundExport = false;
+    for (const auto& exportEntry : object.exports()) {
+        if (exportEntry.Name != "__heap_base") {
+            continue;
+        }
+        if (exportEntry.Kind != llvm::wasm::WASM_EXTERNAL_GLOBAL) {
+            return std::unexpected("__heap_base is not a wasm global export");
+        }
+        heapBaseGlobalIndex = exportEntry.Index;
+        foundExport = true;
+        break;
+    }
+    if (!foundExport) {
+        return std::unexpected("linked wasm does not export __heap_base");
+    }
+
+    for (const auto& global : object.globals()) {
+        if (global.Index != heapBaseGlobalIndex) {
+            continue;
+        }
+        if (global.InitExpr.Extended) {
+            return std::unexpected("__heap_base uses an unsupported init expr");
+        }
+        switch (global.InitExpr.Inst.Opcode) {
+            case llvm::wasm::WASM_OPCODE_I32_CONST:
+                return static_cast<int64_t>(global.InitExpr.Inst.Value.Int32);
+            case llvm::wasm::WASM_OPCODE_I64_CONST:
+                return global.InitExpr.Inst.Value.Int64;
+            default:
+                return std::unexpected("__heap_base is not a constant global");
+        }
+    }
+
+    return std::unexpected("__heap_base global definition was not found");
+}
+
+struct TCompiledWasmModule {
+    std::string Bytes;
+    int64_t HeapBase = 0;
+};
+
 // Compiles a kernel AST to WASM through the same path as the native JIT
 // (NQdb::CompileKernelAstToObject), only swapping the codegen target. The target
 // is wasm64 (8-byte pointers): the kernel/runtime layout assumes 8-byte pointers
 // and wasm32 miscompiles it. See docs/issues/browser-wasm64-layout.md.
-std::expected<std::string, std::string> CompileKernelAstToWasm(
+std::expected<TCompiledWasmModule, std::string> CompileKernelAstToWasm(
     NQumir::NAst::TExprPtr ast,
     int64_t globalBase)
 {
@@ -520,7 +581,14 @@ std::expected<std::string, std::string> CompileKernelAstToWasm(
     if (wasm.empty()) {
         return std::unexpected("empty wasm output");
     }
-    return wasm;
+    auto heapBase = ExtractWasmHeapBase(wasm);
+    if (!heapBase) {
+        return std::unexpected(heapBase.error());
+    }
+    return TCompiledWasmModule{
+        .Bytes = std::move(wasm),
+        .HeapBase = *heapBase,
+    };
 }
 
 NQumir::NAst::TTypePtr ParseType(std::string_view typeName) {
@@ -1494,16 +1562,16 @@ std::string AstText(const NQumir::NAst::TExprPtr& ast) {
 }
 
 // Register every lowered kernel's AST as an artifact and (in embed mode)
-// compile it to wasm. Failures land in `diagnostics` per kernel; the bundle
-// still forms.
-std::vector<TKernelArtifacts> WasmFinalizeKernels(
-    std::span<const NQdb::TGeneratedKernel> kernels,
+// compile one fused query-level wasm module. Failures land in `diagnostics`;
+// the bundle still forms, but exec will be marked unsupported for wasm stages.
+TWasmFinalizeResult WasmFinalizeKernels(
+    std::span<NQdb::TGeneratedKernel> kernels,
     TArtifactStore& artifacts,
     llvm::json::Array& diagnostics,
     bool embedWasm)
 {
-    std::vector<TKernelArtifacts> out;
-    out.reserve(kernels.size());
+    TWasmFinalizeResult out;
+    out.Kernels.reserve(kernels.size());
     for (size_t i = 0; i < kernels.size(); ++i) {
         const auto& kernel = kernels[i];
         TKernelArtifacts item{
@@ -1511,30 +1579,61 @@ std::vector<TKernelArtifacts> WasmFinalizeKernels(
             .Name = kernel.Name,
         };
         if (!kernel.ExportArtifacts) {
-            out.push_back(std::move(item));
+            out.Kernels.push_back(std::move(item));
             continue;
         }
         item.Ast = artifacts.Add(
             "ast", AstText(kernel.Ast), item.Name, item.Stage);
-        if (embedWasm) {
-            // One generated kernel artifact owns one static slot. Reusing the
-            // same artifact from multiple graph nodes is safe in the browser's
-            // single-threaded scheduler: literals are immutable and wasm stack
-            // use is not concurrent.
-            const int64_t globalBase =
-                WasmSlot0 + static_cast<int64_t>(i) * WasmSlotSize;
-            auto wasm = CompileKernelAstToWasm(kernel.Ast, globalBase);
-            if (wasm) {
-                item.Wasm = artifacts.AddBinary(
-                    "wasm", std::move(*wasm), item.Name, item.Stage);
-            } else {
-                diagnostics.push_back(llvm::json::Object{
-                    {"stage", item.Stage},
-                    {"message", wasm.error()},
-                });
-            }
+        out.Kernels.push_back(std::move(item));
+    }
+
+    if (!embedWasm || kernels.empty()) {
+        return out;
+    }
+
+    std::vector<NQdb::TGeneratedKernel*> unique;
+    std::vector<std::pair<size_t, size_t>> bindings;
+    std::unordered_map<std::string, size_t> uniqueByKey;
+    unique.reserve(kernels.size());
+    bindings.reserve(kernels.size());
+    for (size_t i = 0; i < kernels.size(); ++i) {
+        if (!kernels[i].ExportArtifacts) {
+            continue;
         }
-        out.push_back(std::move(item));
+        auto key = NQdb::MakeKernelDedupKey(kernels[i]);
+        auto [it, inserted] = uniqueByKey.emplace(std::move(key), unique.size());
+        if (inserted) {
+            unique.push_back(&kernels[i]);
+        }
+        bindings.emplace_back(i, it->second);
+    }
+    if (unique.empty()) {
+        return out;
+    }
+
+    auto fused = NQdb::BuildFusedProgram(unique);
+    auto wasm = CompileKernelAstToWasm(fused.Program, WasmSlot0);
+    if (!wasm) {
+        diagnostics.push_back(llvm::json::Object{
+            {"stage", "wasm-fusion"},
+            {"message", wasm.error()},
+        });
+        return out;
+    }
+
+    out.HeapBase = wasm->HeapBase;
+    out.QueryWasm = artifacts.AddBinary(
+        "wasm", std::move(wasm->Bytes), "query.fused", "query");
+
+    for (const auto& [kernelIndex, uniqueIndex] : bindings) {
+        const auto& originalEntrypoints = kernels[kernelIndex].Entrypoints;
+        const auto& fusedEntrypoints = fused.UniqueEntrypoints[uniqueIndex];
+        auto& exported = out.Kernels[kernelIndex].Entrypoints;
+        for (size_t i = 0; i < originalEntrypoints.size(); ++i) {
+            exported[originalEntrypoints[i]] = i < fusedEntrypoints.size()
+                ? fusedEntrypoints[i]
+                : originalEntrypoints[i];
+        }
     }
     return out;
 }
@@ -1613,9 +1712,10 @@ size_t ExecProjectWidth(const NQumir::NAst::TTypePtr& outType) {
 // kernels): qumir models pointers as 8 bytes on every target, so these offsets
 // also match the native 64-bit layout. See PLAN_BROWSER_EXECUTION.md and
 // docs/issues/qumir_pointer_width_and_pointer_cast.md.
-llvm::json::Object ExecLayoutJson(size_t kernelCount) {
-    const int64_t heapBase =
-        WasmSlot0 + static_cast<int64_t>(kernelCount) * WasmSlotSize;
+llvm::json::Object ExecLayoutJson(int64_t heapBase) {
+    if (heapBase <= 0) {
+        heapBase = WasmSlot0;
+    }
     const int64_t initialPages =
         (heapBase + WasmPageSize - 1) / WasmPageSize + WasmInitialSlackPages;
     llvm::json::Object layout{
@@ -1658,10 +1758,9 @@ llvm::json::Object ExecLayoutJson(size_t kernelCount) {
     layout["sharedMemory"] = llvm::json::Object{
         {"heapBase", heapBase},
         {"initialPages", initialPages},
-        {"slot0", WasmSlot0},
-        {"slotSize", WasmSlotSize},
+        {"globalBase", WasmSlot0},
         {"stackSize", WasmStackSize},
-        {"kernelCount", static_cast<int64_t>(kernelCount)},
+        {"kernelCount", 1},
     };
     return layout;
 }
@@ -1785,6 +1884,47 @@ const TKernelRef* FindKernel(
     return nullptr;
 }
 
+bool HasEntrypoint(const TKernelRef& ref, std::string_view name) {
+    return ref.Artifacts &&
+        ref.Artifacts->Entrypoints.contains(std::string(name));
+}
+
+bool HasEntrypointAt(const TKernelRef& ref, size_t index) {
+    if (!ref.Kernel || !ref.Artifacts || index >= ref.Kernel->Entrypoints.size()) {
+        return false;
+    }
+    return ref.Artifacts->Entrypoints.contains(ref.Kernel->Entrypoints[index]);
+}
+
+llvm::json::Object EntrypointsJson(
+    const TKernelRef& ref,
+    std::vector<std::pair<std::string, size_t>> aliases = {})
+{
+    llvm::json::Object out;
+    if (!ref.Artifacts) {
+        return out;
+    }
+    std::vector<std::string> names;
+    names.reserve(ref.Artifacts->Entrypoints.size());
+    for (const auto& [name, _] : ref.Artifacts->Entrypoints) {
+        names.push_back(name);
+    }
+    std::ranges::sort(names);
+    for (const auto& name : names) {
+        out[name] = ref.Artifacts->Entrypoints.at(name);
+    }
+    for (const auto& [alias, index] : aliases) {
+        if (!ref.Kernel || index >= ref.Kernel->Entrypoints.size()) {
+            continue;
+        }
+        auto it = ref.Artifacts->Entrypoints.find(ref.Kernel->Entrypoints[index]);
+        if (it != ref.Artifacts->Entrypoints.end()) {
+            out[alias] = it->second;
+        }
+    }
+    return out;
+}
+
 // Builds a sort stage body from the operator's lowered wasm kernel. Browser
 // sort/top-sort stages do not have a JS comparison fallback; an unavailable
 // kernel is a plan/export error.
@@ -1830,7 +1970,7 @@ std::optional<llvm::json::Object> BuildSortStageJson(
         error = std::string(stageName) + " kernel was not generated";
         return std::nullopt;
     }
-    if (wasmKernel->Artifacts->Wasm.empty()) {
+    if (!HasEntrypoint(*wasmKernel, topSort ? "qdb_top_sort_update" : "qdb_sort_run")) {
         error = std::string(stageName) + " kernel failed to compile to wasm";
         return std::nullopt;
     }
@@ -1851,7 +1991,7 @@ std::optional<llvm::json::Object> BuildSortStageJson(
         });
     }
     llvm::json::Object stage{
-        {"wasm", wasmKernel->Artifacts->Wasm},
+        {"entrypoints", EntrypointsJson(*wasmKernel)},
         {"sortKeys", SortKeysJson(sortKeys)},
         {"radixKeys", std::move(keys)},
         {"radixNullable", anyNullableKey},
@@ -1877,7 +2017,7 @@ std::optional<llvm::json::Object> BuildWindowStageJson(
         error = "window kernel was not generated";
         return std::nullopt;
     }
-    if (wasmKernel->Artifacts->Wasm.empty()) {
+    if (!HasEntrypoint(*wasmKernel, "qdb_window_run")) {
         error = "window kernel failed to compile to wasm";
         return std::nullopt;
     }
@@ -1912,7 +2052,7 @@ std::optional<llvm::json::Object> BuildWindowStageJson(
     }
 
     return llvm::json::Object{
-        {"wasm", wasmKernel->Artifacts->Wasm},
+        {"entrypoints", EntrypointsJson(*wasmKernel)},
         {"partitionKeys", StringArray(window.PartitionKeys())},
         {"sortKeys", SortKeysJson(sortKeys)},
         {"radixKeys", std::move(keys)},
@@ -2026,14 +2166,14 @@ struct TExecGraphBuilder {
             Unsupported = UnsupportedExec("cross join kernel was not generated");
             return {};
         }
-        if (EmbedWasm && crossKernel->Artifacts->Wasm.empty()) {
+        if (EmbedWasm && !HasEntrypoint(*crossKernel, "xj_dispatch")) {
             Unsupported = UnsupportedExec("cross join kernel failed to compile to wasm");
             return {};
         }
         const int64_t crossId = AddNode(llvm::json::Object{
             {"kind", "cross-join"},
             {"label", JoinPlanLabel(join)},
-            {"wasm", crossKernel->Artifacts->Wasm},
+            {"entrypoints", EntrypointsJson(*crossKernel)},
             {"leftColumns", StructColumnsJson(*leftStruct)},
             {"rightColumns", StructColumnsJson(*rightStruct)},
             {"output", StructColumnsJson(*outStruct)},
@@ -2049,7 +2189,7 @@ struct TExecGraphBuilder {
                 "cross join residual kernel was not generated");
             return {};
         }
-        if (EmbedWasm && ref->Artifacts->Wasm.empty()) {
+        if (EmbedWasm && !HasEntrypointAt(*ref, 0)) {
             Unsupported = UnsupportedExec(
                 "cross join residual kernel failed to compile to wasm");
             return {};
@@ -2058,7 +2198,7 @@ struct TExecGraphBuilder {
             {"kind", "filter"},
             {"label", "filter " + SafeExprLine(join.Filter())},
             {"predicate", SafeExprLine(join.Filter())},
-            {"wasm", ref->Artifacts->Wasm},
+            {"entrypoints", EntrypointsJson(*ref, {{"filter", 0}})},
         });
         AddEdge(crossId, filterId, 0);
         return {.NodeId = filterId, .OutputType = *outputType};
@@ -2105,7 +2245,7 @@ struct TExecGraphBuilder {
                     Unsupported = UnsupportedExec("filter kernel was not generated");
                     return {};
                 }
-                if (EmbedWasm && ref->Artifacts->Wasm.empty()) {
+                if (EmbedWasm && !HasEntrypointAt(*ref, 0)) {
                     Unsupported = UnsupportedExec("filter kernel failed to compile to wasm");
                     return {};
                 }
@@ -2113,7 +2253,7 @@ struct TExecGraphBuilder {
                     {"kind", "filter"},
                     {"label", "filter " + SafeExprLine(filter.Cast()->Predicate())},
                     {"predicate", SafeExprLine(filter.Cast()->Predicate())},
-                    {"wasm", ref->Artifacts->Wasm},
+                    {"entrypoints", EntrypointsJson(*ref, {{"filter", 0}})},
                 });
                 AddEdge(input.NodeId, id, 0);
                 return {.NodeId = id, .OutputType = input.OutputType};
@@ -2125,22 +2265,22 @@ struct TExecGraphBuilder {
                 auto* inputStruct =
                     static_cast<NQumir::NAst::TStructType*>(input.OutputType.get());
                 auto columnPlan = BuildProjectColumnPlan(*project.Cast(), *inputStruct);
-                std::string wasmId;
+                llvm::json::Object entrypoints;
                 if (!columnPlan.ComputedExprs.empty()) {
                     const auto* ref = FindKernel(Kernels, project.Cast().get(), "project");
                     if (!ref) {
                         Unsupported = UnsupportedExec("project kernel was not generated");
                         return {};
                     }
-                    if (EmbedWasm && ref->Artifacts->Wasm.empty()) {
+                    if (EmbedWasm && !HasEntrypointAt(*ref, 0)) {
                         Unsupported = UnsupportedExec("project kernel failed to compile to wasm");
                         return {};
                     }
-                    wasmId = ref->Artifacts->Wasm;
+                    entrypoints = EntrypointsJson(*ref, {{"project", 0}});
                 }
                 const int64_t id = AddNode(llvm::json::Object{
                     {"kind", "project"},
-                    {"wasm", wasmId},
+                    {"entrypoints", std::move(entrypoints)},
                     {"output", ProjectOutputJson(
                         *project.Cast(), *inputStruct, columnPlan.OutputType)},
                 });
@@ -2156,7 +2296,9 @@ struct TExecGraphBuilder {
                     Unsupported = UnsupportedExec("aggregate kernel was not generated");
                     return {};
                 }
-                if (EmbedWasm && ref->Artifacts->Wasm.empty()) {
+                if (EmbedWasm &&
+                    (!HasEntrypoint(*ref, "agg_dispatch") ||
+                     !HasEntrypoint(*ref, "agg_finish_rowset"))) {
                     Unsupported = UnsupportedExec("aggregate kernel failed to compile to wasm");
                     return {};
                 }
@@ -2185,7 +2327,7 @@ struct TExecGraphBuilder {
                     {"kind", "aggregate"},
                     {"label", AggregatePlanLabel(*aggregate.Cast())},
                     {"groupKeys", StringArray(aggregate.Cast()->GroupKeys())},
-                    {"wasm", ref->Artifacts->Wasm},
+                    {"entrypoints", EntrypointsJson(*ref)},
                     {"keyCount", static_cast<int64_t>(keyCount)},
                     {"output", std::move(output)},
                 };
@@ -2277,7 +2419,9 @@ struct TExecGraphBuilder {
                     Unsupported = UnsupportedExec("join kernel was not generated");
                     return {};
                 }
-                if (EmbedWasm && ref->Artifacts->Wasm.empty()) {
+                if (EmbedWasm &&
+                    (!HasEntrypoint(*ref, "jt_dispatch") ||
+                     !HasEntrypoint(*ref, "jt_materialize"))) {
                     Unsupported = UnsupportedExec("join kernel failed to compile to wasm");
                     return {};
                 }
@@ -2308,7 +2452,7 @@ struct TExecGraphBuilder {
                     {"kind", "join"},
                     {"label", JoinPlanLabel(*join.Cast())},
                     {"joinType", std::string(JoinTypeName(join.Cast()->JoinType()))},
-                    {"wasm", ref->Artifacts->Wasm},
+                    {"entrypoints", EntrypointsJson(*ref)},
                     {"keySize", static_cast<int64_t>(keyDesc.Size)},
                     {"hasResidual", hasResidual},
                     {"keys", std::move(keys)},
@@ -2391,7 +2535,8 @@ llvm::json::Object BuildExecGraphPlan(
     const NQdb::TOperatorPtr& plan,
     const TKernelIndex& kernels,
     bool embedWasm,
-    size_t kernelCount)
+    std::string queryWasm,
+    int64_t heapBase)
 {
     TExecGraphBuilder builder{.Kernels = kernels, .EmbedWasm = embedWasm};
     auto root = builder.Build(plan);
@@ -2401,11 +2546,14 @@ llvm::json::Object BuildExecGraphPlan(
     llvm::json::Object out{
         {"supported", true},
         {"embedWasm", embedWasm},
-        {"layout", ExecLayoutJson(kernelCount)},
+        {"layout", ExecLayoutJson(heapBase)},
         {"nodes", std::move(builder.Nodes)},
         {"edges", std::move(builder.Edges)},
         {"root", root.NodeId},
     };
+    if (embedWasm) {
+        out["wasm"] = std::move(queryWasm);
+    }
     if (builder.Limit) {
         out["limit"] = std::move(*builder.Limit);
     }
@@ -2416,9 +2564,11 @@ llvm::json::Object BuildExecPlan(
     const NQdb::TOperatorPtr& plan,
     const TKernelIndex& kernels,
     bool embedWasm,
-    size_t kernelCount)
+    std::string queryWasm,
+    int64_t heapBase)
 {
-    return BuildExecGraphPlan(plan, kernels, embedWasm, kernelCount);
+    return BuildExecGraphPlan(
+        plan, kernels, embedWasm, std::move(queryWasm), heapBase);
 }
 
 llvm::json::Object BuildBundle(TExportRequest& request) {
@@ -2447,7 +2597,7 @@ llvm::json::Object BuildBundle(TExportRequest& request) {
     llvm::json::Object physicalGraph = EmptyGraphJson();
     llvm::json::Array diagnostics;
     std::ostringstream schedulerText;
-    std::vector<TKernelArtifacts> kernelArtifacts;
+    TWasmFinalizeResult wasmFinalized;
     std::vector<NQdb::TGeneratedKernel> loweredKernels;
     try {
         std::ostringstream lowerDiagnostics;
@@ -2459,7 +2609,7 @@ llvm::json::Object BuildBundle(TExportRequest& request) {
         lowered.Graph->Build();
 
         // Wasm finalization: ast artifacts always, wasm in embed mode.
-        kernelArtifacts = WasmFinalizeKernels(
+        wasmFinalized = WasmFinalizeKernels(
             lowered.Kernels, artifacts, diagnostics, request.EmbedWasm);
         loweredKernels = std::move(lowered.Kernels);
 
@@ -2471,8 +2621,8 @@ llvm::json::Object BuildBundle(TExportRequest& request) {
                       << "\n";
         lowered.Graph->Print(schedulerText);
         schedulerText << "=====================================\n";
-        legacyGraph = GraphJson(lowered, kernelArtifacts);
-        physicalGraph = GraphJson(lowered, kernelArtifacts);
+        legacyGraph = GraphJson(lowered, wasmFinalized.Kernels);
+        physicalGraph = GraphJson(lowered, wasmFinalized.Kernels);
     } catch (const std::exception& e) {
         const auto message = std::string(e.what());
         legacyGraph = EmptyGraphJson(message);
@@ -2485,9 +2635,14 @@ llvm::json::Object BuildBundle(TExportRequest& request) {
 
     // The exec section reads the kernels the lowering already generated —
     // nothing is compiled twice.
-    auto kernelIndex = BuildKernelIndex(loweredKernels, kernelArtifacts);
+    auto kernelIndex = BuildKernelIndex(loweredKernels, wasmFinalized.Kernels);
     auto execPlan =
-        BuildExecPlan(*plan, kernelIndex, request.EmbedWasm, kernelArtifacts.size());
+        BuildExecPlan(
+            *plan,
+            kernelIndex,
+            request.EmbedWasm,
+            wasmFinalized.QueryWasm,
+            wasmFinalized.HeapBase);
 
     return llvm::json::Object{
             {"ok", true},
