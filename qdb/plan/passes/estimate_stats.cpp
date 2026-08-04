@@ -131,6 +131,8 @@ double JoinKeyWidth(const TOperatorPtr& left, const TOperatorPtr& right,
     return total;
 }
 
+constexpr double LikeSelectivity = 0.05;
+
 double EstimateSelectivity(const TExprPtr& atom, TStatsPtr inputStats, std::shared_ptr<TStructType> operatorType) {
     // TODO: eval consts
 
@@ -234,6 +236,15 @@ double EstimateSelectivity(const TExprPtr& atom, TStatsPtr inputStats, std::shar
             }
         }
     };
+
+    // col LIKE pattern -> qdb_string_view_sql_like; assume high selectivity.
+    if (auto maybeCall = TMaybeNode<TCallExpr>(atom)) {
+        if (auto callee = TMaybeNode<TIdentExpr>(maybeCall.Cast()->Callee)) {
+            if (callee.Cast()->Name == "qdb_string_view_sql_like") {
+                return LikeSelectivity;
+            }
+        }
+    }
 
     if (auto maybeBinary = TMaybeNode<TBinaryExpr>(atom)) {
         auto binary = maybeBinary.Cast();
