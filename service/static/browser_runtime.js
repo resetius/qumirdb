@@ -2149,6 +2149,21 @@ const CrossJoinOp = Object.freeze({
   DESTROY: 1n,
 });
 
+function dispatchJoin(state, batch, batchIdx, leftStore, rightStore, arg, op) {
+  return state.dispatch(
+    BigInt(state.leftTable),
+    BigInt(state.rightTable),
+    BigInt(batch),
+    BigInt(batchIdx),
+    BigInt(state.pairBuffer),
+    BigInt(leftStore),
+    BigInt(rightStore),
+    BigInt(state.leftKeyColumns),
+    BigInt(state.rightKeyColumns),
+    BigInt(arg),
+    BigInt(op));
+}
+
 function createJoinState(kernel, layout, stage) {
   if (!browserRuntimeSupportsJoin(stage)) {
     throw new Error(`browser join type is not implemented: ${stage.joinType}` +
@@ -2161,23 +2176,22 @@ function createJoinState(kernel, layout, stage) {
   const leftTable = arena.alloc(layout.hashTable.size, 8);
   const rightTable = arena.alloc(layout.hashTable.size, 8);
   const pairBuffer = arena.alloc(layout.pairBuffer.size, 8);
+  const keys = stage.keys || [];
+  if (keys.length === 0) {
+    throw new Error('join stage has no key columns');
+  }
+  const leftKeyColumns = arena.alloc(keys.length * 8, 8);
+  const rightKeyColumns = arena.alloc(keys.length * 8, 8);
   new Uint8Array(arena.memory.buffer, leftTable, layout.hashTable.size).fill(0);
   new Uint8Array(arena.memory.buffer, rightTable, layout.hashTable.size).fill(0);
   new Uint8Array(arena.memory.buffer, pairBuffer, layout.pairBuffer.size).fill(0);
-  if (!dispatch(
-      BigInt(leftTable),
-      BigInt(rightTable),
-      0n,
-      0n,
-      BigInt(pairBuffer),
-      0n,
-      0n,
-      256n,
-      JoinOp.INIT)) {
-    throw new Error('join hash table initialization failed');
+  const dv = arena.view();
+  for (let i = 0; i < keys.length; ++i) {
+    dv.setBigInt64(leftKeyColumns + i * 8, BigInt(keys[i].leftIndex), true);
+    dv.setBigInt64(rightKeyColumns + i * 8, BigInt(keys[i].rightIndex), true);
   }
 
-  return {
+  const state = {
     kernel,
     layout,
     stage,
@@ -2187,6 +2201,8 @@ function createJoinState(kernel, layout, stage) {
     leftTable,
     rightTable,
     pairBuffer,
+    leftKeyColumns,
+    rightKeyColumns,
     leftStore: new WasmRowStore(arena, layout),
     rightStore: new WasmRowStore(arena, layout),
     // Reused marshalling buffer for the streamed probe-only side once one input
@@ -2197,6 +2213,10 @@ function createJoinState(kernel, layout, stage) {
     outerFinalized: false,
     finalized: false,
   };
+  if (!dispatchJoin(state, 0, 0, 0, 0, 256, JoinOp.INIT)) {
+    throw new Error('join hash table initialization failed');
+  }
+  return state;
 }
 
 function isInnerJoin(stage) {
@@ -2216,16 +2236,9 @@ function streamJoinBatch(state, side, rowSet, asWasm = false) {
         batch.columns, batch.rowCount, false, selection).rowsetPtr;
   const isLeft = side === 0;
   try {
-    const ok = state.dispatch(
-      BigInt(state.leftTable),
-      BigInt(state.rightTable),
-      BigInt(rowsetPtr),
-      -1n,
-      BigInt(state.pairBuffer),
-      BigInt(state.leftStore.dataPtr()),
-      BigInt(state.rightStore.dataPtr()),
-      0n,
-      isLeft ? JoinOp.STREAM_LEFT : JoinOp.STREAM_RIGHT);
+    const ok = dispatchJoin(
+      state, rowsetPtr, -1, state.leftStore.dataPtr(), state.rightStore.dataPtr(),
+      0, isLeft ? JoinOp.STREAM_LEFT : JoinOp.STREAM_RIGHT);
     if (!ok) {
       throw new Error('join stream failed');
     }
@@ -2278,27 +2291,9 @@ function updateJoinState(state, side, rowSet) {
     stored = true;
   }
   try {
-    const ok = isLeft
-      ? state.dispatch(
-          BigInt(state.leftTable),
-          BigInt(state.rightTable),
-          BigInt(batchPtr),
-          BigInt(batchIdx),
-          BigInt(state.pairBuffer),
-          BigInt(state.leftStore.dataPtr()),
-          BigInt(state.rightStore.dataPtr()),
-          0n,
-          JoinOp.UPDATE_LEFT)
-      : state.dispatch(
-          BigInt(state.leftTable),
-          BigInt(state.rightTable),
-          BigInt(batchPtr),
-          BigInt(batchIdx),
-          BigInt(state.pairBuffer),
-          BigInt(state.leftStore.dataPtr()),
-          BigInt(state.rightStore.dataPtr()),
-          0n,
-          JoinOp.UPDATE_RIGHT);
+    const ok = dispatchJoin(
+      state, batchPtr, batchIdx, state.leftStore.dataPtr(), state.rightStore.dataPtr(),
+      0, isLeft ? JoinOp.UPDATE_LEFT : JoinOp.UPDATE_RIGHT);
     if (!ok) {
       throw new Error('join kernel update failed');
     }
@@ -2333,16 +2328,9 @@ function finalizeSemiAntiJoinState(state) {
   if (state.semiAntiFinalized) {
     return;
   }
-  const ok = state.dispatch(
-    BigInt(state.leftTable),
-    BigInt(state.rightTable),
-    0n,
-    0n,
-    BigInt(state.pairBuffer),
-    BigInt(state.leftStore.dataPtr()),
-    BigInt(state.rightStore.dataPtr()),
-    BigInt(state.leftStore.batches.length),
-    JoinOp.FINALIZE);
+  const ok = dispatchJoin(
+    state, 0, 0, state.leftStore.dataPtr(), state.rightStore.dataPtr(),
+    state.leftStore.batches.length, JoinOp.FINALIZE);
   if (!ok) {
     throw new Error('join semi/anti finalize failed');
   }
@@ -2356,16 +2344,9 @@ function finalizeOuterJoinState(state) {
   if (state.outerFinalized) {
     return;
   }
-  const ok = state.dispatch(
-    BigInt(state.leftTable),
-    BigInt(state.rightTable),
-    0n,
-    0n,
-    BigInt(state.pairBuffer),
-    BigInt(state.leftStore.dataPtr()),
-    BigInt(state.rightStore.dataPtr()),
-    0n,
-    JoinOp.FINALIZE);
+  const ok = dispatchJoin(
+    state, 0, 0, state.leftStore.dataPtr(), state.rightStore.dataPtr(),
+    0, JoinOp.FINALIZE);
   if (!ok) {
     throw new Error('join outer finalize failed');
   }
@@ -2394,20 +2375,13 @@ function finishJoinState(state) {
     return;
   }
   state.finalized = true;
-  state.dispatch(
-    BigInt(state.leftTable),
-    BigInt(state.rightTable),
-    0n,
-    0n,
-    BigInt(state.pairBuffer),
-    0n,
-    0n,
-    0n,
-    JoinOp.DESTROY);
+  dispatchJoin(state, 0, 0, 0, 0, 0, JoinOp.DESTROY);
   // Reclaim the build-side row store so it doesn't linger for the rest of the
   // query (upstream joins finish before the final one peaks).
   state.leftStore.freeMarshalled();
   state.rightStore.freeMarshalled();
+  state.arena.free(state.leftKeyColumns);
+  state.arena.free(state.rightKeyColumns);
 }
 
 function createCrossJoinState(kernel, layout, stage) {

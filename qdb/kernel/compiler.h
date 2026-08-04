@@ -194,11 +194,12 @@ using TJoinMaterialize = std::function<int64_t(
 
 // The compiled kernels for one symmetric hash join. Each side's hash map is a
 // caller-owned, zero-initialized HashTable buffer (kHashTableSize); the output
-// pair buffer is a zero-initialized buffer of kPairBufferSize. The key columns
-// and join-kind dispatch are baked into the generated jt_dispatch function.
+// pair buffer is a zero-initialized buffer of kPairBufferSize. Key-column
+// indices are supplied by the bound dispatch closure; join-kind dispatch stays
+// baked into the generated jt_dispatch function.
 struct TJoinKernels {
     // jt_dispatch(left, right, batch, batchIdx, pairs, leftStore, rightStore,
-    //             arg, op) -> bool.
+    //             leftKeyColumns, rightKeyColumns, arg, op) -> bool.
     // Init uses arg as initial capacity. Residual SEMI/ANTI Finalize uses arg
     // as left-store batch count so the kernel can scan selected left rows.
     // UpdateRight/Finalize are specialized by the compiled join type, so host
