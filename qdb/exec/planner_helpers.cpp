@@ -172,8 +172,53 @@ TUnaryRuntimeProcess BuildFilterRuntimeProcess(
 
     auto spec = NKernel::BuildFilterKernelSpec(*inputStruct, filter.Predicate());
     TKernelCompiler compiler(std::move(options));
+    auto dispatch = compiler.CompileFilter(spec);
+
+    // Emit exactly the pruned output columns; a schema identical to the input
+    // (by name and order) keeps the zero-copy fast path.
+    NQumir::NAst::TTypePtr outputType;
+    const NQumir::NAst::TStructType* outputStruct = nullptr;
+    if (auto* fun = static_cast<NQumir::NAst::TFunctionType*>(filter.Type.get())) {
+        outputType = fun->ReturnType;
+        outputStruct = static_cast<NQumir::NAst::TStructType*>(outputType.get());
+    }
+    // A stale/decorrelated ReturnType can list columns absent from the actual
+    // input; only narrow when it is a proper subset, else pass through in full.
+    if (outputStruct && !outputStruct->Fields.empty()) {
+        std::vector<int32_t> keptIndices;
+        keptIndices.reserve(outputStruct->Fields.size());
+        bool subsetOfInput = true;
+        bool identity =
+            outputStruct->Fields.size() == inputStruct->Fields.size();
+        for (size_t o = 0; o < outputStruct->Fields.size(); ++o) {
+            const auto& name = outputStruct->Fields[o].first;
+            int32_t index = -1;
+            for (size_t i = 0; i < inputStruct->Fields.size(); ++i) {
+                if (inputStruct->Fields[i].first == name) {
+                    index = static_cast<int32_t>(i);
+                    break;
+                }
+            }
+            if (index < 0) {
+                subsetOfInput = false;
+                break;
+            }
+            if (static_cast<size_t>(index) != o) {
+                identity = false;
+            }
+            keptIndices.push_back(index);
+        }
+        if (subsetOfInput && !identity) {
+            return {
+                .Process = MakeFilterSelectProcess(
+                    std::move(dispatch), std::move(keptIndices)),
+                .OutputType = std::move(outputType),
+            };
+        }
+    }
+
     return {
-        .Process = MakeFilterProcess(compiler.CompileFilter(spec)),
+        .Process = MakeFilterProcess(std::move(dispatch)),
         .OutputType = inputType,
     };
 }
