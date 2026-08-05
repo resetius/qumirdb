@@ -23,9 +23,12 @@ constexpr int64_t CrossJoinOp(ECrossJoinKernelOp op) {
 
 TInnerJoinProcessor::TInnerJoinProcessor(
     TJoinKernels kernels,
-    EJoinType joinType)
+    EJoinType joinType,
+    EJoinBuildSide buildSide)
     : Kernels_(std::move(kernels))
     , JoinType_(joinType)
+    // Asymmetry needs the streaming (drop-one-side) path, which outer joins skip.
+    , BuildSide_(IsOuter() ? EJoinBuildSide::Auto : buildSide)
 {
 }
 
@@ -314,6 +317,15 @@ bool TInnerJoinProcessor::PullOneInputBatch(
             return processLeft();
         }
 
+        // Asymmetric: drain only the build side; once it finishes the branches
+        // above switch to streaming the probe side against the built table.
+        if (BuildSide_ == EJoinBuildSide::Right) {
+            return processRight();
+        }
+        if (BuildSide_ == EJoinBuildSide::Left) {
+            return processLeft();
+        }
+
         const auto first = ChooseSymmetricPullSide();
         if (first == EJoinSide::Left) {
             if (processLeft()) {
@@ -484,6 +496,23 @@ EJoinProcessorResult TInnerJoinProcessor::Process(
         return EJoinProcessorResult::OK;
     }
     return BothDone_ ? finishedResult() : EJoinProcessorResult::NEED_DATA;
+}
+
+EJoinBuildSide TInnerJoinProcessor::RequiredInputSide() const {
+    // While streaming, the streamed side is the probe: it is the one being read.
+    if (StreamMode_ == EJoinStreamMode::StreamLeftAgainstRight) {
+        return EJoinBuildSide::Left;
+    }
+    if (StreamMode_ == EJoinStreamMode::StreamRightAgainstLeft) {
+        return EJoinBuildSide::Right;
+    }
+    if (BuildSide_ == EJoinBuildSide::Left && !LeftDone_) {
+        return EJoinBuildSide::Left;
+    }
+    if (BuildSide_ == EJoinBuildSide::Right && !RightDone_) {
+        return EJoinBuildSide::Right;
+    }
+    return EJoinBuildSide::Auto;
 }
 
 TCrossJoinProcessor::TCrossJoinProcessor(TCrossJoinKernels kernels)

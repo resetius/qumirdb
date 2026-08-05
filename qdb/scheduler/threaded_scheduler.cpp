@@ -111,6 +111,9 @@ TTaskNode* TThreadedScheduler::PopReady() {
 void TThreadedScheduler::ScheduleInput(TTaskNode* node) {
     bool allFinished = !node->Inbound.empty();
     for (auto* edge : node->Inbound) {
+        if (!node->Task->WantsInput(*edge)) {
+            continue;
+        }
         if (edge->Src->State.load(std::memory_order_acquire) ==
             ETaskState::Finished)
         {

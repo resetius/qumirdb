@@ -76,6 +76,9 @@ void TSingleThreadedScheduler::Schedule(TTaskNode* node) {
 
 void TSingleThreadedScheduler::ScheduleInput(TTaskNode* node) {
     for (auto* edge : node->Inbound) {
+        if (!node->Task->WantsInput(*edge)) {
+            continue;
+        }
         Schedule(edge->Src);
     }
 }

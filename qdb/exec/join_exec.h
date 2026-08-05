@@ -86,6 +86,13 @@ inline constexpr int64_t kJoinOutputBatchRows = 1024;
 
 enum class EJoinSide { Left, Right };
 
+// Build the hash table on the side with fewer estimated rows and stream the
+// other when it is at least this many times larger. Hash-table cost is roughly
+// per build row, so rows (not bytes) is the right metric. Auto keeps the
+// adaptive symmetric build-up.
+inline constexpr double JoinAsymmetryRatio = 10.0;
+enum class EJoinBuildSide { Auto, Left, Right };
+
 enum class EJoinStreamMode {
     Symmetric,
     StreamLeftAgainstRight,
@@ -110,7 +117,8 @@ public:
 
     TInnerJoinProcessor(
         TJoinKernels kernels,
-        EJoinType joinType = EJoinType::Inner);
+        EJoinType joinType = EJoinType::Inner,
+        EJoinBuildSide buildSide = EJoinBuildSide::Auto);
     TInnerJoinProcessor(const TInnerJoinProcessor&) = delete;
     TInnerJoinProcessor& operator=(const TInnerJoinProcessor&) = delete;
     ~TInnerJoinProcessor();
@@ -119,6 +127,11 @@ public:
         const TFetch& left,
         const TFetch& right,
         TRowSet& output);
+
+    // Input side Process reads next: build side while building, probe side while
+    // streaming, Auto (both) for the symmetric/adaptive path. Lets the scheduler
+    // skip waking the side not read yet.
+    EJoinBuildSide RequiredInputSide() const;
 
 private:
     // Mirrors the PairBuffer external type (modules/qumirdb.cpp).
@@ -146,6 +159,7 @@ private:
 private:
     TJoinKernels Kernels_;
     EJoinType JoinType_ = EJoinType::Inner;
+    EJoinBuildSide BuildSide_ = EJoinBuildSide::Auto;
     bool OuterFinalized_ = false;
     bool SemiAntiFinalized_ = false;
     TRowStore LeftRows_;

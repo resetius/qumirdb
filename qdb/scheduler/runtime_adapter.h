@@ -15,6 +15,8 @@
 namespace NQdb {
 namespace NScheduler {
 
+enum class ERequiredSide { Both = 0, Left = 1, Right = 2 };
+
 struct TInputPort {
     IConnection* Connection = nullptr;
     size_t Lane = 0;
@@ -69,10 +71,14 @@ struct TBinaryBlockingCode {
         TInputPort&,
         TInputPort&,
         TRowSet&)>;
+    // Which side Process will read next; empty => both. Consulted by the task's
+    // WantsInput to gate readiness.
+    using TRequiredSide = std::function<ERequiredSide(void*)>;
 
     explicit TBinaryBlockingCode(TProcess process);
 
     TProcess Process;
+    TRequiredSide RequiredSide;
 };
 
 struct THashShuffleCode {
@@ -192,6 +198,7 @@ public:
     ~TBinaryBlockingTask() override;
 
     ETaskResult Execute() override;
+    bool WantsInput(const TTaskEdge& edge) const override;
 
 private:
     std::shared_ptr<const TBinaryBlockingCode> Code_;

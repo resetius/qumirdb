@@ -1186,6 +1186,7 @@ llvm::json::Object LogicalNodeDetails(const NQdb::TOperatorPtr& op) {
         }
         return llvm::json::Object{
             {"joinType", std::string(JoinTypeName(j->JoinType()))},
+            {"buildSide", std::string(JoinBuildSideName(ChooseJoinBuildSide(*j)))},
             {"keys", std::move(keys)},
             {"residual", SafeExprLine(j->Filter())},
         };
@@ -2458,6 +2459,8 @@ struct TExecGraphBuilder {
                     {"kind", "join"},
                     {"label", JoinPlanLabel(*join.Cast())},
                     {"joinType", std::string(JoinTypeName(join.Cast()->JoinType()))},
+                    {"buildSide",
+                        std::string(JoinBuildSideName(ChooseJoinBuildSide(*join.Cast())))},
                     {"entrypoints", EntrypointsJson(*ref)},
                     {"keySize", static_cast<int64_t>(keyDesc.Size)},
                     {"hasResidual", hasResidual},
