@@ -5,10 +5,12 @@
 #include <qumir/codegen/llvm/llvm_initializer.h>
 
 #include <qdb/plan/build.h>
+#include <qdb/plan/ops/filter.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/pipeline.h>
 #include <qdb/sql/parser.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <expected>
 #include <sstream>
@@ -61,10 +63,9 @@ std::unique_ptr<TTable> MakeTable(int64_t rows, size_t batches) {
     return t;
 }
 
-std::unique_ptr<TTestRuntime> RunSql(
+TOperatorPtr BuildSqlPlan(
     const std::string& sql,
-    const std::unordered_map<std::string, ISource*>& sources,
-    NScheduler::TSettings settings = {})
+    const std::unordered_map<std::string, ISource*>& sources)
 {
     std::istringstream in(sql);
     NSql::TTokenStream ts(in);
@@ -87,7 +88,29 @@ std::unique_ptr<TTestRuntime> RunSql(
     }
     TOperatorPtr plan = *root;
     ApplyPlanPasses(plan);
-    return RunPlan(plan, settings);
+    return plan;
+}
+
+std::unique_ptr<TTestRuntime> RunSql(
+    const std::string& sql,
+    const std::unordered_map<std::string, ISource*>& sources,
+    NScheduler::TSettings settings = {})
+{
+    return RunPlan(BuildSqlPlan(sql, sources), settings);
+}
+
+std::shared_ptr<TFilterOperator> FindFilter(const TOperatorPtr& op) {
+    if (auto filter = TMaybeOp<TFilterOperator>(op)) {
+        return filter.Cast();
+    }
+    for (const auto& child : op->Children()) {
+        if (auto childOp = NQumir::NAst::TMaybeNode<IOperator>(child)) {
+            if (auto found = FindFilter(childOp.Cast())) {
+                return found;
+            }
+        }
+    }
+    return nullptr;
 }
 
 int64_t CountRows(TTestRuntime& runtime) {
@@ -99,6 +122,24 @@ int64_t CountRows(TTestRuntime& runtime) {
         batch = {};
     }
     return total;
+}
+
+// Collects the first int64 column, honouring the selection mask, sorted.
+std::vector<int64_t> CollectFirstColumnSorted(TTestRuntime& runtime) {
+    std::vector<int64_t> out;
+    TRowSet batch{};
+    while (runtime.Next(batch)) {
+        const auto* data = reinterpret_cast<const int64_t*>(batch.Columns[0].Data);
+        for (int64_t i = 0; i < batch.RowCount; ++i) {
+            if (!batch.Selection || batch.Selection[i]) {
+                out.push_back(data[i]);
+            }
+        }
+        Release(&batch);
+        batch = {};
+    }
+    std::sort(out.begin(), out.end());
+    return out;
 }
 
 } // namespace
@@ -232,6 +273,93 @@ JOIN x lead ON v1.k = lead.k AND v1.rn = lead.rn - 1
 WHERE v1.rn = 2 OR v1.rn = 3
 )sql", sources);
     EXPECT_EQ(CountRows(*runtime), 2);
+}
+
+// Regression test for filter selection ownership. The CTE is materialized (the
+// self-join references it twice), so each filtered batch is parked in the spool
+// while the next batch is filtered, reusing the kernel's selection scratch. If a
+// parked batch does not own its selection mask, the next batch overwrites it and
+// the join returns wrong rows. Two batches are needed to trigger the reuse; the
+// expected result is exactly the rows the filter kept.
+void RunFilteredCteSelfJoin(NScheduler::TSettings settings) {
+    std::vector<int64_t> id1 = {10, 11};
+    std::vector<int64_t> flag1 = {1, 0};
+    std::vector<int64_t> id2 = {20, 21};
+    std::vector<int64_t> flag2 = {0, 1};
+    std::vector<TColumn> cols1 = {
+        TColumn{.Data = reinterpret_cast<char*>(id1.data())},
+        TColumn{.Data = reinterpret_cast<char*>(flag1.data())},
+    };
+    std::vector<TColumn> cols2 = {
+        TColumn{.Data = reinterpret_cast<char*>(id2.data())},
+        TColumn{.Data = reinterpret_cast<char*>(flag2.data())},
+    };
+    std::vector<TRowSet> batches = {
+        TRowSet{.Columns = cols1.data(), .ColumnCount = 2, .RowCount = 2, .RefCount = 1},
+        TRowSet{.Columns = cols2.data(), .ColumnCount = 2, .RowCount = 2, .RefCount = 1},
+    };
+    TMockSource t({"id", "flag"}, std::move(batches));
+    std::unordered_map<std::string, ISource*> sources = {{"t", &t}};
+
+    auto runtime = RunSql(
+        "WITH x AS (SELECT id FROM t WHERE flag = 1) "
+        "SELECT a.id FROM x a JOIN x b ON a.id = b.id",
+        sources, settings);
+    EXPECT_EQ(CollectFirstColumnSorted(*runtime), (std::vector<int64_t>{10, 21}));
+}
+
+TEST(CteMaterialize, FilteredCteSelfJoinPrunesAndKeepsSelection) {
+    RunFilteredCteSelfJoin({});
+}
+
+// Capacity 1 interleaves the batches, stressing selection reuse.
+TEST(CteMaterialize, FilteredCteSelfJoinCapacityOne) {
+    NScheduler::TSettings settings;
+    settings.Queue.RowsetCapacityPerLane = 1;
+    RunFilteredCteSelfJoin(settings);
+}
+
+// Empty filter demand (COUNT(*) WHERE) keeps one technical column; id before
+// flag exercises ordering.
+TEST(CteMaterialize, CountStarWithFilterKeepsTechnicalColumn) {
+    std::vector<int64_t> id = {10, 11, 20, 21};
+    std::vector<int64_t> flag = {1, 0, 0, 1};
+    std::vector<TColumn> cols = {
+        TColumn{.Data = reinterpret_cast<char*>(id.data())},
+        TColumn{.Data = reinterpret_cast<char*>(flag.data())},
+    };
+    TRowSet batch{
+        .Columns = cols.data(), .ColumnCount = 2, .RowCount = 4, .RefCount = 1};
+    TMockSource t({"id", "flag"}, {batch});
+    std::unordered_map<std::string, ISource*> sources = {{"t", &t}};
+
+    auto runtime = RunSql("SELECT COUNT(*) FROM t WHERE flag = 1", sources);
+    EXPECT_EQ(CollectFirstColumnSorted(*runtime), (std::vector<int64_t>{2}));
+}
+
+// Proves the pruning actually fired: `flag` is gone from the filter's output
+// schema (only the predicate uses it) but stays in its input schema.
+TEST(CteMaterialize, FilterDropsPredicateOnlyColumnFromOutput) {
+    TMockSource t({"id", "flag"});
+    std::unordered_map<std::string, ISource*> sources = {{"t", &t}};
+    auto plan = BuildSqlPlan("SELECT id FROM t WHERE flag = 1", sources);
+
+    auto filter = FindFilter(plan);
+    ASSERT_TRUE(filter);
+
+    auto has = [](const NQumir::NAst::TTypePtr& type, const std::string& needle) {
+        auto* st = static_cast<NQumir::NAst::TStructType*>(type.get());
+        for (const auto& [name, _] : st->Fields) {
+            if (name.find(needle) != std::string::npos) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    EXPECT_FALSE(has(filter->OutputColumns(), "flag"));
+    EXPECT_TRUE(has(filter->OutputColumns(), "id"));
+    EXPECT_TRUE(has(filter->RequiredColumns(), "flag"));
 }
 
 int main(int argc, char** argv) {

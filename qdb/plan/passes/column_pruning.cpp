@@ -130,9 +130,42 @@ void Prune(const TOperatorPtr& root, const TColumnSet* explicitRootDemand, TCteU
             }
         }
 
+        // Drop from the filter's output the columns needed only by the predicate
+        // (e.g. p_name in a LIKE); the predicate still reads them via the child.
+        TColumnSet effectiveNeeded = needed;
+        if (fun && TMaybeOp<TFilterOperator>(op)) {
+            if (auto* rt = static_cast<TStructType*>(fun->ReturnType.get());
+                rt && !rt->Fields.empty()) {
+                TColumnSet keep;
+                for (auto& [name, _] : rt->Fields) {
+                    if (needed.contains(name)) {
+                        keep.insert(name);
+                    }
+                }
+                // No demand above: keep one column (zero-column rowsets are
+                // unsupported), preferring one the predicate already reads.
+                if (keep.empty()) {
+                    auto referenced = op->ComputeReferencedColumns();
+                    std::string technical = rt->Fields.front().first;
+                    for (const auto& [name, _] : rt->Fields) {
+                        if (referenced.contains(name)) {
+                            technical = name;
+                            break;
+                        }
+                    }
+                    keep.insert(technical);
+                }
+                // Propagate the kept column to the child demand.
+                effectiveNeeded.insert(keep.begin(), keep.end());
+                if (keep.size() < rt->Fields.size()) {
+                    fun->ReturnType = narrowStruct(fun->ReturnType, keep);
+                }
+            }
+        }
+
         auto children = op->Children();
         for (size_t i = 0; i < children.size(); ++i) {
-            auto required = op->RequiredColumnsForChild(i, needed);
+            auto required = op->RequiredColumnsForChild(i, effectiveNeeded);
             if (fun && i < fun->ParamTypes.size()) {
                 fun->ParamTypes[i] = narrowStruct(fun->ParamTypes[i], required);
             }
