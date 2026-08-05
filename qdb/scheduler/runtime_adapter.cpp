@@ -1,5 +1,6 @@
 #include <qdb/scheduler/runtime_adapter.h>
 
+#include <qdb/scheduler/graph.h>
 #include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
 
@@ -407,6 +408,18 @@ ETaskResult TBinaryBlockingTask::Execute() {
         Output_.Finish();
     }
     return result;
+}
+
+bool TBinaryBlockingTask::WantsInput(const TTaskEdge& edge) const {
+    if (!Code_->RequiredSide) {
+        return true;
+    }
+    const auto side = Code_->RequiredSide(State_.get());
+    if (side == ERequiredSide::Both) {
+        return true;
+    }
+    const TInputPort& wanted = side == ERequiredSide::Left ? Left_ : Right_;
+    return edge.Connection == wanted.Connection && edge.DstLane == wanted.Lane;
 }
 
 TMergeTask::TMergeTask(

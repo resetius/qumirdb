@@ -1,10 +1,12 @@
 #pragma once
 
+#include <qdb/exec/join_exec.h>
 #include <qdb/exec/project_exec.h>
 #include <qdb/exec/sort_exec.h>
 #include <qdb/exec/unary_process.h>
 #include <qdb/kernel/compiler.h>
 #include <qdb/plan/ops/filter.h>
+#include <qdb/plan/ops/join.h>
 #include <qdb/plan/ops/project.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/ops/sort.h>
@@ -48,6 +50,11 @@ struct TSortRuntimeProcess {
 void PrintRuntimePlan(std::ostream& out, const TOperatorPtr& root);
 
 NQumir::NAst::TTypePtr BuildSourceRuntimeType(TSourceOperator& src);
+
+// Build-side selection for an inner join. Shared by native lowering and the
+// browser plan export so the JoinAsymmetryRatio threshold has one home (C++).
+EJoinBuildSide ChooseJoinBuildSide(const TJoinOperator& join);
+std::string_view JoinBuildSideName(EJoinBuildSide side);
 
 TUnaryRuntimeProcess BuildFilterRuntimeProcess(
     TFilterOperator& filter,

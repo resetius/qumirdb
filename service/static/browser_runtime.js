@@ -3548,6 +3548,16 @@ class JoinTask {
         return this.processStoredSide(0);
       }
 
+      // Asymmetric: drain only the build side chosen by C++ lowering (serialized
+      // as stage.buildSide); the leftDone/rightDone branches above then stream
+      // the probe side. Mirrors TInnerJoinProcessor's BuildSide_ path.
+      if (allowStreaming && this.stage.buildSide === 'right') {
+        return this.processStoredSide(1);
+      }
+      if (allowStreaming && this.stage.buildSide === 'left') {
+        return this.processStoredSide(0);
+      }
+
       const first = this.chooseSymmetricPullSide();
       if (first === 0) {
         if (this.processStoredSide(0)) {

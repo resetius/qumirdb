@@ -160,6 +160,36 @@ NQumir::NAst::TTypePtr BuildSourceRuntimeType(TSourceOperator& src)
     return std::make_shared<NQumir::NAst::TStructType>(std::move(fields));
 }
 
+EJoinBuildSide ChooseJoinBuildSide(const TJoinOperator& join) {
+    if (join.JoinType() != EJoinType::Inner || join.Keys().empty()) {
+        return EJoinBuildSide::Auto;
+    }
+    auto leftStats = join.Left()->Stats_;
+    auto rightStats = join.Right()->Stats_;
+    if (!leftStats || !rightStats
+        || leftStats->RowCount == 0 || rightStats->RowCount == 0) {
+        return EJoinBuildSide::Auto;
+    }
+    const double l = static_cast<double>(leftStats->RowCount);
+    const double r = static_cast<double>(rightStats->RowCount);
+    if (r * JoinAsymmetryRatio <= l) {
+        return EJoinBuildSide::Right;
+    }
+    if (l * JoinAsymmetryRatio <= r) {
+        return EJoinBuildSide::Left;
+    }
+    return EJoinBuildSide::Auto;
+}
+
+std::string_view JoinBuildSideName(EJoinBuildSide side) {
+    switch (side) {
+        case EJoinBuildSide::Left: return "left";
+        case EJoinBuildSide::Right: return "right";
+        case EJoinBuildSide::Auto: return "auto";
+    }
+    return "auto";
+}
+
 TUnaryRuntimeProcess BuildFilterRuntimeProcess(
     TFilterOperator& filter,
     const NQumir::NAst::TTypePtr& inputType,

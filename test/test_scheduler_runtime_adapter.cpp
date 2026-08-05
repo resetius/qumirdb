@@ -359,6 +359,155 @@ TEST(SchedulerRuntimeAdapter, RunsBinaryBlockingTask) {
     EXPECT_EQ(destroyCount->load(std::memory_order_relaxed), 5);
 }
 
+namespace {
+
+struct TGateResult {
+    bool ProbePulledEarly = false;
+    int RightRows = 0;
+    int LeftRows = 0;
+    int SinkRows = 0;
+    int SinkBatches = 0;
+};
+
+// Runs a graph: build (right) source -> binary <- probe (left) source -> sink,
+// where the binary consumes the build side fully before the probe. With `gate`,
+// the binary reports RequiredSide so the scheduler defers the probe producer
+// until build EOF; without it the probe is prefetched. The probe source records
+// whether it was ever pulled before the build finished.
+TGateResult RunAsymmetricGateGraph(bool gate) {
+    auto graph = std::make_unique<TTaskGraph>();
+    auto destroy = std::make_shared<std::atomic<int>>(0);
+    auto buildDone = std::make_shared<std::atomic<bool>>(false);
+    auto probeEarly = std::make_shared<std::atomic<bool>>(false);
+
+    auto buildState = std::make_shared<TSourceState>(TSourceState{.Next = 1, .End = 3});
+    auto buildCode = std::make_shared<TSourceCode>(
+        [buildDone, destroy](void* state, TRowSet& rowSet) {
+            auto* s = static_cast<TSourceState*>(state);
+            if (s->Next > s->End) {
+                buildDone->store(true, std::memory_order_relaxed);
+                return false;
+            }
+            rowSet = MakeRowSet(1, destroy.get());
+            ++s->Next;
+            return true;
+        });
+
+    auto probeState = std::make_shared<TSourceState>(TSourceState{.Next = 1, .End = 2});
+    auto probeCode = std::make_shared<TSourceCode>(
+        [buildDone, probeEarly, destroy](void* state, TRowSet& rowSet) {
+            if (!buildDone->load(std::memory_order_relaxed)) {
+                probeEarly->store(true, std::memory_order_relaxed);
+            }
+            auto* s = static_cast<TSourceState*>(state);
+            if (s->Next > s->End) {
+                return false;
+            }
+            rowSet = MakeRowSet(1, destroy.get());
+            ++s->Next;
+            return true;
+        });
+
+    auto binaryState = std::make_shared<TBinaryState>(TBinaryState{.DestroyCount = destroy.get()});
+    auto binaryCode = std::make_shared<TBinaryBlockingCode>(
+        [](void* state, TInputPort& left, TInputPort& right, TRowSet& output) {
+            auto* b = static_cast<TBinaryState*>(state);
+            TRowSet rowSet{};
+            while (!b->RightDone) { // build side first
+                auto fetch = right.Fetch(rowSet);
+                if (fetch == EFetchResult::NO_DATA) return ETaskResult::NEED_DATA;
+                if (fetch == EFetchResult::FINISHED) { b->RightDone = true; break; }
+                ++b->RightRows;
+                Release(&rowSet);
+                rowSet = {};
+            }
+            while (!b->LeftDone) { // probe side after build EOF
+                auto fetch = left.Fetch(rowSet);
+                if (fetch == EFetchResult::NO_DATA) return ETaskResult::NEED_DATA;
+                if (fetch == EFetchResult::FINISHED) { b->LeftDone = true; break; }
+                ++b->LeftRows;
+                Release(&rowSet);
+                rowSet = {};
+            }
+            if (b->DestroyCount == nullptr) {
+                return ETaskResult::FINISHED;
+            }
+            output = MakeRowSet(b->LeftRows * 100 + b->RightRows, b->DestroyCount);
+            b->DestroyCount = nullptr;
+            return ETaskResult::OK;
+        });
+    if (gate) {
+        binaryCode->RequiredSide = [](void* state) {
+            auto* b = static_cast<TBinaryState*>(state);
+            return b->RightDone ? ERequiredSide::Left : ERequiredSide::Right;
+        };
+    }
+
+    auto sinkState = std::make_shared<TSinkState>();
+    auto sinkCode = std::make_shared<TSinkCode>(
+        [](void* state, const TRowSet& rowSet) {
+            auto* sink = static_cast<TSinkState*>(state);
+            sink->Rows += static_cast<int>(rowSet.RowCount);
+            ++sink->Batches;
+        });
+
+    auto leftToBinary = std::make_unique<TOneToOneConnection>();
+    auto* leftPtr = leftToBinary.get();
+    auto rightToBinary = std::make_unique<TOneToOneConnection>();
+    auto* rightPtr = rightToBinary.get();
+    auto binaryToSink = std::make_unique<TOneToOneConnection>();
+    auto* sinkPtr = binaryToSink.get();
+
+    auto& probe = graph->AddOwnedNode(std::make_unique<TSourceTask>(
+        probeCode, probeState, TOutputPort{.Connection = leftPtr}));
+    auto& build = graph->AddOwnedNode(std::make_unique<TSourceTask>(
+        buildCode, buildState, TOutputPort{.Connection = rightPtr}));
+    auto& binary = graph->AddOwnedNode(std::make_unique<TBinaryBlockingTask>(
+        binaryCode, binaryState,
+        TInputPort{.Connection = leftPtr},
+        TInputPort{.Connection = rightPtr},
+        TOutputPort{.Connection = sinkPtr}));
+    auto& sink = graph->AddOwnedNode(std::make_unique<TSinkTask>(
+        sinkCode, sinkState, TInputPort{.Connection = sinkPtr}));
+
+    graph->AddOwnedEdge(probe, binary, std::move(leftToBinary));
+    graph->AddOwnedEdge(build, binary, std::move(rightToBinary));
+    graph->AddOwnedEdge(binary, sink, std::move(binaryToSink));
+    graph->Build();
+
+    std::string error;
+    EXPECT_TRUE(graph->Validate(&error)) << error;
+    TSingleThreadedScheduler scheduler(*graph);
+    EXPECT_TRUE(scheduler.Run(&error)) << error;
+
+    return {
+        .ProbePulledEarly = probeEarly->load(std::memory_order_relaxed),
+        .RightRows = binaryState->RightRows,
+        .LeftRows = binaryState->LeftRows,
+        .SinkRows = sinkState->Rows,
+        .SinkBatches = sinkState->Batches,
+    };
+}
+
+} // namespace
+
+TEST(SchedulerRuntimeAdapter, RequiredSideDefersProbeUntilBuildDone) {
+    auto r = RunAsymmetricGateGraph(/*gate=*/true);
+    EXPECT_FALSE(r.ProbePulledEarly);
+    EXPECT_EQ(r.RightRows, 3);
+    EXPECT_EQ(r.LeftRows, 2);
+    EXPECT_EQ(r.SinkBatches, 1);
+    EXPECT_EQ(r.SinkRows, 203); // 2*100 + 3
+}
+
+TEST(SchedulerRuntimeAdapter, WithoutRequiredSideProbeIsPrefetched) {
+    // Same graph without the gate: the probe producer is scheduled alongside the
+    // build side and runs before build EOF. Guards the gate test from being vacuous.
+    auto r = RunAsymmetricGateGraph(/*gate=*/false);
+    EXPECT_TRUE(r.ProbePulledEarly);
+    EXPECT_EQ(r.SinkRows, 203); // result identical either way
+}
+
 TEST(SchedulerRuntimeAdapter, HashShuffleTaskScattersSelectedRows) {
     std::atomic<int> destroyCount = 0;
     TOneToOneConnection input(1);

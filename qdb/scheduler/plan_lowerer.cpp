@@ -152,8 +152,9 @@ struct TTopSortBlockingState {
 struct TSchedulerInnerJoinState {
     TSchedulerInnerJoinState(
         TJoinKernels kernels,
-        EJoinType joinType)
-        : Processor(std::move(kernels), joinType)
+        EJoinType joinType,
+        EJoinBuildSide buildSide = EJoinBuildSide::Auto)
+        : Processor(std::move(kernels), joinType, buildSide)
     {}
 
     TInnerJoinProcessor Processor;
@@ -641,6 +642,9 @@ private:
         node.DebugLabel = std::move(label);
     }
 
+    // Build the hash table on the side with fewer estimated rows when the other
+    // is >= JoinAsymmetryRatio times larger; that side then streams without
+    // being stored. Inner only.
     static std::string JoinDebugLabel(const TJoinOperator& join) {
         if (join.Keys().empty()) {
             return "cross-join " + std::string(JoinTypeName(join.JoinType()));
@@ -761,7 +765,7 @@ private:
     // processor's fetch-callback interface. TState wraps the processor.
     template <class TState>
     std::shared_ptr<const NScheduler::TBinaryBlockingCode> MakeBinaryJoinCode() {
-        return std::make_shared<NScheduler::TBinaryBlockingCode>(
+        auto code = std::make_shared<NScheduler::TBinaryBlockingCode>(
             [](void* state,
                NScheduler::TInputPort& left,
                NScheduler::TInputPort& right,
@@ -777,6 +781,20 @@ private:
                 return MapJoinProcessResult(
                     s->Processor.Process(fetchLeft, fetchRight, output));
             });
+        if constexpr (std::is_same_v<TState, TSchedulerInnerJoinState>) {
+            code->RequiredSide = [](void* state) {
+                switch (static_cast<TState*>(state)->Processor.RequiredInputSide()) {
+                    case EJoinBuildSide::Left:
+                        return NScheduler::ERequiredSide::Left;
+                    case EJoinBuildSide::Right:
+                        return NScheduler::ERequiredSide::Right;
+                    case EJoinBuildSide::Auto:
+                        return NScheduler::ERequiredSide::Both;
+                }
+                return NScheduler::ERequiredSide::Both;
+            };
+        }
+        return code;
     }
 
     bool SupportedChild(const TOperatorPtr& op) const {
@@ -1953,7 +1971,7 @@ private:
             auto task = std::make_unique<NScheduler::TBinaryBlockingTask>(
                 joinCode,
                 std::make_shared<TSchedulerInnerJoinState>(
-                    *joinKernels, join.JoinType()),
+                    *joinKernels, join.JoinType(), ChooseJoinBuildSide(join)),
                 NScheduler::TInputPort{
                     .Connection = &leftPipeRef, .Lane = 0},
                 NScheduler::TInputPort{
