@@ -541,7 +541,8 @@ struct TCompiledWasmModule {
 // and wasm32 miscompiles it. See docs/issues/browser-wasm64-layout.md.
 std::expected<TCompiledWasmModule, std::string> CompileKernelAstToWasm(
     NQumir::NAst::TExprPtr ast,
-    int64_t globalBase)
+    int64_t globalBase,
+    const std::vector<std::string>& entryNames)
 {
     auto opts = NQdb::KernelRunnerOptions();
     opts.NativeCode = false;
@@ -550,7 +551,7 @@ std::expected<TCompiledWasmModule, std::string> CompileKernelAstToWasm(
 
     std::string err;
     auto object =
-        NQdb::CompileKernelAstToObject(runner, std::move(ast), {}, &err);
+        NQdb::CompileKernelAstToObject(runner, std::move(ast), entryNames, &err);
     if (!object) {
         return std::unexpected(
             err.empty() ? "wasm kernel compilation failed" : err);
@@ -1612,7 +1613,7 @@ TWasmFinalizeResult WasmFinalizeKernels(
     }
 
     auto fused = NQdb::BuildFusedProgram(unique);
-    auto wasm = CompileKernelAstToWasm(fused.Program, WasmSlot0);
+    auto wasm = CompileKernelAstToWasm(fused.Program, WasmSlot0, fused.Entrypoints);
     if (!wasm) {
         diagnostics.push_back(llvm::json::Object{
             {"stage", "wasm-fusion"},
