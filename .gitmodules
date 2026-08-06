@@ -3,4 +3,4 @@
 	url = ../qumir.git
 [submodule "externals/coroio"]
 	path = externals/coroio
-	url = https://github.com/resetius/coroio.git
+	url = ../coroio.git
