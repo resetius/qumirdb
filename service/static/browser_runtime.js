@@ -888,6 +888,54 @@ function aliasWasmRowSetDescriptor(arena, layout, rowSet) {
   };
 }
 
+// Like aliasWasmRowSetDescriptor, but keeps only `kept` columns (in that order)
+// of the batch's wasm rowset — the wasm equivalent of MakeFilterSelectProcess for
+// filter column pruning. Column data stays in wasm (no JS .values needed); the
+// filter's output `selection` is copied verbatim.
+function narrowWasmRowSetDescriptor(arena, layout, batch, kept, selection) {
+  const wasm = batch?.wasm;
+  if (!wasm) {
+    return null;
+  }
+  assertLiveWasmRowSetHandle(wasm);
+  const rs = layout.rowset;
+  const col = layout.column;
+  const sourcePtr = wasm.rowsetPtr;
+  const sourceColumns = readPointer(arena.view(), sourcePtr + rs.columns);
+  const rowCount = Number(arena.view().getBigInt64(sourcePtr + rs.rowCount, true));
+  const columnsBase = arena.alloc(Math.max(kept.length, 1) * col.size, 8);
+  const rowsetPtr = arena.alloc(rs.size, 8);
+  const selectionPtr = selection ? arena.alloc(Math.max(rowCount, 1), 8) : 0;
+
+  // All allocations done; safe to take views.
+  const bytes = arena.bytes();
+  for (let o = 0; o < kept.length; ++o) {
+    const src = sourceColumns + kept[o] * col.size;
+    bytes.set(bytes.subarray(src, src + col.size), columnsBase + o * col.size);
+  }
+  const dv = arena.view();
+  new Uint8Array(arena.memory.buffer, rowsetPtr, rs.size).fill(0);
+  writePointer(dv, rowsetPtr + rs.columns, columnsBase);
+  dv.setBigInt64(rowsetPtr + rs.columnCount, BigInt(kept.length), true);
+  dv.setBigInt64(rowsetPtr + rs.rowCount, BigInt(rowCount), true);
+  if (selectionPtr) {
+    copySelectionToMemory(arena, selectionPtr, selection, rowCount);
+    writePointer(dv, rowsetPtr + rs.selection, selectionPtr);
+  }
+  return {
+    rowsetPtr,
+    selectionPtr,
+    rowCount,
+    destroy: () => {
+      if (selectionPtr) {
+        arena.free(selectionPtr);
+      }
+      arena.free(columnsBase);
+      arena.free(rowsetPtr);
+    },
+  };
+}
+
 function shapeColumns(output) {
   return (output || []).map(column => ({
     name: column.name,
@@ -3066,7 +3114,37 @@ class FilterTask {
       }
     }
     this.rows += fetched.rowSet.batch.rowCount;
-    output.push({ batch: fetched.rowSet.batch, selection });
+    // Filter pruning (keptColumns) drops predicate-only columns so the layout
+    // matches what the kernels above were compiled for. Narrow the wasm rowset —
+    // column data stays in wasm (the JS .values may be absent) — mirroring
+    // MakeFilterSelectProcess. The narrowed descriptor owns only its own rowset/
+    // columns/selection allocations; the shared column data lives as long as the
+    // input batch, exactly as on the non-narrowed pass-through path.
+    let batch = fetched.rowSet.batch;
+    let outSelection = selection;
+    const kept = this.stage.keptColumns;
+    if (Array.isArray(kept)) {
+      const narrowed = narrowWasmRowSetDescriptor(
+        this.shared.arena, this.layout, batch, kept, selection);
+      batch = { ...batch };
+      if (Array.isArray(fetched.rowSet.batch.columns)) {
+        batch.columns = kept.map(i => fetched.rowSet.batch.columns[i]);
+      }
+      if (narrowed) {
+        // pinned: the narrowed rowset carries the data in wasm and has no JS
+        // .values, so it must be consumed directly, never re-marshalled.
+        attachBatchWasm(batch, narrowed.rowsetPtr, {
+          pinned: true,
+          selectionPtr: narrowed.selectionPtr,
+          destroy: narrowed.destroy,
+        });
+        outSelection = makeWasmSelection(
+          this.shared.arena, narrowed.rowCount, narrowed.selectionPtr);
+      } else {
+        delete batch.wasm;
+      }
+    }
+    output.push({ batch, selection: outSelection });
     return TaskResult.OK;
   }
 }

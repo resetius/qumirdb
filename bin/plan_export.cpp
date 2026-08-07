@@ -1827,6 +1827,45 @@ llvm::json::Array StructColumnsJson(const NQumir::NAst::TStructType& type) {
     return out;
 }
 
+// Column pruning applied to a filter's output (mirrors BuildFilterRuntimeProcess):
+// the annotated output can be a proper, possibly reordered, subset of the input
+// (predicate-only columns dropped). Returns the kept input-column indices, or
+// nullopt when the output is the full input in the same order (no narrowing).
+std::optional<std::vector<int64_t>> FilterKeptColumns(
+    const NQumir::NAst::TStructType& input,
+    const NQumir::NAst::TTypePtr& filterType)
+{
+    auto* fun = filterType
+        ? static_cast<NQumir::NAst::TFunctionType*>(filterType.get())
+        : nullptr;
+    auto* out = fun && fun->ReturnType
+        ? static_cast<NQumir::NAst::TStructType*>(fun->ReturnType.get())
+        : nullptr;
+    if (!out || out->Fields.empty()) {
+        return std::nullopt;
+    }
+    std::vector<int64_t> kept;
+    kept.reserve(out->Fields.size());
+    bool identity = out->Fields.size() == input.Fields.size();
+    for (size_t o = 0; o < out->Fields.size(); ++o) {
+        int64_t idx = -1;
+        for (size_t i = 0; i < input.Fields.size(); ++i) {
+            if (input.Fields[i].first == out->Fields[o].first) {
+                idx = static_cast<int64_t>(i);
+                break;
+            }
+        }
+        if (idx < 0) {
+            return std::nullopt; // stale/wider output: pass the full input through
+        }
+        if (static_cast<size_t>(idx) != o) {
+            identity = false;
+        }
+        kept.push_back(idx);
+    }
+    return identity ? std::nullopt : std::optional(std::move(kept));
+}
+
 llvm::json::Object UnsupportedExec(std::string reason) {
     return llvm::json::Object{
         {"supported", false},
@@ -2251,14 +2290,33 @@ struct TExecGraphBuilder {
                     Unsupported = UnsupportedExec("filter kernel failed to compile to wasm");
                     return {};
                 }
-                const int64_t id = AddNode(llvm::json::Object{
+                llvm::json::Object node{
                     {"kind", "filter"},
                     {"label", "filter " + SafeExprLine(filter.Cast()->Predicate())},
                     {"predicate", SafeExprLine(filter.Cast()->Predicate())},
                     {"entrypoints", EntrypointsJson(*ref, {{"filter", 0}})},
-                });
+                };
+                // If pruning narrowed the filter output (predicate-only columns
+                // dropped), the kernels above expect that narrowed layout; the
+                // browser filter must gather these columns to match.
+                auto* inputStruct = static_cast<NQumir::NAst::TStructType*>(
+                    input.OutputType.get());
+                auto outputType = input.OutputType;
+                if (inputStruct) {
+                    if (auto kept = FilterKeptColumns(
+                            *inputStruct, filter.Cast()->Type)) {
+                        llvm::json::Array cols;
+                        for (int64_t idx : *kept) {
+                            cols.push_back(idx);
+                        }
+                        node["keptColumns"] = std::move(cols);
+                        outputType = static_cast<NQumir::NAst::TFunctionType*>(
+                            filter.Cast()->Type.get())->ReturnType;
+                    }
+                }
+                const int64_t id = AddNode(std::move(node));
                 AddEdge(input.NodeId, id, 0);
-                return {.NodeId = id, .OutputType = input.OutputType};
+                return {.NodeId = id, .OutputType = outputType};
             }
 
             if (auto project = TMaybeOp<TProjectOperator>(op)) {
