@@ -69,3 +69,7 @@ Testing/
 .cache/
 
 docs/issues/*.md
+
+# local planning notes & agent instructions (not tracked)
+plans/
+/CLAUDE.md
