@@ -553,9 +553,11 @@ function renderQueryItem(query, folders) {
   const lastRun = loadLastRun(query.id, activeDatasetId);
   if (lastRun) {
     const meta = document.createElement('span');
-    meta.className = 'query-meta';
-    meta.textContent = formatDuration(lastRun.processingMs ?? lastRun.elapsedMs);
-    meta.title = `Last run ${formatRelativeTime(lastRun.at)}`;
+    const dur = formatDuration(lastRun.processingMs ?? lastRun.elapsedMs);
+    meta.className = lastRun.failed ? 'query-meta query-meta-failed' : 'query-meta';
+    meta.textContent = lastRun.failed ? `fail · ${dur}` : dur;
+    meta.title = `Last run ${formatRelativeTime(lastRun.at)}` +
+      (lastRun.failed ? ' — failed' : '');
     button.appendChild(meta);
   }
 
@@ -1707,6 +1709,7 @@ async function executeBrowserJob(job) {
   job.cancel = () => cancelBrowserJob(job);
   const viewing = () => isActiveWorkspace(queryId, datasetId);
 
+  let started = performance.now(); // reset at run start; used to time failures too
   try {
     if (viewing()) {
       setStatus('explaining');
@@ -1755,6 +1758,8 @@ async function executeBrowserJob(job) {
             'This query is not supported for browser execution yet.'
         }
       };
+      recordLastRun(queryId, datasetId,
+        { processingMs: 0, elapsedMs: 0, rows: 0, failed: true });
       applyOutcome(queryId, datasetId,
         () => {
           setStatus('run failed');
@@ -1771,7 +1776,7 @@ async function executeBrowserJob(job) {
       setStatus('running');
       setRunProgress(0);
     }
-    const started = performance.now();
+    started = performance.now();
     const result = await runBrowserWorker(
       resolvedExec,
       dataset,
@@ -1818,10 +1823,16 @@ async function executeBrowserJob(job) {
     if (job.cancelled || error.name === 'AbortError') {
       return;
     }
+    const elapsedMs = performance.now() - started;
     const payload = {
       ok: false,
+      elapsedMs,
       error: { stage: 'browser-exec', message: error.message || String(error) }
     };
+    // Record the failed run with its time so the query card shows it ran and
+    // failed (not blank, indistinguishable from never-run).
+    recordLastRun(queryId, datasetId,
+      { processingMs: elapsedMs, elapsedMs, rows: 0, failed: true });
     applyOutcome(queryId, datasetId,
       () => {
         setStatus('run failed');
@@ -2552,7 +2563,8 @@ function recordLastRun(queryId, datasetId, meta) {
       datasetId,
       processingMs: meta.processingMs,
       elapsedMs: meta.elapsedMs,
-      rows: meta.rows
+      rows: meta.rows,
+      failed: meta.failed || false
     }));
   } catch {
     // ignore quota errors

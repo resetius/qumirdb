@@ -645,6 +645,10 @@ button:hover {
   font-variant-numeric: tabular-nums;
 }
 
+.query-meta-failed {
+  color: var(--danger);
+}
+
 .query-action {
   flex: none;
   display: inline-flex;
