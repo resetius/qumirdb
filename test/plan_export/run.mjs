@@ -1,17 +1,65 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
-const [exporter, nativeRunner, runtimePath, goldensDir] = process.argv.slice(2);
-if (!exporter || !nativeRunner || !runtimePath || !goldensDir) {
-  throw new Error(
-    'usage: run.mjs <qdb_plan_export> <native_runner> <browser_runtime> <goldens>');
+const args = process.argv.slice(2);
+let xmlOutputPath = null;
+const xmlIndex = args.indexOf('--xml');
+if (xmlIndex >= 0) {
+  xmlOutputPath = args[xmlIndex + 1] ?? null;
+  args.splice(xmlIndex, 2);
+}
+const [exporter, nativeRunner, runtimePath, goldensDir] = args;
+const usageError = !exporter || !nativeRunner || !runtimePath || !goldensDir ||
+  args.length !== 4 || (xmlIndex >= 0 && !xmlOutputPath)
+  ? new Error(
+    'usage: run.mjs <qdb_plan_export> <native_runner> '
+      + '<browser_runtime> <goldens> [--xml <junit.xml>]')
+  : null;
+
+let executeBrowserPipelineScheduled;
+
+function xmlEscape(value) {
+  return String(value ?? '')
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, '\ufffd')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
 }
 
-const { executeBrowserPipelineScheduled } = await import(
-  pathToFileURL(runtimePath).href);
+function errorText(error) {
+  return error instanceof Error
+    ? error.stack || error.message
+    : String(error);
+}
+
+function writeJUnit(results, elapsedMs) {
+  if (!xmlOutputPath) return;
+  const failures = results.filter(result => result.error).length;
+  let xml = '<?xml version="1.0" encoding="UTF-8"?>\n';
+  xml += '<testsuite name="plan-export-integration" '
+    + `tests="${results.length}" failures="${failures}" `
+    + `time="${(elapsedMs / 1000).toFixed(3)}">\n`;
+  for (const result of results) {
+    xml += `  <testcase name="${xmlEscape(result.name)}" `
+      + 'classname="plan-export-integration" '
+      + `time="${(result.elapsedMs / 1000).toFixed(3)}">\n`;
+    if (result.error) {
+      const detail = errorText(result.error);
+      const message = detail.split('\n', 1)[0];
+      xml += `    <failure message="${xmlEscape(message)}">`
+        + `${xmlEscape(detail)}</failure>\n`;
+    }
+    xml += '  </testcase>\n';
+  }
+  xml += '</testsuite>\n';
+  mkdirSync(path.dirname(xmlOutputPath), { recursive: true });
+  writeFileSync(xmlOutputPath, xml, 'utf8');
+}
 
 const fixtures = {
   filter_project: {
@@ -200,41 +248,83 @@ async function browserResult(name, exec) {
 
 const printGoldens = process.env.QDB_PRINT_GOLDENS === '1';
 
-for (const name of Object.keys(fixtures)) {
-  for (const mode of ['single', 'threaded']) {
-    const snapshotBundle = exportBundle(name, mode, false);
-    assertStablePhysicalGroups(name, mode, snapshotBundle);
-    const snapshot = normalizedExec(snapshotBundle.exec);
-    if (printGoldens) {
-      console.log(`=== ${name}.${mode}.json ===`);
-      console.log(JSON.stringify(snapshot, null, 2));
-      continue;
-    }
-    assert.deepEqual(snapshot, readGolden(name, mode),
-      `${name}/${mode}: exported exec JSON changed`);
+async function runFixture(name, mode) {
+  const snapshotBundle = exportBundle(name, mode, false);
+  assertStablePhysicalGroups(name, mode, snapshotBundle);
+  const snapshot = normalizedExec(snapshotBundle.exec);
+  if (printGoldens) {
+    console.log(`=== ${name}.${mode}.json ===`);
+    console.log(JSON.stringify(snapshot, null, 2));
+    return;
+  }
+  assert.deepEqual(snapshot, readGolden(name, mode),
+    `${name}/${mode}: exported exec JSON changed`);
 
-    if (name === 'join' && mode === 'threaded') {
-      const repeated = exportBundle(name, mode, false);
-      assert.deepEqual(
-        snapshotBundle.graphs.physical,
-        repeated.graphs.physical,
-        `${name}/${mode}: physical graph changed across exporter processes`);
-    }
-
-    const runtimeBundle = exportBundle(name, mode, true);
-    const browser = await browserResult(
-      name, resolveExecArtifacts(runtimeBundle));
-    assert.equal(
-      browser.memory?.liveMB,
-      '0.0',
-      `${name}/${mode}: browser runtime leaked wasm memory`);
+  if (name === 'join' && mode === 'threaded') {
+    const repeated = exportBundle(name, mode, false);
     assert.deepEqual(
-      normalizeResult(browser),
-      normalizeResult(nativeResult(name, mode)),
-      `${name}/${mode}: browser and native results differ`);
+      snapshotBundle.graphs.physical,
+      repeated.graphs.physical,
+      `${name}/${mode}: physical graph changed across exporter processes`);
+  }
+
+  const runtimeBundle = exportBundle(name, mode, true);
+  const browser = await browserResult(
+    name, resolveExecArtifacts(runtimeBundle));
+  assert.equal(
+    browser.memory?.liveMB,
+    '0.0',
+    `${name}/${mode}: browser runtime leaked wasm memory`);
+  assert.deepEqual(
+    normalizeResult(browser),
+    normalizeResult(nativeResult(name, mode)),
+    `${name}/${mode}: browser and native results differ`);
+}
+
+async function main() {
+  const suiteStarted = performance.now();
+  const results = [];
+  try {
+    if (usageError) throw usageError;
+    ({ executeBrowserPipelineScheduled } = await import(
+      pathToFileURL(runtimePath).href));
+    for (const name of Object.keys(fixtures)) {
+      for (const mode of ['single', 'threaded']) {
+        const started = performance.now();
+        try {
+          await runFixture(name, mode);
+          results.push({
+            name: `${name}.${mode}`,
+            elapsedMs: performance.now() - started,
+            error: null,
+          });
+        } catch (error) {
+          results.push({
+            name: `${name}.${mode}`,
+            elapsedMs: performance.now() - started,
+            error,
+          });
+          console.error(`[FAIL] ${name}.${mode}\n${errorText(error)}`);
+        }
+      }
+    }
+  } catch (error) {
+    results.push({
+      name: 'harness',
+      elapsedMs: performance.now() - suiteStarted,
+      error,
+    });
+    console.error(`[FAIL] harness\n${errorText(error)}`);
+  }
+
+  writeJUnit(results, performance.now() - suiteStarted);
+  const failures = results.filter(result => result.error).length;
+  if (failures) {
+    console.error(`plan export integration failures: ${failures}`);
+    process.exitCode = 1;
+  } else if (!printGoldens) {
+    console.log('plan export golden and native/browser parity checks passed');
   }
 }
 
-if (!printGoldens) {
-  console.log('plan export golden and native/browser parity checks passed');
-}
+await main();

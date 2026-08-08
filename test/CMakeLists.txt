@@ -73,6 +73,7 @@ if(NODE_EXECUTABLE)
             $<TARGET_FILE:plan_export_native_runner>
             ${CMAKE_SOURCE_DIR}/service/static/browser_runtime.js
             ${CMAKE_SOURCE_DIR}/test/plan_export/goldens
+            --xml ${CMAKE_CURRENT_BINARY_DIR}/test_plan_export_integration.xml
         WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
     )
 endif()
