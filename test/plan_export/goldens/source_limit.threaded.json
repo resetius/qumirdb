@@ -1,0 +1,47 @@
+{
+  "supported": true,
+  "embedWasm": false,
+  "nodes": [
+    {
+      "columns": [
+        {
+          "name": "k",
+          "nullable": false,
+          "type": "i64"
+        }
+      ],
+      "id": 0,
+      "kind": "source",
+      "stageId": 3,
+      "table": "t"
+    },
+    {
+      "entrypoints": {},
+      "id": 1,
+      "kind": "project",
+      "output": [
+        {
+          "inputIndex": 0,
+          "name": "k",
+          "nullable": false,
+          "source": "passthrough",
+          "type": "i64"
+        }
+      ],
+      "stageId": 2
+    }
+  ],
+  "edges": [
+    {
+      "from": 0,
+      "input": 0,
+      "kind": "one-to-one",
+      "to": 1
+    }
+  ],
+  "root": 1,
+  "limit": {
+    "limit": 10,
+    "offset": 0
+  }
+}

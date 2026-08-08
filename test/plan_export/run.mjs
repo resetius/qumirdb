@@ -107,6 +107,13 @@ const fixtures = {
     },
     browserBatchSizes: { t: [1, 2] },
   },
+  source_limit: {
+    sql: 'SELECT * FROM t LIMIT 10',
+    tables: {
+      t: { k: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] },
+    },
+    browserBatchSizes: { t: [4, 4, 4] },
+  },
 };
 
 function datasetFor(fixture) {
@@ -257,6 +264,9 @@ function assertStablePhysicalGroups(name, mode, bundle) {
 
 function resolveExecArtifacts(bundle) {
   const artifactId = bundle.exec.wasm;
+  if (!artifactId) {
+    return bundle.exec;
+  }
   const wasm = bundle.artifacts?.[artifactId]?.data;
   assert.ok(wasm, `exec artifact is missing: ${artifactId}`);
   return { ...bundle.exec, wasm };

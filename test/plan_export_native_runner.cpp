@@ -127,6 +127,14 @@ TFixture MakeFixture(std::string_view name) {
                 {1, 2, 3}}));
         return fixture;
     }
+    if (name == "source_limit") {
+        fixture.Sql = "SELECT * FROM t LIMIT 10";
+        fixture.Tables.emplace("t", std::make_unique<TFixtureTable>(
+            std::vector<std::string>{"k"},
+            std::vector<std::vector<int64_t>>{
+                {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}}));
+        return fixture;
+    }
     throw std::runtime_error("unknown fixture: " + std::string(name));
 }
 

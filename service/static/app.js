@@ -1850,7 +1850,7 @@ function resolveExecArtifacts(exec, artifacts) {
   if (Array.isArray(exec.nodes)) {
     const artifactId = exec.wasm;
     if (!artifactId) {
-      throw new Error('exec plan is missing query wasm artifact');
+      return exec;
     }
     const data = artifacts?.[artifactId]?.data;
     if (!data) {

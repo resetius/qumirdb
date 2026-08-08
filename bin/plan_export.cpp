@@ -2577,7 +2577,7 @@ struct TExecPlanCodec {
             {"edges", std::move(Edges)},
             {"root", static_cast<int64_t>(Plan.Root)},
         };
-        if (EmbedWasm) {
+        if (EmbedWasm && !queryWasm.empty()) {
             out["wasm"] = std::move(queryWasm);
         }
         if (Plan.RootLimit) {
