@@ -20,6 +20,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <functional>
 #include <iostream>
 #include <optional>
@@ -495,13 +496,16 @@ private:
         auto reader = TByteReader(pipe);
         for (;;) {
             ssize_t n = co_await reader.ReadSome(buf, sizeof(buf));
-            if (n <= 0) {
+            if (n < 0) {
+                continue;
+            }
+            if (n == 0) {
                 break;
             }
             output.append(buf, static_cast<size_t>(n));
         }
 
-        const int exitCode = pipe.Wait();
+        const int exitCode = co_await WaitForPipe(pipe);
         if (exitCode != 0) {
             std::string json =
                 "{\"ok\":false,\"error\":{\"stage\":\"export\","
@@ -574,7 +578,10 @@ private:
         char buf[8192];
         for (;;) {
             ssize_t n = co_await pipe.ReadSome(buf, sizeof(buf));
-            if (n <= 0) {
+            if (n < 0) {
+                continue;
+            }
+            if (n == 0) {
                 break;
             }
             output.append(buf, static_cast<size_t>(n));
@@ -583,13 +590,16 @@ private:
         std::string errorOutput;
         for (;;) {
             ssize_t n = co_await pipe.ReadSomeErr(buf, sizeof(buf));
-            if (n <= 0) {
+            if (n < 0) {
+                continue;
+            }
+            if (n == 0) {
                 break;
             }
             errorOutput.append(buf, static_cast<size_t>(n));
         }
 
-        const int exitCode = pipe.Wait();
+        const int exitCode = co_await WaitForPipe(pipe);
         std::error_code ec;
         std::filesystem::remove(queryFile, ec);
 
@@ -797,7 +807,10 @@ private:
         std::vector<char> buf(1 << 18);
         for (;;) {
             ssize_t n = co_await file.ReadSome(buf.data(), buf.size());
-            if (n <= 0) {
+            if (n < 0) {
+                continue;
+            }
+            if (n == 0) {
                 break;
             }
             co_await response.WriteBodyChunk(buf.data(), static_cast<size_t>(n));
@@ -837,7 +850,10 @@ private:
         char buf[65536];
         for (;;) {
             ssize_t n = co_await pipe.ReadSome(buf, sizeof(buf));
-            if (n <= 0) {
+            if (n < 0) {
+                continue;
+            }
+            if (n == 0) {
                 break;
             }
             output.append(buf, static_cast<size_t>(n));
@@ -846,13 +862,16 @@ private:
         std::string errorOutput;
         for (;;) {
             ssize_t n = co_await pipe.ReadSomeErr(buf, sizeof(buf));
-            if (n <= 0) {
+            if (n < 0) {
+                continue;
+            }
+            if (n == 0) {
                 break;
             }
             errorOutput.append(buf, static_cast<size_t>(n));
         }
 
-        const int exitCode = pipe.Wait();
+        const int exitCode = co_await WaitForPipe(pipe);
         if (exitCode != 0) {
             co_await SendJson(response,
                 ToJsonString(ErrorJson(
@@ -999,6 +1018,21 @@ private:
     }
 
 private:
+    TFuture<int> WaitForPipe(TPipe& pipe) {
+        if (!Options_.Poller) {
+            co_return pipe.Wait();
+        }
+        auto exitCode = std::async(std::launch::async, [&pipe]() {
+            return pipe.Wait();
+        });
+        while (exitCode.wait_for(std::chrono::milliseconds(0)) !=
+               std::future_status::ready)
+        {
+            co_await Options_.Poller->Sleep(std::chrono::milliseconds(10));
+        }
+        co_return exitCode.get();
+    }
+
     // RAII entry in the active-run registry: records runId -> child pid on
     // construction and removes it when the run coroutine unwinds (any exit path).
     class TRunRegistration {
