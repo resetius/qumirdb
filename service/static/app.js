@@ -17,6 +17,7 @@ import {
   deleteWorkspaceState
 } from './browser_storage.js';
 import { readParquetTable } from './browser_parquet.js';
+import { prettifyType } from './oz_type.js';
 
 const $ = selector => document.querySelector(selector);
 
@@ -1216,7 +1217,8 @@ function renderSchema(dataset) {
     for (const column of item.columns || []) {
       const row = document.createElement('div');
       row.className = 'schema-column';
-      row.innerHTML = `<span>${escapeHtml(column.name)}</span><span>${escapeHtml(column.type)}</span>`;
+      row.innerHTML = `<span>${escapeHtml(column.name)}</span>`
+        + `<span>${escapeHtml(prettifyType(column.type))}</span>`;
       tableRoot.appendChild(row);
     }
     root.appendChild(tableRoot);

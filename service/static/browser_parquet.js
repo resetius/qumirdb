@@ -1,4 +1,5 @@
 import { WasmSourceBatchBuilder } from './browser_runtime.js';
+import { Type, printType } from './oz_type.js';
 
 const HYPARQUET_URL = 'https://cdn.jsdelivr.net/npm/hyparquet@latest/+esm';
 const HYPARQUET_COMPRESSORS_URL =
@@ -53,7 +54,7 @@ function tableNameFromFile(fileName) {
     .replace(/^_+|_+$/g, '') || 'table';
 }
 
-function parquetTypeName(field) {
+function parquetType(field) {
   const physical = String(parquetPhysicalType(field.type ?? field.physicalType)).toUpperCase();
   const converted = String(parquetConvertedType(
     field.converted_type ?? field.convertedType)).toUpperCase();
@@ -62,33 +63,33 @@ function parquetTypeName(field) {
   if (converted.includes('DECIMAL') || logical.includes('DECIMAL')) {
     const precision = Number(field.precision ?? field.type_precision ?? field.typePrecision ?? 18);
     const scale = Number(field.scale ?? field.type_scale ?? field.typeScale ?? 0);
-    return `DECIMAL(${precision || 18},${scale || 0})`;
+    return Type.named('Decimal', [precision || 18, scale || 0]);
   }
   if (converted.includes('UTF8') || logical.includes('STRING')) {
-    return 'string';
+    return Type.scalar('string');
   }
   if (logical.includes('DATE')) {
-    return 'i32';
+    return Type.scalar('i32');
   }
   if (logical.includes('TIMESTAMP')) {
-    return 'i64';
+    return Type.scalar('i64');
   }
   if (physical === 'BOOLEAN') {
-    return 'bool';
+    return Type.scalar('bool');
   }
   if (physical === 'INT32') {
-    return 'i32';
+    return Type.scalar('i32');
   }
   if (physical === 'INT64') {
-    return 'i64';
+    return Type.scalar('i64');
   }
   if (physical === 'FLOAT' || physical === 'DOUBLE') {
-    return 'f64';
+    return Type.scalar('f64');
   }
   if (physical === 'BYTE_ARRAY' || physical === 'FIXED_LEN_BYTE_ARRAY') {
-    return 'string';
+    return Type.scalar('string');
   }
-  return 'string';
+  return Type.scalar('string');
 }
 
 function parquetNullable(field) {
@@ -158,10 +159,13 @@ function schemaFields(metadata) {
     })
     .filter((field, index) => index > 0 || field.type || field.physicalType)
     .map(field => {
-      const type = parquetTypeName(field);
+      let type = parquetType(field);
+      if (parquetNullable(field)) {
+        type = Type.named('Nullable', [type]);
+      }
       return {
         name: field.name,
-        type: parquetNullable(field) ? `Nullable<${type}>` : type
+        type: printType(type)
       };
     });
 }

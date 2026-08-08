@@ -210,27 +210,14 @@ std::string SchemaTypeName(const NQumir::NAst::TTypePtr& type) {
         return "unknown";
     }
     if (auto nullable = TMaybeType<NQdb::TNullable>(type)) {
-        return "Nullable<" + SchemaTypeName(nullable.Cast()->UnderlyingType) + ">";
+        return "<named Nullable [" +
+            SchemaTypeName(nullable.Cast()->UnderlyingType) + "]>";
     }
     if (auto decimal = NQdb::DecimalSpecOfValueType(type)) {
-        return "DECIMAL(" + std::to_string(decimal->Precision) + "," +
-            std::to_string(decimal->Scale) + ")";
+        return "<named Decimal [" + std::to_string(decimal->Precision) + " " +
+            std::to_string(decimal->Scale) + "]>";
     }
-    if (auto integer = TMaybeType<TIntegerType>(type)) {
-        return integer.Cast()->ToString();
-    }
-    if (TMaybeType<TFloatType>(type)) {
-        return "f64";
-    }
-    if (TMaybeType<TBoolType>(type)) {
-        return "bool";
-    }
-    if (TMaybeType<TStringType>(type)) {
-        return "string";
-    }
-
-    auto direct = type->ToString();
-    return direct.empty() ? NQumir::NAst::NCore::PrintType(type) : direct;
+    return NQumir::NAst::NCore::PrintType(type);
 }
 
 std::string TableNameFromPath(const std::filesystem::path& path) {

@@ -56,7 +56,6 @@
 
 #include <algorithm>
 #include <bit>
-#include <cctype>
 #include <cstdlib>
 #include <cstring>
 #include <cstdio>
@@ -593,110 +592,90 @@ std::expected<TCompiledWasm64Module, std::string> CompileKernelAstToWasm64(
     };
 }
 
-NQumir::NAst::TTypePtr ParseType(std::string_view typeName) {
+NQumir::NAst::TTypePtr TranslateSchemaNamedTypes(
+    NQumir::NAst::TTypePtr type)
+{
     using namespace NQumir::NAst;
-    using TInt = TIntegerType;
 
-    while (!typeName.empty() && std::isspace(static_cast<unsigned char>(typeName.front()))) {
-        typeName.remove_prefix(1);
-    }
-    while (!typeName.empty() && std::isspace(static_cast<unsigned char>(typeName.back()))) {
-        typeName.remove_suffix(1);
-    }
-    if (typeName.starts_with("Nullable<") && typeName.ends_with(">")) {
-        return std::make_shared<TNullable>(
-            ParseType(typeName.substr(9, typeName.size() - 10)));
-    }
-    if (typeName == "<named StringView>") {
-        return std::make_shared<TStringType>();
-    }
-    if (typeName.starts_with("<named DECIMAL [") && typeName.ends_with("]>")) {
-        auto body = typeName.substr(16, typeName.size() - 18);
-        auto space = body.find(' ');
-        auto precision = ParseDecimalArg(space == std::string_view::npos
-            ? body : body.substr(0, space));
-        auto scale = space == std::string_view::npos
-            ? std::optional<int32_t>{DefaultDecimalScale}
-            : ParseDecimalArg(body.substr(space + 1));
-        if (precision && scale) {
+    if (auto named = TMaybeType<TNamedType>(type)) {
+        auto value = named.Cast();
+        if (value->Name == "Nullable") {
+            if (value->UnderlyingType || value->TypeArgs.size() != 1 ||
+                value->TypeArgs[0].Kind != TGenericArg::EKind::Type ||
+                !value->TypeArgs[0].Type)
+            {
+                throw std::runtime_error(
+                    "schema type Nullable expects one type argument");
+            }
+            return std::make_shared<TNullable>(
+                TranslateSchemaNamedTypes(value->TypeArgs[0].Type));
+        }
+        if (value->Name == "Decimal") {
+            if (value->UnderlyingType || value->TypeArgs.size() != 2 ||
+                value->TypeArgs[0].Kind != TGenericArg::EKind::Value ||
+                value->TypeArgs[1].Kind != TGenericArg::EKind::Value)
+            {
+                throw std::runtime_error(
+                    "schema type Decimal expects precision and scale value arguments");
+            }
+            auto precision = ParseDecimalArg(value->TypeArgs[0].Value);
+            auto scale = ParseDecimalArg(value->TypeArgs[1].Value);
+            if (!precision || !scale) {
+                throw std::runtime_error(
+                    "schema type Decimal precision and scale must be integers");
+            }
             return std::make_shared<TDecimal>(*precision, *scale);
         }
-    }
-
-    auto upper = [](std::string_view value) {
-        std::string out;
-        out.reserve(value.size());
-        for (char c : value) {
-            out.push_back(std::toupper(static_cast<unsigned char>(c)));
+        for (auto& arg : value->TypeArgs) {
+            if (arg.Kind == TGenericArg::EKind::Type) {
+                arg.Type = TranslateSchemaNamedTypes(std::move(arg.Type));
+            }
         }
-        return out;
-    };
-    const std::string normalized = upper(typeName);
-
-    if (normalized == "I8") {
-        return std::make_shared<TInt>(TInt::I8);
+        value->UnderlyingType =
+            TranslateSchemaNamedTypes(std::move(value->UnderlyingType));
+        return type;
     }
-    if (normalized == "I16") {
-        return std::make_shared<TInt>(TInt::I16);
-    }
-    if (normalized == "I32") {
-        return std::make_shared<TInt>(TInt::I32);
-    }
-    if (normalized == "I64") {
-        return std::make_shared<TInt>(TInt::I64);
-    }
-    if (normalized == "U8") {
-        return std::make_shared<TInt>(TInt::U8);
-    }
-    if (normalized == "U16") {
-        return std::make_shared<TInt>(TInt::U16);
-    }
-    if (normalized == "U32") {
-        return std::make_shared<TInt>(TInt::U32);
-    }
-    if (normalized == "U64") {
-        return std::make_shared<TInt>(TInt::U64);
-    }
-    if (normalized == "F64") {
-        return std::make_shared<TFloatType>();
-    }
-    if (normalized == "BOOL" || normalized == "BOOLEAN") {
-        return std::make_shared<TBoolType>();
-    }
-    if (normalized == "STRING" || normalized == "TEXT" || normalized == "VARCHAR") {
-        return std::make_shared<TStringType>();
-    }
-    if (normalized == "DATE") {
-        return std::make_shared<TInt>(TInt::I32);
-    }
-    if (normalized == "TIMESTAMP") {
-        return std::make_shared<TInt>(TInt::I64);
-    }
-    if (normalized == "DECIMAL") {
-        return std::make_shared<TDecimal>();
-    }
-    if (normalized.starts_with("DECIMAL(") && normalized.ends_with(")")) {
-        auto body = typeName.substr(8, typeName.size() - 9);
-        auto comma = body.find(',');
-        auto parseArg = [](std::string_view arg) -> std::optional<int32_t> {
-            while (!arg.empty() && std::isspace(static_cast<unsigned char>(arg.front()))) {
-                arg.remove_prefix(1);
-            }
-            while (!arg.empty() && std::isspace(static_cast<unsigned char>(arg.back()))) {
-                arg.remove_suffix(1);
-            }
-            return ParseDecimalArg(arg);
-        };
-        auto precision = parseArg(comma == std::string_view::npos ? body : body.substr(0, comma));
-        auto scale = comma == std::string_view::npos
-            ? std::optional<int32_t>{DefaultDecimalScale}
-            : parseArg(body.substr(comma + 1));
-        if (precision && scale) {
-            return std::make_shared<TDecimal>(*precision, *scale);
+    if (auto function = TMaybeType<TFunctionType>(type)) {
+        auto value = function.Cast();
+        for (auto& param : value->ParamTypes) {
+            param = TranslateSchemaNamedTypes(std::move(param));
+        }
+        value->ReturnType = TranslateSchemaNamedTypes(std::move(value->ReturnType));
+    } else if (auto future = TMaybeType<TFutureType>(type)) {
+        auto value = future.Cast();
+        value->ResultType = TranslateSchemaNamedTypes(std::move(value->ResultType));
+    } else if (auto array = TMaybeType<TArrayType>(type)) {
+        auto value = array.Cast();
+        value->ElementType = TranslateSchemaNamedTypes(std::move(value->ElementType));
+    } else if (auto pointer = TMaybeType<TPointerType>(type)) {
+        auto value = pointer.Cast();
+        value->PointeeType = TranslateSchemaNamedTypes(std::move(value->PointeeType));
+    } else if (auto reference = TMaybeType<TReferenceType>(type)) {
+        auto value = reference.Cast();
+        value->ReferencedType = TranslateSchemaNamedTypes(std::move(value->ReferencedType));
+    } else if (auto structure = TMaybeType<TStructType>(type)) {
+        for (auto& [name, fieldType] : structure.Cast()->Fields) {
+            fieldType = TranslateSchemaNamedTypes(std::move(fieldType));
         }
     }
+    return type;
+}
 
-    throw std::runtime_error("unsupported schema type: " + std::string(typeName));
+NQumir::NAst::TTypePtr ParseSchemaType(std::string_view typeName) {
+    std::istringstream input{std::string(typeName)};
+    NQumir::NAst::NCore::TTokenStream tokens(input);
+    auto parsed = NQumir::NAst::NCore::ParseType(tokens);
+    if (!parsed) {
+        throw std::runtime_error(
+            "invalid schema type '" + std::string(typeName) + "': " +
+            parsed.error().ToString());
+    }
+    if (!tokens.Next().IsEof()) {
+        throw std::runtime_error(
+            "invalid schema type '" + std::string(typeName) +
+            "': unexpected trailing input");
+    }
+    return TranslateSchemaNamedTypes(std::move(*parsed));
 }
 
 std::optional<uint64_t> ParseUnsignedStatsInteger(
@@ -780,7 +759,7 @@ std::vector<std::pair<std::string, NQumir::NAst::TTypePtr>> ParseTableColumns(
         if (!name || !type) {
             throw std::runtime_error("dataset column must have name and type");
         }
-        out.emplace_back(std::string(*name), ParseType(*type));
+        out.emplace_back(std::string(*name), ParseSchemaType(*type));
     }
     return out;
 }

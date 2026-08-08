@@ -20,6 +20,9 @@ const usageError = !exporter || !nativeRunner || !runtimePath || !goldensDir ||
   : null;
 
 let executeBrowserPipelineScheduled;
+let Type;
+let printType;
+let prettifyType;
 
 function xmlEscape(value) {
   return String(value ?? '')
@@ -161,6 +164,59 @@ function exportBundle(name, mode, embedWasm) {
   return bundle;
 }
 
+function schemaTypeRequest(type) {
+  return {
+    sql: 'SELECT amount FROM t',
+    dataset: {
+      tables: [{
+        name: 't',
+        columns: [{ name: 'amount', type }],
+        stats: { rows: 1, bytes: 16, rowGroups: 1 },
+      }],
+    },
+    options: {
+      scheduler: 'single',
+      scanTasks: 1,
+      shufflePartitions: 1,
+      format: 'runtime-bundle',
+      embedWasm: false,
+    },
+  };
+}
+
+function runSchemaTypeContract() {
+  const decimal = Type.named('Decimal', [18, 2]);
+  const nullableDecimal = Type.named('Nullable', [decimal]);
+  const printed = printType(nullableDecimal);
+  assert.equal(printed, '<named Nullable [<named Decimal [18 2]>]>');
+  assert.equal(prettifyType(printed), 'Nullable[Decimal[18 2]]');
+  assert.equal(prettifyType('i32'), 'i32');
+
+  const bundle = JSON.parse(run(
+    exporter,
+    ['--stdin-json', '--stdout-json'],
+    JSON.stringify(schemaTypeRequest(printed))));
+  assert.equal(bundle.ok, true, bundle.error?.message);
+  const source = bundle.exec?.nodes?.find(node => node.kind === 'source');
+  assert.ok(source, 'schema type contract did not produce a source node');
+  assert.deepEqual(source.columns[0], {
+    name: 'amount',
+    nullable: true,
+    precision: 18,
+    scale: 2,
+    storageType: 'binint',
+    type: 'decimal',
+    width: 16,
+  });
+
+  const legacy = JSON.parse(run(
+    exporter,
+    ['--stdin-json', '--stdout-json'],
+    JSON.stringify(schemaTypeRequest('Nullable<DECIMAL(18,2)>'))));
+  assert.equal(legacy.ok, false, 'legacy schema type syntax is still accepted');
+  assert.match(legacy.error?.message || '', /unexpected trailing input/);
+}
+
 function normalizedExec(exec) {
   const normalized = {
     supported: exec.supported,
@@ -288,6 +344,26 @@ async function main() {
     if (usageError) throw usageError;
     ({ executeBrowserPipelineScheduled } = await import(
       pathToFileURL(runtimePath).href));
+    ({ Type, printType, prettifyType } = await import(
+      pathToFileURL(path.join(path.dirname(runtimePath), 'oz_type.js')).href));
+    {
+      const started = performance.now();
+      try {
+        runSchemaTypeContract();
+        results.push({
+          name: 'schema-types',
+          elapsedMs: performance.now() - started,
+          error: null,
+        });
+      } catch (error) {
+        results.push({
+          name: 'schema-types',
+          elapsedMs: performance.now() - started,
+          error,
+        });
+        console.error(`[FAIL] schema-types\n${errorText(error)}`);
+      }
+    }
     for (const name of Object.keys(fixtures)) {
       for (const mode of ['single', 'threaded']) {
         const started = performance.now();
