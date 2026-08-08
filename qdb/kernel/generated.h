@@ -1,5 +1,7 @@
 #pragma once
 
+#include <qdb/exec/stage.h>
+
 #include <qumir/parser/ast.h>
 
 #include <cstdint>
@@ -28,17 +30,16 @@ struct TKernelSlot {
 // then either JITs it (fills Slot) or compiles it to wasm.
 struct TGeneratedKernel {
     std::string Name;                       // "filter", "join", "aggregate.update", ...
-    std::string Stage;                      // == TTaskNode::DebugGroup of the owning stage
+    std::string Stage;                      // diagnostic label; never an identity key
+    TExecStageId ExecStageId = InvalidExecStageId;
     std::vector<std::string> Entrypoints;
     NQumir::NAst::TExprPtr Ast;
     // Payloads the AST points into (e.g. filter literal strings).
     std::shared_ptr<void> Storage;
-    // Logical-operator identity; joins exec-plan stages to their kernels.
-    const void* Operator = nullptr;
     std::shared_ptr<TKernelSlot> Slot;
     bool ExportArtifacts = true;
 
-    // Sort kernels only: resolved key metadata for the exec exporter.
+    // Sort kernels only: resolved key metadata retained with the lowered plan.
     struct TSortKeyMeta {
         int32_t Index = 0;
         int32_t WidthBytes = 0;
@@ -47,9 +48,9 @@ struct TGeneratedKernel {
     };
     std::vector<TSortKeyMeta> SortKeys;
 
-    // Aggregate kernels only: output layout for the exec exporter. Agg-output
-    // nullability is a kernel property (sum/min/max over a nullable argument)
-    // that the plan's output schema does not carry.
+    // Aggregate kernels only: output layout retained with the lowered plan.
+    // Agg-output nullability is a kernel property (sum/min/max over a nullable
+    // argument) that the plan's output schema does not carry.
     struct TAggKeyMeta {
         bool IsString = false;
         bool IsNullable = false;

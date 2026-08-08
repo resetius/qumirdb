@@ -112,10 +112,10 @@ TGeneratedKernel TKernelCompiler::EmitKernel(
     TGeneratedKernel kernel{
         .Name = std::move(name),
         .Stage = Stage_,
+        .ExecStageId = ExecStageId_,
         .Entrypoints = std::move(entrypoints),
         .Ast = std::move(ast),
         .Storage = std::move(storage),
-        .Operator = Operator_,
         .Slot = std::make_shared<TKernelSlot>(),
     };
     kernel.Slot->Fns.resize(kernel.Entrypoints.size(), nullptr);
@@ -1771,7 +1771,7 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
     FinishKernelDiagnostics(Diagnostics_);
 
     if (Sink_) {
-        // Output-layout metadata for the exec exporter.
+        // Preserve output-layout metadata alongside the generated kernel.
         std::vector<TGeneratedKernel::TAggKeyMeta> keyMeta;
         keyMeta.reserve(kernels.OutputKeys.size());
         for (const auto& outputKey : kernels.OutputKeys) {

@@ -869,16 +869,17 @@ function aliasWasmRowSetDescriptor(arena, layout, rowSet) {
   writePointer(arena.view(), rowsetPtr + rs.columns, columnsBase);
   arena.view().setBigInt64(rowsetPtr + rs.columnCount, BigInt(columnCount), true);
   arena.view().setBigInt64(rowsetPtr + rs.rowCount, BigInt(rowCount), true);
+  let selectionPtr = 0;
   if (rowSet.selection) {
-    const selectionPtr = arena.alloc(Math.max(rowCount, 1), 8);
+    selectionPtr = arena.alloc(Math.max(rowCount, 1), 8);
     copySelectionToMemory(arena, selectionPtr, rowSet.selection, rowCount);
     writePointer(arena.view(), rowsetPtr + rs.selection, selectionPtr);
   }
 
   return {
     rowsetPtr,
+    selectionPtr,
     destroy: () => {
-      const selectionPtr = readPointer(arena.view(), rowsetPtr + rs.selection);
       if (selectionPtr) {
         arena.free(selectionPtr);
       }
@@ -3010,6 +3011,7 @@ function canConsumeWasmOutput(task) {
   return kind === 'filter' ||
     kind === 'project' ||
     kind === 'aggregate' ||
+    kind === 'limit' ||
     kind === 'cte-producer' ||
     kind === 'union-all' ||
     kind === 'window' ||
@@ -3978,6 +3980,94 @@ class SortTask {
   }
 }
 
+// A nested (non-root) LIMIT: streams input, keeping rows in [offset, offset+limit)
+// among already-selected rows, then finishes (backpressure stops the producer).
+// The root limit is applied by the sink instead and never reaches here.
+class LimitTask {
+  constructor(stage, layout, shared) {
+    this.stage = stage;
+    this.layout = layout;
+    this.shared = shared;
+    this.limit = Math.max(Number(stage.limit || 0), 0);
+    this.offset = Math.max(Number(stage.offset || 0), 0);
+    this.skipped = 0;
+    this.emitted = 0;
+    this.done = false;
+    this.rows = 0;
+  }
+
+  async execute() {
+    if (this.done) return TaskResult.FINISHED;
+    const output = this.node.outbound[0].connection;
+    if (!output.canPush()) return TaskResult.BLOCKED_OUTPUT;
+    if (this.emitted >= this.limit) {
+      output.finish();
+      this.done = true;
+      return TaskResult.FINISHED;
+    }
+    const input = this.node.inbound[0].connection;
+    const fetched = input.fetch();
+    if (fetched.result === FetchResult.NO_DATA) return TaskResult.NEED_DATA;
+    if (fetched.result === FetchResult.FINISHED) {
+      output.finish();
+      this.done = true;
+      return TaskResult.FINISHED;
+    }
+    const { batch, selection } = fetched.rowSet;
+    const rowCount = batch.rowCount;
+    const mask = new Uint8Array(rowCount);
+    let anyKept = false;
+    for (let i = 0; i < rowCount; ++i) {
+      if (!rowSelected(selection, i)) continue;
+      if (this.skipped < this.offset) { this.skipped++; continue; }
+      if (this.emitted >= this.limit) break;
+      mask[i] = 1;
+      this.emitted++;
+      anyKept = true;
+    }
+    if (!anyKept) {
+      releaseWasmRowSet(fetched.rowSet);
+      return TaskResult.OK;
+    }
+    this.rows = this.emitted;
+    // A wasm-backed batch (columns in wasm) can't be re-marshalled from JS, so
+    // alias its columns and keep the input rowset alive until the alias dies.
+    if (batch.wasm) {
+      const arena = this.shared.arena;
+      const alias = aliasWasmRowSetDescriptor(
+        arena, this.layout, { batch, selection: mask });
+      const releaseInput = takeRowSetRelease(fetched.rowSet);
+      let released = false;
+      const destroy = () => {
+        if (released) return;
+        released = true;
+        alias.destroy();
+        if (releaseInput) {
+          releaseInput();
+        }
+      };
+      const outSelection = makeWasmSelection(
+        arena, rowCount, alias.selectionPtr);
+      const outBatch = { ...batch };
+      try {
+        attachBatchWasm(outBatch, alias.rowsetPtr, {
+          pinned: true,
+          selectionPtr: alias.selectionPtr,
+          destroy,
+        });
+        output.push({ batch: outBatch, selection: outSelection });
+      } catch (error) {
+        destroy();
+        throw error;
+      }
+    } else {
+      fetched.rowSet.selection = mask;
+      output.push(fetched.rowSet);
+    }
+    return TaskResult.OK;
+  }
+}
+
 class SinkTask {
   constructor(limit, layout, shared) {
     this.limit = limit;
@@ -4130,6 +4220,9 @@ function taskNodeForStage(stage, layout, readSourceBatches, onProgress, shared) 
   if (stage.kind === 'sort' || stage.kind === 'top-sort') {
     return makeNode(new SortTask(stage, layout, shared), stageLabel(stage));
   }
+  if (stage.kind === 'limit') {
+    return makeNode(new LimitTask(stage, layout, shared), stageLabel(stage));
+  }
   throw new Error(`unsupported exec stage: ${stage.kind}`);
 }
 
@@ -4137,9 +4230,6 @@ function buildScheduledGraph(exec, readSourceBatches, options, layout, shared) {
   const nodesById = new Map();
   const nodes = [];
   for (const spec of exec.nodes || []) {
-    if (spec.kind === 'limit') {
-      continue;
-    }
     const node = taskNodeForStage(
       spec, layout, readSourceBatches, options.onProgress, shared);
     nodesById.set(Number(spec.id), node);

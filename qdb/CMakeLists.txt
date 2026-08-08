@@ -66,6 +66,7 @@ add_library(qumirdb
     exec/sort_key_ops.cpp
     exec/window_exec.cpp
     exec/planner_helpers.cpp
+    exec/plan_builder.cpp
     scheduler/connection.cpp
     scheduler/executor.cpp
     scheduler/graph.cpp

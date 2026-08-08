@@ -1,3 +1,4 @@
+#include <qdb/exec/plan_builder.h>
 #include <qdb/exec/planner_helpers.h>
 #include <qdb/io/io.h>
 #include <qdb/plan/build.h>
@@ -279,7 +280,7 @@ struct TExportRequest {
 };
 
 struct TKernelArtifacts {
-    std::string Stage;
+    NQdb::TExecStageId ExecStageId = NQdb::InvalidExecStageId;
     std::string Name;
     std::string Ast;
     std::string Ir;
@@ -430,7 +431,7 @@ std::string ReadBinaryFile(const std::filesystem::path& path) {
         std::istreambuf_iterator<char>());
 }
 
-std::expected<std::monostate, std::string> RunWasmLd(
+std::expected<std::monostate, std::string> RunWasm64Ld(
     const std::filesystem::path& objPath,
     const std::filesystem::path& wasmPath,
     int64_t globalBase)
@@ -530,16 +531,16 @@ std::expected<int64_t, std::string> ExtractWasmHeapBase(const std::string& wasm)
     return std::unexpected("__heap_base global definition was not found");
 }
 
-struct TCompiledWasmModule {
+struct TCompiledWasm64Module {
     std::string Bytes;
     int64_t HeapBase = 0;
 };
 
-// Compiles a kernel AST to WASM through the same path as the native JIT
-// (NQdb::CompileKernelAstToObject), only swapping the codegen target. The target
-// is wasm64 (8-byte pointers): the kernel/runtime layout assumes 8-byte pointers
-// and wasm32 miscompiles it. See docs/issues/browser-wasm64-layout.md.
-std::expected<TCompiledWasmModule, std::string> CompileKernelAstToWasm(
+// Compiles a kernel AST to a wasm64 module. It shares the Qumir frontend and
+// fused AST with native JIT finalization, then emits a wasm64 object and links
+// it with wasm-ld -mwasm64. There is no wasm32 export path: the kernel ABI and
+// browser runtime both use 8-byte pointers and WebAssembly Memory64.
+std::expected<TCompiledWasm64Module, std::string> CompileKernelAstToWasm64(
     NQumir::NAst::TExprPtr ast,
     int64_t globalBase,
     const std::vector<std::string>& entryNames)
@@ -572,7 +573,7 @@ std::expected<TCompiledWasmModule, std::string> CompileKernelAstToWasm(
         std::filesystem::remove(objPath, ec);
         std::filesystem::remove(wasmPath, ec);
     };
-    if (auto linked = RunWasmLd(objPath, wasmPath, globalBase); !linked) {
+    if (auto linked = RunWasm64Ld(objPath, wasmPath, globalBase); !linked) {
         cleanup();
         return std::unexpected(linked.error());
     }
@@ -586,7 +587,7 @@ std::expected<TCompiledWasmModule, std::string> CompileKernelAstToWasm(
     if (!heapBase) {
         return std::unexpected(heapBase.error());
     }
-    return TCompiledWasmModule{
+    return TCompiledWasm64Module{
         .Bytes = std::move(wasm),
         .HeapBase = *heapBase,
     };
@@ -1231,6 +1232,7 @@ llvm::json::Object GraphJson(
         std::string Kind;
         std::string Label;
         std::string Group;
+        NQdb::TExecStageId ExecStageId = NQdb::InvalidExecStageId;
         size_t TaskCount = 0;
         size_t InputCount = 0;
         size_t OutputCount = 0;
@@ -1253,9 +1255,11 @@ llvm::json::Object GraphJson(
         const auto rawId = "n" + std::to_string(i);
         const auto kind = node.DebugKind.empty() ? "task" : node.DebugKind;
         const auto label = node.DebugLabel.empty() ? kind : node.DebugLabel;
-        const auto groupKey = node.DebugGroup.empty()
-            ? rawId
-            : node.DebugGroup;
+        const auto groupKey = node.ExecStageId != NQdb::InvalidExecStageId
+            ? "exec:" + std::to_string(node.ExecStageId)
+            : (node.TaskGroupId != NQdb::NScheduler::InvalidTaskGroupId
+                ? "task:" + std::to_string(node.TaskGroupId)
+                : rawId);
 
         auto it = groupIndexes.find(groupKey);
         if (it == groupIndexes.end()) {
@@ -1266,6 +1270,7 @@ llvm::json::Object GraphJson(
                 .Kind = kind,
                 .Label = label,
                 .Group = groupKey,
+                .ExecStageId = node.ExecStageId,
             });
         }
 
@@ -1328,7 +1333,10 @@ llvm::json::Object GraphJson(
         }
         llvm::json::Object artifactRefs;
         for (const auto& item : kernelArtifacts) {
-            if (item.Stage != group.Group) {
+            const bool belongs =
+                group.ExecStageId != NQdb::InvalidExecStageId &&
+                item.ExecStageId == group.ExecStageId;
+            if (!belongs) {
                 continue;
             }
             AddArrayArtifactRef(artifactRefs, "ast", item.Ast);
@@ -1354,6 +1362,9 @@ llvm::json::Object GraphJson(
                 {"taskIds", std::move(taskIds)},
             }},
         };
+        if (group.ExecStageId != NQdb::InvalidExecStageId) {
+            node["stageId"] = static_cast<int64_t>(group.ExecStageId);
+        }
         if (!artifactRefs.empty()) {
             node["artifacts"] = std::move(artifactRefs);
         }
@@ -1577,15 +1588,18 @@ TWasmFinalizeResult WasmFinalizeKernels(
     for (size_t i = 0; i < kernels.size(); ++i) {
         const auto& kernel = kernels[i];
         TKernelArtifacts item{
-            .Stage = kernel.Stage,
+            .ExecStageId = kernel.ExecStageId,
             .Name = kernel.Name,
         };
         if (!kernel.ExportArtifacts) {
             out.Kernels.push_back(std::move(item));
             continue;
         }
+        const auto artifactStage = kernel.ExecStageId != NQdb::InvalidExecStageId
+            ? "exec:" + std::to_string(kernel.ExecStageId)
+            : std::string{};
         item.Ast = artifacts.Add(
-            "ast", AstText(kernel.Ast), item.Name, item.Stage);
+            "ast", AstText(kernel.Ast), item.Name, artifactStage);
         out.Kernels.push_back(std::move(item));
     }
 
@@ -1614,7 +1628,8 @@ TWasmFinalizeResult WasmFinalizeKernels(
     }
 
     auto fused = NQdb::BuildFusedProgram(unique);
-    auto wasm = CompileKernelAstToWasm(fused.Program, WasmSlot0, fused.Entrypoints);
+    auto wasm = CompileKernelAstToWasm64(
+        fused.Program, WasmSlot0, fused.Entrypoints);
     if (!wasm) {
         diagnostics.push_back(llvm::json::Object{
             {"stage", "wasm-fusion"},
@@ -1710,10 +1725,9 @@ size_t ExecProjectWidth(const NQumir::NAst::TTypePtr& outType) {
     return 0;
 }
 
-// Struct layout constants for the wasm32 target (verified against compiled
-// kernels): qumir models pointers as 8 bytes on every target, so these offsets
-// also match the native 64-bit layout. See PLAN_BROWSER_EXECUTION.md and
-// docs/issues/qumir_pointer_width_and_pointer_cast.md.
+// Kernel ABI layout for the wasm64 target. Both the compiled module and browser
+// runtime use 8-byte pointers, so these offsets also match the native 64-bit
+// layout.
 llvm::json::Object ExecLayoutJson(int64_t heapBase) {
     if (heapBase <= 0) {
         heapBase = WasmSlot0;
@@ -1827,45 +1841,6 @@ llvm::json::Array StructColumnsJson(const NQumir::NAst::TStructType& type) {
     return out;
 }
 
-// Column pruning applied to a filter's output (mirrors BuildFilterRuntimeProcess):
-// the annotated output can be a proper, possibly reordered, subset of the input
-// (predicate-only columns dropped). Returns the kept input-column indices, or
-// nullopt when the output is the full input in the same order (no narrowing).
-std::optional<std::vector<int64_t>> FilterKeptColumns(
-    const NQumir::NAst::TStructType& input,
-    const NQumir::NAst::TTypePtr& filterType)
-{
-    auto* fun = filterType
-        ? static_cast<NQumir::NAst::TFunctionType*>(filterType.get())
-        : nullptr;
-    auto* out = fun && fun->ReturnType
-        ? static_cast<NQumir::NAst::TStructType*>(fun->ReturnType.get())
-        : nullptr;
-    if (!out || out->Fields.empty()) {
-        return std::nullopt;
-    }
-    std::vector<int64_t> kept;
-    kept.reserve(out->Fields.size());
-    bool identity = out->Fields.size() == input.Fields.size();
-    for (size_t o = 0; o < out->Fields.size(); ++o) {
-        int64_t idx = -1;
-        for (size_t i = 0; i < input.Fields.size(); ++i) {
-            if (input.Fields[i].first == out->Fields[o].first) {
-                idx = static_cast<int64_t>(i);
-                break;
-            }
-        }
-        if (idx < 0) {
-            return std::nullopt; // stale/wider output: pass the full input through
-        }
-        if (static_cast<size_t>(idx) != o) {
-            identity = false;
-        }
-        kept.push_back(idx);
-    }
-    return identity ? std::nullopt : std::optional(std::move(kept));
-}
-
 llvm::json::Object UnsupportedExec(std::string reason) {
     return llvm::json::Object{
         {"supported", false},
@@ -1888,32 +1863,42 @@ bool BrowserSupportsJoin(NQdb::EJoinType type, bool hasResidual) {
     return false;
 }
 
-// One lowered kernel joined with its exported artifacts, indexed by the
-// logical operator that generated it.
+// One lowered kernel joined with its exported artifacts, indexed by the stable
+// exec stage assigned during scheduler lowering.
 struct TKernelRef {
     const NQdb::TGeneratedKernel* Kernel = nullptr;
     const TKernelArtifacts* Artifacts = nullptr;
 };
 using TKernelIndex =
-    std::unordered_map<const void*, std::vector<TKernelRef>>;
+    std::unordered_map<NQdb::TExecStageId, std::vector<TKernelRef>>;
 
 TKernelIndex BuildKernelIndex(
+    const NQdb::TExecPlan& plan,
     std::span<const NQdb::TGeneratedKernel> kernels,
     std::span<const TKernelArtifacts> artifacts)
 {
+    if (kernels.size() != artifacts.size()) {
+        throw std::runtime_error("exec codec: kernel/artifact count mismatch");
+    }
     TKernelIndex index;
-    for (size_t i = 0; i < kernels.size(); ++i) {
-        if (kernels[i].Operator) {
-            index[kernels[i].Operator].push_back({&kernels[i], &artifacts[i]});
+    for (const auto& node : plan.Nodes) {
+        for (const auto kernelIndex : node.KernelIndexes) {
+            if (kernelIndex >= kernels.size()) {
+                throw std::runtime_error("exec codec: invalid bound kernel index");
+            }
+            index[node.StageId].push_back(
+                {&kernels[kernelIndex], &artifacts[kernelIndex]});
         }
     }
     return index;
 }
 
 const TKernelRef* FindKernel(
-    const TKernelIndex& index, const void* op, std::string_view name)
+    const TKernelIndex& index,
+    NQdb::TExecStageId execStageId,
+    std::string_view name)
 {
-    auto it = index.find(op);
+    auto it = index.find(execStageId);
     if (it == index.end()) {
         return nullptr;
     }
@@ -1973,7 +1958,7 @@ std::optional<llvm::json::Object> BuildSortStageJson(
     const std::vector<NQdb::TSortKey>& sortKeys,
     const NQumir::NAst::TStructType& inputStruct,
     const TKernelIndex& kernels,
-    const void* op,
+    NQdb::TExecStageId execStageId,
     bool embedWasm,
     bool topSort,
     std::string& error)
@@ -2003,9 +1988,9 @@ std::optional<llvm::json::Object> BuildSortStageJson(
     }
 
     const auto* wasmKernel = topSort
-        ? FindKernel(kernels, op, "top-sort.fused")
+        ? FindKernel(kernels, execStageId, "top-sort.fused")
         : FindKernel(
-            kernels, op,
+            kernels, execStageId,
             anyNullableKey ? "sort.run.nullable.fused" : "sort.run.fused");
     if (!wasmKernel) {
         error = std::string(stageName) + " kernel was not generated";
@@ -2045,6 +2030,7 @@ std::optional<llvm::json::Object> BuildWindowStageJson(
     const NQumir::NAst::TStructType& inputStruct,
     const NQumir::NAst::TStructType& outputStruct,
     const TKernelIndex& kernels,
+    NQdb::TExecStageId execStageId,
     bool embedWasm,
     std::string& error)
 {
@@ -2053,7 +2039,8 @@ std::optional<llvm::json::Object> BuildWindowStageJson(
         return std::nullopt;
     }
 
-    const auto* wasmKernel = FindKernel(kernels, &window, "window.run.fused");
+    const auto* wasmKernel = FindKernel(
+        kernels, execStageId, "window.run.fused");
     if (!wasmKernel) {
         error = "window kernel was not generated";
         return std::nullopt;
@@ -2102,410 +2089,223 @@ std::optional<llvm::json::Object> BuildWindowStageJson(
     };
 }
 
-struct TExecGraphBuildResult {
-    int64_t NodeId = -1;
-    NQumir::NAst::TTypePtr OutputType;
-};
-
-struct TExecMaterialization {
-    int64_t Id = -1;
-    int64_t ProducerNodeId = -1;
-    NQumir::NAst::TTypePtr OutputType;
-};
-
-struct TExecGraphBuilder {
+struct TExecPlanCodec {
+    const NQdb::TExecPlan& Plan;
     const TKernelIndex& Kernels;
     bool EmbedWasm = false;
+    std::optional<llvm::json::Object> Unsupported;
     llvm::json::Array Nodes;
     llvm::json::Array Edges;
-    int64_t NextNodeId = 0;
-    int64_t NextMaterializationId = 0;
-    std::optional<llvm::json::Object> Unsupported;
-    std::optional<llvm::json::Object> Limit;
-    std::unordered_map<const TCteMaterialization*, TExecMaterialization> Materialized;
 
-    int64_t AddNode(llvm::json::Object node) {
-        const int64_t id = NextNodeId++;
-        node["id"] = id;
-        Nodes.push_back(std::move(node));
-        return id;
-    }
-
-    void AddEdge(int64_t from, int64_t to, int64_t input) {
-        Edges.push_back(llvm::json::Object{
-            {"from", from},
-            {"to", to},
-            {"input", input},
-            {"kind", "one-to-one"},
-        });
-    }
-
-    const TExecMaterialization& BuildCteProducer(const TCteConsumer& consumer) {
-        const auto* mat = consumer.Materialization().get();
-        auto it = Materialized.find(mat);
-        if (it != Materialized.end()) {
-            return it->second;
-        }
-
-        auto input = Build(consumer.Materialization()->Plan);
-        if (Unsupported) {
-            static const TExecMaterialization empty;
-            return empty;
-        }
-        auto* outStruct =
-            static_cast<NQumir::NAst::TStructType*>(input.OutputType.get());
-        const int64_t materializationId = NextMaterializationId++;
-        const int64_t id = AddNode(llvm::json::Object{
-            {"kind", "cte-producer"},
-            {"label", "cte-producer " + std::to_string(consumer.Def()->Id)},
-            {"materialization", materializationId},
-            {"cteId", static_cast<int64_t>(consumer.Def()->Id)},
-            {"output", StructColumnsJson(*outStruct)},
-        });
-        AddEdge(input.NodeId, id, 0);
-        auto [inserted, _] = Materialized.emplace(
-            mat,
-            TExecMaterialization{
-                .Id = materializationId,
-                .ProducerNodeId = id,
-                .OutputType = input.OutputType,
-            });
-        return inserted->second;
-    }
-
-    // Keyless join = cross product (a scalar-subquery broadcast in practice).
-    // Pair emission is handled by the generated cross-join kernel; the
-    // residual predicate runs as a plain filter node over the glued schema,
-    // reusing the filter kernel the lowerer generated for the join operator.
-    TExecGraphBuildResult BuildCrossJoin(
-        NQdb::TJoinOperator& join,
-        const TExecGraphBuildResult& left,
-        const TExecGraphBuildResult& right,
-        bool hasResidual)
+    const NQdb::TExecPlanNode& Input(
+        const NQdb::TExecPlanNode& node,
+        size_t input) const
     {
-        using namespace NQdb;
-        if (join.JoinType() != EJoinType::Inner) {
-            Unsupported = UnsupportedExec(
-                "browser keyless join type is not supported yet: " +
-                std::string(JoinTypeName(join.JoinType())));
-            return {};
+        if (input >= node.Inputs.size() ||
+            node.Inputs[input] >= Plan.Nodes.size())
+        {
+            throw std::runtime_error("exec codec: invalid typed-plan input");
         }
-        auto outputType = ComputeJoinOutputType(
-            left.OutputType, right.OutputType, EJoinType::Inner);
-        if (!outputType) {
-            Unsupported = UnsupportedExec(outputType.error().ToString());
-            return {};
-        }
-        auto* leftStruct =
-            static_cast<NQumir::NAst::TStructType*>(left.OutputType.get());
-        auto* rightStruct =
-            static_cast<NQumir::NAst::TStructType*>(right.OutputType.get());
-        auto* outStruct =
-            static_cast<NQumir::NAst::TStructType*>(outputType->get());
-        const auto* crossKernel = FindKernel(Kernels, &join, "cross-join");
-        if (!crossKernel) {
-            Unsupported = UnsupportedExec("cross join kernel was not generated");
-            return {};
-        }
-        if (EmbedWasm && !HasEntrypoint(*crossKernel, "xj_dispatch")) {
-            Unsupported = UnsupportedExec("cross join kernel failed to compile to wasm");
-            return {};
-        }
-        const int64_t crossId = AddNode(llvm::json::Object{
-            {"kind", "cross-join"},
-            {"label", JoinPlanLabel(join)},
-            {"entrypoints", EntrypointsJson(*crossKernel)},
-            {"leftColumns", StructColumnsJson(*leftStruct)},
-            {"rightColumns", StructColumnsJson(*rightStruct)},
-            {"output", StructColumnsJson(*outStruct)},
-        });
-        AddEdge(left.NodeId, crossId, 0);
-        AddEdge(right.NodeId, crossId, 1);
-        if (!hasResidual) {
-            return {.NodeId = crossId, .OutputType = *outputType};
-        }
-        const auto* ref = FindKernel(Kernels, &join, "filter");
-        if (!ref) {
-            Unsupported = UnsupportedExec(
-                "cross join residual kernel was not generated");
-            return {};
-        }
-        if (EmbedWasm && !HasEntrypointAt(*ref, 0)) {
-            Unsupported = UnsupportedExec(
-                "cross join residual kernel failed to compile to wasm");
-            return {};
-        }
-        const int64_t filterId = AddNode(llvm::json::Object{
-            {"kind", "filter"},
-            {"label", "filter " + SafeExprLine(join.Filter())},
-            {"predicate", SafeExprLine(join.Filter())},
-            {"entrypoints", EntrypointsJson(*ref, {{"filter", 0}})},
-        });
-        AddEdge(crossId, filterId, 0);
-        return {.NodeId = filterId, .OutputType = *outputType};
+        return Plan.Nodes[node.Inputs[input]];
     }
 
-    TExecGraphBuildResult Build(const NQdb::TOperatorPtr& op) {
-        using namespace NQdb;
-        if (Unsupported) {
-            return {};
+    void AddNode(
+        const NQdb::TExecPlanNode& typed,
+        llvm::json::Object encoded)
+    {
+        encoded["id"] = static_cast<int64_t>(typed.Id);
+        if (typed.StageId != NQdb::InvalidExecStageId) {
+            encoded["stageId"] = static_cast<int64_t>(typed.StageId);
+        }
+        Nodes.push_back(std::move(encoded));
+    }
+
+    void EncodeNode(const NQdb::TExecPlanNode& node) {
+        using namespace NQumir::NAst;
+
+        if (node.Kind == NQdb::EExecPlanNodeKind::UnionAll) {
+            auto* output = static_cast<TStructType*>(node.OutputType.get());
+            AddNode(node, llvm::json::Object{
+                {"kind", "union-all"},
+                {"label", "union-all"},
+                {"output", StructColumnsJson(*output)},
+            });
+            return;
+        }
+        if (!node.Operator) {
+            Unsupported = UnsupportedExec("exec codec: stage has no operator metadata");
+            return;
         }
 
-        try {
-            if (auto consumer = TMaybeOp<TCteConsumer>(op)) {
-                const auto& producer = BuildCteProducer(*consumer.Cast());
-                if (Unsupported) return {};
-                auto* outStruct =
-                    static_cast<NQumir::NAst::TStructType*>(producer.OutputType.get());
-                const int64_t id = AddNode(llvm::json::Object{
-                    {"kind", "cte-consumer"},
-                    {"label", "cte-consumer " + std::to_string(consumer.Cast()->Def()->Id)},
-                    {"materialization", producer.Id},
-                    {"cteId", static_cast<int64_t>(consumer.Cast()->Def()->Id)},
-                    {"output", StructColumnsJson(*outStruct)},
-                });
-                AddEdge(producer.ProducerNodeId, id, 0);
-                return {.NodeId = id, .OutputType = producer.OutputType};
-            }
-
-            if (auto source = TMaybeOp<TSourceOperator>(op)) {
-                auto outputType = BuildSourceRuntimeType(*source.Cast());
-                const int64_t id = AddNode(llvm::json::Object{
+        switch (node.Kind) {
+            case NQdb::EExecPlanNodeKind::Source: {
+                auto* source = static_cast<const NQdb::TSourceOperator*>(
+                    node.Operator);
+                AddNode(node, llvm::json::Object{
                     {"kind", "source"},
-                    {"table", source.Cast()->SourcePath()},
-                    {"columns", SourceColumnsJson(outputType)},
+                    {"table", source->SourcePath()},
+                    {"columns", SourceColumnsJson(node.OutputType)},
                 });
-                return {.NodeId = id, .OutputType = outputType};
+                return;
             }
-
-            if (auto filter = TMaybeOp<TFilterOperator>(op)) {
-                auto input = Build(filter.Cast()->Input());
-                if (Unsupported) return {};
-                const auto* ref = FindKernel(Kernels, filter.Cast().get(), "filter");
+            case NQdb::EExecPlanNodeKind::Filter: {
+                auto* filter = static_cast<const NQdb::TFilterOperator*>(
+                    node.Operator);
+                const auto* ref = FindKernel(Kernels, node.StageId, "filter");
                 if (!ref) {
                     Unsupported = UnsupportedExec("filter kernel was not generated");
-                    return {};
+                    return;
                 }
                 if (EmbedWasm && !HasEntrypointAt(*ref, 0)) {
-                    Unsupported = UnsupportedExec("filter kernel failed to compile to wasm");
-                    return {};
+                    Unsupported = UnsupportedExec(
+                        "filter kernel failed to compile to wasm");
+                    return;
                 }
-                llvm::json::Object node{
+                llvm::json::Object encoded{
                     {"kind", "filter"},
-                    {"label", "filter " + SafeExprLine(filter.Cast()->Predicate())},
-                    {"predicate", SafeExprLine(filter.Cast()->Predicate())},
+                    {"label", "filter " + SafeExprLine(filter->Predicate())},
+                    {"predicate", SafeExprLine(filter->Predicate())},
                     {"entrypoints", EntrypointsJson(*ref, {{"filter", 0}})},
                 };
-                // If pruning narrowed the filter output (predicate-only columns
-                // dropped), the kernels above expect that narrowed layout; the
-                // browser filter must gather these columns to match.
-                auto* inputStruct = static_cast<NQumir::NAst::TStructType*>(
-                    input.OutputType.get());
-                auto outputType = input.OutputType;
-                if (inputStruct) {
-                    if (auto kept = FilterKeptColumns(
-                            *inputStruct, filter.Cast()->Type)) {
-                        llvm::json::Array cols;
-                        for (int64_t idx : *kept) {
-                            cols.push_back(idx);
-                        }
-                        node["keptColumns"] = std::move(cols);
-                        outputType = static_cast<NQumir::NAst::TFunctionType*>(
-                            filter.Cast()->Type.get())->ReturnType;
+                if (node.KeptInputColumns) {
+                    llvm::json::Array columns;
+                    for (const auto index : *node.KeptInputColumns) {
+                        columns.push_back(index);
                     }
+                    encoded["keptColumns"] = std::move(columns);
                 }
-                const int64_t id = AddNode(std::move(node));
-                AddEdge(input.NodeId, id, 0);
-                return {.NodeId = id, .OutputType = outputType};
+                AddNode(node, std::move(encoded));
+                return;
             }
-
-            if (auto project = TMaybeOp<TProjectOperator>(op)) {
-                auto input = Build(project.Cast()->Input());
-                if (Unsupported) return {};
-                auto* inputStruct =
-                    static_cast<NQumir::NAst::TStructType*>(input.OutputType.get());
-                auto columnPlan = BuildProjectColumnPlan(*project.Cast(), *inputStruct);
+            case NQdb::EExecPlanNodeKind::Project: {
+                auto* project = const_cast<NQdb::TProjectOperator*>(
+                    static_cast<const NQdb::TProjectOperator*>(node.Operator));
+                auto* input = static_cast<TStructType*>(
+                    Input(node, 0).OutputType.get());
+                auto columnPlan = BuildProjectColumnPlan(*project, *input);
                 llvm::json::Object entrypoints;
                 if (!columnPlan.ComputedExprs.empty()) {
-                    const auto* ref = FindKernel(Kernels, project.Cast().get(), "project");
+                    const auto* ref = FindKernel(
+                        Kernels, node.StageId, "project");
                     if (!ref) {
-                        Unsupported = UnsupportedExec("project kernel was not generated");
-                        return {};
+                        Unsupported = UnsupportedExec(
+                            "project kernel was not generated");
+                        return;
                     }
                     if (EmbedWasm && !HasEntrypointAt(*ref, 0)) {
-                        Unsupported = UnsupportedExec("project kernel failed to compile to wasm");
-                        return {};
+                        Unsupported = UnsupportedExec(
+                            "project kernel failed to compile to wasm");
+                        return;
                     }
                     entrypoints = EntrypointsJson(*ref, {{"project", 0}});
                 }
-                const int64_t id = AddNode(llvm::json::Object{
+                AddNode(node, llvm::json::Object{
                     {"kind", "project"},
                     {"entrypoints", std::move(entrypoints)},
                     {"output", ProjectOutputJson(
-                        *project.Cast(), *inputStruct, columnPlan.OutputType)},
+                        *project, *input, node.OutputType)},
                 });
-                AddEdge(input.NodeId, id, 0);
-                return {.NodeId = id, .OutputType = columnPlan.OutputType};
+                return;
             }
-
-            if (auto aggregate = TMaybeOp<TAggregateOperator>(op)) {
-                auto input = Build(aggregate.Cast()->Input());
-                if (Unsupported) return {};
-                const auto* ref = FindKernel(Kernels, aggregate.Cast().get(), "aggregate");
+            case NQdb::EExecPlanNodeKind::Aggregate: {
+                auto* aggregate = static_cast<const NQdb::TAggregateOperator*>(
+                    node.Operator);
+                const auto* ref = FindKernel(
+                    Kernels, node.StageId, "aggregate");
                 if (!ref) {
-                    Unsupported = UnsupportedExec("aggregate kernel was not generated");
-                    return {};
+                    Unsupported = UnsupportedExec(
+                        "aggregate kernel was not generated");
+                    return;
                 }
                 if (EmbedWasm &&
                     (!HasEntrypoint(*ref, "agg_dispatch") ||
-                     !HasEntrypoint(*ref, "agg_finish_rowset"))) {
-                    Unsupported = UnsupportedExec("aggregate kernel failed to compile to wasm");
-                    return {};
+                     !HasEntrypoint(*ref, "agg_finish_rowset")))
+                {
+                    Unsupported = UnsupportedExec(
+                        "aggregate kernel failed to compile to wasm");
+                    return;
                 }
-                const bool groupingSets = !aggregate.Cast()->GroupingSets().empty();
-                auto outputType = ComputeAggregateOutputType(
-                    input.OutputType,
-                    aggregate.Cast()->GroupKeys(),
-                    aggregate.Cast()->Aggs(),
-                    groupingSets);
-                auto* outStruct =
-                    static_cast<NQumir::NAst::TStructType*>(outputType.get());
+                auto* outputType = static_cast<TStructType*>(
+                    node.OutputType.get());
                 const size_t keyCount = ref->Kernel->AggKeys.size();
                 llvm::json::Array output;
-                for (size_t i = 0; i < outStruct->Fields.size(); ++i) {
-                    auto entry = CoreTypeJson(outStruct->Fields[i].second);
-                    entry["name"] = BareColumnName(outStruct->Fields[i].first);
+                for (size_t i = 0; i < outputType->Fields.size(); ++i) {
+                    auto entry = CoreTypeJson(outputType->Fields[i].second);
+                    entry["name"] = BareColumnName(outputType->Fields[i].first);
                     if (i < keyCount) {
-                        entry["nullable"] = ref->Kernel->AggKeys[i].IsNullable;
-                    } else if (i - keyCount < ref->Kernel->AggValues.size()) {
+                        entry["nullable"] =
+                            ref->Kernel->AggKeys[i].IsNullable;
+                    } else if (
+                        i - keyCount < ref->Kernel->AggValues.size())
+                    {
                         entry["nullable"] =
                             ref->Kernel->AggValues[i - keyCount].IsNullable;
                     }
                     output.push_back(std::move(entry));
                 }
-                llvm::json::Object stage{
+                llvm::json::Object encoded{
                     {"kind", "aggregate"},
-                    {"label", AggregatePlanLabel(*aggregate.Cast())},
-                    {"groupKeys", StringArray(aggregate.Cast()->GroupKeys())},
+                    {"label", AggregatePlanLabel(*aggregate)},
+                    {"groupKeys", StringArray(aggregate->GroupKeys())},
                     {"entrypoints", EntrypointsJson(*ref)},
                     {"keyCount", static_cast<int64_t>(keyCount)},
                     {"output", std::move(output)},
                 };
-                if (groupingSets) {
+                if (!aggregate->GroupingSets().empty()) {
                     llvm::json::Array sets;
-                    for (const auto& set : aggregate.Cast()->GroupingSets()) {
+                    for (const auto& set : aggregate->GroupingSets()) {
                         llvm::json::Array item;
-                        for (size_t index : set) {
+                        for (const auto index : set) {
                             item.push_back(static_cast<int64_t>(index));
                         }
                         sets.push_back(std::move(item));
                     }
-                    stage["groupingSets"] = std::move(sets);
-                    stage["groupKeyCount"] =
-                        static_cast<int64_t>(aggregate.Cast()->GroupKeys().size());
+                    encoded["groupingSets"] = std::move(sets);
+                    encoded["groupKeyCount"] = static_cast<int64_t>(
+                        aggregate->GroupKeys().size());
                 }
-                const int64_t id = AddNode(std::move(stage));
-                AddEdge(input.NodeId, id, 0);
-                return {.NodeId = id, .OutputType = outputType};
+                AddNode(node, std::move(encoded));
+                return;
             }
-
-            if (auto un = TMaybeOp<TUnionAllOperator>(op)) {
-                std::vector<TExecGraphBuildResult> inputs;
-                inputs.reserve(un.Cast()->Inputs().size());
-                for (const auto& branch : un.Cast()->Inputs()) {
-                    auto input = Build(branch);
-                    if (Unsupported) return {};
-                    inputs.push_back(std::move(input));
-                }
-                if (inputs.empty()) {
-                    Unsupported = UnsupportedExec("browser union-all has no inputs");
-                    return {};
-                }
-                auto* outStruct =
-                    static_cast<NQumir::NAst::TStructType*>(inputs.front().OutputType.get());
-                const int64_t id = AddNode(llvm::json::Object{
-                    {"kind", "union-all"},
-                    {"label", "union-all"},
-                    {"output", StructColumnsJson(*outStruct)},
-                });
-                for (size_t i = 0; i < inputs.size(); ++i) {
-                    AddEdge(inputs[i].NodeId, id, static_cast<int64_t>(i));
-                }
-                return {.NodeId = id, .OutputType = inputs.front().OutputType};
-            }
-
-            if (auto window = TMaybeOp<TWindowOperator>(op)) {
-                auto input = Build(window.Cast()->Input());
-                if (Unsupported) return {};
-                auto* inputStruct =
-                    static_cast<NQumir::NAst::TStructType*>(input.OutputType.get());
-                auto outputType = ComputeWindowOutputType(
-                    input.OutputType,
-                    window.Cast()->Functions());
-                auto* outStruct =
-                    static_cast<NQumir::NAst::TStructType*>(outputType.get());
-                std::string error;
-                auto stage = BuildWindowStageJson(
-                    *window.Cast(), *inputStruct, *outStruct, Kernels, EmbedWasm, error);
-                if (!stage) {
-                    Unsupported = UnsupportedExec(std::move(error));
-                    return {};
-                }
-                stage->insert({"kind", "window"});
-                stage->insert({"label", "window"});
-                const int64_t id = AddNode(std::move(*stage));
-                AddEdge(input.NodeId, id, 0);
-                return {.NodeId = id, .OutputType = outputType};
-            }
-
-            if (auto join = TMaybeOp<TJoinOperator>(op)) {
-                auto left = Build(join.Cast()->Left());
-                auto right = Build(join.Cast()->Right());
-                if (Unsupported) return {};
-                const bool hasResidual = join.Cast()->Filter() != nullptr;
-                if (join.Cast()->Keys().empty()) {
-                    return BuildCrossJoin(
-                        *join.Cast(), left, right, hasResidual);
-                }
-                if (!BrowserSupportsJoin(join.Cast()->JoinType(), hasResidual)) {
+            case NQdb::EExecPlanNodeKind::Join: {
+                auto* join = static_cast<const NQdb::TJoinOperator*>(
+                    node.Operator);
+                const bool hasResidual = join->Filter() != nullptr;
+                if (!BrowserSupportsJoin(join->JoinType(), hasResidual)) {
                     Unsupported = UnsupportedExec(
                         "browser join type is not supported yet: " +
-                        std::string(JoinTypeName(join.Cast()->JoinType())) +
+                        std::string(JoinTypeName(join->JoinType())) +
                         (hasResidual ? " with residual" : ""));
-                    return {};
+                    return;
                 }
-                const auto* ref = FindKernel(Kernels, join.Cast().get(), "join");
+                const auto* ref = FindKernel(Kernels, node.StageId, "join");
                 if (!ref) {
                     Unsupported = UnsupportedExec("join kernel was not generated");
-                    return {};
+                    return;
                 }
                 if (EmbedWasm &&
                     (!HasEntrypoint(*ref, "jt_dispatch") ||
-                     !HasEntrypoint(*ref, "jt_materialize"))) {
-                    Unsupported = UnsupportedExec("join kernel failed to compile to wasm");
-                    return {};
+                     !HasEntrypoint(*ref, "jt_materialize")))
+                {
+                    Unsupported = UnsupportedExec(
+                        "join kernel failed to compile to wasm");
+                    return;
                 }
-                auto outputType = ComputeJoinOutputType(
-                    left.OutputType, right.OutputType, join.Cast()->JoinType());
-                if (!outputType) {
-                    Unsupported = UnsupportedExec(outputType.error().ToString());
-                    return {};
-                }
-                auto* leftStruct =
-                    static_cast<NQumir::NAst::TStructType*>(left.OutputType.get());
-                auto* rightStruct =
-                    static_cast<NQumir::NAst::TStructType*>(right.OutputType.get());
-                auto* outStruct =
-                    static_cast<NQumir::NAst::TStructType*>(outputType->get());
+                auto* left = static_cast<TStructType*>(
+                    Input(node, 0).OutputType.get());
+                auto* right = static_cast<TStructType*>(
+                    Input(node, 1).OutputType.get());
+                auto* output = static_cast<TStructType*>(
+                    node.OutputType.get());
                 std::vector<std::pair<std::string, std::string>> keyPairs;
-                for (const auto& key : join.Cast()->Keys()) {
+                for (const auto& key : join->Keys()) {
                     keyPairs.emplace_back(key.Left, key.Right);
                 }
                 const auto keyDesc =
-                    NKernel::BuildJoinKeyDescriptor(*leftStruct, *rightStruct, keyPairs);
+                    NKernel::BuildJoinKeyDescriptor(*left, *right, keyPairs);
                 llvm::json::Array keys;
-                for (size_t i = 0; i < join.Cast()->Keys().size(); ++i) {
-                    const auto& key = join.Cast()->Keys()[i];
+                for (size_t i = 0; i < join->Keys().size(); ++i) {
+                    const auto& key = join->Keys()[i];
                     keys.push_back(llvm::json::Object{
                         {"left", BareColumnName(key.Left)},
                         {"right", BareColumnName(key.Right)},
@@ -2513,129 +2313,252 @@ struct TExecGraphBuilder {
                         {"rightIndex", keyDesc.Fields[i].RightColumnIndex},
                     });
                 }
-                const int64_t id = AddNode(llvm::json::Object{
+                AddNode(node, llvm::json::Object{
                     {"kind", "join"},
-                    {"label", JoinPlanLabel(*join.Cast())},
-                    {"joinType", std::string(JoinTypeName(join.Cast()->JoinType()))},
-                    {"buildSide",
-                        std::string(JoinBuildSideName(ChooseJoinBuildSide(*join.Cast())))},
+                    {"label", JoinPlanLabel(*join)},
+                    {"joinType", std::string(JoinTypeName(join->JoinType()))},
+                    {"buildSide", std::string(JoinBuildSideName(
+                        ChooseJoinBuildSide(*join)))},
                     {"entrypoints", EntrypointsJson(*ref)},
                     {"keySize", static_cast<int64_t>(keyDesc.Size)},
                     {"hasResidual", hasResidual},
                     {"keys", std::move(keys)},
-                    {"leftColumns", StructColumnsJson(*leftStruct)},
-                    {"rightColumns", StructColumnsJson(*rightStruct)},
-                    {"output", StructColumnsJson(*outStruct)},
+                    {"leftColumns", StructColumnsJson(*left)},
+                    {"rightColumns", StructColumnsJson(*right)},
+                    {"output", StructColumnsJson(*output)},
                 });
-                AddEdge(left.NodeId, id, 0);
-                AddEdge(right.NodeId, id, 1);
-                return {.NodeId = id, .OutputType = *outputType};
+                return;
             }
-
-            if (auto sort = TMaybeOp<TSortOperator>(op)) {
-                auto input = Build(sort.Cast()->Input());
-                if (Unsupported) return {};
-                auto* inputStruct =
-                    static_cast<NQumir::NAst::TStructType*>(input.OutputType.get());
-                std::string error;
-                auto stage = BuildSortStageJson(
-                    sort.Cast()->Keys(), *inputStruct, Kernels,
-                    sort.Cast().get(), EmbedWasm, false, error);
-                if (!stage) {
-                    Unsupported = UnsupportedExec(std::move(error));
-                    return {};
+            case NQdb::EExecPlanNodeKind::CrossJoin: {
+                auto* join = static_cast<const NQdb::TJoinOperator*>(
+                    node.Operator);
+                if (join->JoinType() != NQdb::EJoinType::Inner) {
+                    Unsupported = UnsupportedExec(
+                        "browser keyless join type is not supported yet: " +
+                        std::string(JoinTypeName(join->JoinType())));
+                    return;
                 }
-                stage->insert({"kind", "sort"});
-                stage->insert({"label", SortPlanLabel("sort", sort.Cast()->Keys())});
-                const int64_t id = AddNode(std::move(*stage));
-                AddEdge(input.NodeId, id, 0);
-                return {.NodeId = id, .OutputType = input.OutputType};
-            }
-
-            if (auto top = TMaybeOp<TTopSortOperator>(op)) {
-                auto input = Build(top.Cast()->Input());
-                if (Unsupported) return {};
-                auto* inputStruct =
-                    static_cast<NQumir::NAst::TStructType*>(input.OutputType.get());
-                std::string error;
-                auto stage = BuildSortStageJson(
-                    top.Cast()->Keys(), *inputStruct, Kernels,
-                    top.Cast().get(), EmbedWasm, true, error);
-                if (!stage) {
-                    Unsupported = UnsupportedExec(std::move(error));
-                    return {};
+                const auto* ref = FindKernel(
+                    Kernels, node.StageId, "cross-join");
+                if (!ref) {
+                    Unsupported = UnsupportedExec(
+                        "cross join kernel was not generated");
+                    return;
                 }
-                stage->insert({"kind", "top-sort"});
-                stage->insert({
-                    "label",
-                    SortPlanLabel("top-sort", top.Cast()->Keys(), top.Cast()->Limit())});
-                stage->insert({"limit", top.Cast()->Limit()});
-                const int64_t id = AddNode(std::move(*stage));
-                AddEdge(input.NodeId, id, 0);
-                return {.NodeId = id, .OutputType = input.OutputType};
+                if (EmbedWasm && !HasEntrypoint(*ref, "xj_dispatch")) {
+                    Unsupported = UnsupportedExec(
+                        "cross join kernel failed to compile to wasm");
+                    return;
+                }
+                auto* left = static_cast<TStructType*>(
+                    Input(node, 0).OutputType.get());
+                auto* right = static_cast<TStructType*>(
+                    Input(node, 1).OutputType.get());
+                auto* output = static_cast<TStructType*>(
+                    node.OutputType.get());
+                AddNode(node, llvm::json::Object{
+                    {"kind", "cross-join"},
+                    {"label", JoinPlanLabel(*join)},
+                    {"entrypoints", EntrypointsJson(*ref)},
+                    {"leftColumns", StructColumnsJson(*left)},
+                    {"rightColumns", StructColumnsJson(*right)},
+                    {"output", StructColumnsJson(*output)},
+                });
+                return;
             }
-
-            if (auto limit = TMaybeOp<TLimitOperator>(op)) {
-                auto input = Build(limit.Cast()->Input());
-                if (Unsupported) return {};
-                Limit = llvm::json::Object{
-                    {"limit", limit.Cast()->Limit()},
-                    {"offset", limit.Cast()->Offset()},
-                };
-                return input;
+            case NQdb::EExecPlanNodeKind::CrossResidualFilter: {
+                auto* join = static_cast<const NQdb::TJoinOperator*>(
+                    node.Operator);
+                const auto* ref = FindKernel(Kernels, node.StageId, "filter");
+                if (!ref) {
+                    Unsupported = UnsupportedExec(
+                        "cross join residual kernel was not generated");
+                    return;
+                }
+                if (EmbedWasm && !HasEntrypointAt(*ref, 0)) {
+                    Unsupported = UnsupportedExec(
+                        "cross join residual kernel failed to compile to wasm");
+                    return;
+                }
+                AddNode(node, llvm::json::Object{
+                    {"kind", "filter"},
+                    {"label", "filter " + SafeExprLine(join->Filter())},
+                    {"predicate", SafeExprLine(join->Filter())},
+                    {"entrypoints", EntrypointsJson(*ref, {{"filter", 0}})},
+                });
+                return;
             }
-        } catch (const NQumir::TError& e) {
-            Unsupported = UnsupportedExec(e.ToString());
-            return {};
-        } catch (const std::exception& e) {
-            Unsupported = UnsupportedExec(e.what());
-            return {};
+            case NQdb::EExecPlanNodeKind::CteProducer:
+            case NQdb::EExecPlanNodeKind::CteConsumer: {
+                auto* consumer = static_cast<const NQdb::TCteConsumer*>(
+                    node.Operator);
+                if (!node.MaterializationId) {
+                    Unsupported = UnsupportedExec(
+                        "exec codec: CTE materialization id is missing");
+                    return;
+                }
+                const bool producer =
+                    node.Kind == NQdb::EExecPlanNodeKind::CteProducer;
+                const auto kind = producer ? "cte-producer" : "cte-consumer";
+                const auto cteId =
+                    static_cast<int64_t>(consumer->Def()->Id);
+                auto* output = static_cast<TStructType*>(
+                    node.OutputType.get());
+                AddNode(node, llvm::json::Object{
+                    {"kind", kind},
+                    {"label", std::string(kind) + " " + std::to_string(cteId)},
+                    {"materialization",
+                        static_cast<int64_t>(*node.MaterializationId)},
+                    {"cteId", cteId},
+                    {"output", StructColumnsJson(*output)},
+                });
+                return;
+            }
+            case NQdb::EExecPlanNodeKind::Window: {
+                auto* window = const_cast<NQdb::TWindowOperator*>(
+                    static_cast<const NQdb::TWindowOperator*>(node.Operator));
+                auto* input = static_cast<TStructType*>(
+                    Input(node, 0).OutputType.get());
+                auto* output = static_cast<TStructType*>(
+                    node.OutputType.get());
+                std::string error;
+                auto encoded = BuildWindowStageJson(
+                    *window, *input, *output, Kernels, node.StageId,
+                    EmbedWasm, error);
+                if (!encoded) {
+                    Unsupported = UnsupportedExec(std::move(error));
+                    return;
+                }
+                encoded->insert({"kind", "window"});
+                encoded->insert({"label", "window"});
+                AddNode(node, std::move(*encoded));
+                return;
+            }
+            case NQdb::EExecPlanNodeKind::Sort:
+            case NQdb::EExecPlanNodeKind::TopSort: {
+                const bool top =
+                    node.Kind == NQdb::EExecPlanNodeKind::TopSort;
+                auto* input = static_cast<TStructType*>(
+                    Input(node, 0).OutputType.get());
+                std::string error;
+                if (top) {
+                    auto* sort = static_cast<const NQdb::TTopSortOperator*>(
+                        node.Operator);
+                    auto encoded = BuildSortStageJson(
+                        sort->Keys(), *input, Kernels, node.StageId,
+                        EmbedWasm, true, error);
+                    if (!encoded) {
+                        Unsupported = UnsupportedExec(std::move(error));
+                        return;
+                    }
+                    encoded->insert({"kind", "top-sort"});
+                    encoded->insert({"label", SortPlanLabel(
+                        "top-sort", sort->Keys(), sort->Limit())});
+                    encoded->insert({"limit", sort->Limit()});
+                    AddNode(node, std::move(*encoded));
+                    return;
+                }
+                auto* sort = static_cast<const NQdb::TSortOperator*>(
+                    node.Operator);
+                auto encoded = BuildSortStageJson(
+                    sort->Keys(), *input, Kernels, node.StageId,
+                    EmbedWasm, false, error);
+                if (!encoded) {
+                    Unsupported = UnsupportedExec(std::move(error));
+                    return;
+                }
+                encoded->insert({"kind", "sort"});
+                encoded->insert({"label", SortPlanLabel(
+                    "sort", sort->Keys())});
+                AddNode(node, std::move(*encoded));
+                return;
+            }
+            case NQdb::EExecPlanNodeKind::Limit: {
+                // A nested (non-root) limit is a streaming node; the root limit
+                // is collapsed by the core builder into TExecPlan::RootLimit.
+                auto* limit = static_cast<const NQdb::TLimitOperator*>(node.Operator);
+                AddNode(node, llvm::json::Object{
+                    {"kind", "limit"},
+                    {"label", "limit " + std::to_string(limit->Limit())},
+                    {"limit", limit->Limit()},
+                    {"offset", limit->Offset()},
+                });
+                return;
+            }
+            case NQdb::EExecPlanNodeKind::UnionAll:
+                return;
         }
+    }
 
-        Unsupported = UnsupportedExec(
-            "browser exec does not support operator: " + std::string(op->RelName()));
-        return {};
+    llvm::json::Object Encode(
+        std::string queryWasm,
+        int64_t heapBase)
+    {
+        for (size_t i = 0; i < Plan.Nodes.size(); ++i) {
+            const auto& node = Plan.Nodes[i];
+            if (node.Id != i) {
+                return UnsupportedExec(
+                    "exec codec: typed plan node ids are not contiguous");
+            }
+            EncodeNode(node);
+            if (Unsupported) {
+                return std::move(*Unsupported);
+            }
+        }
+        for (const auto& node : Plan.Nodes) {
+            for (size_t input = 0; input < node.Inputs.size(); ++input) {
+                Edges.push_back(llvm::json::Object{
+                    {"from", static_cast<int64_t>(node.Inputs[input])},
+                    {"to", static_cast<int64_t>(node.Id)},
+                    {"input", static_cast<int64_t>(input)},
+                    {"kind", "one-to-one"},
+                });
+            }
+        }
+        llvm::json::Object out{
+            {"supported", true},
+            {"embedWasm", EmbedWasm},
+            {"layout", ExecLayoutJson(heapBase)},
+            {"nodes", std::move(Nodes)},
+            {"edges", std::move(Edges)},
+            {"root", static_cast<int64_t>(Plan.Root)},
+        };
+        if (EmbedWasm) {
+            out["wasm"] = std::move(queryWasm);
+        }
+        if (Plan.RootLimit) {
+            out["limit"] = llvm::json::Object{
+                {"limit", Plan.RootLimit->Limit},
+                {"offset", Plan.RootLimit->Offset},
+            };
+        }
+        return out;
     }
 };
 
-llvm::json::Object BuildExecGraphPlan(
-    const NQdb::TOperatorPtr& plan,
-    const TKernelIndex& kernels,
+llvm::json::Object EncodeExecPlan(
+    const NQdb::TExecPlan* plan,
+    std::span<const NQdb::TGeneratedKernel> kernels,
+    std::span<const TKernelArtifacts> artifacts,
     bool embedWasm,
     std::string queryWasm,
     int64_t heapBase)
 {
-    TExecGraphBuilder builder{.Kernels = kernels, .EmbedWasm = embedWasm};
-    auto root = builder.Build(plan);
-    if (builder.Unsupported) {
-        return std::move(*builder.Unsupported);
+    if (!plan) {
+        return UnsupportedExec("scheduler lowering did not produce an exec plan");
     }
-    llvm::json::Object out{
-        {"supported", true},
-        {"embedWasm", embedWasm},
-        {"layout", ExecLayoutJson(heapBase)},
-        {"nodes", std::move(builder.Nodes)},
-        {"edges", std::move(builder.Edges)},
-        {"root", root.NodeId},
-    };
-    if (embedWasm) {
-        out["wasm"] = std::move(queryWasm);
+    try {
+        auto kernelIndex = BuildKernelIndex(*plan, kernels, artifacts);
+        return TExecPlanCodec{
+            .Plan = *plan,
+            .Kernels = kernelIndex,
+            .EmbedWasm = embedWasm,
+        }.Encode(std::move(queryWasm), heapBase);
+    } catch (const NQumir::TError& e) {
+        return UnsupportedExec(e.ToString());
+    } catch (const std::exception& e) {
+        return UnsupportedExec(e.what());
     }
-    if (builder.Limit) {
-        out["limit"] = std::move(*builder.Limit);
-    }
-    return out;
-}
-
-llvm::json::Object BuildExecPlan(
-    const NQdb::TOperatorPtr& plan,
-    const TKernelIndex& kernels,
-    bool embedWasm,
-    std::string queryWasm,
-    int64_t heapBase)
-{
-    return BuildExecGraphPlan(
-        plan, kernels, embedWasm, std::move(queryWasm), heapBase);
 }
 
 llvm::json::Object BuildBundle(TExportRequest& request) {
@@ -2666,6 +2589,8 @@ llvm::json::Object BuildBundle(TExportRequest& request) {
     std::ostringstream schedulerText;
     TWasmFinalizeResult wasmFinalized;
     std::vector<NQdb::TGeneratedKernel> loweredKernels;
+    std::optional<NQdb::TExecPlan> typedExecPlan;
+    std::string execPlanError;
     try {
         std::ostringstream lowerDiagnostics;
         // One lowering; kernels arrive as ASTs on lowered.Kernels.
@@ -2673,6 +2598,19 @@ llvm::json::Object BuildBundle(TExportRequest& request) {
             *plan,
             request.Scheduler,
             &lowerDiagnostics);
+
+        // Core owns graph contraction, ordered inputs, output propagation, and
+        // stage/kernel binding. The exporter only encodes the returned plan.
+        auto builtExecPlan = NQdb::BuildExecPlan(lowered);
+        if (builtExecPlan) {
+            typedExecPlan = std::move(*builtExecPlan);
+        } else {
+            execPlanError = builtExecPlan.error();
+            diagnostics.push_back(llvm::json::Object{
+                {"stage", "exec-plan"},
+                {"message", execPlanError},
+            });
+        }
         lowered.Graph->Build();
 
         // Wasm finalization: ast artifacts always, wasm in embed mode.
@@ -2692,6 +2630,9 @@ llvm::json::Object BuildBundle(TExportRequest& request) {
         physicalGraph = GraphJson(lowered, wasmFinalized.Kernels);
     } catch (const std::exception& e) {
         const auto message = std::string(e.what());
+        if (execPlanError.empty()) {
+            execPlanError = message;
+        }
         legacyGraph = EmptyGraphJson(message);
         physicalGraph = EmptyGraphJson(message);
         diagnostics.push_back(llvm::json::Object{
@@ -2700,16 +2641,18 @@ llvm::json::Object BuildBundle(TExportRequest& request) {
         });
     }
 
-    // The exec section reads the kernels the lowering already generated —
-    // nothing is compiled twice.
-    auto kernelIndex = BuildKernelIndex(loweredKernels, wasmFinalized.Kernels);
-    auto execPlan =
-        BuildExecPlan(
-            *plan,
-            kernelIndex,
+    // The codec reads the kernels already generated by the one native lowering.
+    auto execPlan = typedExecPlan
+        ? EncodeExecPlan(
+            &*typedExecPlan,
+            loweredKernels,
+            wasmFinalized.Kernels,
             request.EmbedWasm,
             wasmFinalized.QueryWasm,
-            wasmFinalized.HeapBase);
+            wasmFinalized.HeapBase)
+        : UnsupportedExec(execPlanError.empty()
+            ? "scheduler lowering did not produce an exec plan"
+            : execPlanError);
 
     return llvm::json::Object{
             {"ok", true},

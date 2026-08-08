@@ -390,12 +390,13 @@ public:
     // Kernel options for one stage: generation only (deferred finalization),
     // kernels collected into the lowered plan.
     TKernelCompilerOptions KernelOptions(
-        std::string stage, const void* op) const
+        std::string stage,
+        TExecStageId execStageId) const
     {
         return TKernelCompilerOptions{
             .Diagnostics = Diagnostics_,
             .Stage = std::move(stage),
-            .Operator = op,
+            .ExecStageId = execStageId,
             .Sink = KernelSink_,
             .BindNow = false,
         };
@@ -533,32 +534,38 @@ public:
         }
         if (auto n = TMaybeOp<TFilterOperator>(op)) {
             auto filter = n.Cast();
-            auto stageGroup = StageGroup("filter", filter.get());
+            auto execStageId = NewExecStage(
+                filter.get(), EExecPlanNodeKind::Filter);
+            auto stageLabel = StageLabel("filter", execStageId);
             return LowerUnary(
                 filter->Input(),
                 "filter",
-                stageGroup,
+                stageLabel,
+                execStageId,
                 [&](const NQumir::NAst::TTypePtr& inType) {
                     return BuildSchedulerFilterStage(
                         *filter,
                         inType,
-                        KernelOptions(stageGroup, filter.get()));
+                        KernelOptions(stageLabel, execStageId));
                 },
                 outConn,
                 outLaneOffset);
         }
         if (auto n = TMaybeOp<TProjectOperator>(op)) {
             auto project = n.Cast();
-            auto stageGroup = StageGroup("project", project.get());
+            auto execStageId = NewExecStage(
+                project.get(), EExecPlanNodeKind::Project);
+            auto stageLabel = StageLabel("project", execStageId);
             return LowerUnary(
                 project->Input(),
                 "project",
-                stageGroup,
+                stageLabel,
+                execStageId,
                 [&](const NQumir::NAst::TTypePtr& inType) {
                     return BuildSchedulerProjectStage(
                         *project,
                         inType,
-                        KernelOptions(stageGroup, project.get()));
+                        KernelOptions(stageLabel, execStageId));
                 },
                 outConn,
                 outLaneOffset);
@@ -625,20 +632,62 @@ public:
         }
     }
 
+    void CheckExecStagesConsistent() const {
+        std::vector<size_t> taskCounts(ExecStages_.size() + 1, 0);
+        for (const auto& node : Graph_.Nodes()) {
+            if (node->TaskGroupId == NScheduler::InvalidTaskGroupId) {
+                throw std::runtime_error(
+                    "scheduler lowering: task has no stable task group");
+            }
+            const auto id = node->ExecStageId;
+            if (id == InvalidExecStageId) {
+                continue; // scheduler-only plumbing
+            }
+            if (id >= taskCounts.size()) {
+                throw std::runtime_error(
+                    "scheduler lowering: task references an unknown exec stage");
+            }
+            ++taskCounts[id];
+        }
+        for (const auto& stage : ExecStages_) {
+            if (stage.Id == InvalidExecStageId ||
+                stage.Id >= taskCounts.size() || taskCounts[stage.Id] == 0)
+            {
+                throw std::runtime_error(
+                    "scheduler lowering: exec stage has no physical tasks");
+            }
+        }
+        if (KernelSink_) {
+            for (const auto& kernel : *KernelSink_) {
+                if (kernel.ExecStageId == InvalidExecStageId ||
+                    kernel.ExecStageId >= taskCounts.size())
+                {
+                    throw std::runtime_error(
+                        "scheduler lowering: kernel references an unknown exec stage");
+                }
+            }
+        }
+    }
+
 private:
-    static std::string StageGroup(std::string_view kind, const void* owner) {
-        return std::string(kind) + ":" +
-            std::to_string(reinterpret_cast<uintptr_t>(owner));
+    static std::string StageLabel(
+        std::string_view kind,
+        TExecStageId execStageId)
+    {
+        return "exec:" + std::to_string(execStageId) + ":" +
+            std::string(kind);
     }
 
     static void MarkNode(
         NScheduler::TTaskNode& node,
         std::string kind,
-        std::string group,
-        std::string label)
+        NScheduler::TTaskGroupId taskGroupId,
+        std::string label,
+        TExecStageId execStageId = InvalidExecStageId)
     {
+        node.ExecStageId = execStageId;
+        node.TaskGroupId = taskGroupId;
         node.DebugKind = std::move(kind);
-        node.DebugGroup = std::move(group);
         node.DebugLabel = std::move(label);
     }
 
@@ -884,6 +933,8 @@ private:
         size_t outLaneOffset)
     {
         auto outputType = BuildSourceRuntimeType(src);
+        const auto execStageId = NewExecStage(
+            &src, EExecPlanNodeKind::Source);
         auto splits = ScanSplits(src);
         auto* sourcePtr = &src.GetSource();
         auto* parquetSource = dynamic_cast<TParquetSource*>(sourcePtr);
@@ -921,8 +972,9 @@ private:
             auto& node = Graph_.AddOwnedNode(std::move(task));
             MarkNode(node,
                 "source",
-                StageGroup("source", &src),
-                src.GetAlias().empty() ? "source" : "source " + src.GetAlias());
+                execStageId,
+                src.GetAlias().empty() ? "source" : "source " + src.GetAlias(),
+                execStageId);
             result.Producers.push_back(&node);
         }
         return result;
@@ -958,10 +1010,13 @@ private:
             producer.State,
             NScheduler::TOutputPort{.Connection = &outConn, .Lane = outLaneOffset});
         auto& node = Graph_.AddOwnedNode(std::move(task));
+        const auto execStageId = NewExecStage(
+            &consumer, EExecPlanNodeKind::CteConsumer);
         MarkNode(node,
             "cte-consumer",
-            StageGroup("cte-consumer", mat),
-            "cte-consumer " + std::to_string(consumer.Def()->Id));
+            execStageId,
+            "cte-consumer " + std::to_string(consumer.Def()->Id),
+            execStageId);
         Graph_.AddEdge(*producer.Producer, node, *producer.Completion, 0, lane);
         return TLoweredOutput{
             .Producers = {&node},
@@ -1014,10 +1069,13 @@ private:
             NScheduler::TInputPort{.Connection = inputConn, .Lane = 0},
             NScheduler::TOutputPort{.Connection = &completion, .Lane = 0});
         auto& node = Graph_.AddOwnedNode(std::move(task));
+        const auto execStageId = NewExecStage(
+            &consumer, EExecPlanNodeKind::CteProducer);
         MarkNode(node,
             "cte-producer",
-            StageGroup("cte-producer", materialization.get()),
-            "cte-producer " + std::to_string(consumer.Def()->Id));
+            execStageId,
+            "cte-producer " + std::to_string(consumer.Def()->Id),
+            execStageId);
         for (size_t p = 0; p < lanes; ++p) {
             Graph_.AddEdge(*planOut.Producers[p], node, *inputConn, p, 0);
         }
@@ -1035,6 +1093,7 @@ private:
         const TOperatorPtr& child,
         std::string stageKind,
         std::string stageGroup,
+        TExecStageId execStageId,
         TStageBuilder buildStage,
         NScheduler::IConnection& outConn,
         size_t outLaneOffset)
@@ -1056,7 +1115,7 @@ private:
                 NScheduler::TInputPort{.Connection = &childConnRef, .Lane = p},
                 NScheduler::TOutputPort{.Connection = &outConn, .Lane = p + outLaneOffset});
             auto& node = Graph_.AddOwnedNode(std::move(task));
-            MarkNode(node, stageKind, stageGroup, stageKind);
+            MarkNode(node, stageKind, execStageId, stageKind, execStageId);
             Graph_.AddEdge(*childOut.Producers[p], node, childConnRef, p, p);
             result.Producers.push_back(&node);
         }
@@ -1068,6 +1127,7 @@ private:
         const TOperatorPtr& child,
         std::string stageKind,
         std::string stageGroup,
+        TExecStageId execStageId,
         TTailBuilder buildTail,
         NScheduler::IConnection& outConn,
         size_t outLaneOffset)
@@ -1091,7 +1151,7 @@ private:
             NScheduler::TInputPort{.Connection = inputConn, .Lane = 0},
             NScheduler::TOutputPort{.Connection = &outConn, .Lane = 0 + outLaneOffset});
         auto& node = Graph_.AddOwnedNode(std::move(task));
-        MarkNode(node, stageKind, stageGroup, stageKind);
+        MarkNode(node, stageKind, execStageId, stageKind, execStageId);
         for (size_t p = 0; p < lanes; ++p) {
             Graph_.AddEdge(*childOut.Producers[p], node, *inputConn, p, 0);
         }
@@ -1108,7 +1168,8 @@ private:
         const NQumir::NAst::TTypePtr& childType,
         const NQumir::NAst::TStructType& inputType,
         TAggregateOperator& aggregate,
-        std::string stage)
+        std::string stage,
+        TExecStageId execStageId)
     {
         using namespace NQumir::NAst;
         const size_t numKeys = aggregate.GroupKeys().size();
@@ -1134,7 +1195,8 @@ private:
         }
 
         auto spec = NKernel::BuildAggregateKernelSpec(*extInput, extKeys, aggregate.Aggs());
-        TKernelCompiler compiler(KernelOptions(std::move(stage), &aggregate));
+        TKernelCompiler compiler(
+            KernelOptions(std::move(stage), execStageId));
         auto kernels = std::make_shared<TAggregateKernels>(compiler.CompileAggregate(spec));
         auto sets = aggregate.GroupingSets();
 
@@ -1173,7 +1235,8 @@ private:
     TBlockingTail BuildAggregateTail(
         const NQumir::NAst::TTypePtr& childType,
         TAggregateOperator& aggregate,
-        std::string stage)
+        std::string stage,
+        TExecStageId execStageId)
     {
         auto* inputType =
             static_cast<NQumir::NAst::TStructType*>(childType.get());
@@ -1181,11 +1244,13 @@ private:
             throw std::runtime_error("aggregate input must have TStructType");
         }
         if (!aggregate.GroupingSets().empty()) {
-            return BuildGroupingSetsAggregateTail(childType, *inputType, aggregate, std::move(stage));
+            return BuildGroupingSetsAggregateTail(
+                childType, *inputType, aggregate, std::move(stage), execStageId);
         }
         auto spec = NKernel::BuildAggregateKernelSpec(
             *inputType, aggregate.GroupKeys(), aggregate.Aggs());
-        TKernelCompiler compiler(KernelOptions(std::move(stage), &aggregate));
+        TKernelCompiler compiler(
+            KernelOptions(std::move(stage), execStageId));
         auto kernels = std::make_shared<TAggregateKernels>(
             compiler.CompileAggregate(spec));
         auto code = std::make_shared<NScheduler::TBlockingCode>(
@@ -1270,11 +1335,15 @@ private:
             lanes, lanes, "aggregate-cascade-input");
         auto childOut = Lower(aggregate.Input(), childRef);
 
-        const auto partialGroup = StageGroup("aggregate-partial", &aggregate);
+        const auto partialStageId = NewExecStage(
+            &aggregate, EExecPlanNodeKind::Aggregate);
+        const auto partialGroup = StageLabel(
+            "aggregate-partial", partialStageId);
         TBlockingTail partialTail =
             [&]() {
                 TStageDiagnosticsScope diagnosticsScope(Diagnostics_, partialGroup);
-                return BuildAggregateTail(childOut.OutputType, aggregate, partialGroup);
+                return BuildAggregateTail(
+                    childOut.OutputType, aggregate, partialGroup, partialStageId);
             }();
         auto partialType = partialTail.OutputType;
 
@@ -1292,18 +1361,23 @@ private:
             auto& node = Graph_.AddOwnedNode(std::move(task));
             MarkNode(node,
                 "aggregate",
-                partialGroup,
-                "aggregate partial");
+                partialStageId,
+                "aggregate partial",
+                partialStageId);
             Graph_.AddEdge(*childOut.Producers[m], node, childRef, m, m);
             partialNodes.push_back(&node);
         }
 
         auto combineAgg = BuildCombineAggregate(aggregate);
-        const auto combineGroup = StageGroup("aggregate-combine", &aggregate);
+        const auto combineStageId = NewExecStage(
+            combineAgg.get(), EExecPlanNodeKind::Aggregate, combineAgg);
+        const auto combineGroup = StageLabel(
+            "aggregate-combine", combineStageId);
         TBlockingTail combineTail =
             [&]() {
                 TStageDiagnosticsScope diagnosticsScope(Diagnostics_, combineGroup);
-                return BuildAggregateTail(partialType, *combineAgg, combineGroup);
+                return BuildAggregateTail(
+                    partialType, *combineAgg, combineGroup, combineStageId);
             }();
         auto finalTask = std::make_unique<NScheduler::TBlockingTask>(
             std::move(combineTail.Code),
@@ -1313,8 +1387,9 @@ private:
         auto& finalNode = Graph_.AddOwnedNode(std::move(finalTask));
         MarkNode(finalNode,
             "aggregate",
-            combineGroup,
-            "aggregate combine");
+            combineStageId,
+            "aggregate combine",
+            combineStageId);
         for (size_t m = 0; m < lanes; ++m) {
             Graph_.AddEdge(*partialNodes[m], finalNode, gatherRef, m, 0);
         }
@@ -1346,11 +1421,15 @@ private:
             childLanes, childLanes, "grouping-sets-partial-input");
         auto childOut = Lower(aggregate.Input(), childRef);
 
-        const auto partialGroup = StageGroup("aggregate-partial", &aggregate);
+        const auto partialStageId = NewExecStage(
+            &aggregate, EExecPlanNodeKind::Aggregate);
+        const auto partialGroup = StageLabel(
+            "aggregate-partial", partialStageId);
         TBlockingTail partialTail =
             [&]() {
                 TStageDiagnosticsScope diagnosticsScope(Diagnostics_, partialGroup);
-                return BuildAggregateTail(childOut.OutputType, aggregate, partialGroup);
+                return BuildAggregateTail(
+                    childOut.OutputType, aggregate, partialGroup, partialStageId);
             }();
         auto partialType = partialTail.OutputType;
         auto* partialStruct =
@@ -1370,7 +1449,9 @@ private:
                 NScheduler::TInputPort{.Connection = &childRef, .Lane = i},
                 NScheduler::TOutputPort{.Connection = &partialRef, .Lane = i});
             auto& node = Graph_.AddOwnedNode(std::move(task));
-            MarkNode(node, "aggregate", partialGroup, "aggregate partial");
+            MarkNode(
+                node, "aggregate", partialStageId,
+                "aggregate partial", partialStageId);
             Graph_.AddEdge(*childOut.Producers[i], node, childRef, i, i);
             partialNodes.push_back(&node);
         }
@@ -1380,6 +1461,7 @@ private:
         auto hashCode = MakeHashShuffleCode(std::move(groupHash), partialType);
         auto& shufRef = AddConn<NScheduler::THashShuffleConnection>(
             childLanes, parts, "grouping-sets-shuffle");
+        const auto shuffleTaskGroupId = NewTaskGroup();
         std::vector<NScheduler::TTaskNode*> shufNodes;
         shufNodes.reserve(childLanes);
         for (size_t i = 0; i < childLanes; ++i) {
@@ -1390,17 +1472,21 @@ private:
                 shufRef,
                 i);
             auto& node = Graph_.AddOwnedNode(std::move(task));
-            MarkNode(node, "hash-shuffle",
-                StageGroup("aggregate-shuffle", &aggregate), "hash-shuffle");
+            MarkNode(
+                node, "hash-shuffle", shuffleTaskGroupId, "hash-shuffle");
             Graph_.AddEdge(*partialNodes[i], node, partialRef, i, i);
             shufNodes.push_back(&node);
         }
 
-        const auto combineGroup = StageGroup("aggregate-combine", &aggregate);
+        const auto combineStageId = NewExecStage(
+            combineAgg.get(), EExecPlanNodeKind::Aggregate, combineAgg);
+        const auto combineGroup = StageLabel(
+            "aggregate-combine", combineStageId);
         TBlockingTail combineTail =
             [&]() {
                 TStageDiagnosticsScope diagnosticsScope(Diagnostics_, combineGroup);
-                return BuildAggregateTail(partialType, *combineAgg, combineGroup);
+                return BuildAggregateTail(
+                    partialType, *combineAgg, combineGroup, combineStageId);
             }();
 
         TLoweredOutput result;
@@ -1413,7 +1499,9 @@ private:
                 NScheduler::TInputPort{.Connection = &shufRef, .Lane = m},
                 NScheduler::TOutputPort{.Connection = &outConn, .Lane = m + outLaneOffset});
             auto& node = Graph_.AddOwnedNode(std::move(task));
-            MarkNode(node, "aggregate", combineGroup, "aggregate combine");
+            MarkNode(
+                node, "aggregate", combineStageId,
+                "aggregate combine", combineStageId);
             for (size_t s = 0; s < childLanes; ++s) {
                 Graph_.AddEdge(*shufNodes[s], node, shufRef, s, m);
             }
@@ -1430,13 +1518,17 @@ private:
         const size_t childLanes = OutputLanes(aggregate.Input());
         // Non-parallel input: single aggregate, nothing to parallelize.
         if (childLanes <= 1) {
-            auto group = StageGroup("aggregate", &aggregate);
+            auto execStageId = NewExecStage(
+                &aggregate, EExecPlanNodeKind::Aggregate);
+            auto group = StageLabel("aggregate", execStageId);
             return LowerBlocking(
                 aggregate.Input(),
                 "aggregate",
                 group,
+                execStageId,
                 [&, group](const NQumir::NAst::TTypePtr& childType) {
-                    return BuildAggregateTail(childType, aggregate, group);
+                    return BuildAggregateTail(
+                        childType, aggregate, group, execStageId);
                 },
                 outConn,
                 outLaneOffset);
@@ -1456,13 +1548,17 @@ private:
             if (Settings_.Aggregate.CascadeGlobal) {
                 return LowerAggregateCascade(aggregate, childLanes, outConn, outLaneOffset);
             }
-            auto group = StageGroup("aggregate", &aggregate);
+            auto execStageId = NewExecStage(
+                &aggregate, EExecPlanNodeKind::Aggregate);
+            auto group = StageLabel("aggregate", execStageId);
             return LowerBlocking(
                 aggregate.Input(),
                 "aggregate",
                 group,
+                execStageId,
                 [&, group](const NQumir::NAst::TTypePtr& childType) {
-                    return BuildAggregateTail(childType, aggregate, group);
+                    return BuildAggregateTail(
+                        childType, aggregate, group, execStageId);
                 },
                 outConn,
                 outLaneOffset);
@@ -1483,11 +1579,14 @@ private:
             throw std::runtime_error("aggregate input must have TStructType");
         }
         auto groupHash = MakeGroupKeyHash(*childStruct, aggregate.GroupKeys());
-        const auto aggregateGroup = StageGroup("aggregate", &aggregate);
+        const auto execStageId = NewExecStage(
+            &aggregate, EExecPlanNodeKind::Aggregate);
+        const auto aggregateGroup = StageLabel("aggregate", execStageId);
         TBlockingTail tail =
             [&]() {
                 TStageDiagnosticsScope diagnosticsScope(Diagnostics_, aggregateGroup);
-                return BuildAggregateTail(childType, aggregate, aggregateGroup);
+                return BuildAggregateTail(
+                    childType, aggregate, aggregateGroup, execStageId);
             }();
 
         auto& shufRef = AddConn<NScheduler::THashShuffleConnection>(
@@ -1495,6 +1594,7 @@ private:
         auto* shufPtr = &shufRef;
 
         auto hashCode = MakeHashShuffleCode(std::move(groupHash), childType);
+        const auto shuffleTaskGroupId = NewTaskGroup();
         std::vector<NScheduler::TTaskNode*> shufNodes;
         shufNodes.reserve(childLanes);
         for (size_t i = 0; i < childLanes; ++i) {
@@ -1507,7 +1607,7 @@ private:
             auto& node = Graph_.AddOwnedNode(std::move(task));
             MarkNode(node,
                 "hash-shuffle",
-                StageGroup("aggregate-shuffle", &aggregate),
+                shuffleTaskGroupId,
                 "hash-shuffle");
             Graph_.AddEdge(*childOut.Producers[i], node, childConnRef, i, i);
             shufNodes.push_back(&node);
@@ -1525,8 +1625,9 @@ private:
             auto& node = Graph_.AddOwnedNode(std::move(task));
             MarkNode(node,
                 "aggregate",
-                aggregateGroup,
-                "aggregate");
+                execStageId,
+                "aggregate",
+                execStageId);
             for (size_t s = 0; s < childLanes; ++s) {
                 Graph_.AddEdge(*shufNodes[s], node, shufRef, s, m);
             }
@@ -1540,10 +1641,13 @@ private:
         NScheduler::IConnection& outConn,
         size_t outLaneOffset)
     {
+        const auto execStageId = NewExecStage(
+            &limit, EExecPlanNodeKind::Limit);
         return LowerBlocking(
             limit.Input(),
             "limit",
-            StageGroup("limit", &limit),
+            StageLabel("limit", execStageId),
+            execStageId,
             [&](const NQumir::NAst::TTypePtr& childType) {
                 const int64_t limitValue = limit.Limit();
                 const int64_t offsetValue = limit.Offset();
@@ -1571,11 +1675,17 @@ private:
         NScheduler::IConnection& outConn,
         size_t outLaneOffset)
     {
-        auto group = StageGroup(kernelName, input.get());
+        const auto execStageId = NewExecStage(
+            static_cast<const IOperator*>(sortOp),
+            kernelName == "top-sort"
+                ? EExecPlanNodeKind::TopSort
+                : EExecPlanNodeKind::Sort);
+        auto group = StageLabel(kernelName, execStageId);
         return LowerBlocking(
             input,
             std::string(kernelName),
             group,
+            execStageId,
             [&, group](const NQumir::NAst::TTypePtr& childType) {
                 auto* inputType =
                     static_cast<NQumir::NAst::TStructType*>(childType.get());
@@ -1585,7 +1695,7 @@ private:
                 }
                 auto runtime = BuildSortRuntimeProcess(
                     *inputType, sortKeys, kernelName,
-                    KernelOptions(group, sortOp));
+                    KernelOptions(group, execStageId));
                 return MakeSortTail(
                     childType, sortKeys,
                     std::move(runtime.KeyColumns),
@@ -1613,6 +1723,11 @@ private:
         size_t mergeOutLaneOffset)
     {
         const size_t lanes = OutputLanes(input);
+        const auto execStageId = NewExecStage(
+            static_cast<const IOperator*>(sortOp),
+            kernelName == "top-sort"
+                ? EExecPlanNodeKind::TopSort
+                : EExecPlanNodeKind::Sort);
         auto& childConnRef = AddConn<NScheduler::TOneToOneConnection>(
             lanes, lanes, "sort-merge-input");
         auto childOut = Lower(input, childConnRef);
@@ -1623,13 +1738,13 @@ private:
         if (!inputType) {
             throw std::runtime_error("sort input must have TStructType");
         }
-        auto localSortGroup = StageGroup(kernelName, input.get());
+        auto localSortGroup = StageLabel(kernelName, execStageId);
         TSortRuntimeProcess runtime =
             [&]() {
                 TStageDiagnosticsScope diagnosticsScope(Diagnostics_, localSortGroup);
                 return BuildSortRuntimeProcess(
                     *inputType, sortKeys, kernelName,
-                    KernelOptions(localSortGroup, sortOp));
+                    KernelOptions(localSortGroup, execStageId));
             }();
         auto keys = sortKeys;
         auto keyColumns = runtime.KeyColumns;
@@ -1657,8 +1772,9 @@ private:
             auto& node = Graph_.AddOwnedNode(std::move(task));
             MarkNode(node,
                 std::string(kernelName),
-                localSortGroup,
-                std::string(kernelName));
+                execStageId,
+                std::string(kernelName),
+                execStageId);
             Graph_.AddEdge(*childOut.Producers[i], node, childConnRef, i, i);
             runConns.push_back(&runRef);
             mergeInputs.push_back(
@@ -1712,7 +1828,7 @@ private:
         auto& mergeNode = Graph_.AddOwnedNode(std::move(merge));
         MarkNode(mergeNode,
             "merge",
-            StageGroup("merge", input.get()),
+            NewTaskGroup(),
             "merge");
         for (size_t i = 0; i < lanes; ++i) {
             Graph_.AddEdge(*localSorts[i], mergeNode, *runConns[i], 0, 0);
@@ -1768,7 +1884,7 @@ private:
         auto& limitNode = Graph_.AddOwnedNode(std::move(limitTask));
         MarkNode(limitNode,
             "limit",
-            StageGroup("top-sort-limit", &sort),
+            NewTaskGroup(),
             "limit");
         Graph_.AddEdge(*merged.Merge, limitNode, mergeConnRef, 0, 0);
 
@@ -1786,7 +1902,10 @@ private:
         TJoinOperator& join,
         NScheduler::IConnection& outConn,
         size_t outLaneOffset)
-    {        const size_t lanes = OutputLanes(join.Left());
+    {
+        const auto crossStageId = NewExecStage(
+            &join, EExecPlanNodeKind::CrossJoin);
+        const size_t lanes = OutputLanes(join.Left());
 
         // Vector (streamed, partitioned) side.
         auto& vectorRef = AddConn<NScheduler::TOneToOneConnection>(
@@ -1823,7 +1942,7 @@ private:
             auto& fwdNode = Graph_.AddOwnedNode(std::move(fwd));
             MarkNode(fwdNode,
                 "broadcast",
-                StageGroup("cross-scalar-broadcast", &join),
+                NewTaskGroup(),
                 "broadcast");
             for (size_t m = 0; m < scalarLanes; ++m) {
                 Graph_.AddEdge(
@@ -1849,8 +1968,9 @@ private:
             throw std::runtime_error("scheduler cross join inputs must have TStructType");
         }
         auto kernelSpec = NKernel::BuildCrossJoinKernelSpec(*leftStruct, *rightStruct);
-        const auto crossGroup = StageGroup("join", &join);
-        TKernelCompiler compiler(KernelOptions(crossGroup, &join));
+        const auto crossGroup = StageLabel("cross-join", crossStageId);
+        TKernelCompiler compiler(
+            KernelOptions(crossGroup, crossStageId));
         auto crossKernels = std::make_shared<TCrossJoinKernels>(
             [&]() {
                 TStageDiagnosticsScope diagnosticsScope(Diagnostics_, crossGroup);
@@ -1879,14 +1999,16 @@ private:
             auto& node = Graph_.AddOwnedNode(std::move(task));
             MarkNode(node,
                 "join",
-                StageGroup("join", &join),
-                JoinDebugLabel(join));
+                crossStageId,
+                JoinDebugLabel(join),
+                crossStageId);
             Graph_.AddEdge(*vectorOut.Producers[m], node, vectorRef, m, m);
             if (directScalar) {
-                Graph_.AddEdge(*scalarOut.Producers[0], node, *scalarInput, 0, 0);
+                Graph_.AddEdge(
+                    *scalarOut.Producers[0], node, *scalarInput, 0, 0, 1);
             } else {
                 Graph_.AddEdge(
-                    *scalarBroadcastProducer, node, *scalarInput, 0, m);
+                    *scalarBroadcastProducer, node, *scalarInput, 0, m, 1);
             }
             crossNodes.push_back(&node);
         }
@@ -1901,15 +2023,19 @@ private:
         // Residual predicate is a plain filter over the glued schema.
         auto filterOp =
             std::make_shared<TFilterOperator>(join.Left(), join.Filter());
-        const auto residualGroup = StageGroup("cross-residual-filter", &join);
+        const auto residualStageId = NewExecStage(
+            &join, EExecPlanNodeKind::CrossResidualFilter);
+        const auto residualGroup = StageLabel(
+            "cross-residual-filter", residualStageId);
         TSchedulerUnaryStage stage =
             [&]() {
                 TStageDiagnosticsScope diagnosticsScope(Diagnostics_, residualGroup);
                 // The residual filter kernel belongs to the join operator: the
-                // exec exporter looks it up by the join's identity.
+                // The residual is a separate executable stage even though its
+                // semantic metadata points at the owning join operator.
                 return BuildSchedulerFilterStage(
                     *filterOp, crossType,
-                    KernelOptions(residualGroup, &join));
+                    KernelOptions(residualGroup, residualStageId));
             }();
         TLoweredOutput result;
         result.OutputType = std::move(stage.OutputType);
@@ -1923,8 +2049,9 @@ private:
             auto& node = Graph_.AddOwnedNode(std::move(task));
             MarkNode(node,
                 "filter",
-                residualGroup,
-                "filter");
+                residualStageId,
+                "filter",
+                residualStageId);
             Graph_.AddEdge(*crossNodes[m], node, *residualConn, m, m);
             result.Producers.push_back(&node);
         }
@@ -1958,8 +2085,11 @@ private:
 
         auto kernelSpec = NKernel::BuildJoinKernelSpec(
             *leftStruct, *rightStruct, join.Keys(), join.JoinType(), join.Filter());
-        const auto joinGroup = StageGroup("join", &join);
-        TKernelCompiler compiler(KernelOptions(joinGroup, &join));
+        const auto execStageId = NewExecStage(
+            &join, EExecPlanNodeKind::Join);
+        const auto joinGroup = StageLabel("join", execStageId);
+        TKernelCompiler compiler(
+            KernelOptions(joinGroup, execStageId));
         auto joinKernels = std::make_shared<TJoinKernels>(
             [&]() {
                 TStageDiagnosticsScope diagnosticsScope(Diagnostics_, joinGroup);
@@ -1980,10 +2110,12 @@ private:
             auto& node = Graph_.AddOwnedNode(std::move(task));
             MarkNode(node,
                 "join",
-                joinGroup,
-                JoinDebugLabel(join));
+                execStageId,
+                JoinDebugLabel(join),
+                execStageId);
             Graph_.AddEdge(*leftOut.Producers[0], node, leftPipeRef, 0, 0);
-            Graph_.AddEdge(*rightOut.Producers[0], node, rightPipeRef, 0, 0);
+            Graph_.AddEdge(
+                *rightOut.Producers[0], node, rightPipeRef, 0, 0, 1);
             return TLoweredOutput{
                 .Producers = {&node},
                 .OutputType = kernelSpec.OutputSchema,
@@ -2022,14 +2154,15 @@ private:
             auto& node = Graph_.AddOwnedNode(std::move(task));
             MarkNode(node,
                 "join",
-                joinGroup,
-                JoinDebugLabel(join));
+                execStageId,
+                JoinDebugLabel(join),
+                execStageId);
             for (size_t s = 0; s < leftLanes; ++s) {
                 Graph_.AddEdge(*leftShuf.Nodes[s], node, *leftShuf.Connection, s, j);
             }
             for (size_t s = 0; s < rightLanes; ++s) {
                 Graph_.AddEdge(
-                    *rightShuf.Nodes[s], node, *rightShuf.Connection, s, j);
+                    *rightShuf.Nodes[s], node, *rightShuf.Connection, s, j, 1);
             }
             result.Producers.push_back(&node);
         }
@@ -2039,9 +2172,11 @@ private:
     TBlockingTail BuildWindowTail(
         const NQumir::NAst::TTypePtr& childType,
         TWindowOperator& window,
-        std::string stage)
+        std::string stage,
+        TExecStageId execStageId)
     {
-        TKernelCompilerOptions options = KernelOptions(std::move(stage), &window);
+        TKernelCompilerOptions options =
+            KernelOptions(std::move(stage), execStageId);
         auto runtime = BuildWindowRuntimeProcess(window, childType, std::move(options));
         return TBlockingTail{
             .Code = MakeSortBlockingCode<TWindowBlockingState>(),
@@ -2062,15 +2197,19 @@ private:
         size_t outLaneOffset)
     {
         const size_t childLanes = OutputLanes(window.Input());
-        const auto windowGroup = StageGroup("window", &window);
+        const auto execStageId = NewExecStage(
+            &window, EExecPlanNodeKind::Window);
+        const auto windowGroup = StageLabel("window", execStageId);
 
         if (childLanes <= 1 || window.PartitionKeys().empty()) {
             return LowerBlocking(
                 window.Input(),
                 "window",
                 windowGroup,
+                execStageId,
                 [&, windowGroup](const NQumir::NAst::TTypePtr& childType) {
-                    return BuildWindowTail(childType, window, windowGroup);
+                    return BuildWindowTail(
+                        childType, window, windowGroup, execStageId);
                 },
                 outConn,
                 outLaneOffset);
@@ -2101,7 +2240,8 @@ private:
         TBlockingTail tail =
             [&]() {
                 TStageDiagnosticsScope diagnosticsScope(Diagnostics_, windowGroup);
-                return BuildWindowTail(childType, window, windowGroup);
+                return BuildWindowTail(
+                    childType, window, windowGroup, execStageId);
             }();
 
         TLoweredOutput result;
@@ -2116,8 +2256,9 @@ private:
             auto& node = Graph_.AddOwnedNode(std::move(task));
             MarkNode(node,
                 "window",
-                windowGroup,
-                "window");
+                execStageId,
+                "window",
+                execStageId);
             for (size_t s = 0; s < childLanes; ++s) {
                 Graph_.AddEdge(*shuf.Nodes[s], node, *shuf.Connection, s, m);
             }
@@ -2141,6 +2282,7 @@ private:
         TShuffleSide side;
         side.Connection = shufPtr;
         side.Nodes.reserve(inputLanes);
+        const auto shuffleTaskGroupId = NewTaskGroup();
         for (size_t p = 0; p < inputLanes; ++p) {
             auto task = std::make_unique<NScheduler::THashShuffleTask>(
                 hashCode,
@@ -2151,7 +2293,7 @@ private:
             auto& node = Graph_.AddOwnedNode(std::move(task));
             MarkNode(node,
                 "hash-shuffle",
-                StageGroup(label, hashCode.get()),
+                shuffleTaskGroupId,
                 label);
             Graph_.AddEdge(*input.Producers[p], node, inputConn, p, p);
             side.Nodes.push_back(&node);
@@ -2171,12 +2313,39 @@ private:
             Settings_.HashShuffle.TargetOutputBatchBytes);
     }
 
+public:
+    std::vector<TLoweredExecStage>& ExecStages() {
+        return ExecStages_;
+    }
+
 private:
+    TExecStageId NewExecStage(
+        const IOperator* op,
+        EExecPlanNodeKind kind,
+        TOperatorPtr ownedOp = {})
+    {
+        const auto id = static_cast<TExecStageId>(ExecStages_.size() + 1);
+        ExecStages_.push_back({
+            .Id = id,
+            .Kind = std::move(kind),
+            .Operator = op,
+            .OperatorOwner = std::move(ownedOp),
+        });
+        return id;
+    }
+
+    NScheduler::TTaskGroupId NewTaskGroup() {
+        return ++LastTaskGroupId_;
+    }
+
     NScheduler::TTaskGraph& Graph_;
     NScheduler::TSettings Settings_;
     std::ostream* Diagnostics_;
     std::vector<TGeneratedKernel>* KernelSink_ = nullptr;
     std::unordered_map<const TCteMaterialization*, TMaterializedProducer> Materialized_;
+    std::vector<TLoweredExecStage> ExecStages_;
+    NScheduler::TTaskGroupId LastTaskGroupId_ =
+        NScheduler::InvalidTaskGroupId;
 };
 
 } // namespace
@@ -2264,6 +2433,7 @@ TLoweredPlan LowerPlanToGraph(
     }
     auto out = lowerer.Lower(root, *finalRef);
     lowerer.CheckMaterializationsWired();
+    lowerer.CheckExecStagesConsistent();
 
     return TLoweredPlan{
         .Graph = std::move(graph),
@@ -2272,6 +2442,7 @@ TLoweredPlan LowerPlanToGraph(
         .Producers = std::move(out.Producers),
         .Lanes = lanes,
         .Kernels = std::move(kernels),
+        .ExecStages = std::move(lowerer.ExecStages()),
     };
 }
 

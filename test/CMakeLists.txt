@@ -52,8 +52,27 @@ ut(test_scheduler_graph test_scheduler_graph.cpp)
 ut(test_scheduler_queues test_scheduler_queues.cpp)
 ut(test_scheduler_runtime_adapter test_scheduler_runtime_adapter.cpp)
 ut(test_scheduler_scan_split test_scheduler_scan_split.cpp)
+ut(test_exec_plan_builder test_exec_plan_builder.cpp)
 ut(test_scheduler test_scheduler.cpp)
 ut(test_scheduler_threaded test_scheduler_threaded.cpp)
 ut(test_window test_window.cpp)
 ut(test_window_plan test_window_plan.cpp)
 ut(test_window_exec test_window_exec.cpp)
+
+add_executable(plan_export_native_runner plan_export_native_runner.cpp)
+target_link_libraries(plan_export_native_runner PRIVATE qumirdb)
+target_compile_features(plan_export_native_runner PRIVATE cxx_std_23)
+
+# JavaScript execution tests (Node.js required), matching externals/qumir.
+find_program(NODE_EXECUTABLE node)
+if(NODE_EXECUTABLE)
+    add_test(
+        NAME test_plan_export_integration
+        COMMAND ${NODE_EXECUTABLE} ${CMAKE_SOURCE_DIR}/test/plan_export/run.mjs
+            $<TARGET_FILE:qdb_plan_export>
+            $<TARGET_FILE:plan_export_native_runner>
+            ${CMAKE_SOURCE_DIR}/service/static/browser_runtime.js
+            ${CMAKE_SOURCE_DIR}/test/plan_export/goldens
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    )
+endif()
