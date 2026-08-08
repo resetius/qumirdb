@@ -150,6 +150,24 @@ std::optional<std::string> CompileKernelAstToObject(
     return runner.CompileKernelAstToObject(std::move(ast), entryNames, error);
 }
 
+std::optional<NQumir::TLLVMRunner::TCachedObjectModule>
+CompileKernelAstToObjectsCached(
+    NQumir::TLLVMRunner& runner,
+    NQumir::NAst::TExprPtr ast,
+    const std::vector<std::string>& entryNames,
+    const std::string& cacheDir,
+    std::string* error)
+{
+    EnsureQumirDbUse(ast);
+    return runner.CompileFusedKernelsToObjectsCached(
+        std::move(ast),
+        entryNames,
+        cacheDir,
+        CacheSchemaVersion,
+        KernelLibVersion,
+        error);
+}
+
 namespace {
 
 NQumir::NAst::TTypePtr QumirDbNamedType(const std::string& name) {

@@ -42,6 +42,7 @@ struct TOptions {
     std::string StaticDir = QDB_SERVICE_STATIC_DIR;
     std::string BinaryDir = QDB_BUILD_BIN_DIR;
     std::string SourceDir = QDB_SOURCE_ROOT_DIR;
+    std::string CacheDir;
     std::vector<std::string> DataDirs;
     std::vector<std::string> LocalDataDirs;
 };
@@ -482,9 +483,17 @@ private:
     TFuture<void> Explain(TRequest& request, TResponse& response) {
         std::string body = co_await request.ReadBodyFull();
         auto exporter = (BinaryBase_ / "qdb_plan_export").generic_string();
+        std::vector<std::string> exporterArgs{
+            "--stdin-json",
+            "--stdout-json",
+        };
+        if (!Options_.CacheDir.empty()) {
+            exporterArgs.push_back("--cache");
+            exporterArgs.push_back(Options_.CacheDir);
+        }
         auto pipe = Options_.PipeFactory(
             exporter,
-            {"--stdin-json", "--stdout-json"},
+            exporterArgs,
             /*stderrToStdout=*/true);
         TRunRegistration runReg(this, QueryParam(request, "runId"), pipe.Pid());
 
@@ -1081,6 +1090,8 @@ int main(int argc, char** argv) {
             options.BinaryDir = argv[++i];
         } else if (!std::strcmp(argv[i], "--source-dir") && i + 1 < argc) {
             options.SourceDir = argv[++i];
+        } else if (!std::strcmp(argv[i], "--cache") && i + 1 < argc) {
+            options.CacheDir = argv[++i];
         } else if (!std::strcmp(argv[i], "--data") && i + 1 < argc) {
             options.DataDirs.push_back(argv[++i]);
         } else if (!std::strcmp(argv[i], "--local-data") && i + 1 < argc) {
@@ -1088,7 +1099,7 @@ int main(int argc, char** argv) {
         } else if (!std::strcmp(argv[i], "--help")) {
             std::cout << "Usage: " << argv[0]
                       << " [--port n] [--static-dir dir] [--binary-dir dir]"
-                      << " [--source-dir dir]"
+                      << " [--source-dir dir] [--cache dir]"
                       << " [--data 'dir [alias]' ...] [--local-data 'dir [alias]' ...]\n";
             return 0;
         }

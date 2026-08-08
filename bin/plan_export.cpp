@@ -430,13 +430,23 @@ std::string ReadBinaryFile(const std::filesystem::path& path) {
         std::istreambuf_iterator<char>());
 }
 
+void WriteResponseArgument(std::ostream& out, std::string_view argument) {
+    out.put('"');
+    for (char ch : argument) {
+        if (ch == '\\' || ch == '"') {
+            out.put('\\');
+        }
+        out.put(ch);
+    }
+    out << "\"\n";
+}
+
 std::expected<std::monostate, std::string> RunWasm64Ld(
-    const std::filesystem::path& objPath,
+    const std::vector<std::filesystem::path>& objectPaths,
     const std::filesystem::path& wasmPath,
     int64_t globalBase)
 {
-    std::vector<std::string> args{
-        "wasm-ld",
+    std::vector<std::string> linkArgs{
         "--no-entry",
         "--export-all",
         "--allow-undefined",
@@ -447,17 +457,44 @@ std::expected<std::monostate, std::string> RunWasm64Ld(
         "stack-size=" + std::to_string(WasmStackSize),
         "-o",
         wasmPath.string(),
-        objPath.string(),
     };
-    std::vector<char*> argv;
-    argv.reserve(args.size() + 1);
-    for (auto& arg : args) {
-        argv.push_back(arg.data());
+    linkArgs.reserve(linkArgs.size() + objectPaths.size());
+    for (const auto& path : objectPaths) {
+        linkArgs.push_back(path.string());
     }
-    argv.push_back(nullptr);
+
+    const auto responsePath = TempPath(".rsp");
+    {
+        std::ofstream response(responsePath, std::ios::binary);
+        if (!response) {
+            return std::unexpected("cannot create temporary wasm-ld response file");
+        }
+        for (const auto& arg : linkArgs) {
+            WriteResponseArgument(response, arg);
+        }
+        if (!response) {
+            std::error_code ec;
+            std::filesystem::remove(responsePath, ec);
+            return std::unexpected("cannot write temporary wasm-ld response file");
+        }
+    }
+
+    std::vector<std::string> args{
+        "wasm-ld",
+        "--rsp-quoting=posix",
+        "@" + responsePath.string(),
+    };
+    std::vector<char*> argv{
+        args[0].data(),
+        args[1].data(),
+        args[2].data(),
+        nullptr,
+    };
 
     const pid_t pid = fork();
     if (pid < 0) {
+        std::error_code ec;
+        std::filesystem::remove(responsePath, ec);
         return std::unexpected("fork failed");
     }
     if (pid == 0) {
@@ -473,8 +510,12 @@ std::expected<std::monostate, std::string> RunWasm64Ld(
 
     int status = 0;
     if (waitpid(pid, &status, 0) < 0) {
+        std::error_code ec;
+        std::filesystem::remove(responsePath, ec);
         return std::unexpected("waitpid failed");
     }
+    std::error_code ec;
+    std::filesystem::remove(responsePath, ec);
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
         return std::unexpected(
             "wasm-ld failed with code " +
@@ -542,37 +583,70 @@ struct TCompiledWasm64Module {
 std::expected<TCompiledWasm64Module, std::string> CompileKernelAstToWasm64(
     NQumir::NAst::TExprPtr ast,
     int64_t globalBase,
-    const std::vector<std::string>& entryNames)
+    const std::vector<std::string>& entryNames,
+    const std::string& cacheDir)
 {
     auto opts = NQdb::KernelRunnerOptions();
     opts.NativeCode = false;
     opts.TargetTriple = "wasm64-unknown-unknown";
     NQumir::TLLVMRunner runner(std::move(opts));
 
-    std::string err;
-    auto object =
-        NQdb::CompileKernelAstToObject(runner, std::move(ast), entryNames, &err);
-    if (!object) {
-        return std::unexpected(
-            err.empty() ? "wasm kernel compilation failed" : err);
-    }
-
-    const auto objPath = TempPath(".o");
     const auto wasmPath = TempPath(".wasm");
-    {
-        std::ofstream obj(objPath, std::ios::binary);
-        if (!obj) {
-            return std::unexpected("cannot create temporary wasm object");
+    std::vector<std::filesystem::path> objectPaths;
+    std::vector<std::filesystem::path> temporaryObjects;
+    std::vector<std::string> objectBlobs;
+
+    std::string err;
+    if (cacheDir.empty()) {
+        auto object = NQdb::CompileKernelAstToObject(
+            runner, std::move(ast), entryNames, &err);
+        if (!object) {
+            return std::unexpected(
+                err.empty() ? "wasm kernel compilation failed" : err);
         }
-        obj.write(object->data(), static_cast<std::streamsize>(object->size()));
+        objectBlobs.push_back(std::move(*object));
+    } else {
+        auto compiled = NQdb::CompileKernelAstToObjectsCached(
+            runner, std::move(ast), entryNames, cacheDir, &err);
+        if (!compiled) {
+            return std::unexpected(
+                err.empty() ? "cached wasm kernel compilation failed" : err);
+        }
+        objectPaths.reserve(
+            compiled->ObjectFiles.size() + compiled->ObjectBlobs.size() + 1);
+        for (auto& path : compiled->ObjectFiles) {
+            objectPaths.emplace_back(std::move(path));
+        }
+        objectBlobs = std::move(compiled->ObjectBlobs);
+        objectBlobs.push_back(std::move(compiled->KernelObject));
     }
 
     auto cleanup = [&]() {
         std::error_code ec;
-        std::filesystem::remove(objPath, ec);
+        for (const auto& path : temporaryObjects) {
+            std::filesystem::remove(path, ec);
+            ec.clear();
+        }
         std::filesystem::remove(wasmPath, ec);
     };
-    if (auto linked = RunWasm64Ld(objPath, wasmPath, globalBase); !linked) {
+
+    for (const auto& bytes : objectBlobs) {
+        const auto objPath = TempPath(".o");
+        std::ofstream obj(objPath, std::ios::binary);
+        if (!obj) {
+            cleanup();
+            return std::unexpected("cannot create temporary wasm object");
+        }
+        temporaryObjects.push_back(objPath);
+        obj.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+        if (!obj) {
+            cleanup();
+            return std::unexpected("cannot write temporary wasm object");
+        }
+        objectPaths.push_back(objPath);
+    }
+
+    if (auto linked = RunWasm64Ld(objectPaths, wasmPath, globalBase); !linked) {
         cleanup();
         return std::unexpected(linked.error());
     }
@@ -1560,7 +1634,8 @@ TWasmFinalizeResult WasmFinalizeKernels(
     std::span<NQdb::TGeneratedKernel> kernels,
     TArtifactStore& artifacts,
     llvm::json::Array& diagnostics,
-    bool embedWasm)
+    bool embedWasm,
+    const std::string& cacheDir)
 {
     TWasmFinalizeResult out;
     out.Kernels.reserve(kernels.size());
@@ -1608,7 +1683,7 @@ TWasmFinalizeResult WasmFinalizeKernels(
 
     auto fused = NQdb::BuildFusedProgram(unique);
     auto wasm = CompileKernelAstToWasm64(
-        fused.Program, WasmSlot0, fused.Entrypoints);
+        fused.Program, WasmSlot0, fused.Entrypoints, cacheDir);
     if (!wasm) {
         diagnostics.push_back(llvm::json::Object{
             {"stage", "wasm-fusion"},
@@ -2540,7 +2615,10 @@ llvm::json::Object EncodeExecPlan(
     }
 }
 
-llvm::json::Object BuildBundle(TExportRequest& request) {
+llvm::json::Object BuildBundle(
+    TExportRequest& request,
+    const std::string& cacheDir)
+{
     auto plan = ParseSql(request.Sql, request.Catalog);
     if (!plan) {
         return ErrorObject("parse", plan.error().ToString());
@@ -2594,7 +2672,11 @@ llvm::json::Object BuildBundle(TExportRequest& request) {
 
         // Wasm finalization: ast artifacts always, wasm in embed mode.
         wasmFinalized = WasmFinalizeKernels(
-            lowered.Kernels, artifacts, diagnostics, request.EmbedWasm);
+            lowered.Kernels,
+            artifacts,
+            diagnostics,
+            request.EmbedWasm,
+            cacheDir);
         loweredKernels = std::move(lowered.Kernels);
 
         schedulerText << lowerDiagnostics.str();
@@ -2661,7 +2743,8 @@ llvm::json::Object BuildBundle(TExportRequest& request) {
 }
 
 void PrintHelp(const char* argv0) {
-    std::cout << "Usage: " << argv0 << " --stdin-json --stdout-json\n";
+    std::cout << "Usage: " << argv0
+              << " --stdin-json --stdout-json [--cache dir]\n";
 }
 
 } // namespace
@@ -2671,11 +2754,18 @@ int main(int argc, char** argv) {
 
     bool stdinJson = false;
     bool stdoutJson = false;
+    std::string cacheDir;
     for (int i = 1; i < argc; ++i) {
         if (!std::strcmp(argv[i], "--stdin-json")) {
             stdinJson = true;
         } else if (!std::strcmp(argv[i], "--stdout-json")) {
             stdoutJson = true;
+        } else if (!std::strcmp(argv[i], "--cache")) {
+            if (i + 1 >= argc) {
+                std::cerr << "qdb_plan_export: --cache requires a directory\n";
+                return 2;
+            }
+            cacheDir = argv[++i];
         } else if (!std::strcmp(argv[i], "--help")) {
             PrintHelp(argv[0]);
             return 0;
@@ -2695,7 +2785,7 @@ int main(int argc, char** argv) {
     llvm::json::Object bundle;
     {
         TOutputSilencer silence;
-        bundle = BuildBundle(*request);
+        bundle = BuildBundle(*request, cacheDir);
     }
 
     std::cout << ToJsonString(std::move(bundle)) << "\n";

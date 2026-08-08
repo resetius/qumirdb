@@ -63,6 +63,16 @@ std::optional<std::string> CompileKernelAstToObject(
     const std::vector<std::string>& entryNames,
     std::string* error);
 
+// Cache-backed object compilation for external linkers. Cacheable dependencies
+// are returned as existing paths or fresh blobs; KernelObject is always rebuilt.
+std::optional<NQumir::TLLVMRunner::TCachedObjectModule>
+CompileKernelAstToObjectsCached(
+    NQumir::TLLVMRunner& runner,
+    NQumir::NAst::TExprPtr ast,
+    const std::vector<std::string>& entryNames,
+    const std::string& cacheDir,
+    std::string* error);
+
 struct TSortRadixKeyInput {
     int32_t ColumnIndex = 0;
     NQumir::NAst::TTypePtr Type;

@@ -110,7 +110,7 @@ Build and start the web server:
 
 ```bash
 cmake --build build --target qdb_web
-./build/service/qdb_web --port 8080 --data /path/to/pq1
+./build/service/qdb_web --port 8080 --data /path/to/pq1 --cache /path/to/jit-cache
 ```
 
 Open:
@@ -121,6 +121,9 @@ http://localhost:8080
 
 `--data <dir>` registers a server-side dataset. Queries against these datasets
 run natively through `qdb` on the server.
+
+`--cache <dir>` enables the symbol-granular wasm object cache used while the
+service exports browser execution plans.
 
 The workbench can also run queries in the browser. Browser datasets live in
 OPFS. You can create them in the UI by uploading `.parquet` files.
@@ -157,8 +160,12 @@ The service calls it internally, but it can also be useful when debugging plan
 generation:
 
 ```bash
-./build/bin/qdb_plan_export --stdin-json --stdout-json < request.json
+./build/bin/qdb_plan_export \
+  --stdin-json --stdout-json --cache /path/to/jit-cache < request.json
 ```
+
+The cache stores reusable wasm64 objects per cacheable symbol; the
+query-specific object and final `.wasm` module are rebuilt for every request.
 
 ## TPC-H
 

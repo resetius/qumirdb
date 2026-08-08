@@ -1,5 +1,13 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
@@ -137,7 +145,7 @@ function run(command, args, input = undefined) {
   return result.stdout;
 }
 
-function exportBundle(name, mode, embedWasm) {
+function exportBundle(name, mode, embedWasm, cacheDir = null) {
   const fixture = fixtures[name];
   const multi = mode === 'threaded';
   const request = {
@@ -152,10 +160,11 @@ function exportBundle(name, mode, embedWasm) {
       embedWasm,
     },
   };
-  const bundle = JSON.parse(run(
-    exporter,
-    ['--stdin-json', '--stdout-json'],
-    JSON.stringify(request)));
+  const exporterArgs = ['--stdin-json', '--stdout-json'];
+  if (cacheDir) {
+    exporterArgs.push('--cache', cacheDir);
+  }
+  const bundle = JSON.parse(run(exporter, exporterArgs, JSON.stringify(request)));
   assert.equal(bundle.ok, true, `${name}/${mode}: exporter rejected request`);
   assert.equal(
     bundle.exec?.supported,
@@ -302,6 +311,41 @@ async function browserResult(name, exec) {
   return executeBrowserPipelineScheduled(exec, readSourceBatches);
 }
 
+function countObjectFiles(dir) {
+  let count = 0;
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const entryPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      count += countObjectFiles(entryPath);
+    } else if (entry.name.endsWith('.o')) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
+async function runWasmCacheContract() {
+  const cacheDir = mkdtempSync(path.join(tmpdir(), 'qdb-wasm-cache-'));
+  try {
+    const first = exportBundle('aggregate', 'single', true, cacheDir);
+    const firstObjectCount = countObjectFiles(cacheDir);
+    assert.ok(firstObjectCount > 0, 'wasm cache did not persist any objects');
+
+    const second = exportBundle('aggregate', 'single', true, cacheDir);
+    assert.equal(
+      countObjectFiles(cacheDir),
+      firstObjectCount,
+      'second wasm compilation added objects instead of reusing the cache');
+
+    assert.deepEqual(
+      normalizeResult(await browserResult('aggregate', resolveExecArtifacts(second))),
+      normalizeResult(await browserResult('aggregate', resolveExecArtifacts(first))),
+      'cached wasm execution changed the query result');
+  } finally {
+    rmSync(cacheDir, { recursive: true, force: true });
+  }
+}
+
 const printGoldens = process.env.QDB_PRINT_GOLDENS === '1';
 
 async function runFixture(name, mode) {
@@ -362,6 +406,24 @@ async function main() {
           error,
         });
         console.error(`[FAIL] schema-types\n${errorText(error)}`);
+      }
+    }
+    {
+      const started = performance.now();
+      try {
+        await runWasmCacheContract();
+        results.push({
+          name: 'wasm-cache',
+          elapsedMs: performance.now() - started,
+          error: null,
+        });
+      } catch (error) {
+        results.push({
+          name: 'wasm-cache',
+          elapsedMs: performance.now() - started,
+          error,
+        });
+        console.error(`[FAIL] wasm-cache\n${errorText(error)}`);
       }
     }
     for (const name of Object.keys(fixtures)) {
