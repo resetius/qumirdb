@@ -58,7 +58,8 @@ TTaskEdge& TTaskGraph::AddEdge(
     TTaskNode& dst,
     IConnection& connection,
     size_t srcLane,
-    size_t dstLane)
+    size_t dstLane,
+    size_t execInput)
 {
     auto edge = std::make_unique<TTaskEdge>();
     edge->Src = &src;
@@ -66,6 +67,7 @@ TTaskEdge& TTaskGraph::AddEdge(
     edge->Connection = &connection;
     edge->SrcLane = srcLane;
     edge->DstLane = dstLane;
+    edge->ExecInput = execInput;
     auto* ptr = edge.get();
     Edges_.push_back(std::move(edge));
     return *ptr;
@@ -76,7 +78,8 @@ TTaskEdge& TTaskGraph::AddOwnedEdge(
     TTaskNode& dst,
     std::unique_ptr<IConnection> connection,
     size_t srcLane,
-    size_t dstLane)
+    size_t dstLane,
+    size_t execInput)
 {
     if (!connection) {
         auto edge = std::make_unique<TTaskEdge>();
@@ -84,13 +87,14 @@ TTaskEdge& TTaskGraph::AddOwnedEdge(
         edge->Dst = &dst;
         edge->SrcLane = srcLane;
         edge->DstLane = dstLane;
+        edge->ExecInput = execInput;
         auto* ptr = edge.get();
         Edges_.push_back(std::move(edge));
         return *ptr;
     }
 
     auto& stored = AddConnection(std::move(connection));
-    return AddEdge(src, dst, stored, srcLane, dstLane);
+    return AddEdge(src, dst, stored, srcLane, dstLane, execInput);
 }
 
 void TTaskGraph::Build() {

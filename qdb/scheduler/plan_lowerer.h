@@ -1,6 +1,7 @@
 #pragma once
 
 #include <qdb/io/io.h>
+#include <qdb/exec/plan.h>
 #include <qdb/kernel/generated.h>
 #include <qdb/plan/ops/operator.h>
 #include <qdb/scheduler/connection.h>
@@ -20,9 +21,9 @@ namespace NScheduler {
 // (one edge per producer lane) before the graph is run.
 //
 // Kernels holds every kernel generated during lowering, as ASTs with unbound
-// slots (joined to graph nodes by Stage == DebugGroup). A finalizer must run
-// before execution: RunPlanIntoSink JIT-binds them; the plan exporter compiles
-// them to wasm instead.
+// slots. ExecStageId is their stable association with graph stages; Stage is
+// diagnostic text only. A finalizer must bind or compile them before a consumer
+// executes the lowered plan.
 struct TLoweredPlan {
     std::unique_ptr<TTaskGraph> Graph;
     NQumir::NAst::TTypePtr OutputType;
@@ -30,6 +31,9 @@ struct TLoweredPlan {
     std::vector<TTaskNode*> Producers;
     size_t Lanes = 0;
     std::vector<TGeneratedKernel> Kernels;
+    // Stable, exporter-neutral executable stages produced by the same lowering
+    // that creates Graph. Debug labels are deliberately not identities.
+    std::vector<TLoweredExecStage> ExecStages;
 };
 
 // Lower a logical plan into a scheduler graph (no terminal sink yet).

@@ -11,14 +11,14 @@ logical plan
   │  physical compilation (AST level)
   ▼
 TLoweredPlan  =  TTaskGraph + Kernels: every kernel as TGeneratedKernel
-                 { Name, Stage, Entrypoints, Ast, Storage, Operator, Slot,
+                 { Name, Stage, ExecStageId, Entrypoints, Ast, Storage, Slot,
                    SortKeys }  (AST only, not compiled)
   │  machine finalization (the ONLY fork)
-  ├── JitFinalizeKernels  → compile each AST with the native JIT, fill the
-  │                          kernel's TKernelSlot; runtime dispatches read the
-  │                          slot (CLI: cli.cpp / RunPlanIntoSink)
-  └── WasmFinalizeKernels → compile each AST to a wasm64 object, attach as
-                             base64 artifacts (bin/plan_export.cpp)
+  ├── JitFinalizeKernels  → deduplicate + fuse all ASTs, compile one native
+  │                          module, fill every kernel's TKernelSlot
+  └── WasmFinalizeKernels → use the same deduplication/fusion, compile one
+                             query-level wasm64 module, publish its entrypoint
+                             mapping and base64 artifact
 ```
 
 ## Generation (qdb/kernel/compiler.{h,cpp})
@@ -42,35 +42,40 @@ Kernels per operator:
   jt_destroy, pb_destroy, plus semi/anti/outer finalizers), resolved via
   LookupMany; `join_hash` (jt_hash_left/right) for the partitioned path.
 
-Lowering (`plan_lowerer.cpp`) creates compilers via `KernelOptions(stage, op)`:
-`Sink = &TLoweredPlan::Kernels`, `BindNow = false`, `Operator` = the logical
-operator, `Stage` = the node's DebugGroup. No target is mentioned anywhere in
-this phase.
+Lowering (`plan_lowerer.cpp`) creates compilers via
+`KernelOptions(stage, execStageId)`: `Sink = &TLoweredPlan::Kernels`,
+`BindNow = false`, `ExecStageId` is the stable association with the executable
+stage, and `Stage` is a deterministic `exec:<id>:<kind>` diagnostic label. No
+operator pointer, debug label, or target is an identity in this phase.
 
 ## Finalization
 
-- JIT: `JitFinalizeKernels` (qdb/kernel/finalize.cpp) — per kernel, a fresh
-  `TLLVMRunner` from `KernelRunnerOptions()` + `NativeCode`, `CompileKernelAst`
-  (LookupMany), fill `Slot->Fns` in `Entrypoints` order, store the runner in
-  the slot (JIT'd pointers live as long as the runner). Idempotent.
+- JIT: `JitFinalizeKernels` (qdb/kernel/finalize.cpp) — deduplicate kernels by
+  AST + entrypoints, build one `TFusedProgram`, compile it through one
+  `TLLVMRunner`, then fill every `Slot->Fns` in original entrypoint order. All
+  slots retain the runner (and cached-JIT lifetime when enabled). Idempotent.
   `RunPlanIntoSink` always finalizes before scheduling; cli.cpp finalizes
   earlier so the reported query time excludes kernel compilation.
-- Wasm: `WasmFinalizeKernels` (bin/plan_export.cpp) — per kernel, an `ast`
-  artifact always and (embed mode) `CompileKernelAstToWasm` = the same runner
-  pipeline with `TargetTriple=wasm64-unknown-unknown` via
-  `CompileKernelAstToObject`, linked with `wasm-ld -mwasm64`. Slots stay
-  unbound; the exporter never executes the graph.
+- Wasm: `WasmFinalizeKernels` (bin/plan_export.cpp) — register an `ast` artifact
+  per exported kernel, apply the same deduplication and `BuildFusedProgram`, and
+  compile one query-level module through `CompileKernelAstToWasm64` with
+  `TargetTriple=wasm64-unknown-unknown`, linked by `wasm-ld -mwasm64`. The
+  exporter records fused entrypoint names per `ExecStageId`; slots stay unbound
+  and the exporter never executes the native graph.
 
 Both finalizers share the frontend (`EnsureQumirDbUse` + the runner's
-`EmitKernelArtifacts`); only emission differs. See
-docs/issues/browser-wasm64-layout.md for why the browser target is wasm64.
+`EmitKernelArtifacts`); only emission differs. The browser runtime instantiates
+WebAssembly Memory64, matching the exporter and the kernel ABI's 8-byte
+pointers; no wasm32 fallback is supported.
 
 ## Consumers
 
-- Physical graph JSON: kernel artifacts attach to graph nodes by
-  `Stage == TTaskNode::DebugGroup`.
-- The exec (browser) section reads kernels by `Operator` identity
-  (`BuildKernelIndex`/`FindKernel` in plan_export.cpp) — stage wasm ids point
-  at the same artifacts the physical graph references; nothing is compiled
-  twice. Sort stages take `radixKeys` from the kernel's `SortKeys` metadata,
-  falling back to JS-comparison keys for non-radix (string) or nullable keys.
+- Physical graph JSON attaches kernel artifacts to semantic task groups by
+  `ExecStageId`. Scheduler-only plumbing has separate monotonically assigned
+  `task:<id>` groups; debug strings are display-only.
+- `BuildExecPlan` collapses physical lanes and contracts plumbing using stable
+  stage/input IDs, producing an exporter-neutral typed DAG.
+- The exec JSON codec indexes kernels by `ExecStageId`; stage entrypoints and
+  physical graph artifacts therefore refer to kernels emitted by the same
+  scheduler lowering. Sort stages take `radixKeys` directly from retained
+  kernel metadata. Nothing is lowered or compiled twice.

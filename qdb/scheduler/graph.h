@@ -1,10 +1,12 @@
 #pragma once
 
+#include <qdb/exec/stage.h>
 #include <qdb/scheduler/connection.h>
 #include <qdb/scheduler/state.h>
 
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <iosfwd>
 #include <memory>
 #include <string>
@@ -13,12 +15,19 @@
 namespace NQdb {
 namespace NScheduler {
 
+using TTaskGroupId = uint64_t;
+inline constexpr TTaskGroupId InvalidTaskGroupId = 0;
+
 struct TTaskEdge;
 
 struct TTaskNode {
     ITaskNode* Task = nullptr;
+    TExecStageId ExecStageId = InvalidExecStageId;
+    // Stable physical grouping assigned monotonically during one lowering.
+    // ExecStageId remains the semantic identity; this ID is only for grouping
+    // scheduler plumbing and physical lanes in diagnostics.
+    TTaskGroupId TaskGroupId = InvalidTaskGroupId;
     std::string DebugKind;
-    std::string DebugGroup;
     std::string DebugLabel;
     std::vector<TTaskEdge*> Inbound;
     std::vector<TTaskEdge*> Outbound;
@@ -31,6 +40,9 @@ struct TTaskEdge {
     IConnection* Connection = nullptr;
     size_t SrcLane = 0;
     size_t DstLane = 0;
+    // Stable semantic-stage input. This is distinct from DstLane: all left
+    // join partitions target input 0 and all right partitions target input 1.
+    size_t ExecInput = 0;
 };
 
 class TTaskGraph {
@@ -44,14 +56,16 @@ public:
         TTaskNode& dst,
         IConnection& connection,
         size_t srcLane = 0,
-        size_t dstLane = 0);
+        size_t dstLane = 0,
+        size_t execInput = 0);
 
     TTaskEdge& AddOwnedEdge(
         TTaskNode& src,
         TTaskNode& dst,
         std::unique_ptr<IConnection> connection,
         size_t srcLane = 0,
-        size_t dstLane = 0);
+        size_t dstLane = 0,
+        size_t execInput = 0);
 
     void Build();
     bool Validate(std::string* error = nullptr) const;

@@ -1,0 +1,165 @@
+{
+  "supported": true,
+  "embedWasm": false,
+  "nodes": [
+    {
+      "columns": [
+        {
+          "name": "k",
+          "nullable": false,
+          "type": "i64"
+        }
+      ],
+      "id": 0,
+      "kind": "source",
+      "stageId": 8,
+      "table": "t"
+    },
+    {
+      "entrypoints": {},
+      "id": 1,
+      "kind": "filter",
+      "label": "filter (>= |t.k| 2)",
+      "predicate": "(>= |t.k| 2)",
+      "stageId": 7
+    },
+    {
+      "entrypoints": {},
+      "id": 2,
+      "kind": "project",
+      "output": [
+        {
+          "inputIndex": 0,
+          "name": "k",
+          "nullable": false,
+          "source": "passthrough",
+          "type": "i64"
+        }
+      ],
+      "stageId": 6
+    },
+    {
+      "id": 3,
+      "kind": "limit",
+      "label": "limit 2",
+      "limit": 2,
+      "offset": 1,
+      "stageId": 5
+    },
+    {
+      "entrypoints": {},
+      "id": 4,
+      "kind": "project",
+      "output": [
+        {
+          "inputIndex": 0,
+          "name": "u.k",
+          "nullable": false,
+          "source": "passthrough",
+          "type": "i64"
+        }
+      ],
+      "stageId": 4
+    },
+    {
+      "entrypoints": {},
+      "id": 5,
+      "kind": "project",
+      "output": [
+        {
+          "computedIndex": 0,
+          "isString": false,
+          "name": "__group__",
+          "nullable": false,
+          "source": "computed",
+          "type": "i64",
+          "width": 8
+        }
+      ],
+      "stageId": 3
+    },
+    {
+      "entrypoints": {},
+      "groupKeys": [
+        "__group__"
+      ],
+      "id": 6,
+      "keyCount": 1,
+      "kind": "aggregate",
+      "label": "aggregate keys=[__group__] aggs=[count_0=count]",
+      "output": [
+        {
+          "name": "__group__",
+          "nullable": false,
+          "type": "i64"
+        },
+        {
+          "name": "count_0",
+          "nullable": false,
+          "type": "i64"
+        }
+      ],
+      "stageId": 2
+    },
+    {
+      "entrypoints": {},
+      "id": 7,
+      "kind": "project",
+      "output": [
+        {
+          "inputIndex": 1,
+          "name": "n",
+          "nullable": false,
+          "source": "passthrough",
+          "type": "i64"
+        }
+      ],
+      "stageId": 1
+    }
+  ],
+  "edges": [
+    {
+      "from": 0,
+      "input": 0,
+      "kind": "one-to-one",
+      "to": 1
+    },
+    {
+      "from": 1,
+      "input": 0,
+      "kind": "one-to-one",
+      "to": 2
+    },
+    {
+      "from": 2,
+      "input": 0,
+      "kind": "one-to-one",
+      "to": 3
+    },
+    {
+      "from": 3,
+      "input": 0,
+      "kind": "one-to-one",
+      "to": 4
+    },
+    {
+      "from": 4,
+      "input": 0,
+      "kind": "one-to-one",
+      "to": 5
+    },
+    {
+      "from": 5,
+      "input": 0,
+      "kind": "one-to-one",
+      "to": 6
+    },
+    {
+      "from": 6,
+      "input": 0,
+      "kind": "one-to-one",
+      "to": 7
+    }
+  ],
+  "root": 7
+}

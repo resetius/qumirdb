@@ -1,0 +1,53 @@
+{
+  "supported": true,
+  "embedWasm": false,
+  "nodes": [
+    {
+      "columns": [
+        { "name": "k", "nullable": false, "type": "i64" },
+        { "name": "v", "nullable": false, "type": "i64" }
+      ],
+      "id": 0,
+      "kind": "source",
+      "stageId": 3,
+      "table": "t"
+    },
+    {
+      "entrypoints": {},
+      "id": 1,
+      "kind": "filter",
+      "label": "filter (>= |t.v| 20)",
+      "predicate": "(>= |t.v| 20)",
+      "stageId": 2
+    },
+    {
+      "entrypoints": {},
+      "id": 2,
+      "kind": "project",
+      "output": [
+        {
+          "inputIndex": 0,
+          "name": "k",
+          "nullable": false,
+          "source": "passthrough",
+          "type": "i64"
+        },
+        {
+          "computedIndex": 0,
+          "isString": false,
+          "name": "x",
+          "nullable": false,
+          "source": "computed",
+          "type": "i64",
+          "width": 8
+        }
+      ],
+      "stageId": 1
+    }
+  ],
+  "edges": [
+    { "from": 0, "input": 0, "kind": "one-to-one", "to": 1 },
+    { "from": 1, "input": 0, "kind": "one-to-one", "to": 2 }
+  ],
+  "root": 2
+}

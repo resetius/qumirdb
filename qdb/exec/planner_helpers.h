@@ -12,7 +12,9 @@
 #include <qdb/plan/ops/sort.h>
 #include <qdb/plan/ops/window.h>
 
+#include <cstdint>
 #include <iosfwd>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -23,6 +25,17 @@ struct TUnaryRuntimeProcess {
     TUnaryStreamProcess Process;
     NQumir::NAst::TTypePtr OutputType;
 };
+
+struct TFilterColumnPlan {
+    NQumir::NAst::TTypePtr OutputType;
+    std::optional<std::vector<int32_t>> KeptInputColumns;
+};
+
+// Compilation-free filter output layout shared by native execution and the
+// typed exec-plan builder.
+TFilterColumnPlan BuildFilterColumnPlan(
+    const TFilterOperator& filter,
+    const NQumir::NAst::TTypePtr& inputType);
 
 // Compilation-free projection layout: column plan, computed-expression types
 // and the output struct. Shared by the runtime process builder and the plan

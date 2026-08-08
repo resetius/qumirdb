@@ -28,7 +28,7 @@ namespace NQdb {
 struct TKernelCompilerOptions {
     std::ostream* Diagnostics = nullptr;
     std::string Stage;
-    const void* Operator = nullptr;
+    TExecStageId ExecStageId = InvalidExecStageId;
     std::vector<TGeneratedKernel>* Sink = nullptr;
     bool BindNow = true;
 };
@@ -254,7 +254,7 @@ public:
     explicit TKernelCompiler(TKernelCompilerOptions options)
         : Diagnostics_(options.Diagnostics)
         , Stage_(std::move(options.Stage))
-        , Operator_(options.Operator)
+        , ExecStageId_(options.ExecStageId)
         , Sink_(options.Sink)
         , BindNow_(options.BindNow)
     {
@@ -393,7 +393,7 @@ private:
 
     std::ostream* Diagnostics_ = nullptr;
     std::string Stage_;
-    const void* Operator_ = nullptr;
+    TExecStageId ExecStageId_ = InvalidExecStageId;
     std::vector<TGeneratedKernel>* Sink_ = nullptr;
     bool BindNow_ = true;
     NQumir::TLLVMRunnerOptions Opts_;

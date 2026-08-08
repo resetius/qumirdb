@@ -1,0 +1,89 @@
+{
+  "supported": true,
+  "embedWasm": false,
+  "nodes": [
+    {
+      "columns": [
+        { "name": "k", "nullable": false, "type": "i64" },
+        { "name": "v", "nullable": false, "type": "i64" }
+      ],
+      "id": 0,
+      "kind": "source",
+      "stageId": 2,
+      "table": "l"
+    },
+    {
+      "columns": [
+        { "name": "rk", "nullable": false, "type": "i64" },
+        { "name": "w", "nullable": false, "type": "i64" }
+      ],
+      "id": 1,
+      "kind": "source",
+      "stageId": 3,
+      "table": "r"
+    },
+    {
+      "buildSide": "auto",
+      "entrypoints": {},
+      "hasResidual": false,
+      "id": 2,
+      "joinType": "inner",
+      "keySize": 8,
+      "keys": [
+        {
+          "left": "k",
+          "leftIndex": 0,
+          "right": "rk",
+          "rightIndex": 0
+        }
+      ],
+      "kind": "join",
+      "label": "join inner [l.k = r.rk]",
+      "leftColumns": [
+        { "name": "k", "nullable": false, "type": "i64" },
+        { "name": "v", "nullable": false, "type": "i64" }
+      ],
+      "output": [
+        { "name": "k", "nullable": false, "type": "i64" },
+        { "name": "v", "nullable": false, "type": "i64" },
+        { "name": "rk", "nullable": false, "type": "i64" },
+        { "name": "w", "nullable": false, "type": "i64" }
+      ],
+      "rightColumns": [
+        { "name": "rk", "nullable": false, "type": "i64" },
+        { "name": "w", "nullable": false, "type": "i64" }
+      ],
+      "stageId": 4
+    },
+    {
+      "entrypoints": {},
+      "id": 3,
+      "kind": "project",
+      "output": [
+        {
+          "inputIndex": 0,
+          "name": "k",
+          "nullable": false,
+          "source": "passthrough",
+          "type": "i64"
+        },
+        {
+          "computedIndex": 0,
+          "isString": false,
+          "name": "total",
+          "nullable": false,
+          "source": "computed",
+          "type": "i64",
+          "width": 8
+        }
+      ],
+      "stageId": 1
+    }
+  ],
+  "edges": [
+    { "from": 0, "input": 0, "kind": "one-to-one", "to": 2 },
+    { "from": 1, "input": 1, "kind": "one-to-one", "to": 2 },
+    { "from": 2, "input": 0, "kind": "one-to-one", "to": 3 }
+  ],
+  "root": 3
+}

@@ -204,6 +204,30 @@ TUnaryRuntimeProcess BuildFilterRuntimeProcess(
     TKernelCompiler compiler(std::move(options));
     auto dispatch = compiler.CompileFilter(spec);
 
+    auto columnPlan = BuildFilterColumnPlan(filter, inputType);
+    if (columnPlan.KeptInputColumns) {
+        return {
+            .Process = MakeFilterSelectProcess(
+                std::move(dispatch), std::move(*columnPlan.KeptInputColumns)),
+            .OutputType = std::move(columnPlan.OutputType),
+        };
+    }
+    return {
+        .Process = MakeFilterProcess(std::move(dispatch)),
+        .OutputType = std::move(columnPlan.OutputType),
+    };
+}
+
+TFilterColumnPlan BuildFilterColumnPlan(
+    const TFilterOperator& filter,
+    const NQumir::NAst::TTypePtr& inputType)
+{
+    auto* inputStruct = static_cast<NQumir::NAst::TStructType*>(
+        inputType.get());
+    if (!inputStruct) {
+        throw std::runtime_error("filter input must have TStructType");
+    }
+
     // Emit exactly the pruned output columns; a schema identical to the input
     // (by name and order) keeps the zero-copy fast path.
     NQumir::NAst::TTypePtr outputType;
@@ -240,15 +264,13 @@ TUnaryRuntimeProcess BuildFilterRuntimeProcess(
         }
         if (subsetOfInput && !identity) {
             return {
-                .Process = MakeFilterSelectProcess(
-                    std::move(dispatch), std::move(keptIndices)),
                 .OutputType = std::move(outputType),
+                .KeptInputColumns = std::move(keptIndices),
             };
         }
     }
 
     return {
-        .Process = MakeFilterProcess(std::move(dispatch)),
         .OutputType = inputType,
     };
 }
