@@ -1822,11 +1822,15 @@ async function executeBrowserJob(job) {
 
     const exec = bundle.exec;
     if (!exec || exec.supported !== true) {
+      const diagnostic = Array.isArray(bundle.diagnostics)
+        ? bundle.diagnostics.find(item => item?.message)
+        : null;
+      const compileError = exec?.error || diagnostic;
       const payload = {
         ok: false,
         error: {
-          stage: 'browser-exec',
-          message: exec?.reason ||
+          stage: compileError?.stage || 'browser-exec',
+          message: compileError?.message || exec?.reason ||
             'This query is not supported for browser execution yet.'
         }
       };

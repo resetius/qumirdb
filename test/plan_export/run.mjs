@@ -233,6 +233,38 @@ function runSchemaTypeContract() {
   assert.match(legacy.error?.message || '', /unexpected trailing input/);
 }
 
+function runTypeErrorDiagnosticContract() {
+  const request = {
+    sql: "SELECT amount + 'x' AS bad FROM t",
+    dataset: {
+      tables: [{
+        name: 't',
+        columns: [{ name: 'amount', type: 'f64' }],
+        stats: { rows: 1, bytes: 8, rowGroups: 1 },
+      }],
+    },
+    options: {
+      scheduler: 'single',
+      scanTasks: 1,
+      format: 'runtime-bundle',
+      embedWasm: true,
+    },
+  };
+  const bundle = JSON.parse(run(
+    exporter,
+    ['--stdin-json', '--stdout-json'],
+    JSON.stringify(request)));
+  assert.equal(bundle.ok, true, 'type-error bundle was not formed');
+  assert.equal(bundle.exec?.supported, false, 'invalid expression compiled');
+  const diagnostic = bundle.diagnostics?.find(
+    item => item.stage === 'wasm-fusion' && item.message);
+  assert.ok(diagnostic, 'type error is missing from bundle diagnostics');
+  assert.match(diagnostic.message, /оператор \+/);
+  assert.equal(bundle.exec.reason, diagnostic.message);
+  assert.deepEqual(bundle.exec.error, diagnostic);
+  assert.doesNotMatch(bundle.exec.reason, /kernel failed to compile to wasm/);
+}
+
 async function runExternalModuleBatchContract() {
   const request = {
     sql: `
@@ -470,6 +502,24 @@ async function main() {
           error,
         });
         console.error(`[FAIL] schema-types\n${errorText(error)}`);
+      }
+    }
+    {
+      const started = performance.now();
+      try {
+        runTypeErrorDiagnosticContract();
+        results.push({
+          name: 'type-error-diagnostics',
+          elapsedMs: performance.now() - started,
+          error: null,
+        });
+      } catch (error) {
+        results.push({
+          name: 'type-error-diagnostics',
+          elapsedMs: performance.now() - started,
+          error,
+        });
+        console.error(`[FAIL] type-error-diagnostics\n${errorText(error)}`);
       }
     }
     {
