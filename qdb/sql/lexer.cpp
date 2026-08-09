@@ -210,6 +210,21 @@ void TTokenStream::Read() {
         throw std::runtime_error("unterminated string literal");
     };
 
+    auto readDollarQuotedString = [&]() {
+        take(); // $
+        take(); // $
+        std::string value;
+        while (In.peek() != -1) {
+            char ch = take();
+            if (ch == '$' && In.peek() == '$') {
+                take();
+                return value;
+            }
+            value += ch;
+        }
+        throw std::runtime_error("unterminated dollar-quoted string");
+    };
+
     auto readNumber = [&](TLocation location) {
         std::string rawValue;
         bool isFloat = false;
@@ -350,7 +365,15 @@ void TTokenStream::Read() {
             }
         }
 
-        if (isTwoCharOperator(next)) {
+        if (next == '$') {
+            auto value = readDollarQuotedString();
+            Tokens.emplace_back(TToken {
+                .Name = value,
+                .RawValue = value,
+                .Type = TToken::String,
+                .Location = tokenLocation,
+            });
+        } else if (isTwoCharOperator(next)) {
             std::string name;
             name += take();
             name += take();

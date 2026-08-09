@@ -13,7 +13,17 @@
 
 /*
 
-<query> ::= <select_stmt> [ ";" ]
+<statement> ::=
+    ( <select_stmt> | <create_module_stmt> ) [ ";" ]
+
+<create_module_stmt> ::=
+    "CREATE" [ "OR" "REPLACE" ] "MODULE" <ident>
+    "LANGUAGE" <ident>
+    "AS" <dollar_quoted_source>
+
+// A single token produced by the lexer; its value is the text between delimiters.
+<dollar_quoted_source> ::=
+    "$$" { any_char_sequence_not_containing_terminating_"$$" } "$$"
 
 <select_stmt> ::=
     [ <with_clause> ]
@@ -491,6 +501,8 @@ TAstTask<TSqlNode> query_expr(TParserContext& ctx);
 TAstTask<TSqlNode> query_term(TParserContext& ctx);
 TAstTask<TSqlNode> query_primary(TParserContext& ctx);
 
+TAstTask<TSqlNode> statement(TParserContext& ctx);
+TAstTask<TSqlExternalModule> create_module_stmt(TParserContext& ctx);
 TAstTask<TSqlQuery> select_stmt(TParserContext& ctx);
 TAstTask<TSqlNode> select_core(TParserContext& ctx);
 TAstTask<TSqlSelectList> select_list(TParserContext& ctx);
@@ -535,17 +547,62 @@ TAstExprTask expr_list(TParserContext& ctx);
 
 TAstTypeTask type_name(TParserContext& ctx);
 
-TAstTask<TSqlQuery> query(TParserContext& ctx) {
-    TSqlPtr<TSqlQuery> q;
+TAstTask<TSqlNode> statement(TParserContext& ctx) {
+    auto first = ctx.Stream.Next();
+    ctx.Stream.Unget(first);
 
-    q = co_await select_stmt(ctx);
+    TSqlNodePtr node;
+    if (IsWord(first, "CREATE")) {
+        node = co_await create_module_stmt(ctx);
+    } else {
+        node = co_await select_stmt(ctx);
+    }
 
     auto token = ctx.Stream.Next();
     if (IsEof(token) || IsOp(token, ';')) {
-        co_return q;
+        co_return node;
     }
 
     co_return Error(token, "expected ';' or end of file");
+}
+
+TAstTask<TSqlExternalModule> create_module_stmt(TParserContext& ctx) {
+    auto token = ctx.Stream.Next();
+    if (!IsWord(token, "CREATE")) {
+        co_return Error(token, "`CREATE' required");
+    }
+
+    bool replace = false;
+    token = ctx.Stream.Next();
+    if (IsKeyword(token, "OR")) {
+        token = ctx.Stream.Next();
+        if (!IsWord(token, "REPLACE")) {
+            co_return Error(token, "`REPLACE' required after `OR'");
+        }
+        replace = true;
+        token = ctx.Stream.Next();
+    }
+    if (!IsWord(token, "MODULE")) {
+        co_return Error(token, "`MODULE' required");
+    }
+
+    auto name = co_await ident(ctx);
+    token = ctx.Stream.Next();
+    if (!IsWord(token, "LANGUAGE")) {
+        co_return Error(token, "`LANGUAGE' required");
+    }
+    auto language = co_await ident(ctx);
+    token = ctx.Stream.Next();
+    if (!IsKeyword(token, "AS")) {
+        co_return Error(token, "`AS' required");
+    }
+    auto code = ctx.Stream.Next();
+    if (code.Type != TToken::String) {
+        co_return Error(code, "dollar-quoted module source expected");
+    }
+
+    co_return std::make_shared<TSqlExternalModule>(
+        std::move(name), std::move(language), std::move(code.Name), replace);
 }
 
 TAstTask<TSqlQuery> select_stmt(TParserContext& ctx) {
@@ -1910,7 +1967,7 @@ std::expected<TSqlNodePtr, NQumir::TError> TParser::Parse(TTokenStream& stream)
 {
     TWrappedTokenStream wrappedStream(stream, /*windowSize = */ 10);
     TParserContext context(wrappedStream);
-    auto task = query(context);
+    auto task = statement(context);
     auto result = task.result();
     if (!result) {
         return std::unexpected(result.error());

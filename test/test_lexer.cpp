@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <qdb/sql/lexer.h>
+#include <qdb/sql/parser.h>
 
 #include <sstream>
 #include <vector>
@@ -128,6 +129,13 @@ TEST(SqlLexer, SqlString) {
     EXPECT_EQ(tokens[1].Name, "it's ok");
 }
 
+TEST(SqlLexer, DollarQuotedString) {
+    auto tokens = Tokenize("$$\nfn f() { println!(\"it's $raw\"); }\n$$");
+    ASSERT_EQ(tokens.size(), 1u);
+    EXPECT_EQ(tokens[0].Type, TToken::String);
+    EXPECT_EQ(tokens[0].Name, "\nfn f() { println!(\"it's $raw\"); }\n");
+}
+
 TEST(SqlLexer, QuotedIdentifier) {
     auto tokens = Tokenize("\"Column Name\"");
     ASSERT_EQ(tokens.size(), 1u);
@@ -162,12 +170,33 @@ TEST(SqlLexer, UnterminatedStringThrows) {
     EXPECT_THROW(Tokenize("'abc"), std::runtime_error);
 }
 
+TEST(SqlLexer, UnterminatedDollarQuotedStringThrows) {
+    EXPECT_THROW(Tokenize("$$abc"), std::runtime_error);
+}
+
 TEST(SqlLexer, UnterminatedBlockCommentThrows) {
     EXPECT_THROW(Tokenize("select /* abc"), std::runtime_error);
+}
+
+TEST(SqlParser, CreateOrReplaceModule) {
+    std::istringstream in(
+        "CREATE OR REPLACE MODULE orbital\n"
+        "LANGUAGE rust\n"
+        "AS $$fn orbit_position() {}$$;");
+    TTokenStream tokens(in);
+    TParser parser;
+    auto parsed = parser.Parse(tokens);
+    ASSERT_TRUE(parsed) << parsed.error().ToString();
+
+    auto module = NQdb::NSql::TMaybeNode<TSqlExternalModule>(*parsed);
+    ASSERT_TRUE(module);
+    EXPECT_EQ(module.Cast()->Name, "orbital");
+    EXPECT_EQ(module.Cast()->Language, "rust");
+    EXPECT_EQ(module.Cast()->Code, "fn orbit_position() {}");
+    EXPECT_TRUE(module.Cast()->Replace);
 }
 
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
 }
-

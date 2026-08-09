@@ -373,6 +373,23 @@ struct TSqlSetOp : TSqlNode {
     { }
 };
 
+struct TSqlExternalModule : TSqlNode {
+    static constexpr const char* NodeId = "ExternalModule";
+    std::string_view NodeName() const override { return NodeId; }
+
+    std::string Name;
+    std::string Language;
+    std::string Code;
+    bool Replace = false;
+
+    explicit TSqlExternalModule(std::string name, std::string language, std::string code, bool replace)
+        : Name(std::move(name))
+        , Language(std::move(language))
+        , Code(std::move(code))
+        , Replace(replace)
+    { }
+};
+
 // A subquery used inside an expression. Bridges a SQL query into the Qumir
 // expression tree; visitors handle it through IVisitor::VisitOtherwise.
 struct TSubqueryExpr : NQumir::NAst::TExpr {
