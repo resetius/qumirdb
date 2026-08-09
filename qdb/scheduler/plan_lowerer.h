@@ -14,6 +14,7 @@
 #include <vector>
 
 namespace NQdb {
+class TExternalCatalogSnapshot;
 namespace NScheduler {
 
 // A plan lowered into a scheduler task graph, without a terminal sink attached.
@@ -31,6 +32,7 @@ struct TLoweredPlan {
     std::vector<TTaskNode*> Producers;
     size_t Lanes = 0;
     std::vector<TGeneratedKernel> Kernels;
+    std::shared_ptr<const TExternalCatalogSnapshot> ExternalCatalog;
     // Stable, exporter-neutral executable stages produced by the same lowering
     // that creates Graph. Debug labels are deliberately not identities.
     std::vector<TLoweredExecStage> ExecStages;
@@ -41,7 +43,8 @@ struct TLoweredPlan {
 TLoweredPlan LowerPlanToGraph(
     const TOperatorPtr& root,
     TSettings settings,
-    std::ostream* diagnostics);
+    std::ostream* diagnostics,
+    std::shared_ptr<const TExternalCatalogSnapshot> externalCatalog = nullptr);
 
 // Attach a terminal sink that writes every output rowset to `sink`, then run the
 // graph on the configured scheduler. Returns false and sets `error` on failure.

@@ -84,6 +84,17 @@ std::unordered_map<std::string, void*> CompileKernelAst(
     return runner.CompileKernelAst(std::move(ast), entryNames, error);
 }
 
+std::unordered_map<std::string, void*> CompileKernelAst(
+    NQumir::TLLVMRunner& runner,
+    NQumir::NFrontend::TComposeResult composed,
+    const std::vector<std::string>& entryNames,
+    std::string* error)
+{
+    NQumir::NRegistry::EnsureQumirDbRuntimeSymbolsLinked();
+    EnsureQumirDbUse(composed.Ast);
+    return runner.CompileKernelAst(std::move(composed), entryNames, error);
+}
+
 namespace {
 constexpr const char* CacheSchemaVersion = "v1";
 // Bump when the generated key helpers or the .oz kernel libraries change.
@@ -123,7 +134,8 @@ TGeneratedKernel TKernelCompiler::EmitKernel(
         Sink_->push_back(kernel);
     }
     if (BindNow_) {
-        JitFinalizeKernels(std::span(&kernel, 1), Diagnostics_);
+        JitFinalizeKernels(
+            std::span(&kernel, 1), Diagnostics_, ExternalCatalog_);
     }
     return kernel;
 }
@@ -1871,7 +1883,7 @@ TJoinKernels TKernelCompiler::CompileJoin(
         innerType = static_cast<TStructType*>(innerOutputType.get());
         leftFieldCount = leftType.Cast()->Fields.size();
         residualPredicate = NKernel::ExpandKernelExpr(
-            residualPredicate, *innerType).first;
+            residualPredicate, *innerType, ExternalCatalog_.get()).first;
     }
 
     if (Diagnostics_) {

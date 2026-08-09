@@ -22,6 +22,8 @@
 
 namespace NQdb {
 
+class TExternalCatalogSnapshot;
+
 // Kernel generation appends TGeneratedKernels to Sink (when set); BindNow
 // additionally JIT-finalizes them immediately so the returned dispatches are
 // live (the default; deferred callers finalize via JitFinalizeKernels).
@@ -31,6 +33,7 @@ struct TKernelCompilerOptions {
     TExecStageId ExecStageId = InvalidExecStageId;
     std::vector<TGeneratedKernel>* Sink = nullptr;
     bool BindNow = true;
+    std::shared_ptr<const TExternalCatalogSnapshot> ExternalCatalog;
 };
 
 // Shared kernel-pipeline options; caller overrides NativeCode/TargetTriple.
@@ -42,6 +45,12 @@ NQumir::TLLVMRunnerOptions KernelRunnerOptions();
 std::unordered_map<std::string, void*> CompileKernelAst(
     NQumir::TLLVMRunner& runner,
     NQumir::NAst::TExprPtr ast,
+    const std::vector<std::string>& entryNames,
+    std::string* error);
+
+std::unordered_map<std::string, void*> CompileKernelAst(
+    NQumir::TLLVMRunner& runner,
+    NQumir::NFrontend::TComposeResult composed,
     const std::vector<std::string>& entryNames,
     std::string* error);
 
@@ -267,6 +276,7 @@ public:
         , ExecStageId_(options.ExecStageId)
         , Sink_(options.Sink)
         , BindNow_(options.BindNow)
+        , ExternalCatalog_(std::move(options.ExternalCatalog))
     {
         Opts_ = KernelRunnerOptions();
         Opts_.NativeCode = true;
@@ -406,6 +416,7 @@ private:
     TExecStageId ExecStageId_ = InvalidExecStageId;
     std::vector<TGeneratedKernel>* Sink_ = nullptr;
     bool BindNow_ = true;
+    std::shared_ptr<const TExternalCatalogSnapshot> ExternalCatalog_;
     NQumir::TLLVMRunnerOptions Opts_;
 };
 

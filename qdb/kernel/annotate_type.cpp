@@ -1,5 +1,6 @@
 #include <qdb/kernel/annotate_type.h>
 
+#include <qdb/catalog/external_module.h>
 #include <qdb/plan/clone_expr.h>
 #include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
@@ -25,6 +26,45 @@ namespace NQdb::NKernel {
 using namespace NQumir::NAst;
 
 namespace {
+
+thread_local const TExternalCatalogSnapshot* CurrentExternalCatalog = nullptr;
+thread_local const TAnnotationContext* CurrentAnnotationContext = nullptr;
+
+class TExternalCatalogScope {
+public:
+    explicit TExternalCatalogScope(const TExternalCatalogSnapshot* catalog)
+        : Previous_(CurrentExternalCatalog)
+    {
+        CurrentExternalCatalog = catalog;
+    }
+
+    ~TExternalCatalogScope() {
+        CurrentExternalCatalog = Previous_;
+    }
+
+private:
+    const TExternalCatalogSnapshot* Previous_;
+};
+
+class TAnnotationScope {
+public:
+    explicit TAnnotationScope(const TAnnotationContext* context)
+        : Previous_(CurrentAnnotationContext)
+    {
+        CurrentAnnotationContext = context;
+    }
+
+    ~TAnnotationScope() {
+        CurrentAnnotationContext = Previous_;
+    }
+
+private:
+    const TAnnotationContext* Previous_;
+};
+
+TTypePtr ExternalReturnType(
+    const std::string& name,
+    const std::vector<TTypePtr>& argTypes);
 
 // TError carries its text in Location/Children, not Msg, so what() is empty for the
 // generic std::exception catch. Re-throw with the full ToString() flattened into Msg
@@ -110,13 +150,22 @@ TTypePtr FindResultType(const TExprPtr& node, const std::string& resultName) {
 // columns, so external-function and operator return types come from qumirdb.oz.
 class TTypingContext {
 public:
-    TTypingContext() {
+    explicit TTypingContext(
+        std::shared_ptr<const TExternalCatalogSnapshot> externalCatalog = nullptr)
+        : ExternalCatalog_(std::move(externalCatalog))
+    {
         System_ = std::make_shared<NQumir::NRegistry::SystemModule>();
         Resolver_.ApplyPragmas(Pragmas_);
         Resolver_.RegisterModule(System_.get());
         if (auto reg = Loader_.RegisterSourceModule(
                 std::string(QDB_SOURCE_DIR) + "/modules/qumirdb.oz"); !reg) {
             LoadError_ = reg.error();
+        }
+        if (ExternalCatalog_) {
+            ExternalModuleNames_ = ExternalCatalog_->ModuleNames();
+            if (auto reg = ExternalCatalog_->RegisterDeclarations(Loader_); !reg) {
+                LoadError_ = reg.error();
+            }
         }
     }
 
@@ -156,8 +205,13 @@ public:
         auto fn = std::make_shared<TFunDecl>(
             loc, "__annotate_" + tag + "__", std::vector<TGenericParam>{},
             std::move(params), body, std::make_shared<TVoidType>());
-        TExprPtr module = std::make_shared<TBlockExpr>(loc, std::vector<TExprPtr>{
-            std::make_shared<TUseExpr>(loc, "qumirdb"), fn});
+        std::vector<TExprPtr> statements{
+            std::make_shared<TUseExpr>(loc, "qumirdb")};
+        for (const auto& moduleName : ExternalModuleNames_) {
+            statements.push_back(std::make_shared<TUseExpr>(loc, moduleName));
+        }
+        statements.push_back(fn);
+        TExprPtr module = std::make_shared<TBlockExpr>(loc, std::move(statements));
 
         // Shared loader + resolver so qumirdb.oz is parsed only once. LoadAndCompose
         // still re-inlines and re-resolves it each call (the pending optimization), but
@@ -183,6 +237,25 @@ public:
                 NQumir::NAst::NCore::PrintAst(expr) + "'");
         }
         return type;
+    }
+
+    TTypePtr ResolveCall(
+        const std::string& name,
+        const std::vector<TTypePtr>& argTypes)
+    {
+        NQumir::TLocation loc{};
+        std::vector<std::pair<std::string, TTypePtr>> fields;
+        std::vector<TExprPtr> args;
+        fields.reserve(argTypes.size());
+        args.reserve(argTypes.size());
+        for (size_t i = 0; i < argTypes.size(); ++i) {
+            const std::string argName = "__external_arg_" + std::to_string(i);
+            fields.emplace_back(argName, UnwrapNullableType(argTypes[i]));
+            args.push_back(std::make_shared<TIdentExpr>(loc, argName));
+        }
+        auto call = std::make_shared<TCallExpr>(
+            loc, std::make_shared<TIdentExpr>(loc, name), std::move(args));
+        return FromQumirType(Annotate(call, TStructType(std::move(fields))));
     }
 
 private:
@@ -227,11 +300,72 @@ private:
     uint64_t Counter_ = 0;
     bool ExternsBuilt_ = false;
     std::unordered_map<std::string, TTypePtr> ExternReturns_;
+    std::shared_ptr<const TExternalCatalogSnapshot> ExternalCatalog_;
+    std::vector<std::string> ExternalModuleNames_;
 };
 
 TTypingContext& Context() {
     static TTypingContext context;
     return context;
+}
+
+} // namespace
+
+struct TExternalTypingResolver::TImpl {
+    explicit TImpl(std::shared_ptr<const TExternalCatalogSnapshot> catalog)
+        : ExternalCatalog(std::move(catalog))
+        , Context(ExternalCatalog)
+    {
+    }
+
+    std::shared_ptr<const TExternalCatalogSnapshot> ExternalCatalog;
+    TTypingContext Context;
+};
+
+TExternalTypingResolver::TExternalTypingResolver(
+    std::shared_ptr<const TExternalCatalogSnapshot> catalog)
+    : Impl_(std::make_shared<TImpl>(std::move(catalog)))
+{
+}
+
+TExternalTypingResolver::~TExternalTypingResolver() = default;
+
+TTypePtr TExternalTypingResolver::ResolveCall(
+    const std::string& name,
+    const std::vector<TTypePtr>& argTypes)
+{
+    auto returnType = Impl_->Context.ResolveCall(name, argTypes);
+    if (Impl_->ExternalCatalog) {
+        Impl_->ExternalCatalog->RememberResolvedReturnType(
+            name, argTypes, returnType);
+    }
+    return returnType;
+}
+
+namespace {
+
+TTypePtr ExternalReturnType(
+    const std::string& name,
+    const std::vector<TTypePtr>& argTypes)
+{
+    if (CurrentAnnotationContext && CurrentAnnotationContext->ExternalCatalog
+        && CurrentAnnotationContext->ExternalCatalog->HasFunction(name))
+    {
+        if (!CurrentAnnotationContext->Resolver) {
+            CurrentAnnotationContext->Resolver =
+                std::make_shared<TExternalTypingResolver>(
+                    CurrentAnnotationContext->ExternalCatalog);
+        }
+        return CurrentAnnotationContext->Resolver->ResolveCall(name, argTypes);
+    }
+    if (!CurrentExternalCatalog) {
+        return nullptr;
+    }
+    auto resolved = CurrentExternalCatalog->ResolveReturnType(name, argTypes);
+    if (!resolved) {
+        throw resolved.error();
+    }
+    return *resolved ? **resolved : nullptr;
 }
 
 using NQumir::TLocation;
@@ -608,7 +742,10 @@ TTypePtr InferType(const TExprPtr& e, const TStructType& schema) {
         if (auto value = NumericPreservingUnaryCall(name, at)) {
             return Propagate({at[0]}, value);
         }
-        TTypePtr ret = Context().ExternReturnType(name);
+        TTypePtr ret = ExternalReturnType(name, at);
+        if (!ret) {
+            ret = Context().ExternReturnType(name);
+        }
         bool nullable = false;
         for (const auto& t : at) nullable = nullable || !t || IsNullableType(t);
         if (!ret) {
@@ -1098,7 +1235,10 @@ TTypePtr Expand(TExprPtr& e, const TStructType& inputType, uint64_t& counter) {
                 }, value, counter, node->Location);
             return std::make_shared<TNullable>(value);
         }
-        TTypePtr ret = Context().ExternReturnType(name);
+        TTypePtr ret = ExternalReturnType(name, argTypes);
+        if (!ret) {
+            ret = Context().ExternReturnType(name);
+        }
         if (!ret) {
             return InferType(e, inputType); // unknown extern: leave the call, best-effort type
         }
@@ -1494,7 +1634,12 @@ std::pair<TExprPtr, TTypePtr> ExpandDecimal(const TExprPtr& expr,
 
 } // namespace
 
-TTypePtr AnnotateExprType(const TExprPtr& expr, const TStructType& inputType) {
+TTypePtr AnnotateExprType(
+    const TExprPtr& expr,
+    const TStructType& inputType,
+    const TAnnotationContext* context)
+{
+    TAnnotationScope scope(context);
     if (!expr) {
         throw NQumir::TError("project type inference: null expression");
     }
@@ -1569,7 +1714,12 @@ bool SchemaHasDecimal(const TStructType& inputType) {
 }
 } // namespace
 
-std::pair<TExprPtr, TTypePtr> ExpandNullable(const TExprPtr& expr, const TStructType& inputType) {
+std::pair<TExprPtr, TTypePtr> ExpandNullable(
+    const TExprPtr& expr,
+    const TStructType& inputType,
+    const TExternalCatalogSnapshot* externalCatalog)
+{
+    TExternalCatalogScope scope(externalCatalog);
     // Fast path: with no nullable column and no bare NULL there is nothing to propagate,
     // so leave the expression untouched (non-nullable path stays ordinary).
     bool anyNullable = false;
@@ -1588,9 +1738,11 @@ std::pair<TExprPtr, TTypePtr> ExpandNullable(const TExprPtr& expr, const TStruct
 }
 
 std::pair<TExprPtr, TTypePtr> ExpandKernelExpr(const TExprPtr& expr,
-    const TStructType& inputType)
+    const TStructType& inputType,
+    const TExternalCatalogSnapshot* externalCatalog)
 {
-    auto nullable = ExpandNullable(expr, inputType);
+    TExternalCatalogScope scope(externalCatalog);
+    auto nullable = ExpandNullable(expr, inputType, externalCatalog);
     if (!SchemaHasDecimal(inputType) && !ContainsDecimalTypeRef(nullable.first)) {
         return nullable;
     }

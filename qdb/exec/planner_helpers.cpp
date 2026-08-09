@@ -200,7 +200,8 @@ TUnaryRuntimeProcess BuildFilterRuntimeProcess(
         throw std::runtime_error("filter input must have TStructType");
     }
 
-    auto spec = NKernel::BuildFilterKernelSpec(*inputStruct, filter.Predicate());
+    auto spec = NKernel::BuildFilterKernelSpec(
+        *inputStruct, filter.Predicate(), "<kernel>", options.ExternalCatalog.get());
     TKernelCompiler compiler(std::move(options));
     auto dispatch = compiler.CompileFilter(spec);
 
@@ -281,7 +282,13 @@ TProjectColumnPlan BuildProjectColumnPlan(
 {
     TProjectColumnPlan plan;
     std::vector<std::pair<std::string, NQumir::NAst::TTypePtr>> outFields;
-    for (const auto& projection : project.Projections()) {
+    auto* annotatedOutput = static_cast<NQumir::NAst::TStructType*>(
+        project.OutputColumns().get());
+    for (size_t projectionIndex = 0;
+         projectionIndex < project.Projections().size();
+         ++projectionIndex)
+    {
+        const auto& projection = project.Projections()[projectionIndex];
         if (auto identNode = NQumir::NAst::TMaybeNode<NQumir::NAst::TIdentExpr>(
                 projection.Expression)) {
             const std::string& exprName = identNode.Cast()->Name;
@@ -298,9 +305,17 @@ TProjectColumnPlan BuildProjectColumnPlan(
             });
             outFields.emplace_back(projection.Name, it->second);
         } else {
-            auto outType = NKernel::AnnotateExprType(
-                projection.Expression,
-                inputStruct);
+            auto outType = annotatedOutput
+                    && annotatedOutput->Fields.size() == project.Projections().size()
+                ? annotatedOutput->Fields[projectionIndex].second
+                : NKernel::AnnotateExprType(projection.Expression, inputStruct);
+            if (NQumir::NAst::TMaybeType<NQumir::NAst::TStructType>(
+                    NQumir::NAst::UnwrapNamedType(
+                        NQdb::UnwrapNullableType(outType))))
+            {
+                throw NQumir::TError(
+                    "struct-return projection expansion is not supported yet");
+            }
             auto jitType = ProjectJitType(outType);
             using namespace NQumir::NAst;
             bool isStr = static_cast<bool>(TMaybeType<TStringType>(
@@ -339,7 +354,9 @@ TUnaryRuntimeProcess BuildProjectRuntimeProcess(
         auto spec = NKernel::BuildProjectKernelSpec(
             *inputStruct,
             plan.ComputedExprs,
-            plan.ComputedJitTypes);
+            plan.ComputedJitTypes,
+            "<project>",
+            options.ExternalCatalog.get());
         TKernelCompiler compiler(std::move(options));
         dispatch = compiler.CompileProject(spec);
     }

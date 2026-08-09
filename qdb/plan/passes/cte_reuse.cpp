@@ -323,7 +323,10 @@ TExprPtr BuildPushablePredicate(const TCteDefinition& def, const std::vector<TEx
 
 } // namespace
 
-void PushConsumerPredicatesIntoDefinitions(const TOperatorPtr& main) {
+void PushConsumerPredicatesIntoDefinitions(
+    const TOperatorPtr& main,
+    const NKernel::TAnnotationContext& context)
+{
     TRefPredicates refs;
     CollectRefPredicates(main, refs);
     auto defs = CollectCteDefinitions(main);
@@ -341,7 +344,7 @@ void PushConsumerPredicatesIntoDefinitions(const TOperatorPtr& main) {
         }
         def->Plan = PushDownPredicates(
             std::make_shared<TFilterOperator>(def->Plan, std::move(pushable)));
-        AnnotateTypes(def->Plan);
+        AnnotateTypes(def->Plan, context);
         EstimateStats(def->Plan);
     }
 }

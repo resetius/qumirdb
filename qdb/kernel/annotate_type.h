@@ -3,17 +3,47 @@
 #include <qumir/parser/ast.h>
 #include <qumir/parser/type.h>
 
+#include <memory>
+#include <string>
+#include <vector>
+
+namespace NQdb {
+class TExternalCatalogSnapshot;
+}
+
 namespace NQdb::NKernel {
 
-// Lightweight, rule-based SQL type inference for a Project/filter/aggregate expression
-// over `inputType`. No AST rewrite and no per-node qumirdb.oz compose: operators use
-// promotion rules, extern-call returns come from the resolver, and NULL propagates (a
-// nullable operand makes the result Nullable[T]) — i.e. it types the expression as if
-// ExpandNullable had already run. Used by the logical typing pass, which must keep the
-// AST clean (`a==b`, `a+b`) for equi-join extraction. Throws on a null expression.
+class TExternalTypingResolver {
+public:
+    explicit TExternalTypingResolver(
+        std::shared_ptr<const TExternalCatalogSnapshot> catalog);
+    ~TExternalTypingResolver();
+
+    NQumir::NAst::TTypePtr ResolveCall(
+        const std::string& name,
+        const std::vector<NQumir::NAst::TTypePtr>& argTypes);
+
+private:
+    struct TImpl;
+    std::shared_ptr<TImpl> Impl_;
+};
+
+struct TAnnotationContext {
+    std::shared_ptr<const TExternalCatalogSnapshot> ExternalCatalog;
+    // Filled lazily on the first external annotation and then reused by all
+    // repeated AnnotateTypes passes for this context.
+    mutable std::shared_ptr<TExternalTypingResolver> Resolver;
+};
+
+// Lightweight SQL type inference for a Project/filter/aggregate expression over
+// `inputType`. Operators use local promotion rules; catalog calls use the reusable
+// resolver in TAnnotationContext. No AST rewrite is performed, and NULL propagates as
+// if ExpandNullable had already run. The logical AST therefore stays clean for passes
+// such as equi-join extraction. Throws on a null expression.
 NQumir::NAst::TTypePtr AnnotateExprType(
     const NQumir::NAst::TExprPtr& expr,
-    const NQumir::NAst::TStructType& inputType);
+    const NQumir::NAst::TStructType& inputType,
+    const TAnnotationContext* context = nullptr);
 
 // Heavy rewrite, run once per kernel just before compilation (never during logical
 // planning). Rewrites null-strict ops/calls/casts, AND/OR (SQL 3VL) and CASE/`if`
@@ -22,12 +52,14 @@ NQumir::NAst::TTypePtr AnnotateExprType(
 // shared expression is left intact. Returns the rewritten expression and its planner type.
 std::pair<NQumir::NAst::TExprPtr, NQumir::NAst::TTypePtr> ExpandNullable(
     const NQumir::NAst::TExprPtr& expr,
-    const NQumir::NAst::TStructType& inputType);
+    const NQumir::NAst::TStructType& inputType,
+    const TExternalCatalogSnapshot* externalCatalog = nullptr);
 
 // Final expression rewrite for kernel compilation. Applies the existing nullable
 // normalization and then qdb-only decimal erasure (Decimal -> qumirdb.oz BinInt).
 std::pair<NQumir::NAst::TExprPtr, NQumir::NAst::TTypePtr> ExpandKernelExpr(
     const NQumir::NAst::TExprPtr& expr,
-    const NQumir::NAst::TStructType& inputType);
+    const NQumir::NAst::TStructType& inputType,
+    const TExternalCatalogSnapshot* externalCatalog = nullptr);
 
 } // namespace NQdb::NKernel

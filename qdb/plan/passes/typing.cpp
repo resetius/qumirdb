@@ -55,11 +55,14 @@ TTypePtr UnifyUnionColumn(const TTypePtr& a, const TTypePtr& b) {
 
 } // namespace
 
-void AnnotateTypes(const TOperatorPtr& root) {
+void AnnotateTypes(
+    const TOperatorPtr& root,
+    const NKernel::TAnnotationContext& context)
+{
     // Bottom-up: children first.
     for (const auto& child : root->Children()) {
         if (auto maybeOp = TMaybeNode<IOperator>(child)) {
-            AnnotateTypes(maybeOp.Cast());
+            AnnotateTypes(maybeOp.Cast(), context);
         }
     }
 
@@ -126,7 +129,8 @@ void AnnotateTypes(const TOperatorPtr& root) {
                     }
                 } else {
                     // Computed column: rule-based SQL type inference (no rewrite).
-                    fieldType = NKernel::AnnotateExprType(spec.Expression, *inputStruct);
+                    fieldType = NKernel::AnnotateExprType(
+                        spec.Expression, *inputStruct, &context);
                 }
                 outFields.emplace_back(spec.Name, fieldType);
             }
