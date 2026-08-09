@@ -14,7 +14,7 @@
 /*
 
 <statement> ::=
-    ( <select_stmt> | <create_module_stmt> ) [ ";" ]
+    ( <select_stmt> | <create_module_stmt> | <create_function_stmt> ) [ ";" ]
 
 <create_module_stmt> ::=
     "CREATE" [ "OR" "REPLACE" ] "MODULE" <ident>
@@ -24,6 +24,30 @@
 // A single token produced by the lexer; its value is the text between delimiters.
 <dollar_quoted_source> ::=
     "$$" { any_char_sequence_not_containing_terminating_"$$" } "$$"
+
+<create_function_stmt> ::=
+    "CREATE" [ "OR" "REPLACE" ] "FUNCTION" <ident>
+    "(" [ <function_arg> { "," <function_arg> } ] ")"
+    "RETURNS" <function_return_type>
+    <external_function_options>
+
+<function_arg> ::=
+    [ <ident> ] <type_name>
+
+<function_return_type> ::=
+      <type_name>
+    | "(" <type_name> { "," <type_name> } ")"
+
+// Exactly one MODULE and one SYMBOL option are required, in either order.
+<external_function_options> ::=
+      <set_module_clause> <set_symbol_clause>
+    | <set_symbol_clause> <set_module_clause>
+
+<set_module_clause> ::=
+    "SET" "MODULE" ( "TO" | "=" ) <ident>
+
+<set_symbol_clause> ::=
+    "SET" "SYMBOL" ( "TO" | "=" ) <ident>
 
 <select_stmt> ::=
     [ <with_clause> ]
@@ -503,6 +527,7 @@ TAstTask<TSqlNode> query_primary(TParserContext& ctx);
 
 TAstTask<TSqlNode> statement(TParserContext& ctx);
 TAstTask<TSqlExternalModule> create_module_stmt(TParserContext& ctx);
+TAstTask<TSqlExternalFunction> create_function_stmt(TParserContext& ctx);
 TAstTask<TSqlQuery> select_stmt(TParserContext& ctx);
 TAstTask<TSqlNode> select_core(TParserContext& ctx);
 TAstTask<TSqlSelectList> select_list(TParserContext& ctx);
@@ -549,12 +574,27 @@ TAstTypeTask type_name(TParserContext& ctx);
 
 TAstTask<TSqlNode> statement(TParserContext& ctx) {
     auto first = ctx.Stream.Next();
-    ctx.Stream.Unget(first);
 
     TSqlNodePtr node;
     if (IsWord(first, "CREATE")) {
-        node = co_await create_module_stmt(ctx);
+        std::vector<TToken> consumed{first};
+        auto kind = ctx.Stream.Next();
+        consumed.push_back(kind);
+        if (IsKeyword(kind, "OR")) {
+            consumed.push_back(ctx.Stream.Next()); // REPLACE
+            kind = ctx.Stream.Next();
+            consumed.push_back(kind);
+        }
+        for (auto it = consumed.rbegin(); it != consumed.rend(); ++it) {
+            ctx.Stream.Unget(*it);
+        }
+        if (IsWord(kind, "FUNCTION")) {
+            node = co_await create_function_stmt(ctx);
+        } else {
+            node = co_await create_module_stmt(ctx);
+        }
     } else {
+        ctx.Stream.Unget(first);
         node = co_await select_stmt(ctx);
     }
 
@@ -603,6 +643,134 @@ TAstTask<TSqlExternalModule> create_module_stmt(TParserContext& ctx) {
 
     co_return std::make_shared<TSqlExternalModule>(
         std::move(name), std::move(language), std::move(code.Name), replace);
+}
+
+TAstTask<TSqlExternalFunction> create_function_stmt(TParserContext& ctx) {
+    using namespace NQumir::NAst;
+
+    auto token = ctx.Stream.Next();
+    auto location = token.Location;
+    if (!IsWord(token, "CREATE")) {
+        co_return Error(token, "`CREATE' required");
+    }
+
+    bool replace = false;
+    token = ctx.Stream.Next();
+    if (IsKeyword(token, "OR")) {
+        token = ctx.Stream.Next();
+        if (!IsWord(token, "REPLACE")) {
+            co_return Error(token, "`REPLACE' required after `OR'");
+        }
+        replace = true;
+        token = ctx.Stream.Next();
+    }
+    if (!IsWord(token, "FUNCTION")) {
+        co_return Error(token, "`FUNCTION' required");
+    }
+
+    auto name = co_await ident(ctx);
+    token = ctx.Stream.Next();
+    if (!IsOp(token, '(')) {
+        co_return Error(token, "`(' expected");
+    }
+
+    std::vector<TParam> params;
+    token = ctx.Stream.Next();
+    if (!IsOp(token, ')')) {
+        ctx.Stream.Unget(token);
+        while (true) {
+            auto first = ctx.Stream.Next();
+            auto second = ctx.Stream.Next();
+            std::string paramName;
+            if (first.Type == TToken::Identifier
+                && (second.Type == TToken::Identifier || second.Type == TToken::Keyword))
+            {
+                paramName = first.Name;
+                ctx.Stream.Unget(second);
+            } else {
+                ctx.Stream.Unget(second);
+                ctx.Stream.Unget(first);
+                paramName = "__external_arg_" + std::to_string(params.size());
+            }
+            auto paramType = co_await type_name(ctx);
+            params.push_back(std::make_shared<TVarStmt>(
+                first.Location, std::move(paramName), std::move(paramType)));
+
+            token = ctx.Stream.Next();
+            if (IsOp(token, ')')) {
+                break;
+            }
+            if (!IsOp(token, ',')) {
+                co_return Error(token, "`,' or `)' expected");
+            }
+        }
+    }
+
+    token = ctx.Stream.Next();
+    if (!IsWord(token, "RETURNS")) {
+        co_return Error(token, "`RETURNS' required");
+    }
+
+    TTypePtr returnType;
+    token = ctx.Stream.Next();
+    if (IsOp(token, '(')) {
+        std::vector<std::pair<std::string, TTypePtr>> fields;
+        while (true) {
+            auto fieldType = co_await type_name(ctx);
+            fields.emplace_back(
+                "field" + std::to_string(fields.size() + 1), std::move(fieldType));
+            token = ctx.Stream.Next();
+            if (IsOp(token, ')')) {
+                break;
+            }
+            if (!IsOp(token, ',')) {
+                co_return Error(token, "`,' or `)' expected");
+            }
+        }
+        returnType = std::make_shared<TStructType>(std::move(fields));
+    } else {
+        ctx.Stream.Unget(token);
+        returnType = co_await type_name(ctx);
+    }
+
+    std::optional<std::string> moduleName;
+    std::optional<std::string> symbol;
+    for (int i = 0; i < 2; ++i) {
+        token = ctx.Stream.Next();
+        if (!IsWord(token, "SET")) {
+            co_return Error(token, "`SET MODULE' and `SET SYMBOL' required");
+        }
+        auto option = ctx.Stream.Next();
+        auto separator = ctx.Stream.Next();
+        if (!IsWord(separator, "TO") && !IsOp(separator, '=')) {
+            co_return Error(separator, "`TO' or `=' expected");
+        }
+        auto value = co_await ident(ctx);
+        if (IsWord(option, "MODULE") && !moduleName) {
+            moduleName = std::move(value);
+        } else if (IsWord(option, "SYMBOL") && !symbol) {
+            symbol = std::move(value);
+        } else {
+            co_return Error(option, "duplicate or unknown external function option");
+        }
+    }
+
+    auto body = std::make_shared<TBlockExpr>(location, std::vector<TExprPtr>{});
+    auto function = std::make_shared<TFunDecl>(
+        location, std::move(name), std::vector<TGenericParam>{},
+        std::move(params), std::move(body), std::move(returnType));
+    function->MangledName = std::move(*symbol);
+    std::vector<TTypePtr> paramTypes;
+    for (const auto& param : function->Params) {
+        paramTypes.push_back(param->Type);
+    }
+    function->Type = std::make_shared<TFunctionType>(
+        std::move(paramTypes), function->RetType);
+
+    auto result = std::make_shared<TSqlExternalFunction>(replace);
+    result->ModuleName = std::move(*moduleName);
+    result->Func = std::move(function);
+    co_return result;
 }
 
 TAstTask<TSqlQuery> select_stmt(TParserContext& ctx) {

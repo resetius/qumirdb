@@ -196,6 +196,57 @@ TEST(SqlParser, CreateOrReplaceModule) {
     EXPECT_TRUE(module.Cast()->Replace);
 }
 
+TEST(SqlParser, CreateOrReplaceExternalFunction) {
+    std::istringstream in(
+        "CREATE OR REPLACE FUNCTION orbit_position(a DOUBLE, DOUBLE) "
+        "RETURNS (DOUBLE, DOUBLE, DOUBLE) "
+        "SET SYMBOL = orbit_position "
+        "SET MODULE TO orbital;");
+    TTokenStream tokens(in);
+    TParser parser;
+    auto parsed = parser.Parse(tokens);
+    ASSERT_TRUE(parsed) << parsed.error().ToString();
+
+    auto external = NQdb::NSql::TMaybeNode<TSqlExternalFunction>(*parsed);
+    ASSERT_TRUE(external);
+    EXPECT_TRUE(external.Cast()->Replace);
+    EXPECT_EQ(external.Cast()->ModuleName, "orbital");
+    ASSERT_TRUE(external.Cast()->Func);
+    EXPECT_EQ(external.Cast()->Func->Name, "orbit_position");
+    EXPECT_EQ(external.Cast()->Func->MangledName, "orbit_position");
+    ASSERT_EQ(external.Cast()->Func->Params.size(), 2u);
+    EXPECT_EQ(external.Cast()->Func->Params[0]->Name, "a");
+    EXPECT_EQ(external.Cast()->Func->Params[1]->Name, "__external_arg_1");
+
+    auto returnType = NQumir::NAst::TMaybeType<NQumir::NAst::TStructType>(
+        external.Cast()->Func->RetType);
+    ASSERT_TRUE(returnType);
+    ASSERT_EQ(returnType.Cast()->Fields.size(), 3u);
+    EXPECT_EQ(returnType.Cast()->Fields[0].first, "field1");
+    EXPECT_EQ(returnType.Cast()->Fields[1].first, "field2");
+    EXPECT_EQ(returnType.Cast()->Fields[2].first, "field3");
+}
+
+TEST(SqlParser, CreateExternalFunctionWithScalarReturn) {
+    std::istringstream in(
+        "CREATE FUNCTION orbit_distance(DOUBLE) RETURNS DOUBLE "
+        "SET MODULE = orbital SET SYMBOL TO orbit_distance;");
+    TTokenStream tokens(in);
+    TParser parser;
+    auto parsed = parser.Parse(tokens);
+    ASSERT_TRUE(parsed) << parsed.error().ToString();
+
+    auto external = NQdb::NSql::TMaybeNode<TSqlExternalFunction>(*parsed);
+    ASSERT_TRUE(external);
+    EXPECT_FALSE(external.Cast()->Replace);
+    EXPECT_EQ(external.Cast()->ModuleName, "orbital");
+    ASSERT_TRUE(external.Cast()->Func);
+    EXPECT_EQ(external.Cast()->Func->Name, "orbit_distance");
+    EXPECT_EQ(external.Cast()->Func->MangledName, "orbit_distance");
+    EXPECT_TRUE(NQumir::NAst::TMaybeType<NQumir::NAst::TFloatType>(
+        external.Cast()->Func->RetType));
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

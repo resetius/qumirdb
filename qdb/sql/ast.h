@@ -390,6 +390,46 @@ struct TSqlExternalModule : TSqlNode {
     { }
 };
 
+struct TSqlExternalFunction : TSqlNode {
+    /*
+    argnames -> optional
+    CREATE [OR REPLACE] FUNCTION orbit_position(
+        [a] DOUBLE,
+        [e] DOUBLE,
+        [i] DOUBLE,
+        [w] DOUBLE,
+        [node] DOUBLE,
+        [m] DOUBLE,
+        [epoch] DOUBLE,
+        [t] DOUBLE
+    )
+    RETURNS (DOUBLE, DOUBLE, DOUBLE) // RETURNS DOUBLE also possible for single return value
+    // 2 configuration options must be set for external functions:
+    SET MODULE TO orbital // SET MODULE = orbital also possible
+    SET SYMBOL TO orbit_position // SET SYMBOL = orbit_position also possible
+    ;
+    */
+    static constexpr const char* NodeId = "ExternalFunction";
+    std::string_view NodeName() const override { return NodeId; }
+
+    std::string ModuleName;
+
+    // CALLED ON NULL INPUT -> false (true unsupported for now)
+    // RETURNS NULL ON NULL INPUT -> true (false unsupported for now)
+
+    // external function declaration
+    // Name -> Func->Name
+    // Symbol -> Func->MangledName
+    // Args -> Func->Params
+    // RetType -> Func->RetType
+    std::shared_ptr<NQumir::NAst::TFunDecl> Func;
+    bool Replace = false;
+
+    explicit TSqlExternalFunction(bool replace)
+        : Replace(replace)
+    { }
+};
+
 // A subquery used inside an expression. Bridges a SQL query into the Qumir
 // expression tree; visitors handle it through IVisitor::VisitOtherwise.
 struct TSubqueryExpr : NQumir::NAst::TExpr {
