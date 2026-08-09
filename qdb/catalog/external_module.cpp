@@ -2,6 +2,7 @@
 
 #include <qdb/plan/types/nullable.h>
 #include <qdb/sql/ast.h>
+#include <qdb/utils/sha1.h>
 
 #include <qumir/frontend/source_module_loader.h>
 
@@ -14,6 +15,7 @@
 #include <fstream>
 #include <map>
 #include <mutex>
+#include <sstream>
 #include <sys/wait.h>
 #include <unistd.h>
 #include <unordered_map>
@@ -101,10 +103,81 @@ std::string RustCrateName(std::string_view moduleName) {
     return result;
 }
 
-std::expected<std::string, TError> CompileRust(
+std::string RustModuleCacheKey(
     const std::string& moduleName,
     const std::string& source,
     const std::string& target)
+{
+    std::string input;
+    input.reserve(moduleName.size() + source.size() + target.size() + 32);
+    auto add = [&](std::string_view value) {
+        input.append(value);
+        input.push_back('\0');
+    };
+    add("qdb-rust-module-v1");
+    add(moduleName);
+    add(source);
+    add(target);
+    return NUtils::Sha1Hex(input);
+}
+
+std::expected<std::monostate, TError> WriteFileAtomically(
+    const std::filesystem::path& path,
+    std::string_view contents,
+    std::string_view description)
+{
+    std::error_code existsError;
+    if (std::filesystem::exists(path, existsError)) {
+        return std::monostate{};
+    }
+    if (existsError) {
+        return std::unexpected(TError(
+            "cannot inspect " + std::string(description) + ": " +
+            existsError.message()));
+    }
+
+    std::string pattern = path.string() + ".XXXXXX";
+    std::vector<char> temp(pattern.begin(), pattern.end());
+    temp.push_back('\0');
+    const int fd = ::mkstemp(temp.data());
+    if (fd < 0) {
+        return std::unexpected(TError(
+            "cannot create " + std::string(description) + ": " +
+            std::string(std::strerror(errno))));
+    }
+
+    size_t written = 0;
+    while (written < contents.size()) {
+        const ssize_t n = ::write(
+            fd, contents.data() + written, contents.size() - written);
+        if (n > 0) {
+            written += static_cast<size_t>(n);
+        } else if (n < 0 && errno == EINTR) {
+            continue;
+        } else {
+            const int error = errno;
+            ::close(fd);
+            ::unlink(temp.data());
+            return std::unexpected(TError(
+                "cannot write " + std::string(description) + ": " +
+                std::string(std::strerror(error))));
+        }
+    }
+    if (::close(fd) != 0 || ::rename(temp.data(), path.c_str()) != 0) {
+        const int error = errno;
+        ::unlink(temp.data());
+        return std::unexpected(TError(
+            "cannot install " + std::string(description) + ": " +
+            std::string(std::strerror(error))));
+    }
+    return std::monostate{};
+}
+
+std::expected<std::string, TError> CompileRust(
+    const std::string& moduleName,
+    const std::string& source,
+    const std::string& target,
+    const std::string& cacheDir)
 {
     std::string pattern =
         (std::filesystem::temp_directory_path() / "qdb-rust-XXXXXX").string();
@@ -117,37 +190,111 @@ std::expected<std::string, TError> CompileRust(
             std::string(std::strerror(errno))));
     }
 
-    const std::filesystem::path dir(created);
-    const auto sourcePath = dir / "module.rs";
-    const auto outputPath = dir / "module.bc";
-    const auto stderrPath = dir / "rustc.stderr";
+    const std::filesystem::path invocationDir(created);
+    const auto stderrPath = invocationDir / "compiler.stderr";
     struct TCleanup {
         std::filesystem::path Path;
         ~TCleanup() {
             std::error_code ec;
             std::filesystem::remove_all(Path, ec);
         }
-    } cleanup{dir};
+    } cleanup{invocationDir};
 
-    {
+    const bool wasm64 = target == "wasm64-unknown-unknown";
+    std::filesystem::path projectDir = invocationDir;
+    std::filesystem::path targetDir = invocationDir / "target";
+    if (wasm64 && !cacheDir.empty()) {
+        const auto rustCache = std::filesystem::path(cacheDir) / "rust";
+        projectDir = rustCache / "modules" /
+            RustModuleCacheKey(moduleName, source, target);
+        targetDir = rustCache / "target";
+        std::error_code ec;
+        std::filesystem::create_directories(projectDir, ec);
+        if (ec) {
+            return std::unexpected(TError(
+                "cannot create Rust module cache `" + projectDir.string() +
+                "': " + ec.message()));
+        }
+        std::filesystem::create_directories(targetDir, ec);
+        if (ec) {
+            return std::unexpected(TError(
+                "cannot create Rust target cache `" + targetDir.string() +
+                "': " + ec.message()));
+        }
+    }
+
+    const auto sourcePath = projectDir / "module.rs";
+    const auto outputPath = projectDir / "module.bc";
+    if (wasm64 && !cacheDir.empty()) {
+        auto written = WriteFileAtomically(sourcePath, source, "Rust module source");
+        if (!written) {
+            return std::unexpected(written.error());
+        }
+    } else {
         std::ofstream out(sourcePath, std::ios::binary);
         if (!out || !(out << source)) {
             return std::unexpected(TError("cannot write rustc input"));
         }
     }
 
-    std::vector<std::string> args{
-        "rustc",
-        sourcePath.string(),
-        "--crate-name", RustCrateName(moduleName),
-        "--crate-type", "lib",
-        "--edition", "2021",
-        "--emit", "llvm-bc",
-        "-o", outputPath.string(),
-    };
-    if (!target.empty()) {
-        args.push_back("--target");
-        args.push_back(target);
+    std::vector<std::string> args;
+    if (wasm64) {
+        // Rust does not ship wasm64 std artifacts yet. Cargo builds std from
+        // rust-src, while rustc emits only the external crate as LLVM bitcode.
+        const auto manifestPath = projectDir / "Cargo.toml";
+        std::ostringstream manifest;
+        manifest << R"([package]
+name = ")" << RustCrateName(moduleName) << R"("
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+path = "module.rs"
+crate-type = ["rlib"]
+
+[profile.release]
+opt-level = 2
+panic = "abort"
+codegen-units = 1
+)";
+        if (!cacheDir.empty()) {
+            auto written = WriteFileAtomically(
+                manifestPath, manifest.str(), "Cargo manifest");
+            if (!written) {
+                return std::unexpected(written.error());
+            }
+        } else {
+            std::ofstream out(manifestPath, std::ios::binary);
+            if (!out || !(out << manifest.str())) {
+                return std::unexpected(TError("cannot write Cargo manifest"));
+            }
+        }
+        args = {
+            "cargo", "rustc",
+            "--manifest-path", manifestPath.string(),
+            "--target-dir", targetDir.string(),
+            "--target", target,
+            "--release",
+            "--lib",
+            "-Z", "build-std=std,panic_abort",
+            "--",
+            "--emit=llvm-bc=" + outputPath.string(),
+            "-C", "codegen-units=1",
+        };
+    } else {
+        args = {
+            "rustc",
+            sourcePath.string(),
+            "--crate-name", RustCrateName(moduleName),
+            "--crate-type", "lib",
+            "--edition", "2021",
+            "--emit", "llvm-bc",
+            "-o", outputPath.string(),
+        };
+        if (!target.empty()) {
+            args.push_back("--target");
+            args.push_back(target);
+        }
     }
     std::vector<char*> argv;
     argv.reserve(args.size() + 1);
@@ -166,8 +313,13 @@ std::expected<std::string, TError> CompileRust(
         if (err) {
             ::dup2(::fileno(err), STDERR_FILENO);
         }
+        if (wasm64) {
+            ::setenv("RUSTC_BOOTSTRAP", "1", 1);
+            ::setenv("RUSTFLAGS", "-C panic=abort", 1);
+        }
         ::execvp(argv[0], argv.data());
-        std::fprintf(stderr, "cannot execute rustc: %s\n", std::strerror(errno));
+        std::fprintf(
+            stderr, "cannot execute %s: %s\n", args[0].c_str(), std::strerror(errno));
         _exit(127);
     }
 
@@ -185,7 +337,7 @@ std::expected<std::string, TError> CompileRust(
         } catch (...) {
         }
         if (diagnostics.empty()) {
-            diagnostics = "rustc failed";
+            diagnostics = args[0] + " failed";
         }
         return std::unexpected(TError(
             "external module `" + moduleName + "': " + diagnostics));
@@ -256,7 +408,8 @@ std::shared_ptr<TExternalCatalogSnapshot::TState::TModule> CloneModule(
 
 std::expected<std::string, TError> ModuleBitcode(
     const TExternalCatalogSnapshot::TState::TModule& module,
-    const std::string& target)
+    const std::string& target,
+    const std::string& cacheDir)
 {
     {
         std::lock_guard lock(module.Bitcode->Mutex);
@@ -266,7 +419,7 @@ std::expected<std::string, TError> ModuleBitcode(
             return it->second;
         }
     }
-    auto compiled = CompileRust(module.Name, module.Source, target);
+    auto compiled = CompileRust(module.Name, module.Source, target, cacheDir);
     if (!compiled) {
         return std::unexpected(compiled.error());
     }
@@ -368,7 +521,8 @@ TExternalCatalogSnapshot::RegisterDeclarations(
 std::expected<std::optional<NQumir::NFrontend::TComposeResult>, TError>
 TExternalCatalogSnapshot::ComposeReferenced(
     const TExprPtr& ast,
-    const std::string& target) const
+    const std::string& target,
+    const std::string& cacheDir) const
 {
     std::unordered_set<std::string> callNames;
     CollectCallNames(ast, callNames);
@@ -402,7 +556,7 @@ TExternalCatalogSnapshot::ComposeReferenced(
         for (const auto& [_, function] : module->Functions) {
             declarations.push_back(CloneFunction(*function));
         }
-        auto bitcode = ModuleBitcode(*module, target);
+        auto bitcode = ModuleBitcode(*module, target, cacheDir);
         if (!bitcode) {
             return std::unexpected(bitcode.error());
         }

@@ -97,8 +97,9 @@ async function initSourceDownload() {
 function initEditor() {
   const textarea = $('#sql-editor');
   if (window.CodeMirror) {
+    defineQdbSqlMode(window.CodeMirror);
     editor = window.CodeMirror.fromTextArea(textarea, {
-      mode: 'text/x-sql',
+      mode: 'qdb-sql',
       theme: 'material-darker',
       lineNumbers: true,
       matchBrackets: true
@@ -108,6 +109,75 @@ function initEditor() {
   } else {
     textarea.addEventListener('input', saveActiveQuerySql);
   }
+}
+
+// Use SQL outside dollar quotes and Rust inside CREATE MODULE source blocks.
+function defineQdbSqlMode(CodeMirror) {
+  if (CodeMirror.modes['qdb-sql']) {
+    return;
+  }
+  CodeMirror.defineMode('qdb-sql', config => {
+    const sqlMode = CodeMirror.getMode(config, 'text/x-sql');
+    const rustMode = CodeMirror.getMode(config, 'text/x-rustsrc');
+    return {
+      startState() {
+        return {
+          sql: CodeMirror.startState(sqlMode),
+          rust: null,
+          dollarQuote: false
+        };
+      },
+      copyState(state) {
+        return {
+          sql: CodeMirror.copyState(sqlMode, state.sql),
+          rust: state.rust
+            ? CodeMirror.copyState(rustMode, state.rust)
+            : null,
+          dollarQuote: state.dollarQuote
+        };
+      },
+      token(stream, state) {
+        if (state.dollarQuote) {
+          if (stream.match('$$')) {
+            state.dollarQuote = false;
+            state.rust = null;
+            return 'string';
+          }
+          const line = stream.string;
+          const close = line.indexOf('$$', stream.pos);
+          if (close < 0) {
+            return rustMode.token(stream, state.rust);
+          }
+          stream.string = line.slice(0, close);
+          const style = rustMode.token(stream, state.rust);
+          stream.string = line;
+          return style;
+        }
+        if (stream.match('$$')) {
+          state.dollarQuote = true;
+          state.rust = CodeMirror.startState(rustMode);
+          return 'string';
+        }
+        return sqlMode.token(stream, state.sql);
+      },
+      indent(state, textAfter) {
+        const mode = state.dollarQuote ? rustMode : sqlMode;
+        const innerState = state.dollarQuote ? state.rust : state.sql;
+        return mode.indent
+          ? mode.indent(innerState, textAfter)
+          : CodeMirror.Pass;
+      },
+      innerMode(state) {
+        return state.dollarQuote
+          ? { mode: rustMode, state: state.rust }
+          : { mode: sqlMode, state: state.sql };
+      },
+      lineComment: sqlMode.lineComment,
+      blockCommentStart: sqlMode.blockCommentStart,
+      blockCommentEnd: sqlMode.blockCommentEnd,
+      electricChars: sqlMode.electricChars
+    };
+  });
 }
 
 function getSql() {
@@ -1575,7 +1645,7 @@ async function explainCurrent(
       scanTasks: 18,
       shufflePartitions: 4,
       format: 'runtime-bundle',
-      embedWasm: true,
+      embedWasm: dataset.source?.kind === 'browser',
       verboseKernels: true
     }
   };

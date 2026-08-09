@@ -43,11 +43,13 @@ public:
 
     // Finds external calls in `ast`, lazily compiles only their modules and
     // composes their declarations + LLVM bitcode. nullopt means no external
-    // module was referenced. An empty target selects rustc's native target.
+    // module was referenced. An empty target selects rustc's native target;
+    // cacheDir enables the persistent Rust/Cargo cache for cross-compilation.
     std::expected<std::optional<NQumir::NFrontend::TComposeResult>, NQumir::TError>
     ComposeReferenced(
         const NQumir::NAst::TExprPtr& ast,
-        const std::string& target = {}) const;
+        const std::string& target = {},
+        const std::string& cacheDir = {}) const;
 
 private:
     struct TResolvedTypes;

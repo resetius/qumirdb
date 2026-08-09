@@ -5,6 +5,7 @@ find_package(LLVM REQUIRED CONFIG)
 
 add_library(qumirdb
     stub.cpp
+    utils/sha1.cpp
     catalog/external_module.cpp
     modules/qumirdb.cpp
     modules/qumirdb_runtime.cpp

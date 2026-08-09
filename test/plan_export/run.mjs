@@ -233,6 +233,60 @@ function runSchemaTypeContract() {
   assert.match(legacy.error?.message || '', /unexpected trailing input/);
 }
 
+async function runExternalModuleBatchContract() {
+  const request = {
+    sql: `
+CREATE MODULE orbital LANGUAGE rust AS $$
+#[no_mangle]
+pub extern "C" fn orbit_root(a: f64) -> f64 { a.sqrt() }
+$$;
+CREATE FUNCTION orbit_root(a DOUBLE) RETURNS DOUBLE
+SET MODULE TO orbital SET SYMBOL TO orbit_root;
+SELECT orbit_root(a) AS value FROM t;
+`,
+    dataset: {
+      tables: [{
+        name: 't',
+        columns: [{ name: 'a', type: 'f64' }],
+      stats: { rows: 2, bytes: 16, rowGroups: 1 },
+      }],
+    },
+    options: {
+      scheduler: 'single',
+      scanTasks: 1,
+      shufflePartitions: 1,
+      format: 'runtime-bundle',
+      embedWasm: true,
+    },
+  };
+  const bundle = JSON.parse(run(
+    exporter,
+    ['--stdin-json', '--stdout-json'],
+    JSON.stringify(request)));
+  assert.equal(bundle.ok, true, bundle.error?.message);
+  assert.equal(
+    bundle.exec?.supported,
+    true,
+    JSON.stringify({ reason: bundle.exec?.reason, diagnostics: bundle.diagnostics }));
+  const exec = resolveExecArtifacts(bundle);
+  const result = await executeBrowserPipelineScheduled(
+    exec,
+    async function* (stage) {
+      assert.equal(stage.table, 't');
+      yield {
+        rowCount: 2,
+        columns: stage.columns.map(column => ({
+          ...column,
+          values: [4.0, 9.0],
+        })),
+      };
+    });
+  assert.deepEqual(normalizeResult(result), {
+    columns: ['value'],
+    rows: [['2'], ['3']],
+  });
+}
+
 function normalizedExec(exec) {
   const normalized = {
     supported: exec.supported,
@@ -416,6 +470,24 @@ async function main() {
           error,
         });
         console.error(`[FAIL] schema-types\n${errorText(error)}`);
+      }
+    }
+    {
+      const started = performance.now();
+      try {
+        await runExternalModuleBatchContract();
+        results.push({
+          name: 'external-module-batch',
+          elapsedMs: performance.now() - started,
+          error: null,
+        });
+      } catch (error) {
+        results.push({
+          name: 'external-module-batch',
+          elapsedMs: performance.now() - started,
+          error,
+        });
+        console.error(`[FAIL] external-module-batch\n${errorText(error)}`);
       }
     }
     {
