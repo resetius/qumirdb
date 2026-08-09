@@ -162,6 +162,17 @@ std::optional<std::string> CompileKernelAstToObject(
     return runner.CompileKernelAstToObject(std::move(ast), entryNames, error);
 }
 
+std::optional<std::string> CompileKernelAstToObject(
+    NQumir::TLLVMRunner& runner,
+    NQumir::NFrontend::TComposeResult composed,
+    const std::vector<std::string>& entryNames,
+    std::string* error)
+{
+    EnsureQumirDbUse(composed.Ast);
+    return runner.CompileKernelAstToObject(
+        std::move(composed), entryNames, error);
+}
+
 std::optional<NQumir::TLLVMRunner::TCachedObjectModule>
 CompileKernelAstToObjectsCached(
     NQumir::TLLVMRunner& runner,

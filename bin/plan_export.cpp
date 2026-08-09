@@ -1,3 +1,4 @@
+#include <qdb/catalog/external_module.h>
 #include <qdb/exec/plan_builder.h>
 #include <qdb/exec/planner_helpers.h>
 #include <qdb/io/io.h>
@@ -276,6 +277,11 @@ struct TExportRequest {
     TCatalog Catalog;
     NQdb::NScheduler::TSettings Scheduler;
     bool EmbedWasm = false;
+};
+
+struct TParsedSql {
+    NQdb::TOperatorPtr Plan;
+    std::shared_ptr<const NQdb::TExternalCatalogSnapshot> ExternalCatalog;
 };
 
 struct TKernelArtifacts {
@@ -584,7 +590,8 @@ std::expected<TCompiledWasm64Module, std::string> CompileKernelAstToWasm64(
     NQumir::NAst::TExprPtr ast,
     int64_t globalBase,
     const std::vector<std::string>& entryNames,
-    const std::string& cacheDir)
+    const std::string& cacheDir,
+    const std::shared_ptr<const NQdb::TExternalCatalogSnapshot>& externalCatalog)
 {
     auto opts = NQdb::KernelRunnerOptions();
     opts.NativeCode = false;
@@ -597,7 +604,24 @@ std::expected<TCompiledWasm64Module, std::string> CompileKernelAstToWasm64(
     std::vector<std::string> objectBlobs;
 
     std::string err;
-    if (cacheDir.empty()) {
+    std::optional<NQumir::NFrontend::TComposeResult> externalProgram;
+    if (externalCatalog) {
+        auto composed = externalCatalog->ComposeReferenced(
+            ast, "wasm64-unknown-unknown", cacheDir);
+        if (!composed) {
+            return std::unexpected(composed.error().ToString());
+        }
+        externalProgram = std::move(*composed);
+    }
+    if (externalProgram) {
+        auto object = NQdb::CompileKernelAstToObject(
+            runner, std::move(*externalProgram), entryNames, &err);
+        if (!object) {
+            return std::unexpected(
+                err.empty() ? "wasm kernel compilation failed" : err);
+        }
+        objectBlobs.push_back(std::move(*object));
+    } else if (cacheDir.empty()) {
         auto object = NQdb::CompileKernelAstToObject(
             runner, std::move(ast), entryNames, &err);
         if (!object) {
@@ -998,16 +1022,52 @@ std::expected<TExportRequest, std::string> ParseRequest(std::string_view text) {
     }
 }
 
-std::expected<NQdb::TOperatorPtr, NQumir::TError> ParseSql(
+std::expected<TParsedSql, NQumir::TError> ParseSql(
     std::string_view sql,
     TCatalog& catalog)
 {
     std::istringstream in{std::string(sql)};
     NQdb::NSql::TTokenStream tokens(in);
     NQdb::NSql::TParser parser;
-    auto parsed = parser.Parse(tokens);
-    if (!parsed) {
-        return std::unexpected(parsed.error());
+    auto statements = parser.ParseAll(tokens);
+    if (!statements) {
+        return std::unexpected(statements.error());
+    }
+
+    NQdb::TExternalModuleCatalog externalCatalog;
+    NQdb::NSql::TSqlNodePtr query;
+    bool hasExternalDefinitions = false;
+    for (const auto& statement : *statements) {
+        if (query) {
+            const bool isDefinition =
+                NQdb::NSql::TMaybeNode<NQdb::NSql::TSqlExternalModule>(statement) ||
+                NQdb::NSql::TMaybeNode<NQdb::NSql::TSqlExternalFunction>(statement);
+            return std::unexpected(NQumir::TError(
+                isDefinition
+                    ? "plan export requires CREATE definitions before the query"
+                    : "plan export supports only a single query statement"));
+        }
+        if (auto module = NQdb::NSql::TMaybeNode<NQdb::NSql::TSqlExternalModule>(statement)) {
+            auto applied = externalCatalog.Apply(*module.Cast());
+            if (!applied) {
+                return std::unexpected(applied.error());
+            }
+            hasExternalDefinitions = true;
+        } else if (auto function =
+                NQdb::NSql::TMaybeNode<NQdb::NSql::TSqlExternalFunction>(statement))
+        {
+            auto applied = externalCatalog.Apply(*function.Cast());
+            if (!applied) {
+                return std::unexpected(applied.error());
+            }
+            hasExternalDefinitions = true;
+        } else {
+            query = statement;
+        }
+    }
+    if (!query) {
+        return std::unexpected(NQumir::TError(
+            "plan export requires a query after CREATE definitions"));
     }
 
     NQdb::TTableSourceFactory sources = [&](std::string_view table)
@@ -1021,7 +1081,16 @@ std::expected<NQdb::TOperatorPtr, NQumir::TError> ParseSql(
         return std::make_shared<NQdb::TSourceOperator>(*it->second, std::string(table));
     };
 
-    return NQdb::BuildPlan(*parsed, sources);
+    auto plan = NQdb::BuildPlan(query, sources);
+    if (!plan) {
+        return std::unexpected(plan.error());
+    }
+    return TParsedSql{
+        .Plan = std::move(*plan),
+        .ExternalCatalog = hasExternalDefinitions
+            ? externalCatalog.Snapshot()
+            : nullptr,
+    };
 }
 
 std::string LogicalPlanTreeText(const NQdb::TOperatorPtr& plan) {
@@ -1635,7 +1704,8 @@ TWasmFinalizeResult WasmFinalizeKernels(
     TArtifactStore& artifacts,
     llvm::json::Array& diagnostics,
     bool embedWasm,
-    const std::string& cacheDir)
+    const std::string& cacheDir,
+    const std::shared_ptr<const NQdb::TExternalCatalogSnapshot>& externalCatalog)
 {
     TWasmFinalizeResult out;
     out.Kernels.reserve(kernels.size());
@@ -1683,7 +1753,7 @@ TWasmFinalizeResult WasmFinalizeKernels(
 
     auto fused = NQdb::BuildFusedProgram(unique);
     auto wasm = CompileKernelAstToWasm64(
-        fused.Program, WasmSlot0, fused.Entrypoints, cacheDir);
+        fused.Program, WasmSlot0, fused.Entrypoints, cacheDir, externalCatalog);
     if (!wasm) {
         diagnostics.push_back(llvm::json::Object{
             {"stage", "wasm-fusion"},
@@ -2623,23 +2693,28 @@ llvm::json::Object BuildBundle(
     if (!plan) {
         return ErrorObject("parse", plan.error().ToString());
     }
+    auto externalCatalog = std::move(plan->ExternalCatalog);
+    auto logicalPlan = std::move(plan->Plan);
 
     NQdb::TPlanPassDiagnostics planDiagnostics;
     try {
-        NQdb::ApplyPlanPasses(*plan, {.Diagnostics = &planDiagnostics});
+        NQdb::ApplyPlanPasses(logicalPlan, {
+            .Diagnostics = &planDiagnostics,
+            .Annotation = {.ExternalCatalog = externalCatalog},
+        });
     } catch (const std::exception& e) {
         return ErrorObject("logical", e.what());
     }
 
     std::ostringstream runtimeText;
     try {
-        NQdb::PrintRuntimePlan(runtimeText, *plan);
+        NQdb::PrintRuntimePlan(runtimeText, logicalPlan);
     } catch (const std::exception& e) {
         runtimeText << "<unprintable runtime plan: " << e.what() << ">\n";
     }
 
     TArtifactStore artifacts;
-    auto logicalGraph = LogicalGraphJson(*plan, artifacts);
+    auto logicalGraph = LogicalGraphJson(logicalPlan, artifacts);
     llvm::json::Object legacyGraph = EmptyGraphJson();
     llvm::json::Object physicalGraph = EmptyGraphJson();
     llvm::json::Array diagnostics;
@@ -2652,9 +2727,10 @@ llvm::json::Object BuildBundle(
         std::ostringstream lowerDiagnostics;
         // One lowering; kernels arrive as ASTs on lowered.Kernels.
         auto lowered = NQdb::NScheduler::LowerPlanToGraph(
-            *plan,
+            logicalPlan,
             request.Scheduler,
-            &lowerDiagnostics);
+            &lowerDiagnostics,
+            externalCatalog);
 
         // Core owns graph contraction, ordered inputs, output propagation, and
         // stage/kernel binding. The exporter only encodes the returned plan.
@@ -2676,7 +2752,8 @@ llvm::json::Object BuildBundle(
             artifacts,
             diagnostics,
             request.EmbedWasm,
-            cacheDir);
+            cacheDir,
+            externalCatalog);
         loweredKernels = std::move(lowered.Kernels);
 
         schedulerText << lowerDiagnostics.str();
@@ -2726,8 +2803,8 @@ llvm::json::Object BuildBundle(
             {"planner", PlanPassDiagnosticsJson(planDiagnostics)},
             {"exec", std::move(execPlan)},
             {"plans", llvm::json::Object{
-                {"logicalText", LogicalPlanTreeText(*plan)},
-                {"logicalAstText", LogicalPlanAstText(*plan)},
+                {"logicalText", LogicalPlanTreeText(logicalPlan)},
+                {"logicalAstText", LogicalPlanAstText(logicalPlan)},
                 {"physicalText", runtimeText.str() + schedulerText.str()},
             }},
             {"graph", std::move(legacyGraph)},

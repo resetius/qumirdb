@@ -72,6 +72,12 @@ std::optional<std::string> CompileKernelAstToObject(
     const std::vector<std::string>& entryNames,
     std::string* error);
 
+std::optional<std::string> CompileKernelAstToObject(
+    NQumir::TLLVMRunner& runner,
+    NQumir::NFrontend::TComposeResult composed,
+    const std::vector<std::string>& entryNames,
+    std::string* error);
+
 // Cache-backed object compilation for external linkers. Cacheable dependencies
 // are returned as existing paths or fresh blobs; KernelObject is always rebuilt.
 std::optional<NQumir::TLLVMRunner::TCachedObjectModule>
