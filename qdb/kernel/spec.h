@@ -13,6 +13,7 @@
 #include <vector>
 
 namespace NQdb {
+class TExternalCatalogSnapshot;
 namespace NKernel {
 
 enum class EOperatorKernelKind {
@@ -78,18 +79,21 @@ std::string_view KernelKindName(EOperatorKernelKind kind);
 TOperatorKernelSpec BuildFilterKernelSpec(
     const NQumir::NAst::TStructType& inputType,
     const NQumir::NAst::TExprPtr& predicate,
-    std::string entrypointName = "<kernel>");
+    std::string entrypointName = "<kernel>",
+    const TExternalCatalogSnapshot* externalCatalog = nullptr);
 
 TOperatorKernelSpec BuildProjectKernelSpec(
     const NQumir::NAst::TStructType& inputType,
     const std::vector<NQumir::NAst::TExprPtr>& computedExprs,
     const std::vector<NQumir::NAst::TTypePtr>& computedTypes,
-    std::string entrypointName = "<project>");
+    std::string entrypointName = "<project>",
+    const TExternalCatalogSnapshot* externalCatalog = nullptr);
 
 TOperatorKernelSpec BuildAggregateKernelSpec(
     const NQumir::NAst::TStructType& inputType,
     const std::vector<std::string>& groupKeys,
-    const std::vector<TAggregateSpec>& aggs);
+    const std::vector<TAggregateSpec>& aggs,
+    const TExternalCatalogSnapshot* externalCatalog = nullptr);
 
 TOperatorKernelSpec BuildSortKernelSpec(
     const NQumir::NAst::TStructType& inputType,

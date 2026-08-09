@@ -2143,5 +2143,27 @@ std::expected<TSqlNodePtr, NQumir::TError> TParser::Parse(TTokenStream& stream)
     return TSqlNodePtr(result.value());
 }
 
+std::expected<std::vector<TSqlNodePtr>, NQumir::TError> TParser::ParseAll(
+    TTokenStream& stream)
+{
+    TWrappedTokenStream wrappedStream(stream, /*windowSize = */ 10);
+    TParserContext context(wrappedStream);
+    std::vector<TSqlNodePtr> statements;
+    while (true) {
+        auto token = context.Stream.Next();
+        if (IsEof(token)) {
+            break;
+        }
+        context.Stream.Unget(token);
+        auto task = statement(context);
+        auto result = task.result();
+        if (!result) {
+            return std::unexpected(result.error());
+        }
+        statements.emplace_back(result.value());
+    }
+    return statements;
+}
+
 } // namespace NSql
 } // namespace NQdb

@@ -70,9 +70,11 @@ public:
 
 inline std::unique_ptr<TTestRuntime> RunPlan(
     const TOperatorPtr& root,
-    NScheduler::TSettings settings = {})
+    NScheduler::TSettings settings = {},
+    std::shared_ptr<const TExternalCatalogSnapshot> externalCatalog = nullptr)
 {
-    auto lowered = NScheduler::LowerPlanToGraph(root, settings, nullptr);
+    auto lowered = NScheduler::LowerPlanToGraph(
+        root, settings, nullptr, std::move(externalCatalog));
     auto outputType = lowered.OutputType;
 
     NTestDetail::TCollectingSink sink;

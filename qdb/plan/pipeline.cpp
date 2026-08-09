@@ -18,7 +18,7 @@ namespace NQdb {
 
 namespace {
 
-void OptimizeOne(TOperatorPtr& plan, TPlanPassOptions options) {
+void OptimizeOne(TOperatorPtr& plan, TPlanPassOptions& options) {
     // QDB_DUMP_PASSES=1 dumps the plan after each pass to stderr (debugging).
     const bool dump = std::getenv("QDB_DUMP_PASSES") != nullptr;
     auto stage = [&](const char* name) {
@@ -31,28 +31,28 @@ void OptimizeOne(TOperatorPtr& plan, TPlanPassOptions options) {
 
     AssignSourceAliases(plan); stage("AssignSourceAliases");
     QualifyColumns(plan); stage("QualifyColumns");
-    AnnotateTypes(plan);
+    AnnotateTypes(plan, options.Annotation);
     if (options.EnableCbo) {
         plan = FlattenInnerJoins(plan); stage("FlattenInnerJoins");
-        AnnotateTypes(plan); // re-annotate: inner-join regions were reassociated
+        AnnotateTypes(plan, options.Annotation); // re-annotate: inner-join regions were reassociated
     }
     plan = PushDownPredicates(plan); stage("PushDownPredicates");
-    AnnotateTypes(plan); // re-annotate: pushdown moved filters onto leaves
+    AnnotateTypes(plan, options.Annotation); // re-annotate: pushdown moved filters onto leaves
     EstimateStats(plan); // leaf cardinalities for cost-based ReorderJoins
     plan = ReorderJoins(
         plan,
         options.EnableCbo,
         options.Diagnostics ? &options.Diagnostics->JoinReorder : nullptr);
     stage("ReorderJoins");
-    AnnotateTypes(plan); // re-annotate: reordering rebuilt the join tree
+    AnnotateTypes(plan, options.Annotation); // re-annotate: reordering rebuilt the join tree
     plan = ExtractEquiJoins(plan); stage("ExtractEquiJoins");
-    AnnotateTypes(plan); // re-annotate: equi-join extraction adds/removes nodes
+    AnnotateTypes(plan, options.Annotation); // re-annotate: equi-join extraction adds/removes nodes
     plan = PushDownSemiJoins(plan); stage("PushDownSemiJoins");
-    AnnotateTypes(plan); // re-annotate: semi pushdown restructured joins
+    AnnotateTypes(plan, options.Annotation); // re-annotate: semi pushdown restructured joins
     plan = ApplyTopSort(plan);
-    AnnotateTypes(plan); // re-annotate: top-sort replaces limit(sort(...))
+    AnnotateTypes(plan, options.Annotation); // re-annotate: top-sort replaces limit(sort(...))
     CoerceSetOpBranches(plan); stage("CoerceSetOpBranches");
-    AnnotateTypes(plan); // re-annotate: coercion added cast projections on union branches
+    AnnotateTypes(plan, options.Annotation); // re-annotate: coercion added cast projections on union branches
     ApplyColumnPruning(plan); stage("ApplyColumnPruning");
 
     EstimateStats(plan);
@@ -66,7 +66,7 @@ void ApplyPlanPasses(TOperatorPtr& plan, TPlanPassOptions options) {
         def->OutputType = def->Plan->OutputColumns();
     }
     OptimizeOne(plan, options);
-    PushConsumerPredicatesIntoDefinitions(plan);
+    PushConsumerPredicatesIntoDefinitions(plan, options.Annotation);
     auto usage = PropagateCteDemands(plan);
     // PropagateCteDemands narrowed definition schemas; refresh their cost
     // (dependency-first, so nested definitions are estimated before their users)

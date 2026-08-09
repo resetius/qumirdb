@@ -380,11 +380,13 @@ public:
         NScheduler::TTaskGraph& graph,
         NScheduler::TSettings settings,
         std::ostream* diagnostics,
-        std::vector<TGeneratedKernel>* kernelSink)
+        std::vector<TGeneratedKernel>* kernelSink,
+        std::shared_ptr<const TExternalCatalogSnapshot> externalCatalog)
         : Graph_(graph)
         , Settings_(std::move(settings))
         , Diagnostics_(diagnostics)
         , KernelSink_(kernelSink)
+        , ExternalCatalog_(std::move(externalCatalog))
     {}
 
     // Kernel options for one stage: generation only (deferred finalization),
@@ -399,6 +401,7 @@ public:
             .ExecStageId = execStageId,
             .Sink = KernelSink_,
             .BindNow = false,
+            .ExternalCatalog = ExternalCatalog_,
         };
     }
 
@@ -1194,7 +1197,8 @@ private:
             extKeys.push_back(key);
         }
 
-        auto spec = NKernel::BuildAggregateKernelSpec(*extInput, extKeys, aggregate.Aggs());
+        auto spec = NKernel::BuildAggregateKernelSpec(
+            *extInput, extKeys, aggregate.Aggs(), ExternalCatalog_.get());
         TKernelCompiler compiler(
             KernelOptions(std::move(stage), execStageId));
         auto kernels = std::make_shared<TAggregateKernels>(compiler.CompileAggregate(spec));
@@ -1248,7 +1252,7 @@ private:
                 childType, *inputType, aggregate, std::move(stage), execStageId);
         }
         auto spec = NKernel::BuildAggregateKernelSpec(
-            *inputType, aggregate.GroupKeys(), aggregate.Aggs());
+            *inputType, aggregate.GroupKeys(), aggregate.Aggs(), ExternalCatalog_.get());
         TKernelCompiler compiler(
             KernelOptions(std::move(stage), execStageId));
         auto kernels = std::make_shared<TAggregateKernels>(
@@ -2342,6 +2346,7 @@ private:
     NScheduler::TSettings Settings_;
     std::ostream* Diagnostics_;
     std::vector<TGeneratedKernel>* KernelSink_ = nullptr;
+    std::shared_ptr<const TExternalCatalogSnapshot> ExternalCatalog_;
     std::unordered_map<const TCteMaterialization*, TMaterializedProducer> Materialized_;
     std::vector<TLoweredExecStage> ExecStages_;
     NScheduler::TTaskGroupId LastTaskGroupId_ =
@@ -2408,11 +2413,13 @@ void PrintCounterDiagnostics(
 TLoweredPlan LowerPlanToGraph(
     const TOperatorPtr& root,
     TSettings settings,
-    std::ostream* diagnostics)
+    std::ostream* diagnostics,
+    std::shared_ptr<const TExternalCatalogSnapshot> externalCatalog)
 {
     auto graph = std::make_unique<TTaskGraph>();
     std::vector<TGeneratedKernel> kernels;
-    TSchedulerGraphLowerer lowerer(*graph, settings, diagnostics, &kernels);
+    TSchedulerGraphLowerer lowerer(
+        *graph, settings, diagnostics, &kernels, externalCatalog);
     const size_t lanes = lowerer.OutputLanes(root);
     if (lanes == 0) {
         throw std::runtime_error(
@@ -2442,6 +2449,7 @@ TLoweredPlan LowerPlanToGraph(
         .Producers = std::move(out.Producers),
         .Lanes = lanes,
         .Kernels = std::move(kernels),
+        .ExternalCatalog = std::move(externalCatalog),
         .ExecStages = std::move(lowerer.ExecStages()),
     };
 }
@@ -2455,7 +2463,8 @@ bool RunPlanIntoSink(
 {
     // Bind every kernel generated during lowering before any task can execute
     // (no-op for kernels the caller already finalized).
-    JitFinalizeKernels(lowered.Kernels, diagnostics);
+    JitFinalizeKernels(
+        lowered.Kernels, diagnostics, lowered.ExternalCatalog);
 
     // Aliasing shared_ptr: the sink task's state points at the caller-owned
     // sink without taking ownership of it.

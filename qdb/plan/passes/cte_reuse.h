@@ -9,6 +9,10 @@
 
 namespace NQdb {
 
+namespace NKernel {
+struct TAnnotationContext;
+}
+
 enum class ECteReuseMode {
     Inline,
     Materialize,
@@ -26,7 +30,9 @@ using TCteReuseDecisions = std::unordered_map<TCteDefinition*, TCteReuseDecision
 // correct for every reference. Pushed only when every reference constrains the
 // column; delegates the descent (branch pruning, const-folding) to
 // PushDownPredicates. Run after main+definition optimization, before ChooseCteReuse.
-void PushConsumerPredicatesIntoDefinitions(const TOperatorPtr& main);
+void PushConsumerPredicatesIntoDefinitions(
+    const TOperatorPtr& main,
+    const NKernel::TAnnotationContext& context);
 
 // >=2 references -> Materialize, else Inline.
 TCteReuseDecisions ChooseCteReuse(const TCteUsageMap& usage);

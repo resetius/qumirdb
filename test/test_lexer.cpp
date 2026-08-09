@@ -247,6 +247,25 @@ TEST(SqlParser, CreateExternalFunctionWithScalarReturn) {
         external.Cast()->Func->RetType));
 }
 
+TEST(SqlParser, ParseAllExternalModuleFunctionAndQuery) {
+    std::istringstream in(
+        "CREATE MODULE orbital LANGUAGE rust AS $$\n"
+        "#[no_mangle]\n"
+        "pub extern \"C\" fn distance(x: f64) -> f64 { x + 1.0; x }\n"
+        "$$;\n"
+        "CREATE FUNCTION distance(DOUBLE) RETURNS DOUBLE "
+        "SET MODULE TO orbital SET SYMBOL TO distance;\n"
+        "SELECT distance(x) FROM points;");
+    TTokenStream tokens(in);
+    TParser parser;
+    auto parsed = parser.ParseAll(tokens);
+    ASSERT_TRUE(parsed) << parsed.error().ToString();
+    ASSERT_EQ(parsed->size(), 3u);
+    EXPECT_TRUE(NQdb::NSql::TMaybeNode<TSqlExternalModule>((*parsed)[0]));
+    EXPECT_TRUE(NQdb::NSql::TMaybeNode<TSqlExternalFunction>((*parsed)[1]));
+    EXPECT_TRUE(NQdb::NSql::TMaybeNode<TSqlQuery>((*parsed)[2]));
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

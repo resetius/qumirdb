@@ -45,10 +45,12 @@ std::string_view KernelKindName(EOperatorKernelKind kind) {
 TOperatorKernelSpec BuildFilterKernelSpec(
     const NQumir::NAst::TStructType& inputType,
     const NQumir::NAst::TExprPtr& predicate,
-    std::string entrypointName)
+    std::string entrypointName,
+    const TExternalCatalogSnapshot* externalCatalog)
 {
     // Make NULL propagation explicit right before compilation (never in logical planning).
-    auto expanded = NKernel::ExpandKernelExpr(predicate, inputType).first;
+    auto expanded = NKernel::ExpandKernelExpr(
+        predicate, inputType, externalCatalog).first;
     const auto refs = FindUnboundVars(expanded);
 
     std::vector<TKernelColumnRef> referenced;
@@ -81,7 +83,8 @@ TOperatorKernelSpec BuildProjectKernelSpec(
     const NQumir::NAst::TStructType& inputType,
     const std::vector<NQumir::NAst::TExprPtr>& computedExprs,
     const std::vector<NQumir::NAst::TTypePtr>& computedTypes,
-    std::string entrypointName)
+    std::string entrypointName,
+    const TExternalCatalogSnapshot* externalCatalog)
 {
     std::vector<std::pair<std::string, NQumir::NAst::TTypePtr>> outputFields;
     outputFields.reserve(computedTypes.size());
@@ -92,7 +95,8 @@ TOperatorKernelSpec BuildProjectKernelSpec(
     std::vector<NQumir::NAst::TExprPtr> expanded;
     expanded.reserve(computedExprs.size());
     for (const auto& expr : computedExprs) {
-        expanded.push_back(NKernel::ExpandKernelExpr(expr, inputType).first);
+        expanded.push_back(NKernel::ExpandKernelExpr(
+            expr, inputType, externalCatalog).first);
     }
 
     std::unordered_set<std::string> refs;
@@ -130,7 +134,8 @@ TOperatorKernelSpec BuildProjectKernelSpec(
 TOperatorKernelSpec BuildAggregateKernelSpec(
     const NQumir::NAst::TStructType& inputType,
     const std::vector<std::string>& groupKeys,
-    const std::vector<TAggregateSpec>& aggs)
+    const std::vector<TAggregateSpec>& aggs,
+    const TExternalCatalogSnapshot* externalCatalog)
 {
     auto columnRef = [&](const std::string& name) -> TKernelColumnRef {
         for (int32_t i = 0; i < static_cast<int32_t>(inputType.Fields.size()); ++i) {
@@ -152,7 +157,9 @@ TOperatorKernelSpec BuildAggregateKernelSpec(
     aggregateSpecs.reserve(aggs.size());
     for (const auto& agg : aggs) {
         // Expand NULL propagation in the argument expression before compilation.
-        auto argExpr = agg.Arg ? NKernel::ExpandKernelExpr(agg.Arg, inputType).first : agg.Arg;
+        auto argExpr = agg.Arg
+            ? NKernel::ExpandKernelExpr(agg.Arg, inputType, externalCatalog).first
+            : agg.Arg;
         TKernelAggregateSpec spec{
             .Name = agg.Name,
             .Func = agg.Func,

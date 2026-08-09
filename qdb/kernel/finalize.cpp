@@ -1,10 +1,12 @@
 #include <qdb/kernel/finalize.h>
 
+#include <qdb/catalog/external_module.h>
 #include <qdb/kernel/compiler.h>
 #include <qdb/kernel/finalize_fused.h>
 
 #include <cstdlib>
 #include <memory>
+#include <optional>
 #include <ostream>
 #include <stdexcept>
 #include <string>
@@ -26,7 +28,8 @@ struct TFusedKernelStorage {
 
 void JitFinalizeKernels(
     std::span<TGeneratedKernel> kernels,
-    std::ostream* diagnostics)
+    std::ostream* diagnostics,
+    std::shared_ptr<const TExternalCatalogSnapshot> externalCatalog)
 {
     const char* cacheDirEnv = std::getenv("QDB_JIT_CACHE_DIR");
     const std::string cacheDir = (cacheDirEnv && *cacheDirEnv) ? cacheDirEnv : "";
@@ -88,7 +91,21 @@ void JitFinalizeKernels(
     std::string error;
     std::unordered_map<std::string, void*> fns;
     std::shared_ptr<void> jitLifetime;
-    if (!cacheDir.empty()) {
+    std::optional<NQumir::NFrontend::TComposeResult> externalProgram;
+    if (externalCatalog) {
+        auto composed = externalCatalog->ComposeReferenced(storage->Program);
+        if (!composed) {
+            throw std::runtime_error(composed.error().ToString());
+        }
+        externalProgram = std::move(*composed);
+    }
+    if (externalProgram) {
+        if (diagnostics && !cacheDir.empty()) {
+            *diagnostics << "[external-modules] persistent JIT cache bypassed\n";
+        }
+        fns = CompileKernelAst(
+            *runner, std::move(*externalProgram), fused.Entrypoints, &error);
+    } else if (!cacheDir.empty()) {
         auto linked = CompileKernelAstCached(
             *runner, storage->Program, fused.Entrypoints, cacheDir, &error);
         fns = std::move(linked.Entries);
