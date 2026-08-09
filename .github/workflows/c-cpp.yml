@@ -42,7 +42,11 @@ jobs:
           -DCMAKE_C_COMPILER=gcc-14
     - name: Build
       run: cmake --build build
+    - name: Install Rust LLVM 20 toolchain
+      run: rustup toolchain install 1.90.0 --profile minimal --component rust-src
     - name: Test
+      env:
+        RUSTUP_TOOLCHAIN: 1.90.0
       run: cmake --build build --target test
     - name: Test log on failure
       if: failure()
