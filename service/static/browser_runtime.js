@@ -1348,6 +1348,9 @@ function createQdbEnv(getMemory, holder) {
 
   return {
     sqrt: Math.sqrt,
+    sin: Math.sin,
+    cos: Math.cos,
+    fmod: (left, right) => left % right,
 
     // malloc family over the query's shared linear memory (segregated
     // free-list; free reclaims). qdb_realloc is not imported: it is implemented

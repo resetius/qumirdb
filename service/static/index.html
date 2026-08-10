@@ -21,7 +21,6 @@
         </div>
       </div>
       <div class="toolbar">
-        <button id="share-button" type="button" class="secondary action-button" title="Copy shared link"><i data-lucide="share-2"></i><span>Share</span></button>
         <button id="run-button" type="button" class="secondary action-button"><i data-lucide="play"></i><span>Run</span></button>
         <button id="explain-button" type="button" class="primary action-button"><i data-lucide="route"></i><span>Explain</span></button>
       </div>
@@ -32,6 +31,7 @@
           <progress id="run-progress" class="run-progress" max="1" value="0" hidden></progress>
           <span id="status" class="status">idle</span>
         </span>
+        <button id="share-button" class="icon-button" type="button" title="Copy shared link" aria-label="Copy shared link"><i data-lucide="share-2"></i></button>
         <a id="source-download" class="icon-button" href="/api/source.zip" title="Download sources (zip)" aria-label="Download sources" download hidden><i data-lucide="download"></i></a>
         <button id="datasets-toggle" class="icon-button" type="button" title="Datasets" aria-label="Datasets"><i data-lucide="database"></i></button>
       </div>
