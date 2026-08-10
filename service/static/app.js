@@ -372,7 +372,8 @@ function findDatasetForHint(hint) {
 }
 
 async function loadSharedFromQuery() {
-  const shareId = new URLSearchParams(window.location.search).get('share')?.trim();
+  const params = new URLSearchParams(window.location.search);
+  const shareId = (params.get('s') || params.get('share'))?.trim();
   if (!shareId) {
     return;
   }
@@ -415,6 +416,7 @@ async function loadSharedFromQuery() {
   setSql(query.sql || '');
 
   const url = new URL(window.location.href);
+  url.searchParams.delete('s');
   url.searchParams.delete('share');
   window.history.replaceState(
     window.history.state,

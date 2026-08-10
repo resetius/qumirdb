@@ -361,7 +361,8 @@ std::string UrlDecode(std::string_view value) {
 }
 
 constexpr size_t MaxSharePayloadSize = 1024 * 1024;
-constexpr size_t SharedIdLength = 24;
+constexpr size_t SharedIdLength = 12;
+constexpr size_t LegacySharedIdLength = 24;
 
 TFuture<std::optional<std::string>> ReadBodyLimited(
     TRequest& request,
@@ -398,10 +399,39 @@ std::string Utf8Prefix(llvm::StringRef value, size_t maxBytes) {
     return std::string(value.take_front(size));
 }
 
+std::string SharedId(std::string_view data) {
+    const std::string hex = NQdb::NUtils::Sha1Hex(data);
+    unsigned char digest[9];
+    for (size_t i = 0; i < std::size(digest); ++i) {
+        digest[i] = static_cast<unsigned char>(
+            (HexValue(hex[i * 2]) << 4) | HexValue(hex[i * 2 + 1]));
+    }
+
+    static constexpr char Base64Url[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    std::string id;
+    id.reserve(SharedIdLength);
+    for (size_t i = 0; i < std::size(digest); i += 3) {
+        id += Base64Url[digest[i] >> 2];
+        id += Base64Url[((digest[i] & 0x03) << 4) | (digest[i + 1] >> 4)];
+        id += Base64Url[((digest[i + 1] & 0x0f) << 2) | (digest[i + 2] >> 6)];
+        id += Base64Url[digest[i + 2] & 0x3f];
+    }
+    return id;
+}
+
 bool IsValidSharedId(std::string_view id) {
-    return id.size() == SharedIdLength && std::ranges::all_of(id, [](char ch) {
-        return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f');
-    });
+    if (id.size() == SharedIdLength) {
+        return std::ranges::all_of(id, [](char ch) {
+            return (ch >= '0' && ch <= '9') ||
+                (ch >= 'A' && ch <= 'Z') ||
+                (ch >= 'a' && ch <= 'z') || ch == '-' || ch == '_';
+        });
+    }
+    return id.size() == LegacySharedIdLength &&
+        std::ranges::all_of(id, [](char ch) {
+            return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f');
+        });
 }
 
 } // namespace
@@ -593,8 +623,7 @@ private:
         }
 
         const std::string storedJson = ToJsonString(std::move(stored));
-        const std::string id =
-            NQdb::NUtils::Sha1Hex(storedJson).substr(0, SharedIdLength);
+        const std::string id = SharedId(storedJson);
         std::error_code ec;
         std::filesystem::create_directories(SharedLinksBase_, ec);
         if (ec) {
@@ -618,7 +647,7 @@ private:
         co_await SendJson(response, ToJsonString(llvm::json::Object{
             {"ok", true},
             {"id", id},
-            {"url", "/?share=" + id},
+            {"url", "/?s=" + id},
         }));
     }
 
