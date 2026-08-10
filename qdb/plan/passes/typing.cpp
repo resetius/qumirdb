@@ -171,14 +171,25 @@ void AnnotateTypes(
                     throw NQumir::TError(spec.Expression->Location,
                         "nullable struct-return projections are not supported");
                 }
+                if (structType && spec.RejectUnaliasedStructForDistinct) {
+                    throw NQumir::TError(spec.Expression->Location,
+                        "SELECT DISTINCT over a struct-return projection requires AS (...)");
+                }
+                auto nextColName = [&] {
+                    return "col" + std::to_string(outFields.size());
+                };
                 if (!structType) {
+                    if (!spec.ColumnAliases.empty()) {
+                        throw NQumir::TError(spec.Expression->Location,
+                            "a column alias list requires a struct-return projection");
+                    }
                     if (spec.ImplicitName) {
-                        spec.Name = "col" + std::to_string(outFields.size());
+                        spec.Name = nextColName();
                     }
                     outFields.emplace_back(spec.Name, fieldType);
                     continue;
                 }
-                if (!spec.ImplicitName) {
+                if (spec.ColumnAliases.empty() && !spec.ImplicitName) {
                     throw NQumir::TError(spec.Expression->Location,
                         "a struct-return projection cannot use a scalar alias");
                 }
@@ -186,11 +197,20 @@ void AnnotateTypes(
                 // Scalar expressions keep their original AST type metadata
                 // (notably planner-only DECIMAL casts).
                 spec.Expression->Type = fieldType;
-                spec.Name = "col" + std::to_string(outFields.size());
                 const auto structure = structType.Cast();
-                for (const auto& [_, type] : structure->Fields) {
+                const auto& aliases = spec.ColumnAliases;
+                if (!aliases.empty() && aliases.size() != structure->Fields.size()) {
+                    throw NQumir::TError(spec.Expression->Location,
+                        "struct-return projection has "
+                        + std::to_string(structure->Fields.size())
+                        + " fields but " + std::to_string(aliases.size())
+                        + " column aliases were specified");
+                }
+                spec.Name = aliases.empty() ? nextColName() : aliases.front();
+                for (size_t i = 0; i < structure->Fields.size(); ++i) {
                     outFields.emplace_back(
-                        "col" + std::to_string(outFields.size()), type);
+                        aliases.empty() ? nextColName() : aliases[i],
+                        structure->Fields[i].second);
                 }
             }
         }

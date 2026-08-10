@@ -73,9 +73,12 @@ struct TSqlOrder : TSqlNode {
 struct TSqlSelectItem : TSqlNode {
     NQumir::NAst::TExprPtr Expr;
     std::optional<std::string> Alias;
+    // PostgreSQL-style aliases for fields flattened from a struct expression:
+    // `SELECT expression AS (x, y, z)`.
+    std::vector<std::string> ColumnAliases;
 
-    // For "*" and "<qualified_name>.*". When Star is set, Expr/Alias are unused
-    // and StarPrefix holds the optional qualifier (empty for a bare "*").
+    // For "*" and "<qualified_name>.*". When Star is set, Expr and aliases are
+    // unused; StarPrefix holds the optional qualifier (empty for a bare "*").
     bool Star = false;
     std::vector<std::string> StarPrefix;
 };

@@ -14,10 +14,16 @@ namespace NQdb {
 struct TProjectionSpec {
     std::string Name;
     NQumir::NAst::TExprPtr Expression; // parsed, unannotated
+    // Explicit names from `AS (x, y, z)`. Empty for scalar aliases and for the
+    // default colN naming of a flattened struct projection.
+    std::vector<std::string> ColumnAliases;
     // True for an unnamed SQL expression (`SELECT a + b`). Type annotation may
     // shift its synthetic colN name when an earlier projection expands a struct.
     // For a struct expression, Name anchors the group at its first flattened column.
     bool ImplicitName = false;
+    // SELECT DISTINCT is built before struct arity is known. Reject an unaliased
+    // struct during typing instead of silently deduplicating only its first field.
+    bool RejectUnaliasedStructForDistinct = false;
 };
 
 // Number of output columns occupied after flattening a struct-valued projection.

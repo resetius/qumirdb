@@ -149,8 +149,9 @@ TEST(ExternalModuleCatalog, RustFunctionRunsThroughSqlPlan) {
         "SET MODULE TO orbital SET SYMBOL TO orbit_distance;"
         "CREATE FUNCTION orbit_vector(DOUBLE) RETURNS (DOUBLE, DOUBLE, DOUBLE) "
         "SET MODULE TO orbital SET SYMBOL TO orbit_vector;"
-        "SELECT orbit_distance(x, 2) AS distance, orbit_vector(x), x + 0.0 "
-        "FROM points ORDER BY x + 0.0 DESC;");
+        "SELECT orbit_distance(x, 2) AS distance, "
+        "orbit_vector(x) AS (vector_x, vector_y, vector_z), x + 0.0 "
+        "FROM points ORDER BY x + 0.0 DESC, vector_y;");
     ApplyDefinitions(catalog, {statements[0], statements[1], statements[2]});
 
     NQumir::TLocation location{};
@@ -195,13 +196,15 @@ TEST(ExternalModuleCatalog, RustFunctionRunsThroughSqlPlan) {
 
     auto sort = TMaybeOp<TSortOperator>(*plan);
     ASSERT_TRUE(sort);
-    ASSERT_EQ(sort.Cast()->Keys().size(), 1);
+    ASSERT_EQ(sort.Cast()->Keys().size(), 2);
     EXPECT_EQ(sort.Cast()->Keys()[0].Column, "col2");
+    EXPECT_EQ(sort.Cast()->Keys()[1].Column, "vector_y");
 
     auto snapshot = catalog.Snapshot();
     NKernel::TAnnotationContext annotation{.ExternalCatalog = snapshot};
     AnnotateTypes(*plan, annotation);
     EXPECT_EQ(sort.Cast()->Keys()[0].Column, "col4");
+    EXPECT_EQ(sort.Cast()->Keys()[1].Column, "vector_y");
     ASSERT_TRUE(annotation.Resolver);
     auto resolvedWithCoercion = snapshot->ResolveReturnType(
         "orbit_distance",
@@ -223,9 +226,9 @@ TEST(ExternalModuleCatalog, RustFunctionRunsThroughSqlPlan) {
     ASSERT_TRUE(outputType);
     ASSERT_EQ(outputType->Fields.size(), 5);
     EXPECT_EQ(outputType->Fields[0].first, "distance");
-    EXPECT_EQ(outputType->Fields[1].first, "col1");
-    EXPECT_EQ(outputType->Fields[2].first, "col2");
-    EXPECT_EQ(outputType->Fields[3].first, "col3");
+    EXPECT_EQ(outputType->Fields[1].first, "vector_x");
+    EXPECT_EQ(outputType->Fields[2].first, "vector_y");
+    EXPECT_EQ(outputType->Fields[3].first, "vector_z");
     EXPECT_EQ(outputType->Fields[4].first, "col4");
     auto runtime = RunPlan(*plan, {}, snapshot);
 
@@ -278,6 +281,117 @@ TEST(ExternalModuleCatalog, NullableStructProjectionFailsDuringTyping) {
     } catch (const NQumir::TError& error) {
         EXPECT_NE(error.ToString().find(
             "nullable struct-return projections are not supported"),
+            std::string::npos);
+    }
+}
+
+TEST(ExternalModuleCatalog, StructProjectionAliasCountFailsDuringTyping) {
+    TExternalModuleCatalog catalog;
+    auto statements = ParseAll(
+        "CREATE MODULE orbital LANGUAGE rust AS $$$$;"
+        "CREATE FUNCTION orbit_vector(DOUBLE) RETURNS (DOUBLE, DOUBLE, DOUBLE) "
+        "SET MODULE TO orbital;"
+        "SELECT orbit_vector(x) AS (vector_x, vector_y) FROM points;");
+    ApplyDefinitions(catalog, {statements[0], statements[1]});
+
+    TMockSource source(
+        TMockColumns{},
+        {{"x", std::make_shared<TFloatType>()}});
+    auto plan = BuildPlan(statements[2], [&](std::string_view table)
+        -> std::expected<TOperatorPtr, NQumir::TError>
+    {
+        if (table != "points") {
+            return std::unexpected(NQumir::TError("unknown test table"));
+        }
+        return std::make_shared<TSourceOperator>(source, std::string(table));
+    });
+    ASSERT_TRUE(plan) << plan.error().ToString();
+
+    try {
+        AnnotateTypes(*plan, {
+            .ExternalCatalog = catalog.Snapshot(),
+        });
+        FAIL() << "expected struct projection alias count mismatch";
+    } catch (const NQumir::TError& error) {
+        EXPECT_NE(error.ToString().find(
+            "3 fields but 2 column aliases were specified"),
+            std::string::npos);
+    }
+}
+
+TEST(ExternalModuleCatalog, DistinctStructProjectionRequiresColumnAliases) {
+    TExternalModuleCatalog catalog;
+    auto statements = ParseAll(
+        "CREATE MODULE orbital LANGUAGE rust AS $$$$;"
+        "CREATE FUNCTION orbit_vector(DOUBLE) RETURNS (DOUBLE, DOUBLE, DOUBLE) "
+        "SET MODULE TO orbital;"
+        "SELECT DISTINCT orbit_vector(x) FROM points;"
+        "SELECT DISTINCT orbit_vector(x) AS (vector_x, vector_y, vector_z) "
+        "FROM points;");
+    ApplyDefinitions(catalog, {statements[0], statements[1]});
+
+    TMockSource source(
+        TMockColumns{},
+        {{"x", std::make_shared<TFloatType>()}});
+    auto build = [&](const TSqlNodePtr& statement) {
+        return BuildPlan(statement, [&](std::string_view table)
+            -> std::expected<TOperatorPtr, NQumir::TError>
+        {
+            if (table != "points") {
+                return std::unexpected(NQumir::TError("unknown test table"));
+            }
+            return std::make_shared<TSourceOperator>(source, std::string(table));
+        });
+    };
+
+    auto unaliased = build(statements[2]);
+    ASSERT_TRUE(unaliased) << unaliased.error().ToString();
+    try {
+        AnnotateTypes(*unaliased, {
+            .ExternalCatalog = catalog.Snapshot(),
+        });
+        FAIL() << "expected DISTINCT struct projection without aliases to fail";
+    } catch (const NQumir::TError& error) {
+        EXPECT_NE(error.ToString().find(
+            "SELECT DISTINCT over a struct-return projection requires AS (...)"),
+            std::string::npos);
+    }
+
+    auto aliased = build(statements[3]);
+    ASSERT_TRUE(aliased) << aliased.error().ToString();
+    AnnotateTypes(*aliased, {
+        .ExternalCatalog = catalog.Snapshot(),
+    });
+    auto* output = static_cast<TStructType*>((*aliased)->OutputColumns().get());
+    ASSERT_TRUE(output);
+    ASSERT_EQ(output->Fields.size(), 3u);
+    EXPECT_EQ(output->Fields[0].first, "vector_x");
+    EXPECT_EQ(output->Fields[1].first, "vector_y");
+    EXPECT_EQ(output->Fields[2].first, "vector_z");
+}
+
+TEST(ExternalModuleCatalog, ScalarProjectionRejectsColumnAliasList) {
+    auto statements = ParseAll(
+        "SELECT x + 1.0 AS (value) FROM points;");
+    TMockSource source(
+        TMockColumns{},
+        {{"x", std::make_shared<TFloatType>()}});
+    auto plan = BuildPlan(statements[0], [&](std::string_view table)
+        -> std::expected<TOperatorPtr, NQumir::TError>
+    {
+        if (table != "points") {
+            return std::unexpected(NQumir::TError("unknown test table"));
+        }
+        return std::make_shared<TSourceOperator>(source, std::string(table));
+    });
+    ASSERT_TRUE(plan) << plan.error().ToString();
+
+    try {
+        AnnotateTypes(*plan);
+        FAIL() << "expected scalar projection to reject a column alias list";
+    } catch (const NQumir::TError& error) {
+        EXPECT_NE(error.ToString().find(
+            "a column alias list requires a struct-return projection"),
             std::string::npos);
     }
 }

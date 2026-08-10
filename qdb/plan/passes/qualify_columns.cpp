@@ -241,7 +241,13 @@ std::shared_ptr<TStructType> QualifyColumnsImpl(const TOperatorPtr& op) {
         // Output schema is user-defined names; types will be filled by AnnotateTypes.
         std::vector<std::pair<std::string, TTypePtr>> outFields;
         for (const auto& spec : proj->Projections()) {
-            outFields.emplace_back(spec.Name, nullptr);
+            if (spec.ColumnAliases.empty()) {
+                outFields.emplace_back(spec.Name, nullptr);
+            } else {
+                for (const auto& name : spec.ColumnAliases) {
+                    outFields.emplace_back(name, nullptr);
+                }
+            }
         }
         return std::make_shared<TStructType>(std::move(outFields));
     }

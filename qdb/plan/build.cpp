@@ -756,6 +756,9 @@ private:
 };
 
 std::string ItemName(const NSql::TSqlSelectItem& item, size_t index) {
+    if (!item.ColumnAliases.empty()) {
+        return item.ColumnAliases.front();
+    }
     if (item.Alias) {
         return *item.Alias;
     }
@@ -1966,6 +1969,7 @@ std::expected<TOperatorPtr, TError> BuildSelect(
     auto inputSchemaType = node->OutputColumns();
     auto inputSchema = NAst::TMaybeType<NAst::TStructType>(inputSchemaType);
     TAggCollector collector(inputSchema ? inputSchema.Cast().get() : nullptr);
+    const bool distinct = select.Quantifier == NSql::ESetQuantifier::Distinct;
     std::vector<TProjectionSpec> projections;
     for (size_t i = 0; i < select.SelectList->Items.size(); ++i) {
         const auto& item = select.SelectList->Items[i];
@@ -1996,18 +2000,23 @@ std::expected<TOperatorPtr, TError> BuildSelect(
         projections.push_back({
             .Name = std::move(name),
             .Expression = std::move(*expr),
-            .ImplicitName = !item->Alias
+            .ColumnAliases = item->ColumnAliases,
+            .ImplicitName = !item->Alias && item->ColumnAliases.empty()
                 && !NAst::TMaybeNode<NAst::TIdentExpr>(item->Expr),
+            .RejectUnaliasedStructForDistinct =
+                distinct && item->ColumnAliases.empty(),
         });
     }
 
     std::vector<std::string> outputNames;
-    outputNames.reserve(projections.size());
     for (const auto& p : projections) {
-        outputNames.push_back(p.Name);
+        if (p.ColumnAliases.empty()) {
+            outputNames.push_back(p.Name);
+        } else {
+            outputNames.insert(
+                outputNames.end(), p.ColumnAliases.begin(), p.ColumnAliases.end());
+        }
     }
-    const bool distinct = select.Quantifier == NSql::ESetQuantifier::Distinct;
-
     // A scalar subquery in HAVING is left intact by the aggregate collector
     // (it is opaque) and decorrelated below, once the aggregate node exists.
     NAst::TExprPtr having;
@@ -2327,7 +2336,7 @@ std::expected<TOperatorPtr, TError> ApplyOrderBy(
             if (!items[i]->Star && !HasWindowExpr(items[i]->Expr)) {
                 auto name = ItemName(*items[i], i);
                 std::optional<size_t> projectionIndex;
-                if (!items[i]->Alias
+                if (!items[i]->Alias && items[i]->ColumnAliases.empty()
                     && !NAst::TMaybeNode<NAst::TIdentExpr>(items[i]->Expr)
                     && topProject)
                 {

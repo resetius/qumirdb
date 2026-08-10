@@ -40,7 +40,13 @@ TProjectOperator::TProjectOperator(TOperatorPtr input, std::vector<TProjectionSp
                     if (name == ident.Cast()->Name) { fieldType = type; break; }
                 }
             }
-            outFields.emplace_back(proj.Name, fieldType);
+            if (proj.ColumnAliases.empty()) {
+                outFields.emplace_back(proj.Name, fieldType);
+            } else {
+                for (const auto& name : proj.ColumnAliases) {
+                    outFields.emplace_back(name, nullptr);
+                }
+            }
         }
     }
     // ParamTypes[0] = full input schema initially; narrowed by column push-down.

@@ -99,7 +99,7 @@
     | <select_item> { "," <select_item> }
 
 <select_item> ::=
-      <expr> [ [ "AS" ] <ident> ]
+      <expr> [ [ "AS" ] <ident> | "AS" "(" <ident> { "," <ident> } ")" ]
     | <qualified_name> "." "*"
 
 <from_clause> ::=
@@ -922,7 +922,9 @@ TAstTask<TSqlSelectList> select_list(TParserContext& ctx) {
     co_return list;
 }
 
-// <select_item> ::= <expr> [ [ "AS" ] <ident> ] | <qualified_name> "." "*"
+// <select_item> ::=
+//     <expr> [ [ "AS" ] <ident> | "AS" "(" <ident> { "," <ident> } ")" ]
+//   | <qualified_name> "." "*"
 TAstTask<TSqlSelectItem> select_item(TParserContext& ctx) {
     auto item = std::make_shared<TSqlSelectItem>();
 
@@ -976,7 +978,34 @@ TAstTask<TSqlSelectItem> select_item(TParserContext& ctx) {
     }
 
     item->Expr = co_await expr(ctx);
-    item->Alias = co_await opt_alias(ctx);
+    auto alias = ctx.Stream.Next();
+    if (IsKeyword(alias, "AS")) {
+        auto next = ctx.Stream.Next();
+        if (IsOp(next, '(')) {
+            next = ctx.Stream.Next();
+            if (IsOp(next, ')')) {
+                co_return Error(next, "column alias list cannot be empty");
+            }
+            ctx.Stream.Unget(next);
+            while (true) {
+                item->ColumnAliases.push_back(co_await ident(ctx));
+                next = ctx.Stream.Next();
+                if (IsOp(next, ')')) {
+                    break;
+                }
+                if (!IsOp(next, ',')) {
+                    co_return Error(next, "`,' or `)' expected in column alias list");
+                }
+            }
+        } else {
+            ctx.Stream.Unget(next);
+            item->Alias = co_await ident(ctx);
+        }
+    } else if (alias.Type == TToken::Identifier) {
+        item->Alias = std::move(alias.Name);
+    } else {
+        ctx.Stream.Unget(alias);
+    }
     co_return item;
 }
 

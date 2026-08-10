@@ -345,6 +345,8 @@ struct TSqlPrinter {
                 std::string head = "(item";
                 if (item->Alias) {
                     head += " as " + *item->Alias;
+                } else if (!item->ColumnAliases.empty()) {
+                    head += " as (" + Join(item->ColumnAliases, ',') + ")";
                 }
                 Line(ind + 2, head);
                 Expr(ind + 4, item->Expr);
