@@ -58,6 +58,7 @@ let resultMeta = null;
 let inspectorSummaryText = '';
 let inspectorArtifactItems = [];
 let toastTimer = 0;
+let pendingSharedDatasetHint = null;
 
 // Execution queue: at most one job runs at a time. `runningJob` is the current
 // one; `runQueue` holds pending jobs in order. A job is bound to the query +
@@ -69,7 +70,7 @@ let jobSeq = 0;
 let browserExplainPrefetchActive = 0;
 let browserExecWorker = null;
 
-window.addEventListener('DOMContentLoaded', () => {
+window.addEventListener('DOMContentLoaded', async () => {
   window.lucide?.createIcons();
   initEditor();
   initDrawers();
@@ -77,8 +78,9 @@ window.addEventListener('DOMContentLoaded', () => {
   initGraphControls();
   initDiagnosticCopy();
   initQueries();
-  initDatasets();
+  await initDatasets();
   initActions();
+  await loadSharedFromQuery();
   initSourceDownload();
 });
 
@@ -280,6 +282,168 @@ async function copyText(text) {
   textarea.select();
   document.execCommand('copy');
   textarea.remove();
+}
+
+function datasetHintForShare(dataset) {
+  if (!dataset) {
+    return null;
+  }
+  const origin = dataset.source?.downloadedFrom;
+  return {
+    id: origin?.id || dataset.id,
+    name: origin?.name || dataset.name
+  };
+}
+
+async function shareCurrentQuery() {
+  if (!activeQueryId) {
+    showDetails({ ok: false, error: { message: 'Select a query to share.' } });
+    selectTab('details');
+    return;
+  }
+  saveActiveQuerySql();
+  const query = loadQueries().find(item => item.id === activeQueryId);
+  const payload = {
+    sql: getSql(),
+    name: query?.name || 'Shared query'
+  };
+  const dataset = datasetHintForShare(activeDataset());
+  if (dataset) {
+    payload.dataset = dataset;
+  }
+
+  let result;
+  try {
+    result = await postJson('/api/share', payload);
+  } catch (error) {
+    result = {
+      ok: false,
+      error: { stage: 'share', message: error.message || String(error) }
+    };
+  }
+  if (result.ok === false || !result.url) {
+    showDetails(result.ok === false ? result : {
+      ok: false,
+      error: { stage: 'share', message: 'Server returned no shared URL.' }
+    });
+    selectTab('details');
+    return;
+  }
+  const url = new URL(result.url, window.location.href).href;
+  try {
+    await copyText(url);
+    showToast('Shared link copied');
+  } catch (error) {
+    showDetails({
+      ok: true,
+      shareUrl: url,
+      warning: error.message || String(error)
+    });
+    selectTab('details');
+  }
+}
+
+function findDatasetForHint(hint) {
+  if (!hint) {
+    return null;
+  }
+  const datasets = allDatasets();
+  if (hint.id) {
+    const exact = datasets.find(dataset => dataset.id === hint.id);
+    if (exact && (!hint.name || exact.name === hint.name)) {
+      return exact;
+    }
+    const downloaded = browserDatasets.find(dataset =>
+      dataset.source?.downloadedFrom?.id === hint.id &&
+      (!hint.name || dataset.source.downloadedFrom.name === hint.name));
+    if (downloaded) {
+      return downloaded;
+    }
+  }
+  if (hint.name) {
+    const hintedKind = hint.id?.startsWith('local:')
+      ? 'local'
+      : hint.id?.startsWith('server:') ? 'server' : '';
+    return datasets.find(dataset =>
+      dataset.name === hint.name &&
+      (!hintedKind || dataset.source?.kind === hintedKind)) || null;
+  }
+  return null;
+}
+
+async function loadSharedFromQuery() {
+  const shareId = new URLSearchParams(window.location.search).get('share')?.trim();
+  if (!shareId) {
+    return;
+  }
+  let shared;
+  try {
+    shared = await getJson(`/api/share?id=${encodeURIComponent(shareId)}`);
+  } catch (error) {
+    shared = {
+      ok: false,
+      error: { stage: 'share', message: error.message || String(error) }
+    };
+  }
+  if (shared.ok === false || typeof shared.sql !== 'string') {
+    showDetails(shared.ok === false ? shared : {
+      ok: false,
+      error: { stage: 'share', message: 'Shared query has no SQL text.' }
+    });
+    selectTab('details');
+    return;
+  }
+
+  saveActiveQuerySql();
+  await saveWorkspaceState();
+  const queryId = `shared-${shareId}`;
+  const queries = loadQueries();
+  const index = queries.findIndex(item => item.id === queryId);
+  let query = queries[index];
+  if (index < 0) {
+    query = {
+      id: queryId,
+      name: shared.name || `Shared ${shareId}`,
+      folderId: DEFAULT_QUERY_FOLDER_ID,
+      sql: shared.sql
+    };
+    queries.unshift(query);
+  }
+  saveQueries(queries);
+  rememberActiveQuery(queryId);
+  expandQueryFolder(query.folderId);
+  setSql(query.sql || '');
+
+  const url = new URL(window.location.href);
+  url.searchParams.delete('share');
+  window.history.replaceState(
+    window.history.state,
+    '',
+    `${url.pathname}${url.search}${url.hash}`);
+
+  pendingSharedDatasetHint = null;
+  if (shared.dataset) {
+    let dataset = findDatasetForHint(shared.dataset);
+    if (dataset?.source?.kind === 'local') {
+      dataset = downloadedBrowserDatasetFor(dataset) || dataset;
+    }
+    if (dataset) {
+      activeDatasetId = dataset.id;
+      localStorage.setItem(ACTIVE_DATASET_KEY, activeDatasetId);
+    } else {
+      activeDatasetId = '';
+      localStorage.removeItem(ACTIVE_DATASET_KEY);
+      pendingSharedDatasetHint = shared.dataset;
+    }
+  }
+
+  setStatus('idle');
+  renderQueries();
+  renderDatasets();
+  await restoreWorkspaceState();
+  showToast(pendingSharedDatasetHint
+    ? 'Shared query loaded; its dataset is unavailable'
+    : 'Shared query loaded');
 }
 
 function initQueries() {
@@ -875,6 +1039,7 @@ function ensureActiveDataset() {
 }
 
 function switchActiveDataset(datasetId) {
+  pendingSharedDatasetHint = null;
   if (datasetId === activeDatasetId) {
     return;
   }
@@ -934,7 +1099,7 @@ async function downloadLocalDataset(dataset) {
   if (source.kind !== 'local' || !files.length) {
     showDetails({ ok: false, error: { message: 'No downloadable parquet files.' } });
     selectTab('details');
-    return;
+    return null;
   }
 
   const existing = downloadedBrowserDatasetFor(dataset);
@@ -987,7 +1152,7 @@ async function downloadLocalDataset(dataset) {
         sourceFile: file.name
       };
     });
-    await addStoredFilesToBrowserDataset(target, storedFiles, tables);
+    const storedDataset = await addStoredFilesToBrowserDataset(target, storedFiles, tables);
     browserDatasets = await loadBrowserDatasets();
     const updated = browserDatasets.find(item =>
       item.source?.downloadedFrom?.id === dataset.id) ||
@@ -996,6 +1161,7 @@ async function downloadLocalDataset(dataset) {
     renderDatasets();
     setStatus('dataset ready');
     setRunProgress(null);
+    return updated || storedDataset;
   } catch (error) {
     setStatus('download failed');
     setRunProgress(null);
@@ -1007,6 +1173,7 @@ async function downloadLocalDataset(dataset) {
       }
     });
     selectTab('details');
+    return null;
   }
 }
 
@@ -1065,6 +1232,69 @@ async function parallelMapLimit(items, limit, fn) {
 
 function downloadedBrowserDatasetFor(dataset) {
   return browserDatasets.find(item => item.source?.downloadedFrom?.id === dataset.id) || null;
+}
+
+function showDatasetDownloadDialog(dataset) {
+  const dialog = $('#dataset-download-dialog');
+  const files = dataset.source?.files || [];
+  if (!dialog || typeof dialog.showModal !== 'function') {
+    return Promise.resolve(window.confirm(
+      `Download ${dataset.name} to this browser and continue?`));
+  }
+  if (dialog.open) {
+    return Promise.resolve(false);
+  }
+  const totalBytes = files.reduce(
+    (sum, file) => sum + Math.max(Number(file.size || 0), 0), 0);
+  $('#dataset-download-message').textContent =
+    `This query uses “${dataset.name}”. Download it to this browser before continuing.`;
+  $('#dataset-download-size').textContent = `${files.length} file${files.length === 1 ? '' : 's'}` +
+    (totalBytes ? ` · ${formatBytes(totalBytes)}` : '');
+  dialog.returnValue = 'cancel';
+  return new Promise(resolve => {
+    dialog.addEventListener('close', () => {
+      resolve(dialog.returnValue === 'download');
+    }, { once: true });
+    dialog.showModal();
+  });
+}
+
+async function ensureRunnableDataset(dataset) {
+  if (pendingSharedDatasetHint) {
+    dataset = findDatasetForHint(pendingSharedDatasetHint);
+    if (!dataset) {
+      const name = pendingSharedDatasetHint.name || pendingSharedDatasetHint.id || 'unknown';
+      showDetails({
+        ok: false,
+        error: {
+          stage: 'dataset',
+          message: `Dataset “${name}” from the shared link is unavailable.`
+        }
+      });
+      selectTab('details');
+      return null;
+    }
+    pendingSharedDatasetHint = null;
+  }
+  if (!dataset) {
+    showDetails({ ok: false, error: { message: 'Select a dataset first.' } });
+    selectTab('details');
+    return null;
+  }
+  if (dataset.source?.kind !== 'local') {
+    return dataset;
+  }
+
+  const downloaded = downloadedBrowserDatasetFor(dataset);
+  if (downloaded) {
+    switchActiveDataset(downloaded.id);
+    renderDatasets();
+    return downloaded;
+  }
+  if (!await showDatasetDownloadDialog(dataset)) {
+    return null;
+  }
+  return await downloadLocalDataset(dataset);
 }
 
 async function deleteDownloadedLocalDataset(dataset) {
@@ -1333,12 +1563,14 @@ async function removeBrowserDatasetFile(dataset, fileName) {
 }
 
 function initActions() {
-  $('#run-button').addEventListener('click', () => {
+  $('#share-button').addEventListener('click', shareCurrentQuery);
+
+  $('#run-button').addEventListener('click', async () => {
     if (activeFolderId && !activeQueryId) {
-      enqueueFolderRun(activeFolderId, activeDataset());
+      await enqueueFolderRun(activeFolderId, activeDataset());
       return;
     }
-    enqueueRun(getSql(), activeDataset());
+    await enqueueRun(getSql(), activeDataset());
   });
 
   $('#explain-button').addEventListener('click', async () => {
@@ -1347,7 +1579,13 @@ function initActions() {
       selectTab('details');
       return;
     }
-    await explainCurrent(getSql(), activeDataset(), true);
+    const queryId = activeQueryId;
+    const sql = getSql();
+    const dataset = await ensureRunnableDataset(activeDataset());
+    if (!dataset) {
+      return;
+    }
+    await explainCurrent(sql, dataset, true, undefined, queryId, dataset.id);
   });
 
   window.addEventListener('resize', () => {
@@ -1376,23 +1614,26 @@ function queryRunState(queryId) {
 //    (restart);
 //  - running a query that is already queued is ignored (no duplicates);
 //  - otherwise it joins the queue; the in-flight run keeps going.
-function enqueueRun(sql, dataset) {
-  if (!activeQueryId) {
+async function enqueueRun(sql, dataset) {
+  const queryId = activeQueryId;
+  if (!queryId) {
     showDetails({ ok: false, error: { message: 'Select a query first.' } });
     selectTab('details');
     return;
   }
-  if (!validateRunnableDataset(dataset)) {
+  dataset = await ensureRunnableDataset(dataset);
+  if (!dataset) {
     return;
   }
 
-  enqueueQueryRun(activeQueryId, sql, dataset, { restartRunning: true });
+  enqueueQueryRun(queryId, sql, dataset, { restartRunning: true });
   renderQueries();
   pumpQueue();
 }
 
-function enqueueFolderRun(folderId, dataset) {
-  if (!validateRunnableDataset(dataset)) {
+async function enqueueFolderRun(folderId, dataset) {
+  dataset = await ensureRunnableDataset(dataset);
+  if (!dataset) {
     return;
   }
   const queries = queriesInFolder(folderId);
@@ -1413,25 +1654,6 @@ function enqueueFolderRun(folderId, dataset) {
   showToast(enqueued
     ? `${enqueued} queries queued`
     : 'Folder is already queued');
-}
-
-function validateRunnableDataset(dataset) {
-  if (!dataset) {
-    showDetails({ ok: false, error: { message: 'Select a dataset first.' } });
-    selectTab('details');
-    return false;
-  }
-  if (dataset.source?.kind === 'local') {
-    showDetails({
-      ok: false,
-      error: {
-        message: 'Download this dataset to OPFS before running it in the browser.'
-      }
-    });
-    selectTab('details');
-    return false;
-  }
-  return true;
 }
 
 function enqueueQueryRun(queryId, sql, dataset, options = {}) {
@@ -2613,6 +2835,18 @@ function updateRunProgress(progress) {
 
 function formatNumber(value) {
   return Number(value || 0).toLocaleString('en-US');
+}
+
+function formatBytes(value) {
+  let bytes = Math.max(Number(value) || 0, 0);
+  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+  let unit = 0;
+  while (bytes >= 1024 && unit + 1 < units.length) {
+    bytes /= 1024;
+    ++unit;
+  }
+  const digits = unit === 0 || bytes >= 100 ? 0 : bytes >= 10 ? 1 : 2;
+  return `${bytes.toFixed(digits)} ${units[unit]}`;
 }
 
 function formatDuration(ms) {

@@ -6,6 +6,7 @@
 #include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
 #include <qdb/plan/stats_codec.h>
+#include <qdb/utils/sha1.h>
 
 #include <qumir/parser/core/printer.h>
 
@@ -43,6 +44,7 @@ struct TOptions {
     std::string BinaryDir = QDB_BUILD_BIN_DIR;
     std::string SourceDir = QDB_SOURCE_ROOT_DIR;
     std::string CacheDir;
+    std::string SharedLinksDir = "shared";
     std::vector<std::string> DataDirs;
     std::vector<std::string> LocalDataDirs;
 };
@@ -358,6 +360,50 @@ std::string UrlDecode(std::string_view value) {
     return out;
 }
 
+constexpr size_t MaxSharePayloadSize = 1024 * 1024;
+constexpr size_t SharedIdLength = 24;
+
+TFuture<std::optional<std::string>> ReadBodyLimited(
+    TRequest& request,
+    size_t limit)
+{
+    std::string body;
+    char buffer[4096];
+    for (;;) {
+        const ssize_t read = co_await request.ReadBodySome(buffer, sizeof(buffer));
+        if (read < 0) {
+            continue;
+        }
+        if (read == 0) {
+            co_return body;
+        }
+        const size_t size = static_cast<size_t>(read);
+        if (size > limit - body.size()) {
+            co_return std::nullopt;
+        }
+        body.append(buffer, size);
+    }
+}
+
+std::string Utf8Prefix(llvm::StringRef value, size_t maxBytes) {
+    if (value.size() <= maxBytes) {
+        return std::string(value);
+    }
+    size_t size = maxBytes;
+    while (size > 0 &&
+           (static_cast<unsigned char>(value[size]) & 0xc0) == 0x80)
+    {
+        --size;
+    }
+    return std::string(value.take_front(size));
+}
+
+bool IsValidSharedId(std::string_view id) {
+    return id.size() == SharedIdLength && std::ranges::all_of(id, [](char ch) {
+        return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f');
+    });
+}
+
 } // namespace
 
 class TRouter final : public IRouter {
@@ -377,6 +423,11 @@ public:
         SourceBase_ = std::filesystem::weakly_canonical(Options_.SourceDir, ec);
         if (ec || SourceBase_.empty()) {
             SourceBase_ = std::filesystem::path(Options_.SourceDir).lexically_normal();
+        }
+        SharedLinksBase_ = std::filesystem::absolute(Options_.SharedLinksDir, ec);
+        if (ec || SharedLinksBase_.empty()) {
+            SharedLinksBase_ =
+                std::filesystem::path(Options_.SharedLinksDir).lexically_normal();
         }
         std::error_code srcEc;
         SourceAvailable_ =
@@ -426,6 +477,10 @@ private:
             co_await SendJson(response, ServerDatasetsJson());
             co_return;
         }
+        if (path == "/api/share") {
+            co_await ServeShare(request, response);
+            co_return;
+        }
         if (path == "/api/source.zip") {
             co_await ServeSourceZip(response);
             co_return;
@@ -451,6 +506,10 @@ private:
             co_await Cancel(request, response);
             co_return;
         }
+        if (path == "/api/share") {
+            co_await CreateShare(request, response);
+            co_return;
+        }
         response.SetStatus(404);
         co_await SendText(response, "Not Found", "text/plain; charset=utf-8");
     }
@@ -459,6 +518,108 @@ private:
         const auto& params = request.Uri().QueryParameters();
         auto it = params.find(name);
         return it == params.end() ? std::string() : it->second;
+    }
+
+    std::filesystem::path SharedPath(std::string_view id) const {
+        return SharedLinksBase_ / (std::string(id) + ".json");
+    }
+
+    TFuture<void> ServeShare(const TRequest& request, TResponse& response) {
+        const auto id = QueryParam(request, "id");
+        if (!IsValidSharedId(id)) {
+            co_await SendJson(response,
+                ToJsonString(ErrorJson("share", "invalid or missing share id")), 400);
+            co_return;
+        }
+        const auto path = SharedPath(id);
+        std::error_code ec;
+        if (!std::filesystem::is_regular_file(path, ec)) {
+            co_await SendJson(response,
+                ToJsonString(ErrorJson("share", "shared query not found")), 404);
+            co_return;
+        }
+        std::ifstream input(path, std::ios::binary);
+        std::string json(
+            (std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+        if (!input.good() && !input.eof()) {
+            co_await SendJson(response,
+                ToJsonString(ErrorJson("share", "failed to read shared query")), 500);
+            co_return;
+        }
+        co_await SendJson(response, json);
+    }
+
+    TFuture<void> CreateShare(TRequest& request, TResponse& response) {
+        auto limitedBody = co_await ReadBodyLimited(request, MaxSharePayloadSize);
+        if (!limitedBody) {
+            response.SetHeader("Connection", "close");
+            co_await SendJson(response,
+                ToJsonString(ErrorJson("share", "share payload exceeds 1 MiB")), 413);
+            co_return;
+        }
+        std::string& body = *limitedBody;
+        auto parsed = llvm::json::parse(body);
+        if (!parsed) {
+            co_await SendJson(response,
+                ToJsonString(ErrorJson("share", llvm::toString(parsed.takeError()))), 400);
+            co_return;
+        }
+        const auto* root = parsed->getAsObject();
+        auto sql = root ? root->getString("sql") : std::optional<llvm::StringRef>{};
+        if (!root || !sql || sql->trim().empty()) {
+            co_await SendJson(response,
+                ToJsonString(ErrorJson("share", "share requires non-empty sql")), 400);
+            co_return;
+        }
+
+        llvm::json::Object stored{
+            {"version", 1},
+            {"sql", std::string(*sql)},
+        };
+        if (auto name = root->getString("name"); name && !name->trim().empty()) {
+            stored["name"] = Utf8Prefix(*name, 256);
+        }
+        if (const auto* dataset = root->getObject("dataset")) {
+            llvm::json::Object hint;
+            if (auto id = dataset->getString("id")) {
+                hint["id"] = Utf8Prefix(*id, 256);
+            }
+            if (auto name = dataset->getString("name")) {
+                hint["name"] = Utf8Prefix(*name, 256);
+            }
+            if (!hint.empty()) {
+                stored["dataset"] = std::move(hint);
+            }
+        }
+
+        const std::string storedJson = ToJsonString(std::move(stored));
+        const std::string id =
+            NQdb::NUtils::Sha1Hex(storedJson).substr(0, SharedIdLength);
+        std::error_code ec;
+        std::filesystem::create_directories(SharedLinksBase_, ec);
+        if (ec) {
+            co_await SendJson(response,
+                ToJsonString(ErrorJson("share", "failed to create shared-links directory")),
+                500);
+            co_return;
+        }
+        const auto path = SharedPath(id);
+        if (!std::filesystem::exists(path, ec)) {
+            std::ofstream output(path, std::ios::binary | std::ios::trunc);
+            output << storedJson;
+            output.close();
+            if (!output) {
+                co_await SendJson(response,
+                    ToJsonString(ErrorJson("share", "failed to store shared query")), 500);
+                co_return;
+            }
+        }
+
+        co_await SendJson(response, ToJsonString(llvm::json::Object{
+            {"ok", true},
+            {"id", id},
+            {"url", "/?share=" + id},
+        }));
     }
 
     // Kills the child process of an in-flight run/explain identified by runId.
@@ -1071,6 +1232,7 @@ private:
     std::filesystem::path StaticBase_;
     std::filesystem::path BinaryBase_;
     std::filesystem::path SourceBase_;
+    std::filesystem::path SharedLinksBase_;
     bool SourceAvailable_ = false;
     std::vector<TServerDataset> ServerDatasets_;
     std::unordered_map<std::string, int> ActiveRuns_;
@@ -1092,6 +1254,8 @@ int main(int argc, char** argv) {
             options.SourceDir = argv[++i];
         } else if (!std::strcmp(argv[i], "--cache") && i + 1 < argc) {
             options.CacheDir = argv[++i];
+        } else if (!std::strcmp(argv[i], "--shared-links-dir") && i + 1 < argc) {
+            options.SharedLinksDir = argv[++i];
         } else if (!std::strcmp(argv[i], "--data") && i + 1 < argc) {
             options.DataDirs.push_back(argv[++i]);
         } else if (!std::strcmp(argv[i], "--local-data") && i + 1 < argc) {
@@ -1100,6 +1264,7 @@ int main(int argc, char** argv) {
             std::cout << "Usage: " << argv[0]
                       << " [--port n] [--static-dir dir] [--binary-dir dir]"
                       << " [--source-dir dir] [--cache dir]"
+                      << " [--shared-links-dir dir]"
                       << " [--data 'dir [alias]' ...] [--local-data 'dir [alias]' ...]\n";
             return 0;
         }

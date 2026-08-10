@@ -21,6 +21,7 @@
         </div>
       </div>
       <div class="toolbar">
+        <button id="share-button" type="button" class="secondary action-button" title="Copy shared link"><i data-lucide="share-2"></i><span>Share</span></button>
         <button id="run-button" type="button" class="secondary action-button"><i data-lucide="play"></i><span>Run</span></button>
         <button id="explain-button" type="button" class="primary action-button"><i data-lucide="route"></i><span>Explain</span></button>
       </div>
@@ -158,6 +159,17 @@ limit 100;
       </section>
     </main>
   </div>
+  <dialog id="dataset-download-dialog" class="download-dialog">
+    <form method="dialog">
+      <h2>Download dataset?</h2>
+      <p id="dataset-download-message"></p>
+      <p id="dataset-download-size" class="download-dialog-meta"></p>
+      <div class="download-dialog-actions">
+        <button type="submit" value="cancel" class="secondary">Cancel</button>
+        <button type="submit" value="download" class="primary">Download and continue</button>
+      </div>
+    </form>
+  </dialog>
   <div id="toast" class="toast" hidden></div>
 
   <script defer src="https://unpkg.com/codemirror@5/lib/codemirror.js"></script>
