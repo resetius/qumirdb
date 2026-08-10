@@ -61,7 +61,7 @@ TEST(ExternalModuleCatalog, CreateIsLazyAndReplaceKeepsFunctions) {
     auto first = ParseAll(
         "CREATE MODULE orbital LANGUAGE rust AS $$not valid rust$$;"
         "CREATE FUNCTION distance(DOUBLE) RETURNS DOUBLE "
-        "SET MODULE TO orbital SET SYMBOL TO distance;");
+        "SET MODULE TO orbital;");
     ApplyDefinitions(catalog, first);
 
     auto replacement = ParseAll(

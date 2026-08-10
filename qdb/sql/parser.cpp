@@ -38,9 +38,10 @@
       <type_name>
     | "(" <type_name> { "," <type_name> } ")"
 
-// Exactly one MODULE and one SYMBOL option are required, in either order.
+// MODULE is required. SYMBOL is optional and defaults to the SQL function name.
+// When both are present, either order is accepted.
 <external_function_options> ::=
-      <set_module_clause> <set_symbol_clause>
+      <set_module_clause> [ <set_symbol_clause> ]
     | <set_symbol_clause> <set_module_clause>
 
 <set_module_clause> ::=
@@ -735,10 +736,11 @@ TAstTask<TSqlExternalFunction> create_function_stmt(TParserContext& ctx) {
 
     std::optional<std::string> moduleName;
     std::optional<std::string> symbol;
-    for (int i = 0; i < 2; ++i) {
+    while (true) {
         token = ctx.Stream.Next();
         if (!IsWord(token, "SET")) {
-            co_return Error(token, "`SET MODULE' and `SET SYMBOL' required");
+            ctx.Stream.Unget(token);
+            break;
         }
         auto option = ctx.Stream.Next();
         auto separator = ctx.Stream.Next();
@@ -753,6 +755,12 @@ TAstTask<TSqlExternalFunction> create_function_stmt(TParserContext& ctx) {
         } else {
             co_return Error(option, "duplicate or unknown external function option");
         }
+    }
+    if (!moduleName) {
+        co_return Error(token, "`SET MODULE' required");
+    }
+    if (!symbol) {
+        symbol = name;
     }
 
     auto body = std::make_shared<TBlockExpr>(location, std::vector<TExprPtr>{});

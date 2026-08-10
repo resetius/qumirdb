@@ -230,7 +230,7 @@ TEST(SqlParser, CreateOrReplaceExternalFunction) {
 TEST(SqlParser, CreateExternalFunctionWithScalarReturn) {
     std::istringstream in(
         "CREATE FUNCTION orbit_distance(DOUBLE) RETURNS DOUBLE "
-        "SET MODULE = orbital SET SYMBOL TO orbit_distance;");
+        "SET MODULE = orbital;");
     TTokenStream tokens(in);
     TParser parser;
     auto parsed = parser.Parse(tokens);

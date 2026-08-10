@@ -404,9 +404,10 @@ struct TSqlExternalFunction : TSqlNode {
         [t] DOUBLE
     )
     RETURNS (DOUBLE, DOUBLE, DOUBLE) // RETURNS DOUBLE also possible for single return value
-    // 2 configuration options must be set for external functions:
+    // MODULE is required for external functions:
     SET MODULE TO orbital // SET MODULE = orbital also possible
-    SET SYMBOL TO orbit_position // SET SYMBOL = orbit_position also possible
+    // SYMBOL is optional and defaults to the SQL function name:
+    [ SET SYMBOL TO orbit_position ] // SET SYMBOL = orbit_position also possible
     ;
     */
     static constexpr const char* NodeId = "ExternalFunction";
