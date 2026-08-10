@@ -269,12 +269,16 @@ async function runExternalModuleBatchContract() {
   const request = {
     sql: `
 CREATE MODULE orbital LANGUAGE rust AS $$
+#[repr(C)]
+pub struct OrbitResult { pub root: f64, pub square: f64, pub positive: bool }
 #[no_mangle]
-pub extern "C" fn orbit_root(a: f64) -> f64 { a.sqrt() }
+pub extern "C" fn orbit_result(a: f64) -> OrbitResult {
+  OrbitResult { root: a.sqrt(), square: a, positive: a > 0.0 }
+}
 $$;
-CREATE FUNCTION orbit_root(a DOUBLE) RETURNS DOUBLE
-SET MODULE TO orbital SET SYMBOL TO orbit_root;
-SELECT orbit_root(a) AS value FROM t;
+CREATE FUNCTION orbit_result(a DOUBLE) RETURNS (DOUBLE, DOUBLE, BOOL)
+SET MODULE TO orbital SET SYMBOL TO orbit_result;
+SELECT orbit_result(a) FROM t;
 `,
     dataset: {
       tables: [{
@@ -314,8 +318,8 @@ SELECT orbit_root(a) AS value FROM t;
       };
     });
   assert.deepEqual(normalizeResult(result), {
-    columns: ['value'],
-    rows: [['2'], ['3']],
+    columns: ['col0', 'col1', 'col2'],
+    rows: [['2', '4', '1'], ['3', '9', '1']],
   });
 }
 

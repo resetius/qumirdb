@@ -1993,7 +1993,12 @@ std::expected<TOperatorPtr, TError> BuildSelect(
         if (!expr) {
             return std::unexpected(expr.error());
         }
-        projections.push_back({ .Name = std::move(name), .Expression = std::move(*expr) });
+        projections.push_back({
+            .Name = std::move(name),
+            .Expression = std::move(*expr),
+            .ImplicitName = !item->Alias
+                && !NAst::TMaybeNode<NAst::TIdentExpr>(item->Expr),
+        });
     }
 
     std::vector<std::string> outputNames;
@@ -2307,7 +2312,11 @@ std::expected<TOperatorPtr, TError> ApplyOrderBy(
     // ORDER BY can match one and reuse its output column. The plan's projection
     // expressions are unusable here: the aggregate collector has already
     // rewritten e.g. sum(x) into a reference to a synthetic column.
-    std::unordered_map<std::string, std::string> outputByExpr; // PrintAst -> name
+    struct TOutputRef {
+        std::string Name;
+        std::optional<size_t> ProjectionIndex;
+    };
+    std::unordered_map<std::string, TOutputRef> outputByExpr;
     if (auto select = NSql::TMaybeNode<NSql::TSqlSelect>(query.Body);
         select && select.Cast()->SelectList) {
         const auto& items = select.Cast()->SelectList->Items;
@@ -2316,7 +2325,23 @@ std::expected<TOperatorPtr, TError> ApplyOrderBy(
             // the ident branch below); it also cannot be core-printed for a
             // structural match, so skip it here.
             if (!items[i]->Star && !HasWindowExpr(items[i]->Expr)) {
-                outputByExpr.emplace(NAst::NCore::PrintAst(items[i]->Expr), ItemName(*items[i], i));
+                auto name = ItemName(*items[i], i);
+                std::optional<size_t> projectionIndex;
+                if (!items[i]->Alias
+                    && !NAst::TMaybeNode<NAst::TIdentExpr>(items[i]->Expr)
+                    && topProject)
+                {
+                    const auto& projections = topProject.Cast()->Projections();
+                    for (size_t p = 0; p < projections.size(); ++p) {
+                        if (projections[p].ImplicitName && projections[p].Name == name) {
+                            projectionIndex = p;
+                            break;
+                        }
+                    }
+                }
+                outputByExpr.emplace(
+                    NAst::NCore::PrintAst(items[i]->Expr),
+                    TOutputRef{std::move(name), projectionIndex});
             }
         }
     }
@@ -2328,6 +2353,7 @@ std::expected<TOperatorPtr, TError> ApplyOrderBy(
 
     for (const auto& item : query.OrderBy->Items) {
         std::string column;
+        std::optional<size_t> projectionIndex;
         auto ident = NAst::TMaybeNode<NAst::TIdentExpr>(item->Expr);
         if (ident && HasOutputColumn(plan, ident.Cast()->Name)) {
             column = ident.Cast()->Name;
@@ -2336,7 +2362,8 @@ std::expected<TOperatorPtr, TError> ApplyOrderBy(
                 "ORDER BY on a window expression must reference its select alias"));
         } else if (auto it = outputByExpr.find(NAst::NCore::PrintAst(item->Expr));
                    it != outputByExpr.end()) {
-            column = it->second;
+            column = it->second.Name;
+            projectionIndex = it->second.ProjectionIndex;
         } else {
             if (!topProject) {
                 return std::unexpected(TError(item->Expr->Location,
@@ -2366,6 +2393,7 @@ std::expected<TOperatorPtr, TError> ApplyOrderBy(
             .Column = column,
             .Direction = item->Desc ? ESortDirection::Desc : ESortDirection::Asc,
             .Nulls = ConvertSortNulls(item->NullOrder),
+            .ProjectionIndex = projectionIndex,
         });
     }
 

@@ -4,6 +4,7 @@
 
 #include <qumir/error.h>
 
+#include <cstddef>
 #include <expected>
 #include <string>
 #include <vector>
@@ -13,7 +14,14 @@ namespace NQdb {
 struct TProjectionSpec {
     std::string Name;
     NQumir::NAst::TExprPtr Expression; // parsed, unannotated
+    // True for an unnamed SQL expression (`SELECT a + b`). Type annotation may
+    // shift its synthetic colN name when an earlier projection expands a struct.
+    // For a struct expression, Name anchors the group at its first flattened column.
+    bool ImplicitName = false;
 };
+
+// Number of output columns occupied after flattening a struct-valued projection.
+size_t FlattenedProjectionArity(const TProjectionSpec& projection);
 
 class TProjectOperator : public IOperator {
 public:

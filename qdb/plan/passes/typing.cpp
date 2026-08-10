@@ -53,6 +53,35 @@ TTypePtr UnifyUnionColumn(const TTypePtr& a, const TTypePtr& b) {
         ? std::static_pointer_cast<TType>(std::make_shared<TNullable>(base)) : base;
 }
 
+void ResolveProjectionSortKeys(
+    std::vector<TSortKey>& keys,
+    const TOperatorPtr& input)
+{
+    auto project = TMaybeOp<TProjectOperator>(input);
+    auto* output = static_cast<TStructType*>(input->OutputColumns().get());
+    if (!project || !output) {
+        return;
+    }
+    for (auto& key : keys) {
+        if (!key.ProjectionIndex) {
+            continue;
+        }
+        const auto& projections = project.Cast()->Projections();
+        if (*key.ProjectionIndex >= projections.size()) {
+            throw NQumir::TError("ORDER BY projection index is out of range");
+        }
+        size_t outputIndex = 0;
+        for (size_t i = 0; i < *key.ProjectionIndex; ++i) {
+            outputIndex += FlattenedProjectionArity(projections[i]);
+        }
+        if (outputIndex >= output->Fields.size()) {
+            throw NQumir::TError("ORDER BY flattened projection is out of range");
+        }
+        key.Column = output->Fields[outputIndex].first;
+        key.ProjectionIndex.reset();
+    }
+}
+
 } // namespace
 
 void AnnotateTypes(
@@ -93,7 +122,9 @@ void AnnotateTypes(
     }
 
     if (auto maybe = TMaybeOp<TSortOperator>(root)) {
-        auto schema = maybe.Cast()->Input()->OutputColumns();
+        auto sort = maybe.Cast();
+        ResolveProjectionSortKeys(sort->MutableKeys(), sort->Input());
+        auto schema = sort->Input()->OutputColumns();
         root->Type = std::make_shared<TFunctionType>(
             std::vector<TTypePtr>{schema},
             schema);
@@ -101,7 +132,9 @@ void AnnotateTypes(
     }
 
     if (auto maybe = TMaybeOp<TTopSortOperator>(root)) {
-        auto schema = maybe.Cast()->Input()->OutputColumns();
+        auto sort = maybe.Cast();
+        ResolveProjectionSortKeys(sort->MutableKeys(), sort->Input());
+        auto schema = sort->Input()->OutputColumns();
         root->Type = std::make_shared<TFunctionType>(
             std::vector<TTypePtr>{schema},
             schema);
@@ -121,7 +154,7 @@ void AnnotateTypes(
         auto* inputStruct = static_cast<TStructType*>(proj->Input()->OutputColumns().get());
         std::vector<std::pair<std::string, TTypePtr>> outFields;
         if (inputStruct) {
-            for (const auto& spec : proj->Projections()) {
+            for (auto& spec : proj->MutableProjections()) {
                 TTypePtr fieldType;
                 if (auto ident = TMaybeNode<TIdentExpr>(spec.Expression)) {
                     for (auto& [name, type] : inputStruct->Fields) {
@@ -132,7 +165,33 @@ void AnnotateTypes(
                     fieldType = NKernel::AnnotateExprType(
                         spec.Expression, *inputStruct, &context);
                 }
-                outFields.emplace_back(spec.Name, fieldType);
+                auto structType = TMaybeType<TStructType>(
+                    UnwrapNamedType(UnwrapNullableType(fieldType)));
+                if (structType && IsNullableType(fieldType)) {
+                    throw NQumir::TError(spec.Expression->Location,
+                        "nullable struct-return projections are not supported");
+                }
+                if (!structType) {
+                    if (spec.ImplicitName) {
+                        spec.Name = "col" + std::to_string(outFields.size());
+                    }
+                    outFields.emplace_back(spec.Name, fieldType);
+                    continue;
+                }
+                if (!spec.ImplicitName) {
+                    throw NQumir::TError(spec.Expression->Location,
+                        "a struct-return projection cannot use a scalar alias");
+                }
+                // Preserve the grouped type after OutputColumns is flattened.
+                // Scalar expressions keep their original AST type metadata
+                // (notably planner-only DECIMAL casts).
+                spec.Expression->Type = fieldType;
+                spec.Name = "col" + std::to_string(outFields.size());
+                const auto structure = structType.Cast();
+                for (const auto& [_, type] : structure->Fields) {
+                    outFields.emplace_back(
+                        "col" + std::to_string(outFields.size()), type);
+                }
             }
         }
         root->Type = std::make_shared<TFunctionType>(
