@@ -1,6 +1,7 @@
 #include <qdb/plan/ops/project.h>
 
 #include <qdb/plan/passes/unbound_vars.h>
+#include <qdb/plan/types/nullable.h>
 
 #include <qumir/parser/ast.h>
 #include <qumir/parser/core/lexer.h>
@@ -11,6 +12,19 @@
 #include <sstream>
 
 namespace NQdb {
+
+size_t FlattenedProjectionArity(const TProjectionSpec& projection) {
+    using namespace NQumir::NAst;
+    if (!projection.Expression || IsNullableType(projection.Expression->Type)) {
+        return 1;
+    }
+    if (auto structure = TMaybeType<TStructType>(
+            UnwrapNamedType(projection.Expression->Type)))
+    {
+        return structure.Cast()->Fields.size();
+    }
+    return 1;
+}
 
 TProjectOperator::TProjectOperator(TOperatorPtr input, std::vector<TProjectionSpec> projections)
     : Input_(std::move(input))

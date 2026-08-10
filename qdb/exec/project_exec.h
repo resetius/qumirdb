@@ -13,7 +13,7 @@ namespace NQdb {
 struct TProjectColumn {
     bool Computed = false;
     // Ident: index into the input batch's columns.
-    // Computed: index into the computed-buffer list (and computedTypes).
+    // Computed: index into the flat computed-buffer list.
     int32_t Index = 0;
 };
 

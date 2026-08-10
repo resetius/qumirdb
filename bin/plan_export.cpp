@@ -1831,28 +1831,6 @@ llvm::json::Object CoreTypeJson(const NQumir::NAst::TTypePtr& type) {
     };
 }
 
-size_t ExecProjectWidth(const NQumir::NAst::TTypePtr& outType) {
-    using namespace NQumir::NAst;
-    auto valueType = NQdb::UnwrapNullableType(outType);
-    if (NQdb::DecimalSpecOfValueType(valueType) || NQdb::IsBinIntStorageType(valueType)) {
-        return 16;
-    }
-    auto inner = UnwrapNamedType(valueType);
-    if (auto integer = TMaybeType<TIntegerType>(inner)) {
-        return static_cast<size_t>(integer.Cast()->BitWidth() / 8);
-    }
-    if (TMaybeType<TFloatType>(inner)) {
-        return 8;
-    }
-    if (TMaybeType<TBoolType>(inner)) {
-        return 1;
-    }
-    if (TMaybeType<TStringType>(inner)) {
-        return 16; // sizeof(StringView)
-    }
-    return 0;
-}
-
 // Kernel ABI layout for the wasm64 target. Both the compiled module and browser
 // runtime use 8-byte pointers, so these offsets also match the native 64-bit
 // layout.
@@ -1910,38 +1888,27 @@ llvm::json::Object ExecLayoutJson(int64_t heapBase) {
 }
 
 llvm::json::Array ProjectOutputJson(
-    NQdb::TProjectOperator& project,
-    const NQumir::NAst::TStructType& inputStruct,
-    const NQumir::NAst::TTypePtr& outputType)
+    const NQdb::TProjectColumnPlan& plan)
 {
     using namespace NQumir::NAst;
-    auto* outStruct = static_cast<TStructType*>(outputType.get());
+    auto* outStruct = static_cast<TStructType*>(plan.OutputType.get());
     llvm::json::Array out;
-    size_t computedIndex = 0;
-    const auto& projections = project.Projections();
-    for (size_t i = 0; i < projections.size(); ++i) {
-        const auto& projection = projections[i];
-        const auto& outType = outStruct->Fields[i].second;
+    for (size_t i = 0; i < plan.Columns.size(); ++i) {
+        const auto& column = plan.Columns[i];
+        const auto& [name, outType] = outStruct->Fields[i];
         auto entry = CoreTypeJson(outType);
-        entry["name"] = projection.Name;
-        if (auto identNode = TMaybeNode<TIdentExpr>(projection.Expression)) {
-            const std::string& refName = identNode.Cast()->Name;
-            int32_t inputIndex = -1;
-            for (size_t f = 0; f < inputStruct.Fields.size(); ++f) {
-                if (inputStruct.Fields[f].first == refName) {
-                    inputIndex = static_cast<int32_t>(f);
-                    break;
-                }
-            }
+        entry["name"] = name;
+        if (!column.Computed) {
             entry["source"] = "passthrough";
-            entry["inputIndex"] = inputIndex;
+            entry["inputIndex"] = column.Index;
         } else {
-            const bool isString = static_cast<bool>(TMaybeType<TStringType>(
-                UnwrapNamedType(NQdb::UnwrapNullableType(outType))));
+            const size_t computedIndex = static_cast<size_t>(column.Index);
             entry["source"] = "computed";
-            entry["computedIndex"] = static_cast<int64_t>(computedIndex++);
-            entry["width"] = static_cast<int64_t>(ExecProjectWidth(outType));
-            entry["isString"] = isString;
+            entry["computedIndex"] = static_cast<int64_t>(computedIndex);
+            entry["width"] = static_cast<int64_t>(
+                plan.ComputedWidths[computedIndex]);
+            entry["isString"] = static_cast<bool>(
+                plan.ComputedIsString[computedIndex]);
         }
         out.push_back(std::move(entry));
     }
@@ -2340,8 +2307,7 @@ struct TExecPlanCodec {
                 AddNode(node, llvm::json::Object{
                     {"kind", "project"},
                     {"entrypoints", std::move(entrypoints)},
-                    {"output", ProjectOutputJson(
-                        *project, *input, node.OutputType)},
+                    {"output", ProjectOutputJson(columnPlan)},
                 });
                 return;
             }

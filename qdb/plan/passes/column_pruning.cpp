@@ -86,18 +86,49 @@ void Prune(const TOperatorPtr& root, const TColumnSet* explicitRootDemand, TCteU
         // nothing is needed (a zero-column projection would produce empty rowsets).
         if (auto proj = TMaybeOp<TProjectOperator>(op)) {
             auto& specs = proj.Cast()->MutableProjections();
+            auto* output = fun
+                ? static_cast<TStructType*>(fun->ReturnType.get())
+                : nullptr;
+            size_t outputIndex = 0;
             size_t kept = 0;
+            std::vector<bool> keepSpecs;
+            keepSpecs.reserve(specs.size());
+            TColumnSet keptOutputs;
             for (const auto& spec : specs) {
-                if (needed.contains(spec.Name)) {
-                    ++kept;
+                const size_t arity = FlattenedProjectionArity(spec);
+                bool keep = false;
+                for (size_t i = 0; output && i < arity
+                     && outputIndex + i < output->Fields.size(); ++i)
+                {
+                    keep = keep || needed.contains(output->Fields[outputIndex + i].first);
                 }
+                if (!output) {
+                    keep = needed.contains(spec.Name);
+                }
+                if (keep) {
+                    ++kept;
+                    if (output) {
+                        for (size_t i = 0; i < arity
+                             && outputIndex + i < output->Fields.size(); ++i)
+                        {
+                            keptOutputs.insert(output->Fields[outputIndex + i].first);
+                        }
+                    } else {
+                        keptOutputs.insert(spec.Name);
+                    }
+                }
+                keepSpecs.push_back(keep);
+                outputIndex += arity;
             }
             if (kept > 0 && kept < specs.size()) {
-                std::erase_if(specs, [&](const TProjectionSpec& spec) {
-                    return !needed.contains(spec.Name);
+                size_t specIndex = 0;
+                std::erase_if(specs, [&](const TProjectionSpec&) {
+                    return !keepSpecs[specIndex++];
                 });
                 if (fun) {
-                    fun->ReturnType = narrowStruct(fun->ReturnType, needed);
+                    // A struct-valued expression is evaluated as one projection;
+                    // retaining any of its fields retains the whole flat group.
+                    fun->ReturnType = narrowStruct(fun->ReturnType, keptOutputs);
                 }
             }
         }

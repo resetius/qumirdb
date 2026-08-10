@@ -2,6 +2,8 @@
 
 #include <qdb/plan/ops/operator.h>
 
+#include <cstddef>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -22,6 +24,9 @@ struct TSortKey {
     std::string Column;
     ESortDirection Direction = ESortDirection::Asc;
     ESortNulls Nulls = ESortNulls::Default;
+    // Set while ORDER BY structurally references an unnamed SELECT expression.
+    // Type annotation resolves it to the expression's first flattened output.
+    std::optional<size_t> ProjectionIndex;
 };
 
 class TSortOperator : public IOperator {

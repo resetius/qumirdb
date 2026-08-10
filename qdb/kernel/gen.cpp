@@ -1232,8 +1232,9 @@ NQumir::NAst::TExprPtr GenJoinResidualFilterAst(
 
 // Project kernel for COMPUTED columns. Mirrors GenFilterKernelAst's column
 // binding/materialization (column refs in the exprs are rewritten to {name}_value
-// temps), but instead of writing a selection mask it writes each computed
-// expression to its output buffer: out[k][i] = cast(<expr_k>, computedTypes[k]).
+// temps), but instead of writing a selection mask it writes computed values to
+// output buffers. A struct expression is evaluated once into a temporary and
+// its fields are scattered into adjacent scalar buffers.
 NQumir::NAst::TExprPtr GenProjectKernelAst(
     std::vector<NQumir::NAst::TExprPtr> computedExprs,
     const std::vector<NQumir::NAst::TTypePtr>& computedTypes,
@@ -1368,12 +1369,28 @@ NQumir::NAst::TExprPtr GenProjectKernelAst(
         }
     }
 
+    // A struct-valued expression still occupies one entry in computedExprs, but
+    // each field has its own physical output buffer.
+    std::vector<TTypePtr> outputTypes;
+    for (const auto& type : computedTypes) {
+        auto structure = TMaybeType<TStructType>(
+            !IsNullableType(type) ? UnwrapNamedType(type) : TTypePtr{});
+        if (structure) {
+            const auto structType = structure.Cast();
+            for (const auto& [_, fieldType] : structType->Fields) {
+                outputTypes.push_back(fieldType);
+            }
+        } else {
+            outputTypes.push_back(type);
+        }
+    }
+
     // Data buffers live at out[k]; validity masks for nullable columns at
     // out[numComputed + k]. out_k = (<ptr Value_k>) out[k].
-    const size_t numComputed = computedExprs.size();
+    const size_t numComputed = outputTypes.size();
     for (size_t k = 0; k < numComputed; ++k) {
-        const bool nullable = IsNullableType(computedTypes[k]);
-        auto valueType = nullable ? UnwrapNullableType(computedTypes[k]) : computedTypes[k];
+        const bool nullable = IsNullableType(outputTypes[k]);
+        auto valueType = nullable ? UnwrapNullableType(outputTypes[k]) : outputTypes[k];
         auto ptrTk = std::make_shared<TPointerType>(valueType);
         auto outK = std::make_shared<TIndexExpr>(loc, ident("out"), numI64(int64_t(k)));
         bodyStmts.push_back(var("out_" + std::to_string(k), ptrTk));
@@ -1390,13 +1407,15 @@ NQumir::NAst::TExprPtr GenProjectKernelAst(
 
     bodyStmts.push_back(var("i", i64Type));
     bodyStmts.push_back(assign("i", numI64(0)));
-    for (size_t k = 0; k < numComputed; ++k) {
-        if (IsNullableType(computedTypes[k])) {
+    size_t outputIndex = 0;
+    auto emitOutput = [&](TExprPtr value, const TTypePtr& type) {
+        const size_t k = outputIndex++;
+        if (IsNullableType(type)) {
             // Split the Nullable[T] result: Value -> data buffer, Valid -> mask.
-            auto nt = nullableType(UnwrapNullableType(computedTypes[k]));
+            auto nt = nullableType(UnwrapNullableType(type));
             const std::string rName = "r_" + std::to_string(k);
             loopSetup.push_back(var(rName, nt));
-            loopSetup.push_back(assign(rName, std::move(computedExprs[k])));
+            loopSetup.push_back(assign(rName, std::move(value)));
             loopSetup.push_back(std::make_shared<TArrayAssignExpr>(loc,
                 "out_" + std::to_string(k), std::vector<TExprPtr>{ident("i")},
                 field(rName, "Value")));
@@ -1407,7 +1426,25 @@ NQumir::NAst::TExprPtr GenProjectKernelAst(
         } else {
             loopSetup.push_back(std::make_shared<TArrayAssignExpr>(loc,
                 "out_" + std::to_string(k), std::vector<TExprPtr>{ident("i")},
-                cast(std::move(computedExprs[k]), computedTypes[k])));
+                cast(std::move(value), type)));
+        }
+    };
+    for (size_t k = 0; k < computedExprs.size(); ++k) {
+        auto structure = TMaybeType<TStructType>(
+            !IsNullableType(computedTypes[k])
+                ? UnwrapNamedType(computedTypes[k])
+                : TTypePtr{});
+        if (!structure) {
+            emitOutput(std::move(computedExprs[k]), computedTypes[k]);
+            continue;
+        }
+
+        const std::string resultName = "project_result_" + std::to_string(k);
+        loopSetup.push_back(var(resultName, computedTypes[k]));
+        loopSetup.push_back(assign(resultName, std::move(computedExprs[k])));
+        const auto structType = structure.Cast();
+        for (const auto& [fieldName, fieldType] : structType->Fields) {
+            emitOutput(field(resultName, fieldName), fieldType);
         }
     }
     loopSetup.push_back(assign("i",

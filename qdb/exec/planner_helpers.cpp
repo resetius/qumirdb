@@ -284,6 +284,7 @@ TProjectColumnPlan BuildProjectColumnPlan(
     std::vector<std::pair<std::string, NQumir::NAst::TTypePtr>> outFields;
     auto* annotatedOutput = static_cast<NQumir::NAst::TStructType*>(
         project.OutputColumns().get());
+    size_t annotatedFieldIndex = 0;
     for (size_t projectionIndex = 0;
          projectionIndex < project.Projections().size();
          ++projectionIndex)
@@ -303,33 +304,72 @@ TProjectColumnPlan BuildProjectColumnPlan(
                 .Index = static_cast<int32_t>(
                     std::distance(inputStruct.Fields.begin(), it)),
             });
-            outFields.emplace_back(projection.Name, it->second);
+            const std::string& outputName = annotatedOutput
+                    && annotatedFieldIndex < annotatedOutput->Fields.size()
+                ? annotatedOutput->Fields[annotatedFieldIndex].first
+                : projection.Name;
+            outFields.emplace_back(outputName, it->second);
+            ++annotatedFieldIndex;
         } else {
-            auto outType = annotatedOutput
-                    && annotatedOutput->Fields.size() == project.Projections().size()
-                ? annotatedOutput->Fields[projectionIndex].second
-                : NKernel::AnnotateExprType(projection.Expression, inputStruct);
-            if (NQumir::NAst::TMaybeType<NQumir::NAst::TStructType>(
-                    NQumir::NAst::UnwrapNamedType(
-                        NQdb::UnwrapNullableType(outType))))
+            NQumir::NAst::TTypePtr outType;
+            if (projection.Expression->Type
+                && !IsNullableType(projection.Expression->Type)
+                && NQumir::NAst::TMaybeType<NQumir::NAst::TStructType>(
+                    NQumir::NAst::UnwrapNamedType(projection.Expression->Type)))
+            {
+                outType = projection.Expression->Type;
+            } else if (annotatedOutput
+                && annotatedFieldIndex < annotatedOutput->Fields.size())
+            {
+                outType = annotatedOutput->Fields[annotatedFieldIndex].second;
+            }
+            if (!outType) {
+                outType = NKernel::AnnotateExprType(
+                    projection.Expression, inputStruct);
+            }
+            using namespace NQumir::NAst;
+            auto structType = TMaybeType<TStructType>(
+                !IsNullableType(outType)
+                    ? UnwrapNamedType(outType)
+                    : TTypePtr{});
+            if (!structType && IsNullableType(outType)
+                && TMaybeType<TStructType>(
+                    UnwrapNamedType(UnwrapNullableType(outType))))
             {
                 throw NQumir::TError(
-                    "struct-return projection expansion is not supported yet");
+                    "nullable struct-return projections are not supported");
             }
-            auto jitType = ProjectJitType(outType);
-            using namespace NQumir::NAst;
-            bool isStr = static_cast<bool>(TMaybeType<TStringType>(
-                UnwrapNamedType(UnwrapNullableType(outType))));
-            plan.Columns.push_back({
-                .Computed = true,
-                .Index = static_cast<int32_t>(plan.ComputedExprs.size()),
-            });
             plan.ComputedExprs.push_back(projection.Expression);
-            plan.ComputedJitTypes.push_back(jitType);
-            plan.ComputedWidths.push_back(ProjectColumnWidth(outType));
-            plan.ComputedIsString.push_back(isStr);
-            plan.ComputedIsNullable.push_back(IsNullableType(outType));
-            outFields.emplace_back(projection.Name, outType);
+            plan.ComputedJitTypes.push_back(ProjectJitType(outType));
+
+            auto addComputedColumn = [&](const std::string& fallbackName,
+                                         const TTypePtr& fieldType) {
+                const std::string& outputName = annotatedOutput
+                        && annotatedFieldIndex < annotatedOutput->Fields.size()
+                    ? annotatedOutput->Fields[annotatedFieldIndex].first
+                    : fallbackName;
+                const bool isStr = static_cast<bool>(TMaybeType<TStringType>(
+                    UnwrapNamedType(UnwrapNullableType(fieldType))));
+                plan.Columns.push_back({
+                    .Computed = true,
+                    .Index = static_cast<int32_t>(plan.ComputedWidths.size()),
+                });
+                plan.ComputedWidths.push_back(ProjectColumnWidth(fieldType));
+                plan.ComputedIsString.push_back(isStr);
+                plan.ComputedIsNullable.push_back(IsNullableType(fieldType));
+                outFields.emplace_back(outputName, fieldType);
+                ++annotatedFieldIndex;
+            };
+
+            if (structType) {
+                const auto structure = structType.Cast();
+                for (const auto& [fieldName, fieldType] : structure->Fields) {
+                    addComputedColumn(fieldName, fieldType);
+                }
+                continue;
+            }
+
+            addComputedColumn(projection.Name, outType);
         }
     }
     plan.OutputType = std::make_shared<NQumir::NAst::TStructType>(

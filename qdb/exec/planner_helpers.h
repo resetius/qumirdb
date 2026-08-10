@@ -42,8 +42,10 @@ TFilterColumnPlan BuildFilterColumnPlan(
 // exporter so output typing has one source.
 struct TProjectColumnPlan {
     std::vector<TProjectColumn> Columns;
+    // Grouped one-to-one: one expression may have a struct JIT type.
     std::vector<NQumir::NAst::TExprPtr> ComputedExprs;
     std::vector<NQumir::NAst::TTypePtr> ComputedJitTypes;
+    // Flat physical outputs: struct fields occupy separate entries.
     std::vector<size_t> ComputedWidths;
     std::vector<bool> ComputedIsString;
     std::vector<bool> ComputedIsNullable;
