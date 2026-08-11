@@ -14,6 +14,7 @@ Keep this list updated when adding another call name handled specially by
 |---|---|---|
 | `qdb_in_list(lhs, item...)` | SQL scalar `IN (...)` | Binds `lhs` once, hoists its nullable guard, and builds equality/OR expressions over its plain value. Per-item three-valued logic remains only for nullable items. The call never reaches Qumir name resolution. |
 | `strcat(a, b)` | SQL `a || b` | Becomes `qdb_string_concat(__arena__, a, b)`. `__arena__` is the project kernel's hidden scratch-arena parameter. `strcat` itself is not a runtime symbol. |
+| `regexp_replace(str, pattern, replacement)` | SQL function syntax | Constant `pattern` and `replacement` are registered once per query, then the call becomes `qdb_regexp_replace(__arena__, __regexes__[id], str)`. The current three-argument form uses the ECMAScript regex dialect and replaces only the first match; flags are not supported yet. |
 | `coalesce(a, ...)` | SQL function syntax | Becomes a typed `if` chain selecting the first valid argument. |
 
 `qdb_in_list` unwraps `Nullable[T]` internally only after testing `Valid`. There
@@ -34,7 +35,9 @@ not ordinary null propagation.
 
 ## Kernel placeholders
 
-`__arena__` is an identifier placeholder rather than a call. Project kernel
-generation declares it as the opaque string scratch-arena pointer used by
-`qdb_string_concat`.
-
+`__arena__` and `__regexes__` are identifier placeholders rather than calls.
+Filter and project kernel generation declares them as the opaque per-invocation
+string scratch arena and the query-local compiled-regex handle table. Computed
+sort, grouping, aggregate, and window expressions are materialized by a project
+before their key kernels. A regex call left directly in a join or low-level
+aggregate kernel is rejected explicitly instead of reaching the linker.

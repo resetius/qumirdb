@@ -14,6 +14,7 @@
 
 namespace NQdb {
 class TExternalCatalogSnapshot;
+class TRuntimeContext;
 namespace NKernel {
 
 enum class EOperatorKernelKind {
@@ -80,14 +81,16 @@ TOperatorKernelSpec BuildFilterKernelSpec(
     const NQumir::NAst::TStructType& inputType,
     const NQumir::NAst::TExprPtr& predicate,
     std::string entrypointName = "<kernel>",
-    const TExternalCatalogSnapshot* externalCatalog = nullptr);
+    const TExternalCatalogSnapshot* externalCatalog = nullptr,
+    TRuntimeContext* runtimeContext = nullptr);
 
 TOperatorKernelSpec BuildProjectKernelSpec(
     const NQumir::NAst::TStructType& inputType,
     const std::vector<NQumir::NAst::TExprPtr>& computedExprs,
     const std::vector<NQumir::NAst::TTypePtr>& computedTypes,
     std::string entrypointName = "<project>",
-    const TExternalCatalogSnapshot* externalCatalog = nullptr);
+    const TExternalCatalogSnapshot* externalCatalog = nullptr,
+    TRuntimeContext* runtimeContext = nullptr);
 
 TOperatorKernelSpec BuildAggregateKernelSpec(
     const NQumir::NAst::TStructType& inputType,

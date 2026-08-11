@@ -1,9 +1,12 @@
 #include <gtest/gtest.h>
 
 #include <qdb/io/io.h>
+#include <qdb/exec/runtime_context.h>
 #include <qdb/kernel/compiler.h>
 #include <qdb/kernel/annotate_type.h>
 #include <qdb/kernel/spec.h>
+#include <qdb/modules/qumirdb_runtime.h>
+#include <qdb/modules/qumirdb_types.h>
 
 #include <qumir/codegen/llvm/llvm_initializer.h>
 #include <qumir/parser/core/lexer.h>
@@ -15,6 +18,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 using namespace NQdb;
@@ -129,6 +133,67 @@ TEST(CompileProject, CastsIntegerIfBranchesBeforeLoweringPhi) {
     dispatch(&batch, outBuffers.data(), nullptr);
 
     EXPECT_EQ(output, (std::array<int64_t, 3>{11, 0, 33}));
+}
+
+TEST(CompileProject, RegexpReplaceUsesCompiledQueryHandle) {
+    TStructType inputType({
+        {"url", std::make_shared<TStringType>()},
+    });
+    std::vector<TExprPtr> exprs = {Parse(
+        "(call regexp_replace url "
+        "(cast \"^https?://(?:www\\\\.)?([^/]+)/.*$\" StringView) "
+        "(cast \"\\\\1\" StringView))")};
+    ASSERT_TRUE(TMaybeType<TStringType>(
+        NKernel::AnnotateExprType(exprs[0], inputType)));
+    std::vector<TTypePtr> types = {
+        std::make_shared<TNamedType>("StringView", nullptr),
+    };
+    auto runtime = std::make_shared<TRuntimeContext>();
+    auto spec = NKernel::BuildProjectKernelSpec(
+        inputType, exprs, types, "<project>", nullptr,
+        runtime.get());
+    auto dispatch = TKernelCompiler(TKernelCompilerOptions{
+        .RuntimeContext = runtime,
+    }).CompileProject(spec);
+
+    const std::array<std::string_view, 3> values = {
+        "https://www.example.com/a",
+        "http://openai.com/x",
+        "not-a-url",
+    };
+    std::string data;
+    std::array<int64_t, 4> offsets{};
+    for (size_t i = 0; i < values.size(); ++i) {
+        data += values[i];
+        offsets[i + 1] = static_cast<int64_t>(data.size());
+    }
+    std::array<TColumn, 1> columns = {
+        TColumn{
+            .Data = data.data(),
+            .Offsets = offsets.data(),
+            .OffsetWidth = 8,
+        },
+    };
+    TRowSet batch{
+        .Columns = columns.data(),
+        .ColumnCount = 1,
+        .RowCount = static_cast<int64_t>(values.size()),
+        .RefCount = 1,
+    };
+    std::array<TStringView, 3> output{};
+    std::array<void*, 1> outBuffers = {output.data()};
+    TStringArena arena;
+    dispatch(&batch, outBuffers.data(), &arena);
+
+    auto text = [&](size_t i) {
+        return std::string_view(
+            reinterpret_cast<const char*>(output[i].Data),
+            static_cast<size_t>(output[i].Size));
+    };
+    EXPECT_EQ(text(0), "example.com");
+    EXPECT_EQ(text(1), "openai.com");
+    EXPECT_EQ(text(2), "not-a-url");
+    EXPECT_EQ(runtime->Regexes.Specs().size(), 1u);
 }
 
 int main(int argc, char** argv) {

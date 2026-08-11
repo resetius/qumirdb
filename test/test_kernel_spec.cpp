@@ -6,6 +6,7 @@
 #include <qumir/parser/type.h>
 
 #include <sstream>
+#include <string>
 #include <utility>
 
 using namespace NQdb;
@@ -266,6 +267,43 @@ TEST(KernelSpec, BuildsCrossJoinSpec) {
     EXPECT_EQ(spec.Entrypoints[1].Name, "jt_materialize");
     ASSERT_EQ(spec.SourceModules.size(), 1u);
     EXPECT_EQ(spec.SourceModules[0], "qumirdb");
+}
+
+TEST(KernelSpec, RejectsRegexpReplaceInDirectAggregateAndJoinKernels) {
+    using namespace NQumir::NAst;
+
+    auto i64 = std::make_shared<TIntegerType>();
+    TStructType input({{"value", i64}});
+    auto regex = std::make_shared<TCallExpr>(
+        NQumir::TLocation{},
+        std::make_shared<TIdentExpr>(NQumir::TLocation{}, "regexp_replace"),
+        std::vector<TExprPtr>{
+            std::make_shared<TIdentExpr>(NQumir::TLocation{}, "value"),
+            std::make_shared<TStringLiteralExpr>(NQumir::TLocation{}, "x"),
+            std::make_shared<TStringLiteralExpr>(NQumir::TLocation{}, "y"),
+        });
+
+    auto expectClearError = [](auto&& build) {
+        try {
+            build();
+            FAIL() << "expected REGEXP_REPLACE rejection";
+        } catch (const std::runtime_error& error) {
+            EXPECT_NE(
+                std::string(error.what()).find("materialize it in a project first"),
+                std::string::npos);
+        }
+    };
+    expectClearError([&] {
+        NKernel::BuildAggregateKernelSpec(input, {}, {{
+            .Name = "bad",
+            .Func = "count",
+            .Arg = regex,
+        }});
+    });
+    expectClearError([&] {
+        NKernel::BuildJoinKernelSpec(
+            input, input, {}, EJoinType::Inner, regex);
+    });
 }
 
 TEST(OzFunBuilder, BuildsFunctionDeclaration) {

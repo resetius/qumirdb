@@ -323,6 +323,73 @@ SELECT orbit_result(a) FROM t;
   });
 }
 
+async function runRegexpReplaceBatchContract() {
+  const request = {
+    sql: String.raw`
+SELECT REGEXP_REPLACE(
+  url,
+  '^https?://(?:www\.)?([^/]+)/.*$',
+  '\1'
+) AS domain
+FROM t
+WHERE REGEXP_REPLACE(
+  url,
+  '^https?://(?:www\.)?([^/]+)/.*$',
+  '\1'
+) <> 'blocked'
+ORDER BY REGEXP_REPLACE(
+  url,
+  '^https?://(?:www\.)?([^/]+)/.*$',
+  '\1'
+);
+`,
+    dataset: {
+      tables: [{
+        name: 't',
+        columns: [{ name: 'url', type: 'string' }],
+        stats: { rows: 3, bytes: 64, rowGroups: 1 },
+      }],
+    },
+    options: {
+      scheduler: 'single',
+      scanTasks: 1,
+      shufflePartitions: 1,
+      format: 'runtime-bundle',
+      embedWasm: true,
+    },
+  };
+  const bundle = JSON.parse(run(
+    exporter,
+    ['--stdin-json', '--stdout-json'],
+    JSON.stringify(request)));
+  assert.equal(bundle.ok, true, bundle.error?.message);
+  assert.equal(
+    bundle.exec?.supported,
+    true,
+    JSON.stringify({ reason: bundle.exec?.reason, diagnostics: bundle.diagnostics }));
+  const exec = resolveExecArtifacts(bundle);
+  const result = await executeBrowserPipelineScheduled(
+    exec,
+    async function* (stage) {
+      assert.equal(stage.table, 't');
+      yield {
+        rowCount: 3,
+        columns: stage.columns.map(column => ({
+          ...column,
+          values: [
+            'https://www.example.com/a',
+            'http://openai.com/x',
+            'not-a-url',
+          ],
+        })),
+      };
+    });
+  assert.deepEqual(normalizeResult(result), {
+    columns: ['domain'],
+    rows: [['example.com'], ['not-a-url'], ['openai.com']],
+  });
+}
+
 async function runKumirModuleBatchContract() {
   const request = {
     sql: `
@@ -596,6 +663,24 @@ async function main() {
           error,
         });
         console.error(`[FAIL] external-module-batch\n${errorText(error)}`);
+      }
+    }
+    {
+      const started = performance.now();
+      try {
+        await runRegexpReplaceBatchContract();
+        results.push({
+          name: 'regexp-replace-batch',
+          elapsedMs: performance.now() - started,
+          error: null,
+        });
+      } catch (error) {
+        results.push({
+          name: 'regexp-replace-batch',
+          elapsedMs: performance.now() - started,
+          error,
+        });
+        console.error(`[FAIL] regexp-replace-batch\n${errorText(error)}`);
       }
     }
     {

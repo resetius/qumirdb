@@ -12,7 +12,9 @@
 #include <qdb/kernel/join_key.h>
 #include <qdb/kernel/lib.h>
 #include <qdb/kernel/spec.h>
+#include <qdb/exec/runtime_context.h>
 #include <qdb/modules/qumirdb.h>
+#include <qdb/modules/qumirdb_runtime.h>
 
 #include <qumir/codegen/llvm/llvm_initializer.h>
 #include <qumir/error.h>
@@ -98,7 +100,7 @@ std::unordered_map<std::string, void*> CompileKernelAst(
 namespace {
 constexpr const char* CacheSchemaVersion = "v1";
 // Bump when the generated key helpers or the .oz kernel libraries change.
-constexpr const char* KernelLibVersion = "2";
+constexpr const char* KernelLibVersion = "3";
 } // namespace
 
 NQumir::NCodeGen::TLlvmRunner::TLinkedModule CompileKernelAstCached(
@@ -127,6 +129,7 @@ TGeneratedKernel TKernelCompiler::EmitKernel(
         .Entrypoints = std::move(entrypoints),
         .Ast = std::move(ast),
         .Storage = std::move(storage),
+        .RuntimeContext = RuntimeContext_,
         .Slot = std::make_shared<TKernelSlot>(),
     };
     kernel.Slot->Fns.resize(kernel.Entrypoints.size(), nullptr);
@@ -1446,9 +1449,12 @@ TKernelCompiler::TFilterDispatch TKernelCompiler::CompileFilter(
         "filter", {"<kernel>"}, std::move(*kernelAst), literalStorage);
     FinishKernelDiagnostics(Diagnostics_);
 
-    using TFilterFn = void(*)(void*);
-    return [slot = kernel.Slot, storage = kernel.Storage](TRowSet& rowSet) {
-        reinterpret_cast<TFilterFn>(slot->Fns[0])(&rowSet);
+    using TFilterFn = void(*)(void*, void*, void**);
+    return [slot = kernel.Slot, storage = kernel.Storage,
+            runtime = RuntimeContext_](TRowSet& rowSet) {
+        TStringArena arena;
+        reinterpret_cast<TFilterFn>(slot->Fns[0])(
+            &rowSet, &arena, runtime ? runtime->Regexes.Handles() : nullptr);
     };
 }
 
@@ -1505,10 +1511,13 @@ TKernelCompiler::TProjectDispatch TKernelCompiler::CompileProject(
         "project", {"<project>"}, std::move(kernelAst), literalStorage);
     FinishKernelDiagnostics(Diagnostics_);
 
-    using TProjectFn = void(*)(void*, void**, void*);
-    return [slot = kernel.Slot, storage = kernel.Storage](
+    using TProjectFn = void(*)(void*, void**, void*, void**);
+    return [slot = kernel.Slot, storage = kernel.Storage,
+            runtime = RuntimeContext_](
                TRowSet* in, void** outBuffers, void* arena) {
-        reinterpret_cast<TProjectFn>(slot->Fns[0])(in, outBuffers, arena);
+        reinterpret_cast<TProjectFn>(slot->Fns[0])(
+            in, outBuffers, arena,
+            runtime ? runtime->Regexes.Handles() : nullptr);
     };
 }
 

@@ -958,8 +958,13 @@ NQumir::NAst::TExprPtr GenFilterKernelAst(
     bodyStmts.push_back(std::make_shared<TWhileStmtExpr>(loc, cond,
         std::make_shared<TBlockExpr>(loc, std::move(loopSetup))));
 
+    auto ptrI8Type = std::make_shared<TPointerType>(
+        std::make_shared<TIntegerType>(TIntegerType::I8));
+    auto ptrPtrI8Type = std::make_shared<TPointerType>(ptrI8Type);
     auto builder = NOz::TFunBuilder("<kernel>")
         .Param("rowSet", rowSetRefType)
+        .Param("__arena__", ptrI8Type)
+        .Param("__regexes__", ptrPtrI8Type)
         .Return(std::make_shared<TVoidType>());
     for (auto& stmt : bodyStmts) {
         builder.Stmt(std::move(stmt));
@@ -1322,10 +1327,12 @@ NQumir::NAst::TExprPtr GenProjectKernelAst(
     // always passed even when unused; qdb_string_concat(__arena__, …) references it.
     auto ptrI8Type = std::make_shared<TPointerType>(
         std::make_shared<TIntegerType>(TIntegerType::I8));
+    auto ptrPtrI8Type = std::make_shared<TPointerType>(ptrI8Type);
     std::vector<TParam> params = {
         std::make_shared<TVarStmt>(loc, "rowSet", rowSetRefType),
         std::make_shared<TVarStmt>(loc, "out", ptrPtrU8Type),
         std::make_shared<TVarStmt>(loc, "__arena__", ptrI8Type),
+        std::make_shared<TVarStmt>(loc, "__regexes__", ptrPtrI8Type),
     };
 
     std::vector<TExprPtr> bodyStmts;

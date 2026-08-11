@@ -1,6 +1,7 @@
 #include <qdb/catalog/external_module.h>
 #include <qdb/exec/plan_builder.h>
 #include <qdb/exec/planner_helpers.h>
+#include <qdb/exec/runtime_context.h>
 #include <qdb/io/io.h>
 #include <qdb/plan/build.h>
 #include <qdb/plan/pipeline.h>
@@ -2057,6 +2058,20 @@ llvm::json::Object EntrypointsJson(
     return out;
 }
 
+llvm::json::Array RegexesJson(const TKernelRef& ref) {
+    llvm::json::Array out;
+    if (!ref.Kernel || !ref.Kernel->RuntimeContext) {
+        return out;
+    }
+    for (const auto& regex : ref.Kernel->RuntimeContext->Regexes.Specs()) {
+        out.push_back(llvm::json::Object{
+            {"pattern", regex.Pattern},
+            {"replacement", regex.Replacement},
+        });
+    }
+    return out;
+}
+
 // Builds a sort stage body from the operator's lowered wasm kernel. Browser
 // sort/top-sort stages do not have a JS comparison fallback; an unavailable
 // kernel is a plan/export error.
@@ -2273,6 +2288,10 @@ struct TExecPlanCodec {
                     {"predicate", SafeExprLine(filter->Predicate())},
                     {"entrypoints", EntrypointsJson(*ref, {{"filter", 0}})},
                 };
+                auto regexes = RegexesJson(*ref);
+                if (!regexes.empty()) {
+                    encoded["regexes"] = std::move(regexes);
+                }
                 if (node.KeptInputColumns) {
                     llvm::json::Array columns;
                     for (const auto index : *node.KeptInputColumns) {
@@ -2305,11 +2324,20 @@ struct TExecPlanCodec {
                     }
                     entrypoints = EntrypointsJson(*ref, {{"project", 0}});
                 }
-                AddNode(node, llvm::json::Object{
+                llvm::json::Object encoded{
                     {"kind", "project"},
                     {"entrypoints", std::move(entrypoints)},
                     {"output", ProjectOutputJson(columnPlan)},
-                });
+                };
+                if (const auto* ref = FindKernel(
+                        Kernels, node.StageId, "project"))
+                {
+                    auto regexes = RegexesJson(*ref);
+                    if (!regexes.empty()) {
+                        encoded["regexes"] = std::move(regexes);
+                    }
+                }
+                AddNode(node, std::move(encoded));
                 return;
             }
             case NQdb::EExecPlanNodeKind::Aggregate: {

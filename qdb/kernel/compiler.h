@@ -34,6 +34,7 @@ struct TKernelCompilerOptions {
     std::vector<TGeneratedKernel>* Sink = nullptr;
     bool BindNow = true;
     std::shared_ptr<const TExternalCatalogSnapshot> ExternalCatalog;
+    std::shared_ptr<TRuntimeContext> RuntimeContext;
 };
 
 // Shared kernel-pipeline options; caller overrides NativeCode/TargetTriple.
@@ -283,6 +284,7 @@ public:
         , Sink_(options.Sink)
         , BindNow_(options.BindNow)
         , ExternalCatalog_(std::move(options.ExternalCatalog))
+        , RuntimeContext_(std::move(options.RuntimeContext))
     {
         Opts_ = KernelRunnerOptions();
         Opts_.NativeCode = true;
@@ -423,6 +425,7 @@ private:
     std::vector<TGeneratedKernel>* Sink_ = nullptr;
     bool BindNow_ = true;
     std::shared_ptr<const TExternalCatalogSnapshot> ExternalCatalog_;
+    std::shared_ptr<TRuntimeContext> RuntimeContext_;
     NQumir::TLLVMRunnerOptions Opts_;
 };
 

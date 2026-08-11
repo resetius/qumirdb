@@ -1,4 +1,5 @@
 #include <qdb/exec/planner_helpers.h>
+#include <qdb/exec/runtime_context.h>
 #include <qdb/exec/filter_exec.h>
 #include <qdb/exec/project_exec.h>
 #include <qdb/exec/sort_key_ops.h>
@@ -195,13 +196,17 @@ TUnaryRuntimeProcess BuildFilterRuntimeProcess(
     const NQumir::NAst::TTypePtr& inputType,
     TKernelCompilerOptions options)
 {
+    if (!options.RuntimeContext) {
+        options.RuntimeContext = std::make_shared<TRuntimeContext>();
+    }
     auto* inputStruct = static_cast<NQumir::NAst::TStructType*>(inputType.get());
     if (!inputStruct) {
         throw std::runtime_error("filter input must have TStructType");
     }
 
     auto spec = NKernel::BuildFilterKernelSpec(
-        *inputStruct, filter.Predicate(), "<kernel>", options.ExternalCatalog.get());
+        *inputStruct, filter.Predicate(), "<kernel>", options.ExternalCatalog.get(),
+        options.RuntimeContext.get());
     TKernelCompiler compiler(std::move(options));
     auto dispatch = compiler.CompileFilter(spec);
 
@@ -382,6 +387,9 @@ TUnaryRuntimeProcess BuildProjectRuntimeProcess(
     const NQumir::NAst::TTypePtr& inputType,
     TKernelCompilerOptions options)
 {
+    if (!options.RuntimeContext) {
+        options.RuntimeContext = std::make_shared<TRuntimeContext>();
+    }
     auto* inputStruct = static_cast<NQumir::NAst::TStructType*>(inputType.get());
     if (!inputStruct) {
         throw std::runtime_error("project input must have TStructType");
@@ -396,7 +404,8 @@ TUnaryRuntimeProcess BuildProjectRuntimeProcess(
             plan.ComputedExprs,
             plan.ComputedJitTypes,
             "<project>",
-            options.ExternalCatalog.get());
+            options.ExternalCatalog.get(),
+            options.RuntimeContext.get());
         TKernelCompiler compiler(std::move(options));
         dispatch = compiler.CompileProject(spec);
     }

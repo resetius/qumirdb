@@ -1,8 +1,11 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <string_view>
 #include <vector>
+
+struct qdb_string_view;
 
 // Chunked bump arena for strings produced during kernel evaluation (e.g. `||`
 // concatenation via qdb_string_concat). It never moves bytes it has already handed
@@ -17,6 +20,21 @@ public:
 private:
     std::vector<std::vector<char>> Blocks_;
     int64_t Used_ = 0; // bytes used in the last block
+};
+
+class TCompiledRegex {
+public:
+    TCompiledRegex(std::string_view pattern, std::string_view replacement);
+    ~TCompiledRegex();
+
+    TCompiledRegex(const TCompiledRegex&) = delete;
+    TCompiledRegex& operator=(const TCompiledRegex&) = delete;
+
+    qdb_string_view Replace(TStringArena& arena, qdb_string_view input) const;
+
+private:
+    struct TImpl;
+    std::unique_ptr<TImpl> Impl_;
 };
 
 extern "C" {
@@ -55,6 +73,11 @@ qdb_string_view qdb_substring(qdb_string_view str, int32_t start, int32_t length
 // kernel row loop. Null propagation is handled by the caller (ExpandNullable), so this
 // is unconditional: it always concatenates both operands.
 qdb_string_view qdb_string_concat(void* arena, qdb_string_view left, qdb_string_view right);
+
+// regex is compiled once while the query is lowered. arena owns bytes produced
+// by replacements until the current kernel invocation has consumed them.
+qdb_string_view qdb_regexp_replace(
+    void* arena, const TCompiledRegex* regex, qdb_string_view input);
 
 // Returns the Gregorian year for a date given as days since 1970-01-01.
 int32_t qdb_date_year(int32_t days);
