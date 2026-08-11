@@ -122,23 +122,28 @@ arrow::MemoryPool* GetMemoryPool() {
 
 } // namespace
 
-TParquetSource::TParquetSource(const std::string& path)
-    : TParquetSource(path, {})
-{}
+struct TParquetFileData {
+    explicit TParquetFileData(const std::string& path)
+        : Path(path)
+    {
+        Open();
+    }
 
-TParquetSource::TParquetSource(
-    const std::string& path,
-    std::vector<int> rowGroups)
-    : Path_(path)
-    , RowGroups_(std::move(rowGroups))
-{
-    Open();
-    ResetReader();
-}
+    void Open();
+    void LoadColumnStats();
+    void LoadStandardColumnStats(TStats& stats);
 
-void TParquetSource::Open()
+    std::string Path;
+    std::shared_ptr<parquet::arrow::FileReader> FileReader;
+    std::shared_ptr<arrow::Schema> FileSchema;
+    std::vector<std::string> FileNames;
+    std::vector<NScheduler::TScanRowGroup> RowGroups;
+    TStatsPtr Stats;
+};
+
+void TParquetFileData::Open()
 {
-    auto infileResult = arrow::io::ReadableFile::Open(Path_);
+    auto infileResult = arrow::io::ReadableFile::Open(Path);
     if (!infileResult.ok()) {
         throw std::runtime_error(infileResult.status().ToString());
     }
@@ -158,20 +163,57 @@ void TParquetSource::Open()
     if (!fileReaderResult.ok()) {
         throw std::runtime_error(fileReaderResult.status().ToString());
     }
-    FileReader_ = std::move(*fileReaderResult);
+    FileReader = std::move(*fileReaderResult);
 
-    std::shared_ptr<arrow::Schema> fileSchema;
-    auto schemaStatus = FileReader_->GetSchema(&fileSchema);
+    auto schemaStatus = FileReader->GetSchema(&FileSchema);
     if (!schemaStatus.ok()) {
         throw std::runtime_error(schemaStatus.ToString());
     }
-    FileNames_.clear();
-    FileNames_.reserve(fileSchema->num_fields());
-    for (const auto& field : fileSchema->fields()) {
-        FileNames_.push_back(field->name());
+    FileNames.reserve(FileSchema->num_fields());
+    for (const auto& field : FileSchema->fields()) {
+        FileNames.push_back(field->name());
     }
 
     LoadColumnStats();
+
+    auto metadata = FileReader->parquet_reader()->metadata();
+    RowGroups.reserve(static_cast<size_t>(metadata->num_row_groups()));
+    for (int i = 0; i < metadata->num_row_groups(); ++i) {
+        auto rowGroup = metadata->RowGroup(i);
+        RowGroups.push_back({
+            .RowGroup = static_cast<size_t>(i),
+            .RowCount = rowGroup->num_rows(),
+            .ByteSize = rowGroup->total_byte_size(),
+        });
+    }
+}
+
+TParquetFile::TParquetFile(const std::string& path)
+    : Data_(std::make_shared<TParquetFileData>(path))
+{}
+
+TParquetFile::~TParquetFile() = default;
+
+std::unique_ptr<TParquetSource> TParquetFile::MakeSource() const
+{
+    return std::unique_ptr<TParquetSource>(
+        new TParquetSource(Data_, {}, std::nullopt));
+}
+
+TParquetSource::TParquetSource(const std::string& path)
+    : TParquetSource(
+        std::make_shared<TParquetFileData>(path), {}, std::nullopt)
+{}
+
+TParquetSource::TParquetSource(
+    std::shared_ptr<TParquetFileData> file,
+    std::vector<int> rowGroups,
+    std::optional<std::unordered_set<std::string>> restrictedColumns)
+    : File_(std::move(file))
+    , RowGroups_(std::move(rowGroups))
+    , RestrictedColumns_(std::move(restrictedColumns))
+{
+    ResetReader();
 }
 
 std::vector<int> TParquetSource::EffectiveRowGroups() const
@@ -180,7 +222,7 @@ std::vector<int> TParquetSource::EffectiveRowGroups() const
         return RowGroups_;
     }
 
-    int numRgs = FileReader_->parquet_reader()->metadata()->num_row_groups();
+    const int numRgs = static_cast<int>(File_->RowGroups.size());
     std::vector<int> rowGroups(numRgs);
     std::iota(rowGroups.begin(), rowGroups.end(), 0);
     return rowGroups;
@@ -190,9 +232,9 @@ void TParquetSource::ResetReader()
 {
     auto rowGroups = EffectiveRowGroups();
     auto indices = EffectiveColumnIndices();
-    auto batchReaderResult = indices.empty()
-        ? FileReader_->GetRecordBatchReader(rowGroups)
-        : FileReader_->GetRecordBatchReader(rowGroups, indices);
+    auto batchReaderResult = !RestrictedColumns_
+        ? File_->FileReader->GetRecordBatchReader(rowGroups)
+        : File_->FileReader->GetRecordBatchReader(rowGroups, indices);
     if (!batchReaderResult.ok()) {
         throw std::runtime_error(batchReaderResult.status().ToString());
     }
@@ -203,15 +245,15 @@ void TParquetSource::ResetReader()
 
 std::vector<int> TParquetSource::EffectiveColumnIndices() const
 {
-    if (RestrictedColumns_.empty()) {
+    if (!RestrictedColumns_) {
         return {};
     }
 
-    // Map restricted names to indices into the full file schema (FileNames_),
+    // Map restricted names to indices into the full file schema,
     // never the possibly-narrowed Names_, so repeated restrictions stay stable.
     std::vector<int> indices;
-    for (int i = 0; i < static_cast<int>(FileNames_.size()); ++i) {
-        if (RestrictedColumns_.count(FileNames_[i])) {
+    for (int i = 0; i < static_cast<int>(File_->FileNames.size()); ++i) {
+        if (RestrictedColumns_->count(File_->FileNames[i])) {
             indices.push_back(i);
         }
     }
@@ -235,9 +277,9 @@ void TParquetSource::RefreshSchema()
     Schema_ = TSchema{std::span<const TColumnSchema>(Columns_)};
 }
 
-void TParquetSource::LoadStandardColumnStats(TStats& stats)
+void TParquetFileData::LoadStandardColumnStats(TStats& stats)
 {
-    auto metadata = FileReader_->parquet_reader()->metadata();
+    auto metadata = FileReader->parquet_reader()->metadata();
     const int numColumns = metadata->num_columns();
     const int numRowGroups = metadata->num_row_groups();
     const parquet::SchemaDescriptor* schema = metadata->schema();
@@ -338,16 +380,16 @@ void TParquetSource::LoadStandardColumnStats(TStats& stats)
     }
 }
 
-void TParquetSource::LoadColumnStats()
+void TParquetFileData::LoadColumnStats()
 {
-    auto metadata = FileReader_->parquet_reader()->metadata();
+    auto metadata = FileReader->parquet_reader()->metadata();
 
     // Row count is always available from the parquet footer, even for a plain
     // parquet with none of our custom metadata; per-column stats below are
     // best-effort on top of it.
     auto stats = std::make_shared<TStats>();
     stats->RowCount = static_cast<uint64_t>(metadata->num_rows());
-    Stats_ = stats;
+    Stats = stats;
 
     // Base layer: min/max/null_count from the standard parquet column
     // statistics (present in most files). Our custom blob below adds NDV and
@@ -375,15 +417,10 @@ void TParquetSource::LoadColumnStats()
     }
 
     // Physical types decide how min/max/histogram bit patterns are stored.
-    std::shared_ptr<arrow::Schema> fileSchema;
-    if (!FileReader_->GetSchema(&fileSchema).ok()) {
-        return;
-    }
-
     std::unordered_map<std::string_view, size_t> indexByName;
-    indexByName.reserve(FileNames_.size());
-    for (size_t i = 0; i < FileNames_.size(); ++i) {
-        indexByName.emplace(FileNames_[i], i);
+    indexByName.reserve(FileNames.size());
+    for (size_t i = 0; i < FileNames.size(); ++i) {
+        indexByName.emplace(FileNames[i], i);
     }
 
     for (const auto& colValue : *columns) {
@@ -399,7 +436,7 @@ void TParquetSource::LoadColumnStats()
         const size_t idx = found->second;
 
         const auto typeId =
-            fileSchema->field(static_cast<int>(idx))->type()->id();
+            FileSchema->field(static_cast<int>(idx))->type()->id();
         const bool isFloat =
             typeId == arrow::Type::FLOAT || typeId == arrow::Type::DOUBLE;
         const bool isString =
@@ -426,7 +463,7 @@ void TParquetSource::LoadColumnStats()
         // Merge onto the standard stats already loaded for this column: the
         // blob owns NDV/histogram; min/max/null_count only fill gaps the
         // standard parquet statistics left empty.
-        auto& columnStats = stats->ColumnStats[FileNames_[idx]];
+        auto& columnStats = stats->ColumnStats[FileNames[idx]];
         if (!columnStats) {
             columnStats = std::make_shared<TStats::TColumnStats>();
         }
@@ -466,29 +503,19 @@ void TParquetSource::LoadColumnStats()
 
 TParquetSource::~TParquetSource() = default;
 
-void TParquetSource::RestrictColumns(const std::unordered_set<std::string>& names) {
-    if (names.empty()) {
-        return;
-    }
+const TStatsPtr TParquetSource::Stats() const
+{
+    return File_->Stats;
+}
 
+void TParquetSource::RestrictColumns(const std::unordered_set<std::string>& names) {
     RestrictedColumns_ = names;
     ResetReader();
 }
 
 std::vector<NScheduler::TScanRowGroup> TParquetSource::ScanRowGroups() const
 {
-    auto metadata = FileReader_->parquet_reader()->metadata();
-    std::vector<NScheduler::TScanRowGroup> rowGroups;
-    rowGroups.reserve(static_cast<size_t>(metadata->num_row_groups()));
-    for (int i = 0; i < metadata->num_row_groups(); ++i) {
-        auto rowGroup = metadata->RowGroup(i);
-        rowGroups.push_back({
-            .RowGroup = static_cast<size_t>(i),
-            .RowCount = rowGroup->num_rows(),
-            .ByteSize = rowGroup->total_byte_size(),
-        });
-    }
-    return rowGroups;
+    return File_->RowGroups;
 }
 
 std::unique_ptr<TParquetSource> TParquetSource::MakeRowGroupRangeSource(
@@ -500,12 +527,8 @@ std::unique_ptr<TParquetSource> TParquetSource::MakeRowGroupRangeSource(
     for (size_t i = 0; i < rowGroupCount; ++i) {
         rowGroups.push_back(static_cast<int>(firstRowGroup + i));
     }
-    auto source = std::unique_ptr<TParquetSource>(
-        new TParquetSource(Path_, std::move(rowGroups)));
-    if (!RestrictedColumns_.empty()) {
-        source->RestrictColumns(RestrictedColumns_);
-    }
-    return source;
+    return std::unique_ptr<TParquetSource>(new TParquetSource(
+        File_, std::move(rowGroups), RestrictedColumns_));
 }
 
 const TSchema& TParquetSource::Schema() const {

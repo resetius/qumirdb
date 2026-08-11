@@ -151,15 +151,17 @@ TEST(IOTest, ParquetRowGroupRangeSource) {
     });
     WriteParquet(path, batch, 2);
 
-    NQdb::TParquetSource source(path);
-    auto rowGroups = source.ScanRowGroups();
+    NQdb::TParquetFile file(path);
+    auto source = file.MakeSource();
+    auto rowGroups = source->ScanRowGroups();
     ASSERT_EQ(rowGroups.size(), 3u);
     EXPECT_EQ(rowGroups[0].RowCount, 2);
     EXPECT_EQ(rowGroups[1].RowCount, 2);
     EXPECT_EQ(rowGroups[2].RowCount, 1);
 
-    source.RestrictColumns({"id"});
-    auto split = source.MakeRowGroupRangeSource(1, 1);
+    source->RestrictColumns({"id"});
+    auto split = source->MakeRowGroupRangeSource(1, 1);
+    EXPECT_EQ(split->Stats().get(), source->Stats().get());
     TRowSet rowSet = {};
     ASSERT_TRUE(split->Next(rowSet));
     ASSERT_EQ(rowSet.RowCount, 2);
@@ -171,6 +173,15 @@ TEST(IOTest, ParquetRowGroupRangeSource) {
     EXPECT_EQ(values[1], 4);
     NQdb::Release(&rowSet);
     EXPECT_FALSE(split->Next(rowSet));
+
+    source->RestrictColumns({});
+    int64_t rowCount = 0;
+    while (source->Next(rowSet)) {
+        EXPECT_EQ(rowSet.ColumnCount, 0);
+        rowCount += rowSet.RowCount;
+        NQdb::Release(&rowSet);
+    }
+    EXPECT_EQ(rowCount, 5);
 }
 
 int main(int argc, char** argv) {
