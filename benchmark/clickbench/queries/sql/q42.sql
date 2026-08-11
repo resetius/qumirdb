@@ -1,0 +1,1 @@
+SELECT CAST("EventTime" / 60 AS BIGINT) AS M, COUNT(*) AS PageViews FROM hits WHERE "CounterID" = 62 AND "EventDate" >= 15900 AND "EventDate" <= 15901 AND "IsRefresh" = 0 AND "DontCountHits" = 0 GROUP BY CAST("EventTime" / 60 AS BIGINT) ORDER BY CAST("EventTime" / 60 AS BIGINT) LIMIT 10 OFFSET 1000;

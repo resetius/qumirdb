@@ -1,0 +1,1 @@
+SELECT "UserID", CAST("EventTime" / 60 AS BIGINT) - CAST("EventTime" / 3600 AS BIGINT) * 60 AS m, "SearchPhrase", COUNT(*) FROM hits GROUP BY "UserID", CAST("EventTime" / 60 AS BIGINT) - CAST("EventTime" / 3600 AS BIGINT) * 60, "SearchPhrase" ORDER BY COUNT(*) DESC LIMIT 10;

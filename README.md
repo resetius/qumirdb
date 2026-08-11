@@ -23,7 +23,7 @@ rowset pipelines.
   - `qdb_plan_export` - exports plans/runtime bundles for the web UI.
 - `service/` - web server and static browser workbench.
 - `test/` - C++ unit and regression tests.
-- `benchmark/tpch/` - TPC-H query templates, parameters, and benchmark runner.
+- `benchmark/` - TPC-H, TPC-DS, and ClickBench query packs and runners.
 - `docs/arch/` - design notes for planner, scheduler, joins, aggregation, and
   kernel dispatch.
 
@@ -203,6 +203,20 @@ MODE=sql benchmark/tpch/run_tpch.sh /path/to/tpch 1 1,4,21
 ```
 
 Benchmark logs are written to `./results/` by default. Override with `OUT_DIR`.
+
+## ClickBench
+
+The ClickBench runner expects the official `hits.parquet`, either directly in
+the supplied directory or under `pq1/`:
+
+```bash
+benchmark/clickbench/run_clickbench.sh /path/to/clickbench
+benchmark/clickbench/run_clickbench.sh /path/to/clickbench 0,7,42
+```
+
+Use `QDB_ARGS` and `OUT_DIR` as with the other benchmark runners. Queries that
+require unsupported string operations are skipped unless
+`ALLOW_UNSUPPORTED=1` is set.
 
 ## Development Notes
 
