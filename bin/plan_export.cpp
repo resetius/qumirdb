@@ -596,6 +596,7 @@ std::expected<TCompiledWasm64Module, std::string> CompileKernelAstToWasm64(
     const std::shared_ptr<const NQdb::TExternalCatalogSnapshot>& externalCatalog)
 {
     auto opts = NQdb::KernelRunnerOptions();
+    opts.CoreInput = !(externalCatalog && externalCatalog->HasKumirModules());
     opts.NativeCode = false;
     opts.TargetTriple = "wasm64-unknown-unknown";
     NQumir::TLLVMRunner runner(std::move(opts));

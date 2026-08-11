@@ -72,6 +72,7 @@ void JitFinalizeKernels(
     }
 
     auto options = KernelRunnerOptions();
+    options.CoreInput = !(externalCatalog && externalCatalog->HasKumirModules());
     options.NativeCode = true;
     options.EnablePerfJitEventListener = true;
     options.PrintIr = diagnostics != nullptr;

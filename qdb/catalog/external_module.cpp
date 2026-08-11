@@ -565,6 +565,12 @@ bool TExternalCatalogSnapshot::HasFunction(const std::string& name) const {
     return false;
 }
 
+bool TExternalCatalogSnapshot::HasKumirModules() const {
+    return std::ranges::any_of(State_->Modules, [](const auto& item) {
+        return item.second->Language == "kumir";
+    });
+}
+
 std::vector<std::string> TExternalCatalogSnapshot::ModuleNames() const {
     std::vector<std::string> result;
     result.reserve(State_->Modules.size());

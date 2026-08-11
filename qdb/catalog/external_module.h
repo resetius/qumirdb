@@ -37,6 +37,7 @@ public:
         const std::vector<NQumir::NAst::TTypePtr>& argTypes) const;
 
     bool HasFunction(const std::string& name) const;
+    bool HasKumirModules() const;
     std::vector<std::string> ModuleNames() const;
     std::expected<std::monostate, NQumir::TError> RegisterDeclarations(
         NQumir::NFrontend::TSourceModuleLoader& loader) const;
