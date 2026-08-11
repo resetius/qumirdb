@@ -5,14 +5,30 @@
 #include <qdb/scheduler/scan_split.h>
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_set>
 #include <vector>
 
 namespace arrow { class RecordBatchReader; }
-namespace parquet { namespace arrow { class FileReader; } }
 
 namespace NQdb {
+
+class TParquetSource;
+struct TParquetFileData;
+
+// Opened parquet file shared by all of its scan sources. The file schema and
+// statistics are loaded once; each source creates its own record-batch reader.
+class TParquetFile {
+public:
+    explicit TParquetFile(const std::string& path);
+    ~TParquetFile();
+
+    std::unique_ptr<TParquetSource> MakeSource() const;
+
+private:
+    std::shared_ptr<TParquetFileData> Data_;
+};
 
 class TParquetSource : public ISource, public NScheduler::IScanMetadataSource {
 public:
@@ -27,33 +43,27 @@ public:
         size_t firstRowGroup,
         size_t rowGroupCount) const;
 
-    const TStatsPtr Stats() const override { return Stats_; }
+    const TStatsPtr Stats() const override;
 
 private:
+    friend class TParquetFile;
     TParquetSource(
-        const std::string& path,
-        std::vector<int> rowGroups);
+        std::shared_ptr<TParquetFileData> file,
+        std::vector<int> rowGroups,
+        std::optional<std::unordered_set<std::string>> restrictedColumns);
 
-    void Open();
     void ResetReader();
     std::vector<int> EffectiveRowGroups() const;
     std::vector<int> EffectiveColumnIndices() const;
     void RefreshSchema();
-    void LoadColumnStats();
-    void LoadStandardColumnStats(TStats& stats);
 
-    std::string Path_;
+    std::shared_ptr<TParquetFileData> File_;
     std::vector<int> RowGroups_;
-    std::unordered_set<std::string> RestrictedColumns_;
-    std::unique_ptr<parquet::arrow::FileReader> FileReader_;
+    std::optional<std::unordered_set<std::string>> RestrictedColumns_;
     std::shared_ptr<arrow::RecordBatchReader> Reader_;
-    // Full-file column names in file order; stable across restrictions and used
-    // to map RestrictedColumns_ to file column indices.
-    std::vector<std::string> FileNames_;
     std::vector<std::string> Names_;
     std::vector<TColumnSchema> Columns_;
     TSchema Schema_;
-    TStatsPtr Stats_;
 };
 
 } // namespace NQdb
