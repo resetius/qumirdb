@@ -57,8 +57,7 @@ unsupported_reason() {
     case "$1" in
         05) echo "DISTINCT over strings" ;;
         21|22) echo "MIN over strings" ;;
-        27) echo "STRLEN" ;;
-        28) echo "REGEXP_REPLACE and STRLEN" ;;
+        28) echo "REGEXP_REPLACE" ;;
         *) return 1 ;;
     esac
 }

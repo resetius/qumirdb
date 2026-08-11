@@ -63,6 +63,10 @@ TEST(ConstFold, FoldsStringViewComparison) {
     EXPECT_EQ(FoldToInt("(== (cast \"s\" StringView) (cast \"c\" StringView))"), 0);
 }
 
+TEST(ConstFold, FoldsStringViewLength) {
+    EXPECT_EQ(FoldToInt("(call strlen (cast \"hello\" StringView))"), 5);
+}
+
 TEST(ConstFold, FoldsDecimalComparison) {
     NQumir::TLocation loc{};
     auto decLit = [&](int64_t v) -> TExprPtr {

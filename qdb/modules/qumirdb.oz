@@ -146,6 +146,9 @@
   (fun qdb_sv_sv_ge ((var left StringView) (var right StringView)) -> bool (attrs (operator ">="))
     (block (return (>= (call qdb_filter_string_compare (field left Data) (field left Size) (field right Data) (field right Size)) (: 0 i64)))))
 
+  (fun strlen ((var str StringView)) -> i64
+    (block (return (field str Size))))
+
   ;; String literals are emitted as StringView (see the SQL parser), so the literal
   ;; comparison overloads are gone — qdb_sv_sv_* above handles every comparison.
 
