@@ -5,6 +5,11 @@
 #include <qdb/utils/sha1.h>
 
 #include <qumir/frontend/source_module_loader.h>
+#include <qumir/modules/system/system.h>
+#include <qumir/parser/lexer.h>
+#include <qumir/parser/parser.h>
+#include <qumir/semantics/kumir/pipeline.h>
+#include <qumir/semantics/name_resolution/name_resolver.h>
 
 #include <algorithm>
 #include <cctype>
@@ -79,6 +84,79 @@ std::shared_ptr<TFunDecl> CloneFunction(const TFunDecl& source) {
     result->MangledName = source.MangledName;
     result->Type = source.Type;
     return result;
+}
+
+std::shared_ptr<TFunDecl> CloneDeclaration(const TFunDecl& source) {
+    auto result = CloneFunction(source);
+    if (result->MangledName.empty()) {
+        result->MangledName = result->Name;
+    }
+    return result;
+}
+
+struct TParsedKumirModule {
+    TExprPtr Ast;
+    std::vector<TPragma> Pragmas;
+    std::map<std::string, std::shared_ptr<TFunDecl>> Functions;
+};
+
+std::expected<TParsedKumirModule, TError> ParseKumirModule(
+    const std::string& moduleName,
+    const std::string& source)
+{
+    NSemantics::TNameResolver resolver;
+    auto system = std::make_shared<NRegistry::SystemModule>();
+    resolver.RegisterModule(system.get());
+    (void)resolver.ImportModule("System");
+    for (const auto& [alias, canonical] : NSemantics::NKumir::ModuleAliases()) {
+        resolver.RegisterModuleAlias(alias, canonical);
+    }
+
+    std::istringstream input(source);
+    TTokenStream stream(input);
+    TParser parser;
+    auto ast = parser.parse(stream, &resolver);
+    if (!ast) {
+        return std::unexpected(ast.error());
+    }
+    auto block = TMaybeNode<TBlockExpr>(*ast);
+    if (!block) {
+        return std::unexpected(TError(
+            "external Kumir module `" + moduleName + "' must be a block"));
+    }
+
+    std::vector<TPragma> pragmas = stream.GetContext()->GetPragmas();
+    std::erase_if(pragmas, [](const TPragma& pragma) {
+        return pragma.Group == "language";
+    });
+    pragmas.push_back(TPragma{"language", {"overloads"}, {}});
+
+    // Reuse the source-loader validation contract: imported modules cannot
+    // contain a Kumir entry point or arbitrary top-level statements.
+    NFrontend::TSourceModuleLoader loader;
+    auto loaded = loader.LoadAst(
+        moduleName, *ast, {}, pragmas, "<kumir:" + moduleName + ">");
+    if (!loaded) {
+        return std::unexpected(loaded.error());
+    }
+
+    std::map<std::string, std::shared_ptr<TFunDecl>> functions;
+    for (const auto& stmt : block.Cast()->Stmts) {
+        auto function = TMaybeNode<TFunDecl>(stmt);
+        if (!function) {
+            continue;
+        }
+        const auto key = FunctionKey(*function.Cast());
+        if (!functions.emplace(key, function.Cast()).second) {
+            return std::unexpected(TError(
+                "external function `" + key + "' is declared more than once"));
+        }
+    }
+    return TParsedKumirModule{
+        .Ast = std::move(*ast),
+        .Pragmas = std::move(pragmas),
+        .Functions = std::move(functions),
+    };
 }
 
 std::string ReadFile(const std::filesystem::path& path) {
@@ -504,7 +582,7 @@ TExternalCatalogSnapshot::RegisterDeclarations(
         std::vector<TExprPtr> declarations;
         declarations.reserve(module->Functions.size());
         for (const auto& [__, function] : module->Functions) {
-            declarations.push_back(CloneFunction(*function));
+            declarations.push_back(CloneDeclaration(*function));
         }
         auto loaded = loader.LoadAst(
             module->Name,
@@ -551,20 +629,34 @@ TExternalCatalogSnapshot::ComposeReferenced(
 
     NQumir::NFrontend::TSourceModuleLoader loader;
     for (const auto& module : modules) {
-        std::vector<TExprPtr> declarations;
-        declarations.reserve(module->Functions.size());
-        for (const auto& [_, function] : module->Functions) {
-            declarations.push_back(CloneFunction(*function));
+        std::expected<const NFrontend::TSourceModule*, TError> loaded =
+            std::unexpected(TError("unsupported external module language"));
+        if (module->Language == "rust") {
+            std::vector<TExprPtr> declarations;
+            declarations.reserve(module->Functions.size());
+            for (const auto& [_, function] : module->Functions) {
+                declarations.push_back(CloneDeclaration(*function));
+            }
+            auto bitcode = ModuleBitcode(*module, target, cacheDir);
+            if (!bitcode) {
+                return std::unexpected(bitcode.error());
+            }
+            loaded = loader.LoadAst(
+                module->Name,
+                std::make_shared<TBlockExpr>(TLocation{}, std::move(declarations)),
+                {std::move(*bitcode)},
+                {TPragma{"language", {"overloads"}, {}}});
+        } else if (module->Language == "kumir") {
+            auto parsed = ParseKumirModule(module->Name, module->Source);
+            if (!parsed) {
+                return std::unexpected(parsed.error());
+            }
+            loaded = loader.LoadAst(
+                module->Name,
+                std::move(parsed->Ast),
+                {},
+                std::move(parsed->Pragmas));
         }
-        auto bitcode = ModuleBitcode(*module, target, cacheDir);
-        if (!bitcode) {
-            return std::unexpected(bitcode.error());
-        }
-        auto loaded = loader.LoadAst(
-            module->Name,
-            std::make_shared<TBlockExpr>(TLocation{}, std::move(declarations)),
-            {std::move(*bitcode)},
-            {TPragma{"language", {"overloads"}, {}}});
         if (!loaded) {
             return std::unexpected(loaded.error());
         }
@@ -589,11 +681,21 @@ TExternalModuleCatalog::TExternalModuleCatalog()
 std::expected<std::monostate, TError> TExternalModuleCatalog::Apply(
     const NSql::TSqlExternalModule& definition)
 {
-    std::lock_guard lock(Mutex_);
-    if (definition.Language != "rust") {
+    if (definition.Language != "rust" && definition.Language != "kumir") {
         return std::unexpected(TError(
             "unsupported external module language `" + definition.Language + "'"));
     }
+
+    std::optional<TParsedKumirModule> parsedKumir;
+    if (definition.Language == "kumir") {
+        auto parsed = ParseKumirModule(definition.Name, definition.Code);
+        if (!parsed) {
+            return std::unexpected(parsed.error());
+        }
+        parsedKumir = std::move(*parsed);
+    }
+
+    std::lock_guard lock(Mutex_);
     auto existing = State_->Modules.find(definition.Name);
     if (existing != State_->Modules.end() && !definition.Replace) {
         return std::unexpected(TError(
@@ -605,7 +707,18 @@ std::expected<std::monostate, TError> TExternalModuleCatalog::Apply(
     module->Name = definition.Name;
     module->Language = definition.Language;
     module->Source = definition.Code;
-    if (existing != State_->Modules.end()) {
+    if (parsedKumir) {
+        for (const auto& [key, _] : parsedKumir->Functions) {
+            for (const auto& [otherName, other] : State_->Modules) {
+                if (otherName != definition.Name && other->Functions.contains(key)) {
+                    return std::unexpected(TError(
+                        "external function `" + key + "' already exists"));
+                }
+            }
+        }
+        module->Functions = std::move(parsedKumir->Functions);
+    } else if (existing != State_->Modules.end()
+        && existing->second->Language == "rust") {
         module->Functions = existing->second->Functions;
     }
     next->Modules[definition.Name] = std::move(module);
@@ -624,6 +737,11 @@ std::expected<std::monostate, TError> TExternalModuleCatalog::Apply(
     if (targetModule == State_->Modules.end()) {
         return std::unexpected(TError(
             "external module `" + definition.ModuleName + "' does not exist"));
+    }
+    if (targetModule->second->Language != "rust") {
+        return std::unexpected(TError(
+            "CREATE FUNCTION is not required for `" +
+            targetModule->second->Language + "' modules"));
     }
     const std::string key = FunctionKey(*definition.Func);
 

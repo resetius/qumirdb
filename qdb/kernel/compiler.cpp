@@ -142,7 +142,9 @@ TGeneratedKernel TKernelCompiler::EmitKernel(
 
 NQumir::TLLVMRunnerOptions KernelRunnerOptions() {
     NQumir::TLLVMRunnerOptions opts;
-    opts.CoreInput = true;
+    // Kernel AST and Kumir source modules share the same AST. Kumir mode only
+    // supplies the System prelude and the frontend-specific transformations.
+    opts.CoreInput = false;
     opts.ResolveCoreInput = true;
     opts.AllowOverloads = true;
     // TODO: Fix definite-assignment performance on large fused ASTs and re-enable it.

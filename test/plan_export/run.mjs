@@ -323,6 +323,60 @@ SELECT orbit_result(a) FROM t;
   });
 }
 
+async function runKumirModuleBatchContract() {
+  const request = {
+    sql: `
+CREATE MODULE math LANGUAGE kumir AS $$
+алг вещ kumir_root(вещ x)
+нач
+  знач := sqrt(x)
+кон
+$$;
+SELECT kumir_root(a) FROM t;
+`,
+    dataset: {
+      tables: [{
+        name: 't',
+        columns: [{ name: 'a', type: 'f64' }],
+        stats: { rows: 2, bytes: 16, rowGroups: 1 },
+      }],
+    },
+    options: {
+      scheduler: 'single',
+      scanTasks: 1,
+      shufflePartitions: 1,
+      format: 'runtime-bundle',
+      embedWasm: true,
+    },
+  };
+  const bundle = JSON.parse(run(
+    exporter,
+    ['--stdin-json', '--stdout-json'],
+    JSON.stringify(request)));
+  assert.equal(bundle.ok, true, bundle.error?.message);
+  assert.equal(
+    bundle.exec?.supported,
+    true,
+    JSON.stringify({ reason: bundle.exec?.reason, diagnostics: bundle.diagnostics }));
+  const exec = resolveExecArtifacts(bundle);
+  const result = await executeBrowserPipelineScheduled(
+    exec,
+    async function* (stage) {
+      assert.equal(stage.table, 't');
+      yield {
+        rowCount: 2,
+        columns: stage.columns.map(column => ({
+          ...column,
+          values: [4.0, 9.0],
+        })),
+      };
+    });
+  assert.deepEqual(normalizeResult(result), {
+    columns: ['col0'],
+    rows: [['2'], ['3']],
+  });
+}
+
 function normalizedExec(exec) {
   const normalized = {
     supported: exec.supported,
@@ -542,6 +596,24 @@ async function main() {
           error,
         });
         console.error(`[FAIL] external-module-batch\n${errorText(error)}`);
+      }
+    }
+    {
+      const started = performance.now();
+      try {
+        await runKumirModuleBatchContract();
+        results.push({
+          name: 'kumir-module-batch',
+          elapsedMs: performance.now() - started,
+          error: null,
+        });
+      } catch (error) {
+        results.push({
+          name: 'kumir-module-batch',
+          elapsedMs: performance.now() - started,
+          error,
+        });
+        console.error(`[FAIL] kumir-module-batch\n${errorText(error)}`);
       }
     }
     {

@@ -251,6 +251,66 @@ TEST(ExternalModuleCatalog, RustFunctionRunsThroughSqlPlan) {
     EXPECT_FALSE(runtime->Next(output));
 }
 
+TEST(ExternalModuleCatalog, KumirFunctionsAreExportedAndRunWithoutCreateFunction) {
+    NQumir::NCodeGen::TLLVMInitializer llvmInit;
+    TExternalModuleCatalog catalog;
+    auto statements = ParseAll(
+        "CREATE MODULE math LANGUAGE kumir AS $$\n"
+        "алг вещ kumir_abs(вещ x)\n"
+        "нач\n"
+        "    знач := sqrt(x ** 2)\n"
+        "кон\n"
+        "$$;"
+        "SELECT kumir_abs(x) AS value FROM points;");
+    ApplyDefinitions(catalog, {statements[0]});
+
+    auto snapshot = catalog.Snapshot();
+    auto returnType = snapshot->ResolveReturnType(
+        "kumir_abs", {std::make_shared<TFloatType>()});
+    ASSERT_TRUE(returnType) << returnType.error().ToString();
+    ASSERT_TRUE(*returnType);
+    EXPECT_TRUE(TMaybeType<TFloatType>(**returnType));
+
+    std::array<double, 1> values{-3.0};
+    std::array<TColumn, 1> columns{
+        TColumn{.Data = reinterpret_cast<char*>(values.data())},
+    };
+    TRowSet batch{
+        .Columns = columns.data(),
+        .ColumnCount = 1,
+        .RowCount = 1,
+        .RefCount = 1,
+    };
+    TMockSource source(
+        {"x"}, {std::make_shared<TFloatType>()}, {batch});
+    auto plan = BuildPlan(statements[1], [&](std::string_view table)
+        -> std::expected<TOperatorPtr, NQumir::TError>
+    {
+        if (table != "points") {
+            return std::unexpected(NQumir::TError("unknown test table"));
+        }
+        return std::make_shared<TSourceOperator>(source, std::string(table));
+    });
+    ASSERT_TRUE(plan) << plan.error().ToString();
+
+    NKernel::TAnnotationContext annotation{.ExternalCatalog = snapshot};
+    AnnotateTypes(*plan, annotation);
+    ApplyPlanPasses(*plan, {
+        .EnableCbo = false,
+        .Annotation = annotation,
+    });
+    auto runtime = RunPlan(*plan, {}, snapshot);
+
+    TRowSet output{};
+    ASSERT_TRUE(runtime->Next(output));
+    ASSERT_EQ(output.RowCount, 1);
+    ASSERT_EQ(output.ColumnCount, 1);
+    const auto* result = reinterpret_cast<const double*>(output.Columns[0].Data);
+    EXPECT_DOUBLE_EQ(result[0], 3.0);
+    Release(&output);
+    EXPECT_FALSE(runtime->Next(output));
+}
+
 TEST(ExternalModuleCatalog, NullableStructProjectionFailsDuringTyping) {
     TExternalModuleCatalog catalog;
     auto statements = ParseAll(
