@@ -272,6 +272,57 @@ TEST(SortPlan, GroupByExpressionMaterializesKeyAndSubstitutesRefs) {
     EXPECT_NO_THROW(AnnotateTypes(*plan));
 }
 
+TEST(SortPlan, GroupBySelectAliasMaterializesAliasedExpression) {
+    auto i64 = std::make_shared<NQumir::NAst::TIntegerType>();
+    NQdb::TMockSource source(TMockColumns{}, {{"a", i64}, {"b", i64}});
+    auto plan = BuildSqlPlan(
+        "SELECT a + b AS k, count(*) AS c FROM t src GROUP BY k", source);
+    ASSERT_TRUE(plan.has_value()) << (plan ? "" : plan.error().ToString());
+
+    auto topProject = TMaybeOp<TProjectOperator>(*plan);
+    ASSERT_TRUE(topProject);
+    EXPECT_EQ(
+        NQumir::NAst::NCore::PrintAst(
+            topProject.Cast()->Projections()[0].Expression),
+        "k");
+
+    auto aggregate = TMaybeOp<TAggregateOperator>(topProject.Cast()->Input());
+    ASSERT_TRUE(aggregate);
+    EXPECT_EQ(aggregate.Cast()->GroupKeys(), (std::vector<std::string>{"k"}));
+
+    auto keyProject = TMaybeOp<TProjectOperator>(aggregate.Cast()->Input());
+    ASSERT_TRUE(keyProject);
+    ASSERT_FALSE(keyProject.Cast()->Projections().empty());
+    EXPECT_EQ(keyProject.Cast()->Projections()[0].Name, "k");
+    EXPECT_EQ(
+        NQumir::NAst::NCore::PrintAst(
+            keyProject.Cast()->Projections()[0].Expression),
+        "(+ a b)");
+
+    AssignSourceAliases(*plan);
+    QualifyColumns(*plan);
+    EXPECT_NO_THROW(AnnotateTypes(*plan));
+}
+
+TEST(SortPlan, GroupByColumnAliasUsesInputColumnDirectly) {
+    auto i64 = std::make_shared<NQumir::NAst::TIntegerType>();
+    NQdb::TMockSource source(TMockColumns{}, {{"a", i64}});
+    auto plan = BuildSqlPlan(
+        "SELECT a AS k, count(*) AS c FROM t GROUP BY k", source);
+    ASSERT_TRUE(plan.has_value()) << (plan ? "" : plan.error().ToString());
+
+    auto topProject = TMaybeOp<TProjectOperator>(*plan);
+    ASSERT_TRUE(topProject);
+    auto aggregate = TMaybeOp<TAggregateOperator>(topProject.Cast()->Input());
+    ASSERT_TRUE(aggregate);
+    EXPECT_EQ(aggregate.Cast()->GroupKeys(), (std::vector<std::string>{"a"}));
+    EXPECT_TRUE(TMaybeOp<TSourceOperator>(aggregate.Cast()->Input()));
+
+    AssignSourceAliases(*plan);
+    QualifyColumns(*plan);
+    EXPECT_NO_THROW(AnnotateTypes(*plan));
+}
+
 TEST(SortPlan, ColumnPruningKeepsSortKeyColumns) {
     using namespace NQumir::NAst;
 
