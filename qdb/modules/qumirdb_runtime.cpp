@@ -7,7 +7,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <regex>
 #include <stdexcept>
+#include <string>
 #include <string_view>
 #include <type_traits>
 
@@ -47,6 +49,84 @@ __int128 Pow10I128(int64_t scale) {
 }
 
 } // namespace
+
+struct TCompiledRegex::TImpl {
+    std::regex Pattern;
+    std::string Replacement;
+};
+
+namespace {
+
+std::string RegexReplacement(std::string_view replacement) {
+    std::string result;
+    result.reserve(replacement.size());
+    for (size_t i = 0; i < replacement.size(); ++i) {
+        const char ch = replacement[i];
+        if (ch == '$') {
+            result += "$$";
+            continue;
+        }
+        if (ch != '\\' || i + 1 == replacement.size()) {
+            result += ch;
+            continue;
+        }
+        const char escaped = replacement[++i];
+        if (escaped >= '0' && escaped <= '9') {
+            result += '$';
+            result += escaped;
+            while (i + 1 < replacement.size() &&
+                   replacement[i + 1] >= '0' && replacement[i + 1] <= '9')
+            {
+                result += replacement[++i];
+            }
+        } else if (escaped == '&') {
+            result += "$&";
+        } else {
+            result += escaped;
+        }
+    }
+    return result;
+}
+
+} // namespace
+
+TCompiledRegex::TCompiledRegex(
+    std::string_view pattern, std::string_view replacement)
+    : Impl_(std::make_unique<TImpl>(TImpl{
+          .Pattern = std::regex(pattern.begin(), pattern.end()),
+          .Replacement = RegexReplacement(replacement),
+      }))
+{}
+
+TCompiledRegex::~TCompiledRegex() = default;
+
+qdb_string_view TCompiledRegex::Replace(
+    TStringArena& arena, qdb_string_view input) const
+{
+    static const char empty = '\0';
+    const char* begin = input.Data
+        ? reinterpret_cast<const char*>(input.Data)
+        : &empty;
+    const char* end = begin + std::max<int64_t>(input.Size, 0);
+    if (!std::regex_search(begin, end, Impl_->Pattern)) {
+        return input;
+    }
+
+    std::string output;
+    std::regex_replace(
+        std::back_inserter(output), begin, end, Impl_->Pattern,
+        Impl_->Replacement,
+        std::regex_constants::format_first_only);
+    if (output.empty()) {
+        return {nullptr, 0};
+    }
+    char* data = arena.Alloc(static_cast<int64_t>(output.size()));
+    std::memcpy(data, output.data(), output.size());
+    return {
+        reinterpret_cast<const uint8_t*>(data),
+        static_cast<int64_t>(output.size()),
+    };
+}
 
 char* TStringArena::Alloc(int64_t size) {
     if (size <= 0) {
@@ -187,6 +267,15 @@ qdb_string_view qdb_string_concat(void* arena, qdb_string_view left, qdb_string_
         std::memcpy(dst + left.Size, right.Data, static_cast<size_t>(right.Size));
     }
     return {reinterpret_cast<const uint8_t*>(dst), size};
+}
+
+qdb_string_view qdb_regexp_replace(
+    void* arena, const TCompiledRegex* regex, qdb_string_view input)
+{
+    if (!arena || !regex) {
+        return input;
+    }
+    return regex->Replace(*static_cast<TStringArena*>(arena), input);
 }
 
 // Howard Hinnant's date algorithm: https://howardhinnant.github.io/date_algorithms.html

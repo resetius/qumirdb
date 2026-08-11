@@ -133,7 +133,7 @@ NQumir::NAst::TExprPtr GenJoinResidualFilterAst(
     NQumir::NAst::TTypePtr stringViewType);
 
 // Builds a vectorized project kernel for the COMPUTED columns only.
-// Signature: void <kernel>(rowSet: <ref TRowSet>, out: <ptr <ptr i8>>) — for each
+// Signature: void <kernel>(rowSet, out, arena, regexHandles) — for each
 // row i and each computed projection k: out[k][i] = (cast) <expr_k>. Output
 // buffer k holds values of computedTypes[k]; the explicit cast pins the buffer
 // type. ident projections are NOT here (handled zero-copy by project_exec).

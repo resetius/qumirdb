@@ -1225,11 +1225,20 @@ function dateYear(days) {
 // time; `holder.arena` is bound by drivers whose kernels allocate
 // (qdb_alloc/realloc/free — e.g. the aggregate hash table).
 function createQdbEnv(getMemory, holder) {
+  const textDecoder = new TextDecoder();
+  const textEncoder = new TextEncoder();
   const alloc = (size) => {
     if (!holder.arena) {
       throw new Error('kernel called qdb_alloc but no allocator is bound');
     }
     return holder.arena.alloc(Math.max(Number(size), 1), 8);
+  };
+  const allocStringScratch = (size) => {
+    const ptr = alloc(size);
+    if (holder.stringScratchAllocs) {
+      holder.stringScratchAllocs.push(ptr);
+    }
+    return ptr;
   };
   const bytesAt = (ptr, size) => {
     const mem = new Uint8Array(getMemory().buffer);
@@ -1304,7 +1313,7 @@ function createQdbEnv(getMemory, holder) {
       dv.setBigInt64(Number(out) + 8, 0n, true);
       return;
     }
-    const ptr = alloc(size);
+    const ptr = allocStringScratch(size);
     const mem = new Uint8Array(getMemory().buffer);
     let offset = ptr;
     if (leftSize > 0) {
@@ -1317,6 +1326,39 @@ function createQdbEnv(getMemory, holder) {
     const outView = new DataView(getMemory().buffer);
     writePointer(outView, Number(out), ptr);
     outView.setBigInt64(Number(out) + 8, BigInt(size), true);
+  };
+  const regexpReplace = (out, _arena, handle, data, size) => {
+    // wasm64 lowers a trailing 16-byte StringView argument indirectly here.
+    // Keep the split form too so this import remains valid if the ABI classifier
+    // can place both fields directly after a future signature change.
+    if (size === undefined) {
+      const arg = Number(data);
+      const dv = new DataView(getMemory().buffer);
+      data = readPointer(dv, arg);
+      size = dv.getBigInt64(arg + 8, true);
+    }
+    const program = holder.regexPrograms?.[Number(handle) - 1];
+    if (!program) {
+      throw new Error(`kernel used unknown regex handle ${String(handle)}`);
+    }
+    const input = textDecoder.decode(bytesAt(data, size));
+    program.regex.lastIndex = 0;
+    if (!program.regex.exec(input)) {
+      const dv = new DataView(getMemory().buffer);
+      writePointer(dv, Number(out), Number(data));
+      dv.setBigInt64(Number(out) + 8, BigInt(size), true);
+      return;
+    }
+    program.regex.lastIndex = 0;
+    const encoded = textEncoder.encode(
+      input.replace(program.regex, program.replacement));
+    const ptr = encoded.length > 0 ? allocStringScratch(encoded.length) : 0;
+    if (encoded.length > 0) {
+      new Uint8Array(getMemory().buffer).set(encoded, ptr);
+    }
+    const dv = new DataView(getMemory().buffer);
+    writePointer(dv, Number(out), ptr);
+    dv.setBigInt64(Number(out) + 8, BigInt(encoded.length), true);
   };
   const binIntArg = (lo, hi) =>
     (BigInt.asIntN(64, BigInt(hi)) << 64n) + BigInt.asUintN(64, BigInt(lo));
@@ -1365,6 +1407,7 @@ function createQdbEnv(getMemory, holder) {
       BigInt(sqlLikeBytes(bytesAt(sd, ss), bytesAt(pd, ps))),
     qdb_substring: substring,
     qdb_string_concat: stringConcat,
+    qdb_regexp_replace: regexpReplace,
     qdb_date_year: dateYear,
     qdb_sql_date: sqlDate,
     qdb_sql_interval: sqlInterval,
@@ -1471,6 +1514,92 @@ export async function instantiateKernel(entryName, shared) {
     throw new Error(`kernel is missing entry ${entryName}`);
   }
   return { ...kernel, fn };
+}
+
+function beginKernelStringScratch(kernel) {
+  const holder = kernel?.holder;
+  if (!holder?.arena) {
+    throw new Error('kernel string scratch needs the query arena');
+  }
+  if (holder.stringScratchAllocs) {
+    throw new Error('nested kernel string scratch invocation');
+  }
+  const allocations = [];
+  holder.stringScratchAllocs = allocations;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    holder.stringScratchAllocs = null;
+    for (const ptr of allocations) {
+      holder.arena.free(ptr);
+    }
+  };
+}
+
+function regexReplacement(replacement) {
+  let result = '';
+  for (let i = 0; i < replacement.length; ++i) {
+    const ch = replacement[i];
+    if (ch === '$') {
+      result += '$$';
+      continue;
+    }
+    if (ch !== '\\' || i + 1 === replacement.length) {
+      result += ch;
+      continue;
+    }
+    const escaped = replacement[++i];
+    if (escaped >= '0' && escaped <= '9') {
+      result += '$' + escaped;
+      while (i + 1 < replacement.length &&
+             replacement[i + 1] >= '0' && replacement[i + 1] <= '9') {
+        result += replacement[++i];
+      }
+    } else if (escaped === '&') {
+      result += '$&';
+    } else {
+      result += escaped;
+    }
+  }
+  return result;
+}
+
+function bindKernelRegexes(kernel, stage) {
+  const specs = Array.isArray(stage?.regexes) ? stage.regexes : [];
+  if (specs.length === 0) {
+    return { ...kernel, regexHandles: 0 };
+  }
+  const holder = kernel.holder;
+  holder.regexPrograms ||= [];
+  holder.regexProgramIds ||= new Map();
+  holder.regexHandleTables ||= new Map();
+  const handles = specs.map(spec => {
+    const pattern = String(spec.pattern ?? '');
+    const replacement = String(spec.replacement ?? '');
+    const key = JSON.stringify([pattern, replacement]);
+    let handle = holder.regexProgramIds.get(key);
+    if (handle === undefined) {
+      handle = holder.regexPrograms.length + 1;
+      holder.regexPrograms.push({
+        regex: new RegExp(pattern),
+        replacement: regexReplacement(replacement),
+      });
+      holder.regexProgramIds.set(key, handle);
+    }
+    return handle;
+  });
+  const tableKey = handles.join(',');
+  let table = holder.regexHandleTables.get(tableKey);
+  if (table === undefined) {
+    table = holder.arena.alloc(handles.length * 8, 8);
+    const dv = holder.arena.view();
+    for (let i = 0; i < handles.length; ++i) {
+      dv.setBigUint64(table + i * 8, BigInt(handles[i]), true);
+    }
+    holder.regexHandleTables.set(tableKey, table);
+  }
+  return { ...kernel, regexHandles: table };
 }
 
 function stageEntrypoint(stage, name) {
@@ -1628,7 +1757,13 @@ export function runFilter(kernel, layout, rowSet, writer, options = {}) {
     selectionPtr = written.selectionPtr;
   }
   // memory64 entry: the rowset pointer is an i64 param.
-  kernel.fn(BigInt(rowsetPtr));
+  const releaseStringScratch = beginKernelStringScratch(kernel);
+  try {
+    kernel.fn(
+      BigInt(rowsetPtr), 0n, BigInt(kernel.regexHandles || 0));
+  } finally {
+    releaseStringScratch();
+  }
   attachBatchWasm(batch, rowsetPtr, {
     pinned: wasm ? wasm.pinned : pinned,
     selectionPtr,
@@ -1738,6 +1873,7 @@ export function runProject(kernel, layout, rowSet, output, arena) {
   let outArrayPtr = 0;
   const computedBuffers = [];
   const computedMaskBuffers = [];
+  let releaseStringScratch = null;
 
   try {
     if (computed.length > 0) {
@@ -1767,7 +1903,10 @@ export function runProject(kernel, layout, rowSet, output, arena) {
       if (input.rowsetPtr === undefined || outArrayPtr === undefined) {
         throw new Error('project kernel rowset/output pointer is missing');
       }
-      kernel.fn(BigInt(input.rowsetPtr), BigInt(outArrayPtr), 0n);
+      releaseStringScratch = beginKernelStringScratch(kernel);
+      kernel.fn(
+        BigInt(input.rowsetPtr), BigInt(outArrayPtr), 0n,
+        BigInt(kernel.regexHandles || 0));
       arena.free(outArrayPtr);
       outArrayPtr = 0;
     }
@@ -1789,6 +1928,10 @@ export function runProject(kernel, layout, rowSet, output, arena) {
       }
       return { ...stringColumn, maskPtr: computedMaskBuffers[k] };
     });
+    if (releaseStringScratch) {
+      releaseStringScratch();
+      releaseStringScratch = null;
+    }
 
     rowsetPtr = arena.alloc(layout.rowset.size, 8);
     columnsBase = arena.alloc(output.length * layout.column.size, 8);
@@ -1851,6 +1994,9 @@ export function runProject(kernel, layout, rowSet, output, arena) {
       selection: makeWasmSelection(arena, rowCount, selectionPtr),
     };
   } catch (error) {
+    if (releaseStringScratch) {
+      releaseStringScratch();
+    }
     if (outArrayPtr) {
       arena.free(outArrayPtr);
     }
@@ -3098,8 +3244,10 @@ class FilterTask {
       return TaskResult.FINISHED;
     }
     if (!this.kernel) {
-      this.kernel = await instantiateKernel(
-        stageEntrypoint(this.stage, 'filter'), this.shared);
+      this.kernel = bindKernelRegexes(
+        await instantiateKernel(
+          stageEntrypoint(this.stage, 'filter'), this.shared),
+        this.stage);
     }
     assertStreamingWasmEdge(outEdge);
     const reusesInput = reusableFilterWasm(
@@ -3181,8 +3329,10 @@ class ProjectTask {
     const hasComputed = this.stage.output.some(col => col.source === 'computed');
     if (hasComputed) {
       if (!this.kernel) {
-        this.kernel = await instantiateKernel(
-          stageEntrypoint(this.stage, 'project'), this.shared);
+        this.kernel = bindKernelRegexes(
+          await instantiateKernel(
+            stageEntrypoint(this.stage, 'project'), this.shared),
+          this.stage);
       }
     }
     if (fetched.rowSet.batch.wasm && !fetched.rowSet.batch.wasm.pinned) {

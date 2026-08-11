@@ -2,6 +2,7 @@
 #include <qdb/exec/aggregate_exec.h>
 #include <qdb/exec/join_exec.h>
 #include <qdb/exec/planner_helpers.h>
+#include <qdb/exec/runtime_context.h>
 #include <qdb/exec/sort_exec.h>
 #include <qdb/exec/window_exec.h>
 #include <qdb/io/parquet/source.h>
@@ -387,6 +388,7 @@ public:
         , Diagnostics_(diagnostics)
         , KernelSink_(kernelSink)
         , ExternalCatalog_(std::move(externalCatalog))
+        , RuntimeContext_(std::make_shared<TRuntimeContext>())
     {}
 
     // Kernel options for one stage: generation only (deferred finalization),
@@ -402,6 +404,7 @@ public:
             .Sink = KernelSink_,
             .BindNow = false,
             .ExternalCatalog = ExternalCatalog_,
+            .RuntimeContext = RuntimeContext_,
         };
     }
 
@@ -2347,6 +2350,7 @@ private:
     std::ostream* Diagnostics_;
     std::vector<TGeneratedKernel>* KernelSink_ = nullptr;
     std::shared_ptr<const TExternalCatalogSnapshot> ExternalCatalog_;
+    std::shared_ptr<TRuntimeContext> RuntimeContext_;
     std::unordered_map<const TCteMaterialization*, TMaterializedProducer> Materialized_;
     std::vector<TLoweredExecStage> ExecStages_;
     NScheduler::TTaskGroupId LastTaskGroupId_ =

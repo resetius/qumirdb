@@ -1,6 +1,8 @@
 #include <qdb/kernel/spec.h>
 
 #include <qdb/kernel/annotate_type.h>
+#include <qdb/exec/runtime_context.h>
+#include <qdb/plan/clone_expr.h>
 #include <qdb/plan/passes/unbound_vars.h>
 
 #include <qumir/parser/core/printer.h>
@@ -10,6 +12,7 @@
 #include <ostream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <unordered_set>
 #include <utility>
 
@@ -24,6 +27,109 @@ std::string TypeName(const NQumir::NAst::TTypePtr& type) {
 
 void PrintColumn(std::ostream& out, const TKernelColumnRef& column) {
     out << column.Name << "#" << column.Index << ":" << TypeName(column.Type);
+}
+
+const NQumir::NAst::TStringLiteralExpr* StringLiteral(
+    const NQumir::NAst::TExprPtr& expr)
+{
+    using namespace NQumir::NAst;
+    TExprPtr current = expr;
+    while (auto cast = TMaybeNode<TCastExpr>(current)) {
+        current = cast.Cast()->Operand;
+    }
+    auto literal = TMaybeNode<TStringLiteralExpr>(current);
+    return literal ? literal.Cast().get() : nullptr;
+}
+
+void LowerRegexCalls(
+    NQumir::NAst::TExprPtr& expr,
+    TRegexRegistry* registry)
+{
+    using namespace NQumir::NAst;
+    if (!expr) {
+        return;
+    }
+    for (auto* child : expr->MutableChildren()) {
+        LowerRegexCalls(*child, registry);
+    }
+
+    auto call = TMaybeNode<TCallExpr>(expr);
+    if (!call) {
+        return;
+    }
+    auto callee = TMaybeNode<TIdentExpr>(call.Cast()->Callee);
+    if (!callee || callee.Cast()->Name != "regexp_replace") {
+        return;
+    }
+    if (call.Cast()->Args.size() != 3) {
+        throw std::runtime_error("REGEXP_REPLACE expects 3 arguments");
+    }
+    const auto* pattern = StringLiteral(call.Cast()->Args[1]);
+    const auto* replacement = StringLiteral(call.Cast()->Args[2]);
+    if (!pattern || !replacement) {
+        throw std::runtime_error(
+            "REGEXP_REPLACE pattern and replacement must be constant strings");
+    }
+    if (!registry) {
+        throw std::runtime_error("REGEXP_REPLACE has no query regex registry");
+    }
+
+    const size_t id = registry->Register(pattern->Value, replacement->Value);
+    auto index = std::make_shared<TNumberExpr>(
+        call.Cast()->Location, static_cast<int64_t>(id));
+    auto handle = std::make_shared<TIndexExpr>(
+        call.Cast()->Location,
+        std::make_shared<TIdentExpr>(call.Cast()->Location, "__regexes__"),
+        std::move(index));
+    auto lowered = std::make_shared<TCallExpr>(
+        call.Cast()->Location,
+        std::make_shared<TIdentExpr>(call.Cast()->Location, "qdb_regexp_replace"),
+        std::vector<TExprPtr>{
+            std::make_shared<TIdentExpr>(call.Cast()->Location, "__arena__"),
+            std::move(handle),
+            call.Cast()->Args[0],
+        });
+    lowered->Type = expr->Type;
+    expr = std::move(lowered);
+}
+
+bool ContainsRegexCall(const NQumir::NAst::TExprPtr& expr) {
+    using namespace NQumir::NAst;
+    if (!expr) {
+        return false;
+    }
+    if (auto call = TMaybeNode<TCallExpr>(expr)) {
+        if (auto callee = TMaybeNode<TIdentExpr>(call.Cast()->Callee);
+            callee && callee.Cast()->Name == "regexp_replace")
+        {
+            return true;
+        }
+    }
+    return std::ranges::any_of(expr->Children(), ContainsRegexCall);
+}
+
+NQumir::NAst::TExprPtr LowerRegexExpression(
+    const NQumir::NAst::TExprPtr& expr,
+    TRegexRegistry* registry)
+{
+    if (!ContainsRegexCall(expr)) {
+        return expr;
+    }
+    auto lowered = CloneExpr(expr);
+    LowerRegexCalls(lowered, registry);
+    return lowered;
+}
+
+void RejectRegexCall(
+    const NQumir::NAst::TExprPtr& expr,
+    std::string_view kernel)
+{
+    if (ContainsRegexCall(expr)) {
+        throw std::runtime_error(
+            "REGEXP_REPLACE is not supported directly in " +
+            std::string(kernel) +
+            " kernels; materialize it in a project first");
+    }
 }
 
 } // namespace
@@ -46,11 +152,14 @@ TOperatorKernelSpec BuildFilterKernelSpec(
     const NQumir::NAst::TStructType& inputType,
     const NQumir::NAst::TExprPtr& predicate,
     std::string entrypointName,
-    const TExternalCatalogSnapshot* externalCatalog)
+    const TExternalCatalogSnapshot* externalCatalog,
+    TRuntimeContext* runtimeContext)
 {
     // Make NULL propagation explicit right before compilation (never in logical planning).
     auto expanded = NKernel::ExpandKernelExpr(
         predicate, inputType, externalCatalog).first;
+    expanded = LowerRegexExpression(
+        expanded, runtimeContext ? &runtimeContext->Regexes : nullptr);
     const auto refs = FindUnboundVars(expanded);
 
     std::vector<TKernelColumnRef> referenced;
@@ -84,7 +193,8 @@ TOperatorKernelSpec BuildProjectKernelSpec(
     const std::vector<NQumir::NAst::TExprPtr>& computedExprs,
     const std::vector<NQumir::NAst::TTypePtr>& computedTypes,
     std::string entrypointName,
-    const TExternalCatalogSnapshot* externalCatalog)
+    const TExternalCatalogSnapshot* externalCatalog,
+    TRuntimeContext* runtimeContext)
 {
     std::vector<std::pair<std::string, NQumir::NAst::TTypePtr>> outputFields;
     outputFields.reserve(computedTypes.size());
@@ -95,8 +205,10 @@ TOperatorKernelSpec BuildProjectKernelSpec(
     std::vector<NQumir::NAst::TExprPtr> expanded;
     expanded.reserve(computedExprs.size());
     for (const auto& expr : computedExprs) {
-        expanded.push_back(NKernel::ExpandKernelExpr(
-            expr, inputType, externalCatalog).first);
+        auto kernelExpr = NKernel::ExpandKernelExpr(
+            expr, inputType, externalCatalog).first;
+        expanded.push_back(LowerRegexExpression(
+            kernelExpr, runtimeContext ? &runtimeContext->Regexes : nullptr));
     }
 
     std::unordered_set<std::string> refs;
@@ -156,6 +268,7 @@ TOperatorKernelSpec BuildAggregateKernelSpec(
     std::vector<TKernelAggregateSpec> aggregateSpecs;
     aggregateSpecs.reserve(aggs.size());
     for (const auto& agg : aggs) {
+        RejectRegexCall(agg.Arg, "aggregate");
         // Expand NULL propagation in the argument expression before compilation.
         auto argExpr = agg.Arg
             ? NKernel::ExpandKernelExpr(agg.Arg, inputType, externalCatalog).first
@@ -256,6 +369,7 @@ TOperatorKernelSpec BuildJoinKernelSpec(
     EJoinType type,
     const NQumir::NAst::TExprPtr& residualPredicate)
 {
+    RejectRegexCall(residualPredicate, "join");
     auto columnRef = [](const NQumir::NAst::TStructType& inputType,
         const std::string& name) -> TKernelColumnRef
     {

@@ -15,6 +15,8 @@ class TLLVMRunner;
 
 namespace NQdb {
 
+class TRuntimeContext;
+
 // Machine binding for one generated kernel program. Created empty at
 // generation time; filled exactly once by the JIT finalizer.
 struct TKernelSlot {
@@ -36,6 +38,7 @@ struct TGeneratedKernel {
     NQumir::NAst::TExprPtr Ast;
     // Payloads the AST points into (e.g. filter literal strings).
     std::shared_ptr<void> Storage;
+    std::shared_ptr<TRuntimeContext> RuntimeContext;
     std::shared_ptr<TKernelSlot> Slot;
     bool ExportArtifacts = true;
 

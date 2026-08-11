@@ -194,6 +194,15 @@
   (fun qdb_string_concat ((var arena <ptr i8>) (var l StringView) (var r StringView)) -> StringView
        (attrs extern) (block))
 
+  ;; REGEXP_REPLACE is typed here under its SQL name, then kernel lowering
+  ;; replaces it with qdb_regexp_replace(arena, compiled_regex, str).
+  (fun regexp_replace
+       ((var str StringView) (var pattern StringView) (var replacement StringView)) -> StringView
+       (attrs extern) (block))
+  (fun qdb_regexp_replace
+       ((var arena <ptr i8>) (var regex <ptr i8>) (var str StringView)) -> StringView
+       (attrs extern) (block))
+
   (fun substr ((var str StringView) (var start i32) (var length i32)) -> StringView
        (attrs (extern qdb_substring)) (block))
 

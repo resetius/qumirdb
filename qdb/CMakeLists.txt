@@ -55,6 +55,7 @@ add_library(qumirdb
     kernel/join_gen.cpp
     kernel/builder.cpp
     kernel/annotate_type.cpp
+    kernel/regex.cpp
     kernel/spec.cpp
     kernel/lib.cpp
     kernel/compiler.cpp
