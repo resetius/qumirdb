@@ -315,7 +315,7 @@ TProjectColumnPlan BuildProjectColumnPlan(
             if (projection.Expression->Type
                 && !IsNullableType(projection.Expression->Type)
                 && NQumir::NAst::TMaybeType<NQumir::NAst::TStructType>(
-                    NQumir::NAst::UnwrapNamedType(projection.Expression->Type)))
+                    projection.Expression->Type))
             {
                 outType = projection.Expression->Type;
             } else if (annotatedOutput

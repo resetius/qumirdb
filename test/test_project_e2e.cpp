@@ -653,6 +653,16 @@ TEST(ProjectE2E, NormalizesBareNullStringIfBranchBeforeProjectKernel) {
     EXPECT_FALSE(plan->Next(out));
 }
 
+TEST(ProjectE2E, StringLiteralIsNotFlattenedAsStringViewStruct) {
+    NQdb::TMockSource src({"value"});
+    auto plan = SqlPlan("SELECT 's' AS sale_type FROM t", {{"t", &src}});
+
+    auto* outType = static_cast<TStructType*>(plan->OutputType().get());
+    ASSERT_EQ(outType->Fields.size(), 1u);
+    EXPECT_EQ(outType->Fields[0].first, "sale_type");
+    EXPECT_TRUE(TMaybeType<TStringType>(outType->Fields[0].second));
+}
+
 TEST(ProjectE2E, DecimalProjectComputesWithBinIntStorage) {
     std::array<qdb_bin_int, 3> amount = {{
         {.Lo = 1000, .Hi = 0}, // 10.00

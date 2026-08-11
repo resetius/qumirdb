@@ -1217,6 +1217,7 @@ std::expected<TOperatorPtr, TError> ApplyColumnAliases(
     std::vector<TProjectionSpec> renamed = project.Cast()->Projections();
     for (size_t i = 0; i < renamed.size(); ++i) {
         renamed[i].Name = aliases[i];
+        renamed[i].ImplicitName = false;
     }
     return std::make_shared<TProjectOperator>(project.Cast()->Input(), std::move(renamed));
 }
@@ -1472,6 +1473,7 @@ std::expected<TOperatorPtr, TError> DecorrelateIn(
     // internal — a semi/anti join exposes only its left side.
     auto& spec = project.Cast()->MutableProjections()[0];
     spec.Name = "__qdb_in__" + spec.Name;
+    spec.ImplicitName = false;
     auto column = Ident(subquery.Operand->Location, spec.Name);
     auto residual = std::make_shared<NAst::TBinaryExpr>(
         subquery.Operand->Location, NAst::TOperator("=="), subquery.Operand, std::move(column));
@@ -1729,7 +1731,9 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
                 return std::unexpected(TError("IN subquery must return exactly one column"));
             }
             std::string markName = "__in_mark_" + std::to_string(counter++) + "__";
-            project.Cast()->MutableProjections()[0].Name = markName;
+            auto& projection = project.Cast()->MutableProjections()[0];
+            projection.Name = markName;
+            projection.ImplicitName = false;
             // Dedup so each outer row matches at most one right row (no duplication).
             auto distinct = ApplyDistinct(*plan, { markName });
             // Left join null-extends `markName` to NULL on non-match — the marker.
@@ -1823,7 +1827,9 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
                         TError("correlated scalar subquery must return one value"));
                 }
                 std::string scalarName = "__scalar_" + std::to_string(id) + "__";
-                project.Cast()->MutableProjections().back().Name = scalarName;
+                auto& projection = project.Cast()->MutableProjections().back();
+                projection.Name = scalarName;
+                projection.ImplicitName = false;
                 // LEFT join preserves outer rows; a missing match yields NULL, so
                 // the surrounding comparison filters the row out (SQL semantics).
                 node = std::make_shared<TJoinOperator>(
@@ -1854,7 +1860,9 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
             return std::unexpected(TError("scalar subquery must return exactly one column"));
         }
         std::string name = "__scalar_" + std::to_string(counter++) + "__";
-        project.Cast()->MutableProjections()[0].Name = name;
+        auto& projection = project.Cast()->MutableProjections()[0];
+        projection.Name = name;
+        projection.ImplicitName = false;
         node = std::make_shared<TJoinOperator>(
             std::move(node), *plan, std::vector<TJoinKey>{}, EJoinType::Inner, nullptr);
         return Ident(expr->Location, std::move(name));

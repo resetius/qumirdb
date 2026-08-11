@@ -10,6 +10,7 @@
 
 #include <qumir/parser/ast.h>
 
+#include <algorithm>
 #include <expected>
 #include <map>
 #include <sstream>
@@ -212,6 +213,7 @@ TEST(WindowPlan, HavingScalarSubqueryIgnoresFunctionCalleeForCorrelation) {
         ") v",
         tables);
     ASSERT_TRUE(plan.has_value()) << (plan ? "" : plan.error().ToString());
+    ApplyPlanPasses(*plan);
 
     auto* window = FindWindow(*plan);
     ASSERT_NE(window, nullptr);
@@ -219,6 +221,31 @@ TEST(WindowPlan, HavingScalarSubqueryIgnoresFunctionCalleeForCorrelation) {
     ASSERT_NE(scalarJoin, nullptr);
     EXPECT_EQ(scalarJoin->JoinType(), EJoinType::Inner);
     EXPECT_TRUE(scalarJoin->Keys().empty());
+    auto* output = static_cast<NQumir::NAst::TStructType*>(
+        scalarJoin->OutputColumns().get());
+    ASSERT_NE(output, nullptr);
+    EXPECT_TRUE(std::ranges::any_of(output->Fields, [](const auto& field) {
+        return field.first == "__scalar_0__";
+    }));
+}
+
+TEST(WindowPlan, ColumnListAliasesSurviveTyping) {
+    NQdb::TMockSource t({"x"});
+    std::map<std::string, ISource*> tables = {{"t", &t}};
+
+    for (const auto sql : {
+        "SELECT q.renamed FROM (SELECT x + 1 FROM t) AS q(renamed)",
+        "WITH q(renamed) AS (SELECT x + 1 FROM t) SELECT renamed FROM q",
+    }) {
+        auto plan = BuildSqlPlan(sql, tables);
+        ASSERT_TRUE(plan.has_value()) << (plan ? "" : plan.error().ToString());
+        ApplyPlanPasses(*plan);
+        auto* output = static_cast<NQumir::NAst::TStructType*>(
+            (*plan)->OutputColumns().get());
+        ASSERT_NE(output, nullptr);
+        ASSERT_EQ(output->Fields.size(), 1u);
+        EXPECT_NE(output->Fields[0].second, nullptr);
+    }
 }
 
 TEST(WindowPlan, ScalarSubqueryIgnoresInListTemporaryForCorrelation) {
