@@ -1979,6 +1979,8 @@ std::expected<TOperatorPtr, TError> BuildSelect(
     TAggCollector collector(inputSchema ? inputSchema.Cast().get() : nullptr);
     const bool distinct = select.Quantifier == NSql::ESetQuantifier::Distinct;
     std::vector<TProjectionSpec> projections;
+    std::unordered_map<std::string, NAst::TExprPtr> selectAliases;
+    std::unordered_set<std::string> ambiguousSelectAliases;
     for (size_t i = 0; i < select.SelectList->Items.size(); ++i) {
         const auto& item = select.SelectList->Items[i];
         if (item->Star) {
@@ -2004,6 +2006,12 @@ std::expected<TOperatorPtr, TError> BuildSelect(
         auto expr = collector.Rewrite(item->Expr);
         if (!expr) {
             return std::unexpected(expr.error());
+        }
+        if (item->Alias) {
+            auto [_, inserted] = selectAliases.emplace(*item->Alias, *expr);
+            if (!inserted) {
+                ambiguousSelectAliases.insert(*item->Alias);
+            }
         }
         projections.push_back({
             .Name = std::move(name),
@@ -2088,6 +2096,66 @@ std::expected<TOperatorPtr, TError> BuildSelect(
         groupKeys = std::move(parsed->Keys);
         groupingSets = std::move(parsed->Sets);
         hasGroupingSyntax = parsed->HasGroupingSyntax;
+    }
+    auto inputHasColumn = [&](const std::string& name) {
+        if (!inputSchema) {
+            return false;
+        }
+        return std::ranges::any_of(inputSchema.Cast()->Fields, [&](const auto& field) {
+            if (field.first == name) {
+                return true;
+            }
+            const auto dot = field.first.rfind('.');
+            return name.find('.') == std::string::npos
+                && dot != std::string::npos
+                && field.first.substr(dot + 1) == name;
+        });
+    };
+    const bool inputSchemaKnown = inputSchema && !inputSchema.Cast()->Fields.empty();
+    for (auto& key : groupKeys) {
+        // PostgreSQL GROUP BY resolves an input-column name before a SELECT alias.
+        if (key.Computed || inputHasColumn(key.Name)) {
+            continue;
+        }
+        if (ambiguousSelectAliases.contains(key.Name)) {
+            return std::unexpected(TError(
+                key.Expression->Location,
+                "GROUP BY alias '" + key.Name + "' is ambiguous"));
+        }
+        auto alias = selectAliases.find(key.Name);
+        if (alias == selectAliases.end()) {
+            continue;
+        }
+        if (HasSubquery(alias->second) || HasWindowExprLocal(alias->second)) {
+            return std::unexpected(TError(
+                key.Expression->Location,
+                "GROUP BY alias '" + key.Name +
+                "' must refer to a scalar input expression"));
+        }
+        const auto refs = FindUnboundVars(alias->second);
+        if (!inputSchemaKnown && std::ranges::any_of(refs, [&](const auto& ref) {
+                const auto dot = ref.rfind('.');
+                return ref.substr(dot == std::string::npos ? 0 : dot + 1) == key.Name;
+            }))
+        {
+            // Schema-less golden plans cannot prove the input-column match.
+            continue;
+        }
+        for (const auto& ref : refs) {
+            if (!inputHasColumn(ref)) {
+                return std::unexpected(TError(
+                    key.Expression->Location,
+                    "GROUP BY alias '" + key.Name +
+                    "' must refer to a scalar input expression"));
+            }
+        }
+        if (auto ident = NAst::TMaybeNode<NAst::TIdentExpr>(alias->second)) {
+            key.Name = ident.Cast()->Name;
+            key.Expression = CloneExpr(alias->second);
+            continue;
+        }
+        key.Expression = CloneExpr(alias->second);
+        key.Computed = true;
     }
     // A single set over all keys is a plain aggregate; >1 set needs the kernel's
     // grouping-sets machinery (keys become nullable, masked per set).

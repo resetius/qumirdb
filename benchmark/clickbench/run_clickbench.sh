@@ -56,8 +56,7 @@ query_enabled() {
 unsupported_reason() {
     case "$1" in
         05) echo "DISTINCT over strings" ;;
-        21|22) echo "MIN over strings" ;;
-        28) echo "REGEXP_REPLACE" ;;
+        21|22|28) echo "MIN over strings" ;;
         *) return 1 ;;
     esac
 }
