@@ -6,6 +6,8 @@
 
 #include <qumir/frontend/source_module_loader.h>
 #include <qumir/modules/system/system.h>
+#include <qumir/parser/core/lexer.h>
+#include <qumir/parser/core/parser.h>
 #include <qumir/parser/lexer.h>
 #include <qumir/parser/parser.h>
 #include <qumir/semantics/kumir/pipeline.h>
@@ -94,48 +96,62 @@ std::shared_ptr<TFunDecl> CloneDeclaration(const TFunDecl& source) {
     return result;
 }
 
-struct TParsedKumirModule {
+struct TParsedModule {
     TExprPtr Ast;
     std::vector<TPragma> Pragmas;
     std::map<std::string, std::shared_ptr<TFunDecl>> Functions;
 };
 
-std::expected<TParsedKumirModule, TError> ParseKumirModule(
+std::expected<TParsedModule, TError> ParseSourceModule(
     const std::string& moduleName,
-    const std::string& source)
+    const std::string& source,
+    const std::string& language)
 {
-    NSemantics::TNameResolver resolver;
-    auto system = std::make_shared<NRegistry::SystemModule>();
-    resolver.RegisterModule(system.get());
-    (void)resolver.ImportModule("System");
-    for (const auto& [alias, canonical] : NSemantics::NKumir::ModuleAliases()) {
-        resolver.RegisterModuleAlias(alias, canonical);
+    TExprPtr ast;
+    std::vector<TPragma> pragmas;
+    std::istringstream input(source);
+    if (language == "ozlang") {
+        NCore::TTokenStream stream(input);
+        NCore::TParser parser;
+        auto parsed = parser.Parse(stream);
+        if (!parsed) {
+            return std::unexpected(parsed.error());
+        }
+        ast = std::move(*parsed);
+        pragmas = std::move(parser.Pragmas);
+    } else {
+        NSemantics::TNameResolver resolver;
+        auto system = std::make_shared<NRegistry::SystemModule>();
+        resolver.RegisterModule(system.get());
+        (void)resolver.ImportModule("System");
+        for (const auto& [alias, canonical] : NSemantics::NKumir::ModuleAliases()) {
+            resolver.RegisterModuleAlias(alias, canonical);
+        }
+        TTokenStream stream(input);
+        TParser parser;
+        auto parsed = parser.parse(stream, &resolver);
+        if (!parsed) {
+            return std::unexpected(parsed.error());
+        }
+        ast = std::move(*parsed);
+        pragmas = stream.GetContext()->GetPragmas();
+        std::erase_if(pragmas, [](const TPragma& pragma) {
+            return pragma.Group == "language";
+        });
+        pragmas.push_back(TPragma{"language", {"overloads"}, {}});
     }
 
-    std::istringstream input(source);
-    TTokenStream stream(input);
-    TParser parser;
-    auto ast = parser.parse(stream, &resolver);
-    if (!ast) {
-        return std::unexpected(ast.error());
-    }
-    auto block = TMaybeNode<TBlockExpr>(*ast);
+    auto block = TMaybeNode<TBlockExpr>(ast);
     if (!block) {
         return std::unexpected(TError(
-            "external Kumir module `" + moduleName + "' must be a block"));
+            "external " + language + " module `" + moduleName + "' must be a block"));
     }
 
-    std::vector<TPragma> pragmas = stream.GetContext()->GetPragmas();
-    std::erase_if(pragmas, [](const TPragma& pragma) {
-        return pragma.Group == "language";
-    });
-    pragmas.push_back(TPragma{"language", {"overloads"}, {}});
-
     // Reuse the source-loader validation contract: imported modules cannot
-    // contain a Kumir entry point or arbitrary top-level statements.
+    // contain an entry point or arbitrary top-level statements.
     NFrontend::TSourceModuleLoader loader;
     auto loaded = loader.LoadAst(
-        moduleName, *ast, {}, pragmas, "<kumir:" + moduleName + ">");
+        moduleName, ast, {}, pragmas, "<" + language + ":" + moduleName + ">");
     if (!loaded) {
         return std::unexpected(loaded.error());
     }
@@ -152,8 +168,8 @@ std::expected<TParsedKumirModule, TError> ParseKumirModule(
                 "external function `" + key + "' is declared more than once"));
         }
     }
-    return TParsedKumirModule{
-        .Ast = std::move(*ast),
+    return TParsedModule{
+        .Ast = std::move(ast),
         .Pragmas = std::move(pragmas),
         .Functions = std::move(functions),
     };
@@ -652,8 +668,9 @@ TExternalCatalogSnapshot::ComposeReferenced(
                 std::make_shared<TBlockExpr>(TLocation{}, std::move(declarations)),
                 {std::move(*bitcode)},
                 {TPragma{"language", {"overloads"}, {}}});
-        } else if (module->Language == "kumir") {
-            auto parsed = ParseKumirModule(module->Name, module->Source);
+        } else if (module->Language == "kumir" || module->Language == "ozlang") {
+            auto parsed = ParseSourceModule(
+                module->Name, module->Source, module->Language);
             if (!parsed) {
                 return std::unexpected(parsed.error());
             }
@@ -687,18 +704,20 @@ TExternalModuleCatalog::TExternalModuleCatalog()
 std::expected<std::monostate, TError> TExternalModuleCatalog::Apply(
     const NSql::TSqlExternalModule& definition)
 {
-    if (definition.Language != "rust" && definition.Language != "kumir") {
+    if (definition.Language != "rust" && definition.Language != "kumir"
+        && definition.Language != "ozlang") {
         return std::unexpected(TError(
             "unsupported external module language `" + definition.Language + "'"));
     }
 
-    std::optional<TParsedKumirModule> parsedKumir;
-    if (definition.Language == "kumir") {
-        auto parsed = ParseKumirModule(definition.Name, definition.Code);
+    std::optional<TParsedModule> parsedSource;
+    if (definition.Language != "rust") {
+        auto parsed = ParseSourceModule(
+            definition.Name, definition.Code, definition.Language);
         if (!parsed) {
             return std::unexpected(parsed.error());
         }
-        parsedKumir = std::move(*parsed);
+        parsedSource = std::move(*parsed);
     }
 
     std::lock_guard lock(Mutex_);
@@ -713,8 +732,8 @@ std::expected<std::monostate, TError> TExternalModuleCatalog::Apply(
     module->Name = definition.Name;
     module->Language = definition.Language;
     module->Source = definition.Code;
-    if (parsedKumir) {
-        for (const auto& [key, _] : parsedKumir->Functions) {
+    if (parsedSource) {
+        for (const auto& [key, _] : parsedSource->Functions) {
             for (const auto& [otherName, other] : State_->Modules) {
                 if (otherName != definition.Name && other->Functions.contains(key)) {
                     return std::unexpected(TError(
@@ -722,7 +741,7 @@ std::expected<std::monostate, TError> TExternalModuleCatalog::Apply(
                 }
             }
         }
-        module->Functions = std::move(parsedKumir->Functions);
+        module->Functions = std::move(parsedSource->Functions);
     } else if (existing != State_->Modules.end()
         && existing->second->Language == "rust") {
         module->Functions = existing->second->Functions;
