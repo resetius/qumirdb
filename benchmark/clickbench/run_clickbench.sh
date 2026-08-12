@@ -55,7 +55,6 @@ query_enabled() {
 
 unsupported_reason() {
     case "$1" in
-        05) echo "DISTINCT over strings" ;;
         *) return 1 ;;
     esac
 }

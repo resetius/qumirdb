@@ -20,6 +20,7 @@ TColumnValueAst BuildColumnValueAst(
     const std::string& rowName,
     const std::string& temporaryPrefix,
     const NQumir::NAst::TTypePtr& logicalType,
-    const NQumir::NAst::TTypePtr& stringViewType);
+    const NQumir::NAst::TTypePtr& stringViewType,
+    bool needValue = true);
 
 } // namespace NQdb::NKernel

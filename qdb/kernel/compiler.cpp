@@ -1767,7 +1767,8 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
             const bool isFloat = static_cast<bool>(TMaybeType<TFloatType>(unwrapped));
             const bool isInteger = static_cast<bool>(TMaybeType<TIntegerType>(unwrapped));
             const bool isString = static_cast<bool>(TMaybeType<TStringType>(unwrapped));
-            if (isString && agg.Func != "min" && agg.Func != "max") {
+            if (isString && agg.Func != "count" &&
+                agg.Func != "min" && agg.Func != "max") {
                 throw NQumir::TError(
                     "CompileAggregate: '" + agg.Func +
                     "' does not support string arguments");

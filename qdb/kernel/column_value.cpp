@@ -17,7 +17,8 @@ TColumnValueAst BuildColumnValueAst(
     const std::string& rowName,
     const std::string& temporaryPrefix,
     const NQumir::NAst::TTypePtr& logicalType,
-    const NQumir::NAst::TTypePtr& stringViewType)
+    const NQumir::NAst::TTypePtr& stringViewType,
+    bool needValue)
 {
     using namespace NQumir::NAst;
     NQumir::TLocation loc{};
@@ -71,6 +72,12 @@ TColumnValueAst BuildColumnValueAst(
         validity = ident(validName);
     } else {
         validity = number(true, boolType);
+    }
+    if (!needValue) {
+        return {
+            .Setup = std::move(commonSetup),
+            .IsValid = std::move(validity),
+        };
     }
 
     auto zeroBinInt = [&]() -> TExprPtr {

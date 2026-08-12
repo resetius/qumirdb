@@ -1613,13 +1613,12 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
         stringViewType = std::make_shared<TNamedType>("StringView", nullptr);
     }
 
-    // Materialize each DISTINCT argument column once. Non-nullable columns
-    // expose a typed data pointer (values_<idx>); nullable columns go through
-    // the shared TColumn materializer (arg_column_<idx>). Reducers then read
-    // their own column by index (layout's ArgColumnIndex).
+    // Materialize each aggregate argument column at most once. Count-only
+    // arguments need no value; nullable ones read only their validity bitmap.
     struct TArgColumn {
         EAggValueKind ValueKind = EAggValueKind::Int64;
         bool Nullable = false;
+        bool NeedValue = false;
         std::optional<TColumnValueAst> Mat; // nullable or variable-width column
     };
     std::map<int32_t, TArgColumn> argColumns;
@@ -1630,6 +1629,11 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
         const int32_t idx = r.ArgColumnIndex;
         const auto& colType = inputType.Fields[idx].second;
         TArgColumn ac;
+        ac.NeedValue = std::ranges::any_of(layout.Reducers,
+            [&](const auto& candidate) {
+                return candidate.ArgColumnIndex == idx &&
+                    candidate.Func != "count";
+            });
         const auto valueType = UnwrapNullableType(colType);
         if (IsBinIntValueType(valueType)) {
             ac.ValueKind = EAggValueKind::BinInt;
@@ -1639,13 +1643,14 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
             ac.ValueKind = EAggValueKind::String;
         }
         ac.Nullable = IsNullableType(colType);
-        if (ac.Nullable || ac.ValueKind == EAggValueKind::String) {
+        if (ac.Nullable || (ac.NeedValue && ac.ValueKind == EAggValueKind::String)) {
             const std::string colName = "arg_column_" + std::to_string(idx);
             update.push_back(var(colName, columnValueType));
             update.push_back(assign(colName, columnAt(idx)));
             ac.Mat = BuildColumnValueAst(
-                colName, "i", "arg_value_" + std::to_string(idx), colType, stringViewType);
-        } else {
+                colName, "i", "arg_value_" + std::to_string(idx), colType,
+                stringViewType, ac.NeedValue);
+        } else if (ac.NeedValue) {
             auto valType = AggregateStorageType(UnwrapNullableType(colType));
             auto ptrValType = std::make_shared<TPointerType>(valType);
             const std::string ptrName = "values_" + std::to_string(idx);
@@ -1731,15 +1736,24 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
     // Compute each arg column's value and validity once per row. Scalar
     // integers/floats are carried as i64 bits; BinInt stays typed.
     for (auto& [idx, ac] : argColumns) {
-        const std::string vname = "arg_val_" + std::to_string(idx);
-        TExprPtr valExpr;
         if (ac.Mat) {
             materialize.insert(materialize.end(),
                 std::make_move_iterator(ac.Mat->Setup.begin()),
                 std::make_move_iterator(ac.Mat->Setup.end()));
-            if (ac.ValueKind == EAggValueKind::BinInt) {
-                valExpr = ac.Mat->Value;
-            } else if (ac.ValueKind == EAggValueKind::String) {
+        }
+        if (!ac.NeedValue) {
+            if (ac.Nullable) {
+                const std::string validName = "arg_valid_" + std::to_string(idx);
+                materialize.push_back(var(validName, boolType));
+                materialize.push_back(assign(validName, ac.Mat->IsValid));
+            }
+            continue;
+        }
+        const std::string vname = "arg_val_" + std::to_string(idx);
+        TExprPtr valExpr;
+        if (ac.Mat) {
+            if (ac.ValueKind == EAggValueKind::BinInt ||
+                ac.ValueKind == EAggValueKind::String) {
                 valExpr = ac.Mat->Value;
             } else if (ac.ValueKind == EAggValueKind::Float64) {
                 valExpr = bitcast(ac.Mat->Value, i64Type);
@@ -1792,6 +1806,9 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
                     numI64(static_cast<int64_t>(info.ExtraBufIdx)))));
         }
         auto valueI = [&]() -> TExprPtr {
+            if (info.Func == "count") {
+                return numI64(0);
+            }
             return info.HasArg ? ident("arg_val_" + std::to_string(info.ArgColumnIndex))
                                : numI64(0);
         };

@@ -472,21 +472,23 @@ TEST(AggregateE2E, StringMinMaxOwnsAndGrowsReducerValues) {
         {std::make_shared<TIntegerType>(), std::make_shared<TStringType>()});
     auto runtime = RunPlan(ParsePlan(
         "(rel aggregate (rel source \"data.parquet\") (keys k) "
-        "(agg mn min v) (agg mx max v))", source));
+        "(agg c count v) (agg mn min v) (agg mx max v))", source));
 
     TRowSet result{};
     ASSERT_TRUE(runtime->Next(result));
-    ASSERT_EQ(result.ColumnCount, 3);
+    ASSERT_EQ(result.ColumnCount, 4);
     ASSERT_EQ(result.RowCount, 2);
     auto* keys = reinterpret_cast<int64_t*>(result.Columns[0].Data);
+    auto* counts = reinterpret_cast<int64_t*>(result.Columns[1].Data);
     for (int64_t row = 0; row < result.RowCount; ++row) {
+        EXPECT_EQ(counts[row], 4);
         if (keys[row] == 1) {
-            EXPECT_EQ(StringAt(result.Columns[1], row), "a");
-            EXPECT_EQ(StringAt(result.Columns[2], row), "zzzzzzzz");
+            EXPECT_EQ(StringAt(result.Columns[2], row), "a");
+            EXPECT_EQ(StringAt(result.Columns[3], row), "zzzzzzzz");
         } else {
             ASSERT_EQ(keys[row], 2);
-            EXPECT_EQ(StringAt(result.Columns[1], row), "");
-            EXPECT_EQ(StringAt(result.Columns[2], row), "z");
+            EXPECT_EQ(StringAt(result.Columns[2], row), "");
+            EXPECT_EQ(StringAt(result.Columns[3], row), "z");
         }
     }
     Release(&result);
@@ -576,6 +578,63 @@ TEST(AggregateE2E, NullStringKeysGroupTogetherAndDifferFromEmpty) {
     }
     EXPECT_EQ(countBySum.at(30), 2);
     EXPECT_EQ(countBySum.at(7), 2);
+    Release(&result);
+}
+
+TEST(AggregateE2E, CountDistinctString) {
+    std::array<int64_t, 5> groups = {0, 0, 0, 0, 0};
+    std::string data = "alphabetaalpha";
+    std::array<int32_t, 6> offsets = {0, 5, 9, 14, 14, 14};
+    std::vector<TColumn> columns = {
+        TColumn{.Data = reinterpret_cast<char*>(groups.data())},
+        TColumn{.Data = data.data(), .Offsets = offsets.data(), .OffsetWidth = 4},
+    };
+    std::vector<TRowSet> batches = {TRowSet{
+        .Columns = columns.data(), .ColumnCount = 2, .RowCount = 5,
+        .RefCount = 1}};
+    TMockSource source(
+        {"g", "v"}, std::move(batches),
+        {std::make_shared<TIntegerType>(), std::make_shared<TStringType>()});
+    auto runtime = RunPlan(ParsePlan(
+        "(rel aggregate "
+        "  (rel aggregate (rel source \"data.parquet\") (keys g v)) "
+        "  (keys g) (agg c count v))",
+        source));
+
+    TRowSet result{};
+    ASSERT_TRUE(runtime->Next(result));
+    ASSERT_EQ(result.RowCount, 1);
+    EXPECT_EQ(reinterpret_cast<int64_t*>(result.Columns[1].Data)[0], 3);
+    Release(&result);
+}
+
+TEST(AggregateE2E, CountDistinctNullableStringIgnoresNull) {
+    std::array<int64_t, 5> groups = {0, 0, 0, 0, 0};
+    std::string data = "alphahiddenalphabetaignored";
+    std::array<int32_t, 6> offsets = {0, 5, 11, 16, 20, 27};
+    std::array<uint8_t, 1> mask = {0b00001101};
+    std::vector<TColumn> columns = {
+        TColumn{.Data = reinterpret_cast<char*>(groups.data())},
+        TColumn{.Data = data.data(), .Mask = mask.data(),
+            .Offsets = offsets.data(), .OffsetWidth = 4},
+    };
+    std::vector<TRowSet> batches = {TRowSet{
+        .Columns = columns.data(), .ColumnCount = 2, .RowCount = 5,
+        .RefCount = 1}};
+    TMockSource source(
+        {"g", "v"}, std::move(batches),
+        {std::make_shared<TIntegerType>(),
+         std::make_shared<TNullable>(std::make_shared<TStringType>())});
+    auto runtime = RunPlan(ParsePlan(
+        "(rel aggregate "
+        "  (rel aggregate (rel source \"data.parquet\") (keys g v)) "
+        "  (keys g) (agg c count v))",
+        source));
+
+    TRowSet result{};
+    ASSERT_TRUE(runtime->Next(result));
+    ASSERT_EQ(result.RowCount, 1);
+    EXPECT_EQ(reinterpret_cast<int64_t*>(result.Columns[1].Data)[0], 2);
     Release(&result);
 }
 
