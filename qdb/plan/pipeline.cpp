@@ -8,6 +8,7 @@
 #include <qdb/plan/passes/qualify_columns.h>
 #include <qdb/plan/passes/cte_reuse.h>
 #include <qdb/plan/passes/top_sort.h>
+#include <qdb/plan/passes/push_limit.h>
 #include <qdb/plan/passes/typing.h>
 #include <qdb/plan/plan_print.h>
 
@@ -49,6 +50,8 @@ void OptimizeOne(TOperatorPtr& plan, TPlanPassOptions& options) {
     AnnotateTypes(plan, options.Annotation); // re-annotate: equi-join extraction adds/removes nodes
     plan = PushDownSemiJoins(plan); stage("PushDownSemiJoins");
     AnnotateTypes(plan, options.Annotation); // re-annotate: semi pushdown restructured joins
+    plan = PushDownLimits(plan);
+    AnnotateTypes(plan, options.Annotation); // re-annotate: limit moved below strip projections
     plan = ApplyTopSort(plan);
     AnnotateTypes(plan, options.Annotation); // re-annotate: top-sort replaces limit(sort(...))
     CoerceSetOpBranches(plan); stage("CoerceSetOpBranches");

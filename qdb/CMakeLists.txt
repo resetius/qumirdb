@@ -40,6 +40,7 @@ add_library(qumirdb
     plan/passes/join_order.cpp
     plan/passes/cbo/dpccp.cpp
     plan/passes/top_sort.cpp
+    plan/passes/push_limit.cpp
     plan/passes/flatten_conjuncts.cpp
     plan/passes/flatten_disjuncts.cpp
     plan/passes/factor_conjuncts.cpp

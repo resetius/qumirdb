@@ -14,6 +14,7 @@
 #include <qdb/plan/passes/column_pruning.h>
 #include <qdb/plan/passes/qualify_columns.h>
 #include <qdb/plan/passes/top_sort.h>
+#include <qdb/plan/passes/push_limit.h>
 #include <qdb/plan/passes/typing.h>
 #include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
@@ -164,6 +165,24 @@ TEST(SortPlan, TopSortPassRewritesLimitOverSort) {
     EXPECT_EQ(topSort.Cast()->Keys()[0].Direction, ESortDirection::Desc);
     auto project = TMaybeOp<TProjectOperator>(topSort.Cast()->Input());
     ASSERT_TRUE(project);
+}
+
+TEST(SortPlan, LimitPushdownEnablesTopSortThroughStripProjection) {
+    auto i64 = std::make_shared<NQumir::NAst::TIntegerType>();
+    NQdb::TMockSource source(TMockColumns{}, {{"a", i64}, {"b", i64}});
+    auto plan = BuildSqlPlan("SELECT a FROM t ORDER BY b LIMIT 3", source);
+    ASSERT_TRUE(plan.has_value()) << (plan ? "" : plan.error().ToString());
+
+    ASSERT_TRUE(TMaybeOp<TLimitOperator>(*plan));
+
+    auto pushed = PushDownLimits(*plan);
+    auto optimized = ApplyTopSort(pushed);
+
+    auto project = TMaybeOp<TProjectOperator>(optimized);
+    ASSERT_TRUE(project);
+    auto topSort = TMaybeOp<TTopSortOperator>(project.Cast()->Input());
+    ASSERT_TRUE(topSort);
+    EXPECT_EQ(topSort.Cast()->Limit(), 3);
 }
 
 TEST(SortPlan, QualifyColumnsUpdatesTopSortKeys) {
