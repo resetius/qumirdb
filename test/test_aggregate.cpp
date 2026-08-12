@@ -103,6 +103,12 @@ bool IsValid(const TColumn& column, int64_t row) {
     return ((column.Mask[bit / 8] >> (bit % 8)) & 1) != 0;
 }
 
+std::string StringAt(const TColumn& column, int64_t row) {
+    EXPECT_EQ(column.OffsetWidth, 8);
+    const auto* offsets = static_cast<const int64_t*>(column.Offsets);
+    return {column.Data + offsets[row], column.Data + offsets[row + 1]};
+}
+
 } // namespace
 
 // L6 (multiple groups): full pipeline sexp -> AnnotateTypes -> ApplyColumnPruning
@@ -435,6 +441,99 @@ TEST(AggregateE2E, ScalarStringKeyOwnsFinalizedOutput) {
     EXPECT_EQ(actual.at("beta"), (std::pair<int64_t, int64_t>{1, -3}));
     EXPECT_EQ(actual.at(""), (std::pair<int64_t, int64_t>{1, 11}));
     EXPECT_EQ(actual.at("мир"), (std::pair<int64_t, int64_t>{1, 7}));
+    Release(&result);
+}
+
+TEST(AggregateE2E, StringMinMaxOwnsAndGrowsReducerValues) {
+    std::array<int64_t, 4> keys1 = {1, 1, 2, 2};
+    std::string data1 = "malphabetz";
+    std::array<int32_t, 5> offsets1 = {0, 1, 9, 10, 10};
+    std::array<int64_t, 4> keys2 = {1, 1, 2, 2};
+    std::string data2 = "azzzzzzzzaardvarkyak";
+    std::array<int64_t, 5> offsets2 = {0, 1, 9, 17, 20};
+
+    std::vector<std::vector<TColumn>> batchColumns(2);
+    batchColumns[0] = {
+        TColumn{.Data = reinterpret_cast<char*>(keys1.data())},
+        TColumn{.Data = data1.data(), .Offsets = offsets1.data(), .OffsetWidth = 4},
+    };
+    batchColumns[1] = {
+        TColumn{.Data = reinterpret_cast<char*>(keys2.data())},
+        TColumn{.Data = data2.data(), .Offsets = offsets2.data(), .OffsetWidth = 8},
+    };
+    std::vector<TRowSet> batches = {
+        TRowSet{.Columns = batchColumns[0].data(), .ColumnCount = 2,
+            .RowCount = 4, .RefCount = 1},
+        TRowSet{.Columns = batchColumns[1].data(), .ColumnCount = 2,
+            .RowCount = 4, .RefCount = 1},
+    };
+    TMockSource source(
+        {"k", "v"}, std::move(batches),
+        {std::make_shared<TIntegerType>(), std::make_shared<TStringType>()});
+    auto runtime = RunPlan(ParsePlan(
+        "(rel aggregate (rel source \"data.parquet\") (keys k) "
+        "(agg mn min v) (agg mx max v))", source));
+
+    TRowSet result{};
+    ASSERT_TRUE(runtime->Next(result));
+    ASSERT_EQ(result.ColumnCount, 3);
+    ASSERT_EQ(result.RowCount, 2);
+    auto* keys = reinterpret_cast<int64_t*>(result.Columns[0].Data);
+    for (int64_t row = 0; row < result.RowCount; ++row) {
+        if (keys[row] == 1) {
+            EXPECT_EQ(StringAt(result.Columns[1], row), "a");
+            EXPECT_EQ(StringAt(result.Columns[2], row), "zzzzzzzz");
+        } else {
+            ASSERT_EQ(keys[row], 2);
+            EXPECT_EQ(StringAt(result.Columns[1], row), "");
+            EXPECT_EQ(StringAt(result.Columns[2], row), "z");
+        }
+    }
+    Release(&result);
+}
+
+TEST(AggregateE2E, NullableStringMinMaxReturnsNullForAllNullGroup) {
+    std::array<int64_t, 5> keys = {1, 1, 2, 2, 3};
+    std::string data = "hiddenbetahiddenalpha";
+    std::array<int32_t, 6> offsets = {0, 6, 10, 16, 21, 21};
+    std::array<uint8_t, 1> mask = {0b00001010};
+    std::vector<TColumn> columns = {
+        TColumn{.Data = reinterpret_cast<char*>(keys.data())},
+        TColumn{.Data = data.data(), .Mask = mask.data(),
+            .Offsets = offsets.data(), .OffsetWidth = 4},
+    };
+    std::vector<TRowSet> batches = {TRowSet{
+        .Columns = columns.data(), .ColumnCount = 2, .RowCount = 5,
+        .RefCount = 1}};
+    TMockSource source(
+        {"k", "v"}, std::move(batches),
+        {std::make_shared<TIntegerType>(),
+         std::make_shared<TNullable>(std::make_shared<TStringType>())});
+    auto runtime = RunPlan(ParsePlan(
+        "(rel aggregate (rel source \"data.parquet\") (keys k) "
+        "(agg mn min v) (agg mx max v))", source));
+
+    TRowSet result{};
+    ASSERT_TRUE(runtime->Next(result));
+    ASSERT_EQ(result.RowCount, 3);
+    auto* outKeys = reinterpret_cast<int64_t*>(result.Columns[0].Data);
+    for (int64_t row = 0; row < result.RowCount; ++row) {
+        if (outKeys[row] == 1) {
+            EXPECT_EQ(StringAt(result.Columns[1], row), "beta");
+            EXPECT_EQ(StringAt(result.Columns[2], row), "beta");
+            EXPECT_TRUE(IsValid(result.Columns[1], row));
+            EXPECT_TRUE(IsValid(result.Columns[2], row));
+        } else if (outKeys[row] == 2) {
+            EXPECT_EQ(StringAt(result.Columns[1], row), "alpha");
+            EXPECT_EQ(StringAt(result.Columns[2], row), "alpha");
+            EXPECT_TRUE(IsValid(result.Columns[1], row));
+            EXPECT_TRUE(IsValid(result.Columns[2], row));
+        } else {
+            ASSERT_EQ(outKeys[row], 3);
+            EXPECT_FALSE(IsValid(result.Columns[1], row));
+            EXPECT_FALSE(IsValid(result.Columns[2], row));
+        }
+    }
     Release(&result);
 }
 
@@ -995,6 +1094,21 @@ TEST(AggregateE2E, CompilesNullableReducerArgumentWithUnwrappedAstType) {
     auto spec = NQdb::NKernel::BuildAggregateKernelSpec(inputType, {"k"}, aggs);
     EXPECT_NO_THROW(
         NQdb::TKernelCompiler().CompileAggregate(spec));
+}
+
+TEST(AggregateE2E, RejectsUnsupportedStringReducer) {
+    TStructType inputType({
+        {"k", std::make_shared<TIntegerType>()},
+        {"v", std::make_shared<TStringType>()},
+    });
+    NQumir::TLocation loc{};
+    std::vector<NQdb::TAggregateSpec> aggs = {{
+        .Name = "s",
+        .Func = "sum",
+        .Arg = std::make_shared<TIdentExpr>(loc, "v"),
+    }};
+    auto spec = NQdb::NKernel::BuildAggregateKernelSpec(inputType, {"k"}, aggs);
+    EXPECT_THROW(NQdb::TKernelCompiler().CompileAggregate(spec), NQumir::TError);
 }
 
 // M13.8: a nullable reducer argument must distinguish count(*) (every row) from

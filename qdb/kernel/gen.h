@@ -19,6 +19,7 @@ enum class EAggValueKind {
     Int64,
     Float64,
     BinInt,
+    String,
 };
 
 // Per-reducer layout for the generic aggregation kernel. One TAggReducerInfo
@@ -28,16 +29,15 @@ enum class EAggValueKind {
 // group has zero non-null contributions. NumAggBuffers is the total number of
 // physical AggBuffers slots the hash table must allocate.
 //
-// TODO(decimal): BinInt currently occupies two physical i64 state buffers
-// (Lo/Hi) because HashTable::AggBuffers is i64**. Replace this with width-aware
-// byte/typed state buffers once aggregate storage becomes generic.
+// BinInt uses two i64 buffers (Lo/Hi). String MIN/MAX also use two buffers:
+// owned pointer and packed size/capacity metadata.
 struct TAggReducerInfo {
     std::string Func;
     bool HasArg = false;            // agg.Arg != nullptr
     bool NeedsValidity = false;     // arg nullable && HasArg
     bool IsNullableOutput = false;  // NeedsValidity && Func in {sum,min,max}
     int ValueBufIdx = -1;           // main value state buffer
-    int ExtraBufIdx = -1;           // high word for BinInt state, else -1
+    int ExtraBufIdx = -1;           // BinInt high word or string metadata
     int ValidBufIdx = -1;           // -1 if IsNullableOutput == false
     EAggValueKind ValueKind = EAggValueKind::Int64;
     int ArgColumnIndex = -1;        // input column index of this agg's arg; -1 = count(*)
@@ -48,6 +48,10 @@ struct TAggReducerInfo {
 
     bool IsBinInt() const {
         return ValueKind == EAggValueKind::BinInt;
+    }
+
+    bool IsString() const {
+        return ValueKind == EAggValueKind::String;
     }
 };
 
@@ -172,7 +176,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
 
 // Builds agg_finish_rowset(ht, out_rowset) -> i64. The generated function
 // allocates output TColumn buffers with qdb_alloc, calls
-// agg_measure_keys/agg_finalize, writes a complete TRowSet into out_rowset, and
+// agg_measure_outputs/agg_finalize, writes a complete TRowSet into out_rowset, and
 // destroys ht before returning.
 NQumir::NAst::TExprPtr GenGenericAggregateFinishRowSetAst(
     const TAggregateKeyDescriptor& key,
@@ -181,11 +185,12 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinishRowSetAst(
     NQumir::NAst::TTypePtr columnType,
     NQumir::NAst::TTypePtr rowSetType);
 
-// Measures the output Data bytes required for each logical key column.
-// Fixed-width columns report row_count * field.Size; string columns report
-// the sum of stored byte lengths. Returns ht.Size or -1 on capacity failure.
+// Measures output Data bytes for key columns and aggregate values. Fixed-width
+// outputs report row_count * width; strings report their stored byte lengths.
+// Returns ht.Size or -1 on capacity failure.
 NQumir::NAst::TExprPtr GenGenericAggregateMeasureAst(
     const TAggregateKeyDescriptor& key,
+    const TAggReducerLayout& layout,
     NQumir::NAst::TTypePtr hashTableType);
 
 // Generates N = funcs.size() FunDecls named reduce_0..reduce_{N-1}, each with

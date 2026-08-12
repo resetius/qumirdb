@@ -390,6 +390,61 @@ ORDER BY REGEXP_REPLACE(
   });
 }
 
+async function runStringAggregateBatchContract() {
+  const request = {
+    sql: 'SELECT k, MIN(v) AS mn, MAX(v) AS mx FROM t GROUP BY k',
+    dataset: {
+      tables: [{
+        name: 't',
+        columns: [
+          { name: 'k', type: 'i64' },
+          { name: 'v', type: 'string' },
+        ],
+        stats: { rows: 8, bytes: 96, rowGroups: 2 },
+      }],
+    },
+    options: {
+      scheduler: 'single',
+      scanTasks: 1,
+      shufflePartitions: 1,
+      format: 'runtime-bundle',
+      embedWasm: true,
+    },
+  };
+  const bundle = JSON.parse(run(
+    exporter,
+    ['--stdin-json', '--stdout-json'],
+    JSON.stringify(request)));
+  assert.equal(bundle.ok, true, bundle.error?.message);
+  assert.equal(
+    bundle.exec?.supported,
+    true,
+    JSON.stringify({ reason: bundle.exec?.reason, diagnostics: bundle.diagnostics }));
+  const batches = [
+    { k: [1, 1, 2, 2], v: ['m', 'alphabet', 'z', ''] },
+    { k: [1, 1, 2, 2], v: ['a', 'zzzzzzzz', 'aardvark', 'yak'] },
+  ];
+  const result = await executeBrowserPipelineScheduled(
+    resolveExecArtifacts(bundle),
+    async function* (stage) {
+      assert.equal(stage.table, 't');
+      for (const batch of batches) {
+        yield {
+          rowCount: 4,
+          columns: stage.columns.map(column => ({
+            ...column,
+            values: batch[column.name],
+          })),
+        };
+      }
+    });
+  assert.equal(result.memory?.liveMB, '0.0', 'string aggregate leaked wasm memory');
+  assert.deepEqual(normalizeResult(result), {
+    columns: ['k', 'mn', 'mx'],
+    rows: [['1', 'a', 'zzzzzzzz'], ['2', '', 'z']],
+  });
+}
+
 async function runKumirModuleBatchContract() {
   const request = {
     sql: `
@@ -681,6 +736,24 @@ async function main() {
           error,
         });
         console.error(`[FAIL] regexp-replace-batch\n${errorText(error)}`);
+      }
+    }
+    {
+      const started = performance.now();
+      try {
+        await runStringAggregateBatchContract();
+        results.push({
+          name: 'string-aggregate-batch',
+          elapsedMs: performance.now() - started,
+          error: null,
+        });
+      } catch (error) {
+        results.push({
+          name: 'string-aggregate-batch',
+          elapsedMs: performance.now() - started,
+          error,
+        });
+        console.error(`[FAIL] string-aggregate-batch\n${errorText(error)}`);
       }
     }
     {

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <qdb/utils/regex.h>
+
 #include <cstdint>
 #include <memory>
 #include <string_view>
@@ -16,8 +18,10 @@ struct qdb_string_view;
 class TStringArena {
 public:
     char* Alloc(int64_t size);
+    NQdb::NUtils::TRegexContext& RegexContext() { return RegexContext_; }
 
 private:
+    NQdb::NUtils::TRegexContext RegexContext_;
     std::vector<std::vector<char>> Blocks_;
     int64_t Used_ = 0; // bytes used in the last block
 };

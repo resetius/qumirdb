@@ -1,8 +1,8 @@
 #include <qdb/kernel/regex.h>
 
 #include <qdb/modules/qumirdb_runtime.h>
+#include <qdb/utils/regex.h>
 
-#include <regex>
 #include <stdexcept>
 #include <utility>
 
@@ -22,7 +22,7 @@ size_t TRegexRegistry::Register(
     std::shared_ptr<TCompiledRegex> compiled;
     try {
         compiled = std::make_shared<TCompiledRegex>(pattern, replacement);
-    } catch (const std::regex_error& e) {
+    } catch (const NUtils::TRegexError& e) {
         throw std::runtime_error(
             "REGEXP_REPLACE invalid pattern: " + std::string(e.what()));
     }

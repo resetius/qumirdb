@@ -104,6 +104,7 @@ BuildGenericAggregateFinalizeProgramAst(
 std::expected<NQumir::NAst::TExprPtr, NQumir::TError>
 BuildGenericAggregateMeasureProgramAst(
     const TAggregateKeyDescriptor& key,
+    const TAggReducerLayout& layout,
     NQumir::NAst::TTypePtr hashTableType);
 
 // One program with aggregate update/finalize entries sharing a single copy of

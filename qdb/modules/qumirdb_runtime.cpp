@@ -1,4 +1,5 @@
 #include <qdb/modules/qumirdb_runtime.h>
+#include <qdb/utils/regex.h>
 
 #include <algorithm>
 #include <bit>
@@ -7,7 +8,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
-#include <regex>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -50,52 +50,69 @@ __int128 Pow10I128(int64_t scale) {
 
 } // namespace
 
-struct TCompiledRegex::TImpl {
-    std::regex Pattern;
-    std::string Replacement;
-};
-
 namespace {
 
-std::string RegexReplacement(std::string_view replacement) {
-    std::string result;
-    result.reserve(replacement.size());
+constexpr size_t NoCapture = std::numeric_limits<size_t>::max();
+
+struct TReplacementPart {
+    std::string Literal;
+    size_t Capture = NoCapture;
+};
+
+std::vector<TReplacementPart> ParseReplacement(std::string_view replacement) {
+    std::vector<TReplacementPart> result;
+    std::string literal;
+    auto flushLiteral = [&] {
+        if (!literal.empty()) {
+            result.push_back({.Literal = std::move(literal)});
+            literal.clear();
+        }
+    };
     for (size_t i = 0; i < replacement.size(); ++i) {
         const char ch = replacement[i];
-        if (ch == '$') {
-            result += "$$";
-            continue;
-        }
         if (ch != '\\' || i + 1 == replacement.size()) {
-            result += ch;
+            literal += ch;
             continue;
         }
         const char escaped = replacement[++i];
         if (escaped >= '0' && escaped <= '9') {
-            result += '$';
-            result += escaped;
+            flushLiteral();
+            size_t capture = static_cast<size_t>(escaped - '0');
             while (i + 1 < replacement.size() &&
                    replacement[i + 1] >= '0' && replacement[i + 1] <= '9')
             {
-                result += replacement[++i];
+                const size_t digit = static_cast<size_t>(replacement[++i] - '0');
+                capture = capture > (NoCapture - 1 - digit) / 10
+                    ? NoCapture - 1
+                    : capture * 10 + digit;
             }
+            result.push_back({.Capture = capture});
         } else if (escaped == '&') {
-            result += "$&";
+            flushLiteral();
+            result.push_back({.Capture = 0});
         } else {
-            result += escaped;
+            literal += escaped;
         }
     }
+    flushLiteral();
     return result;
 }
 
 } // namespace
 
+struct TCompiledRegex::TImpl {
+    TImpl(std::string_view pattern, std::string_view replacement)
+        : Pattern(pattern)
+        , Replacement(ParseReplacement(replacement))
+    {}
+
+    NQdb::NUtils::TRegex Pattern;
+    std::vector<TReplacementPart> Replacement;
+};
+
 TCompiledRegex::TCompiledRegex(
     std::string_view pattern, std::string_view replacement)
-    : Impl_(std::make_unique<TImpl>(TImpl{
-          .Pattern = std::regex(pattern.begin(), pattern.end()),
-          .Replacement = RegexReplacement(replacement),
-      }))
+    : Impl_(std::make_unique<TImpl>(pattern, replacement))
 {}
 
 TCompiledRegex::~TCompiledRegex() = default;
@@ -103,28 +120,61 @@ TCompiledRegex::~TCompiledRegex() = default;
 qdb_string_view TCompiledRegex::Replace(
     TStringArena& arena, qdb_string_view input) const
 {
-    static const char empty = '\0';
-    const char* begin = input.Data
+    const char empty = '\0';
+    const char* begin = input.Data && input.Size > 0
         ? reinterpret_cast<const char*>(input.Data)
         : &empty;
-    const char* end = begin + std::max<int64_t>(input.Size, 0);
-    if (!std::regex_search(begin, end, Impl_->Pattern)) {
+    const auto inputSize = input.Data
+        ? static_cast<size_t>(std::max<int64_t>(input.Size, 0))
+        : size_t{0};
+    const std::string_view subject(begin, inputSize);
+    const auto match = Impl_->Pattern.Search(arena.RegexContext(), subject);
+    if (!match) {
         return input;
     }
+    const auto whole = match->Capture(0);
+    if (!whole) {
+        throw std::runtime_error("PCRE2 match has no whole-match capture");
+    }
 
-    std::string output;
-    std::regex_replace(
-        std::back_inserter(output), begin, end, Impl_->Pattern,
-        Impl_->Replacement,
-        std::regex_constants::format_first_only);
-    if (output.empty()) {
+    size_t outputSize = whole->Begin + inputSize - whole->End;
+    auto addSize = [&](size_t size) {
+        if (size > static_cast<size_t>(std::numeric_limits<int64_t>::max()) - outputSize) {
+            throw std::length_error("REGEXP_REPLACE result is too large");
+        }
+        outputSize += size;
+    };
+    for (const auto& part : Impl_->Replacement) {
+        if (part.Capture == NoCapture) {
+            addSize(part.Literal.size());
+        } else if (auto capture = match->Capture(part.Capture)) {
+            addSize(capture->End - capture->Begin);
+        }
+    }
+    if (outputSize == 0) {
         return {nullptr, 0};
     }
-    char* data = arena.Alloc(static_cast<int64_t>(output.size()));
-    std::memcpy(data, output.data(), output.size());
+
+    char* data = arena.Alloc(static_cast<int64_t>(outputSize));
+    char* cursor = data;
+    auto append = [&](std::string_view value) {
+        if (!value.empty()) {
+            std::memcpy(cursor, value.data(), value.size());
+            cursor += value.size();
+        }
+    };
+    append(subject.substr(0, whole->Begin));
+    for (const auto& part : Impl_->Replacement) {
+        if (part.Capture == NoCapture) {
+            append(part.Literal);
+        } else if (auto capture = match->Capture(part.Capture)) {
+            append(subject.substr(capture->Begin, capture->End - capture->Begin));
+        }
+    }
+    append(subject.substr(whole->End));
     return {
         reinterpret_cast<const uint8_t*>(data),
-        static_cast<int64_t>(output.size()),
+        static_cast<int64_t>(outputSize),
     };
 }
 

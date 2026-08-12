@@ -1766,14 +1766,22 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
             const auto unwrapped = isBinInt ? valueType : UnwrapNamedType(valueType);
             const bool isFloat = static_cast<bool>(TMaybeType<TFloatType>(unwrapped));
             const bool isInteger = static_cast<bool>(TMaybeType<TIntegerType>(unwrapped));
-            if (!isInteger && !isFloat && !isBinInt) {
+            const bool isString = static_cast<bool>(TMaybeType<TStringType>(unwrapped));
+            if (isString && agg.Func != "min" && agg.Func != "max") {
+                throw NQumir::TError(
+                    "CompileAggregate: '" + agg.Func +
+                    "' does not support string arguments");
+            }
+            if (!isInteger && !isFloat && !isBinInt && !isString) {
                 throw NQumir::TError(
                     "CompileAggregate: aggregate argument column '" + name +
-                    "' must be integer, f64, or BinInt");
+                    "' must be integer, f64, string, or BinInt");
             }
             arg.ValueKind = isBinInt
                 ? NKernel::EAggValueKind::BinInt
-                : (isFloat ? NKernel::EAggValueKind::Float64 : NKernel::EAggValueKind::Int64);
+                : (isString ? NKernel::EAggValueKind::String
+                    : (isFloat ? NKernel::EAggValueKind::Float64
+                               : NKernel::EAggValueKind::Int64));
             arg.IsNullable = IsNullableType(type);
             arg.ColumnIndex = columnIndex(name);
         }

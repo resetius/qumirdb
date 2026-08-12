@@ -70,6 +70,27 @@ int64_t AggStateByteWidth(const TAggReducerInfo& reducer) {
     return reducer.IsBinInt() ? 16 : 8;
 }
 
+bool HasStringReducer(const TAggReducerLayout& layout) {
+    return std::ranges::any_of(
+        layout.Reducers, [](const auto& reducer) { return reducer.IsString(); });
+}
+
+std::vector<NQumir::NAst::TExprPtr> StringCleanupCalls(
+    const TAggReducerLayout& layout)
+{
+    using namespace NQumir::NAst;
+    auto i64Type = std::make_shared<TIntegerType>();
+    std::vector<TExprPtr> result;
+    for (const auto& reducer : layout.Reducers) {
+        if (reducer.IsString()) {
+            result.push_back(NOz::Call("agg_string_cleanup_at", {
+                NOz::Ident("ht"), NOz::TypedInt(reducer.ValueBufIdx, i64Type),
+                NOz::TypedInt(reducer.ExtraBufIdx, i64Type)}));
+        }
+    }
+    return result;
+}
+
 // Rewrites string-column TIdentExpr nodes to their pre-materialized StringView
 // variable names (e.g. "col" → "col_value"). String literals and operator
 // comparisons are left as-is — the qumirdb module registers == / != overloads
@@ -1487,7 +1508,7 @@ TAggReducerLayout BuildAggReducerLayout(
             ? arg.ValueKind
             : EAggValueKind::Int64;
         info.ValueBufIdx = nextBufIdx++;
-        if (info.IsBinInt()) {
+        if (info.IsBinInt() || info.IsString()) {
             info.ExtraBufIdx = nextBufIdx++;
         }
         info.IsNullableOutput = info.NeedsValidity && isAggFunc;
@@ -1588,6 +1609,9 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
         update.push_back(assign(name, columnAt(keyField.ColumnIndex)));
     }
     auto stringViewType = FindStringViewType(key.LookupType);
+    if (!stringViewType && HasStringReducer(layout)) {
+        stringViewType = std::make_shared<TNamedType>("StringView", nullptr);
+    }
 
     // Materialize each DISTINCT argument column once. Non-nullable columns
     // expose a typed data pointer (values_<idx>); nullable columns go through
@@ -1596,7 +1620,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
     struct TArgColumn {
         EAggValueKind ValueKind = EAggValueKind::Int64;
         bool Nullable = false;
-        std::optional<TColumnValueAst> Mat; // set for nullable columns
+        std::optional<TColumnValueAst> Mat; // nullable or variable-width column
     };
     std::map<int32_t, TArgColumn> argColumns;
     for (const auto& r : layout.Reducers) {
@@ -1611,9 +1635,11 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
             ac.ValueKind = EAggValueKind::BinInt;
         } else if (TMaybeType<TFloatType>(UnwrapNamedType(valueType))) {
             ac.ValueKind = EAggValueKind::Float64;
+        } else if (TMaybeType<TStringType>(UnwrapNamedType(valueType))) {
+            ac.ValueKind = EAggValueKind::String;
         }
         ac.Nullable = IsNullableType(colType);
-        if (ac.Nullable) {
+        if (ac.Nullable || ac.ValueKind == EAggValueKind::String) {
             const std::string colName = "arg_column_" + std::to_string(idx);
             update.push_back(var(colName, columnValueType));
             update.push_back(assign(colName, columnAt(idx)));
@@ -1707,11 +1733,13 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
     for (auto& [idx, ac] : argColumns) {
         const std::string vname = "arg_val_" + std::to_string(idx);
         TExprPtr valExpr;
-        if (ac.Nullable) {
+        if (ac.Mat) {
             materialize.insert(materialize.end(),
                 std::make_move_iterator(ac.Mat->Setup.begin()),
                 std::make_move_iterator(ac.Mat->Setup.end()));
             if (ac.ValueKind == EAggValueKind::BinInt) {
+                valExpr = ac.Mat->Value;
+            } else if (ac.ValueKind == EAggValueKind::String) {
                 valExpr = ac.Mat->Value;
             } else if (ac.ValueKind == EAggValueKind::Float64) {
                 valExpr = bitcast(ac.Mat->Value, i64Type);
@@ -1731,7 +1759,9 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
         }
         auto argType = ac.ValueKind == EAggValueKind::BinInt
             ? BinIntStorageType()
-            : i64Type;
+            : (ac.ValueKind == EAggValueKind::String
+                ? AsNamed("StringView", stringViewType)
+                : i64Type);
         materialize.push_back(var(vname, argType));
         materialize.push_back(assign(vname, std::move(valExpr)));
         if (ac.Nullable) {
@@ -1754,7 +1784,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
             std::make_shared<TIndexExpr>(loc, ident("agg_buffers"),
                 numI64(static_cast<int64_t>(info.ValueBufIdx)))));
         std::string hiBufName;
-        if (info.IsBinInt()) {
+        if (info.IsBinInt() || info.IsString()) {
             hiBufName = "hibuf_" + std::to_string(ri);
             reducerStmts.push_back(var(hiBufName, ptrI64Type));
             reducerStmts.push_back(assign(hiBufName,
@@ -1770,6 +1800,36 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
                 ? ident("arg_valid_" + std::to_string(info.ArgColumnIndex))
                 : number(1, boolType);
         };
+        if (info.IsString()) {
+            auto invoke = [&](TExprPtr seed) -> TExprPtr {
+                return call("agg_string_reduce", {
+                    ident(bufName), ident(hiBufName), ident("dense_slot"),
+                    valueI(), number(info.Func == "min", boolType),
+                    std::move(seed)});
+            };
+            if (!info.NeedsValidity) {
+                reducerStmts.push_back(std::make_shared<TIfExpr>(loc,
+                    std::make_shared<TUnaryExpr>(loc, TOperator("!"),
+                        invoke(binary("!=", ident("is_new"), numI64(0)))),
+                    block({std::make_shared<TReturnExpr>(loc, numI64(-1))}), nullptr));
+                continue;
+            }
+            const std::string validBufName = "validbuf_" + std::to_string(ri);
+            reducerStmts.push_back(var(validBufName, ptrI64Type));
+            reducerStmts.push_back(assign(validBufName,
+                std::make_shared<TIndexExpr>(loc, ident("agg_buffers"),
+                    numI64(static_cast<int64_t>(info.ValidBufIdx)))));
+            reducerStmts.push_back(std::make_shared<TIfExpr>(loc, validI(), block({
+                std::make_shared<TIfExpr>(loc,
+                    std::make_shared<TUnaryExpr>(loc, TOperator("!"),
+                        invoke(binary("==", slotIndex(validBufName), numI64(0)))),
+                    block({std::make_shared<TReturnExpr>(loc, numI64(-1))}), nullptr),
+                std::make_shared<TArrayAssignExpr>(loc, validBufName,
+                    std::vector<TExprPtr>{ident("dense_slot")},
+                    binary("+", slotIndex(validBufName), numI64(1))),
+            }), nullptr));
+            continue;
+        }
         if (info.IsBinInt()) {
             if (!info.NeedsValidity) {
                 reducerStmts.push_back(call(reduceName, {
@@ -1830,7 +1890,10 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
         numI64(static_cast<int64_t>(layout.NumAggBuffers)),
         numI64(static_cast<int64_t>(key.Size)),
     }), i64Type);
-    auto destroy = block({call("aht_destroy", {ident("ht")}), numI64(1)});
+    auto destroyStmts = StringCleanupCalls(layout);
+    destroyStmts.push_back(call("aht_destroy", {ident("ht")}));
+    destroyStmts.push_back(numI64(1));
+    auto destroy = block(std::move(destroyStmts));
     auto dispatch = std::make_shared<TIfExpr>(loc,
         binary("==", ident("op"), numI64(0)), std::move(init),
         std::make_shared<TIfExpr>(loc,
@@ -1993,17 +2056,29 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
             const auto& r = layout.Reducers[i];
             const std::string srcName = "agg_src_" + std::to_string(i);
             const std::string dstName = "output_agg_" + std::to_string(i);
-            project.push_back(std::make_shared<TVarStmt>(loc, srcName, ptrI64Type));
-            project.push_back(std::make_shared<TAssignExpr>(loc, srcName,
-                index(ident("agg_buffers"), numI64(static_cast<int64_t>(r.ValueBufIdx)))));
-            project.push_back(std::make_shared<TVarStmt>(loc, dstName, ptrI64Type));
-            project.push_back(std::make_shared<TAssignExpr>(loc, dstName,
-                index(ident("output_buffers"), numI64(static_cast<int64_t>(i)))));
-            if (r.IsBinInt()) {
-                const std::string hiName = "agg_hi_" + std::to_string(i);
-                project.push_back(std::make_shared<TVarStmt>(loc, hiName, ptrI64Type));
-                project.push_back(std::make_shared<TAssignExpr>(loc, hiName,
-                    index(ident("agg_buffers"), numI64(static_cast<int64_t>(r.ExtraBufIdx)))));
+            if (r.IsString()) {
+                project.push_back(std::make_shared<TCallExpr>(loc,
+                    ident("agg_string_finalize_at"), std::vector<TExprPtr>{
+                        ident("ht"), numI64(r.ValueBufIdx),
+                        numI64(r.ExtraBufIdx),
+                        std::make_shared<TCastExpr>(loc,
+                            index(ident("output_buffers"), numI64(i)), i64Type),
+                        ident("result")}));
+            } else {
+                project.push_back(std::make_shared<TVarStmt>(loc, srcName, ptrI64Type));
+                project.push_back(std::make_shared<TAssignExpr>(loc, srcName,
+                    index(ident("agg_buffers"),
+                        numI64(static_cast<int64_t>(r.ValueBufIdx)))));
+                project.push_back(std::make_shared<TVarStmt>(loc, dstName, ptrI64Type));
+                project.push_back(std::make_shared<TAssignExpr>(loc, dstName,
+                    index(ident("output_buffers"), numI64(static_cast<int64_t>(i)))));
+                if (r.IsBinInt()) {
+                    const std::string hiName = "agg_hi_" + std::to_string(i);
+                    project.push_back(std::make_shared<TVarStmt>(loc, hiName, ptrI64Type));
+                    project.push_back(std::make_shared<TAssignExpr>(loc, hiName,
+                        index(ident("agg_buffers"),
+                            numI64(static_cast<int64_t>(r.ExtraBufIdx)))));
+                }
             }
             if (!r.IsNullableOutput) {
                 continue;
@@ -2081,21 +2156,23 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
         const auto& r = layout.Reducers[i];
         const std::string srcName = "agg_src_" + std::to_string(i);
         const std::string dstName = "output_agg_" + std::to_string(i);
-        if (r.IsBinInt()) {
-            const std::string hiName = "agg_hi_" + std::to_string(i);
-            auto outLoSlot = binary("*", ident("slot"), numI64(2));
-            auto outHiSlot = binary("+",
-                binary("*", ident("slot"), numI64(2)), numI64(1));
-            loopStmts.push_back(std::make_shared<TArrayAssignExpr>(loc, dstName,
-                std::vector<TExprPtr>{std::move(outLoSlot)},
-                index(ident(srcName), ident("slot"))));
-            loopStmts.push_back(std::make_shared<TArrayAssignExpr>(loc, dstName,
-                std::vector<TExprPtr>{std::move(outHiSlot)},
-                index(ident(hiName), ident("slot"))));
-        } else {
-            loopStmts.push_back(std::make_shared<TArrayAssignExpr>(loc, dstName,
-                std::vector<TExprPtr>{ident("slot")},
-                index(ident(srcName), ident("slot"))));
+        if (!r.IsString()) {
+            if (r.IsBinInt()) {
+                const std::string hiName = "agg_hi_" + std::to_string(i);
+                auto outLoSlot = binary("*", ident("slot"), numI64(2));
+                auto outHiSlot = binary("+",
+                    binary("*", ident("slot"), numI64(2)), numI64(1));
+                loopStmts.push_back(std::make_shared<TArrayAssignExpr>(loc, dstName,
+                    std::vector<TExprPtr>{std::move(outLoSlot)},
+                    index(ident(srcName), ident("slot"))));
+                loopStmts.push_back(std::make_shared<TArrayAssignExpr>(loc, dstName,
+                    std::vector<TExprPtr>{std::move(outHiSlot)},
+                    index(ident(hiName), ident("slot"))));
+            } else {
+                loopStmts.push_back(std::make_shared<TArrayAssignExpr>(loc, dstName,
+                    std::vector<TExprPtr>{ident("slot")},
+                    index(ident(srcName), ident("slot"))));
+            }
         }
         if (!r.IsNullableOutput) {
             continue;
@@ -2187,7 +2264,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinishRowSetAst(
     const int64_t keyCount = static_cast<int64_t>(key.Fields.size());
     const int64_t aggCount = static_cast<int64_t>(layout.Reducers.size());
     const int64_t columnCount = keyCount + aggCount;
-    int64_t ownedPtrCount = 5; // columns + key bytes + pointer tables.
+    int64_t ownedPtrCount = 6; // columns + byte sizes + pointer tables.
     for (const auto& field : key.Fields) {
         ++ownedPtrCount; // Data
         if (field.IsNullable) {
@@ -2199,6 +2276,9 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinishRowSetAst(
     }
     for (const auto& reducer : layout.Reducers) {
         ++ownedPtrCount; // Data
+        if (reducer.IsString()) {
+            ++ownedPtrCount; // Offsets
+        }
         if (reducer.IsNullableOutput) {
             ++ownedPtrCount; // Mask
         }
@@ -2244,6 +2324,12 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinishRowSetAst(
     remember("key_bytes");
 
     builder
+        .Var("agg_bytes", ptrI64Type)
+        .Assign("agg_bytes", allocAs(ptrI64Type,
+            number(std::max<int64_t>(aggCount, 1) * kPtrSize)));
+    remember("agg_bytes");
+
+    builder
         .Var("key_column_ptrs", ptrPtrU8Type)
         .Assign("key_column_ptrs", allocAs(ptrPtrU8Type,
             number(std::max<int64_t>(keyCount, 1) * kPtrSize)));
@@ -2263,14 +2349,15 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinishRowSetAst(
 
     builder
         .Var("measured", i64Type)
-        .Assign("measured", Oz::Call("agg_measure_keys", {
-            Oz::Ident("ht"), Oz::Ident("key_bytes"), Oz::Ident("size")}))
-        .Stmt(Oz::If(
-            Oz::Bin(TOperator("!="), Oz::Ident("measured"), Oz::Ident("size")),
-            Oz::Block({
-                Oz::Call("aht_destroy", {Oz::Ident("ht")}),
-                Oz::Return(number(-1)),
-            })));
+        .Assign("measured", Oz::Call("agg_measure_outputs", {
+            Oz::Ident("ht"), Oz::Ident("key_bytes"), Oz::Ident("agg_bytes"),
+            Oz::Ident("size")}));
+    auto measureFailure = StringCleanupCalls(layout);
+    measureFailure.push_back(Oz::Call("aht_destroy", {Oz::Ident("ht")}));
+    measureFailure.push_back(Oz::Return(number(-1)));
+    builder.Stmt(Oz::If(
+        Oz::Bin(TOperator("!="), Oz::Ident("measured"), Oz::Ident("size")),
+        Oz::Block(std::move(measureFailure))));
 
     for (size_t i = 0; i < key.Fields.size(); ++i) {
         const auto& fieldInfo = key.Fields[i];
@@ -2325,17 +2412,41 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinishRowSetAst(
         const auto idx = number(static_cast<int64_t>(i));
         const std::string dataName = "agg_data_" + std::to_string(i);
         const std::string maskName = "agg_mask_" + std::to_string(i);
+        const std::string offsetsName = "agg_offsets_" + std::to_string(i);
 
-        builder
-            .Var(dataName, ptrI64Type)
-            .Assign(dataName, allocAs(ptrI64Type,
-                Oz::Mul(Oz::Ident("size"), number(AggStateByteWidth(reducer)))));
-        remember(dataName);
-        builder
-            .Stmt(Oz::ArrayAssign("agg_buffers", idx, Oz::Ident(dataName)))
-            .Stmt(Oz::FieldAssign(
-                column(columnIdx), "Data", Oz::Cast(Oz::Ident(dataName), ptrI8Type)))
-            .Stmt(Oz::FieldAssign(column(columnIdx), "DataBitOffset", numI32(0)));
+        if (reducer.IsString()) {
+            builder
+                .Var(dataName, ptrU8Type)
+                .Assign(dataName, allocAs(ptrU8Type, Oz::Index("agg_bytes", idx)));
+            remember(dataName);
+            builder
+                .Var(offsetsName, ptrI64Type)
+                .Assign(offsetsName, allocAs(ptrI64Type,
+                    Oz::Mul(Oz::Add(Oz::Ident("size"), number(1)), number(8))));
+            remember(offsetsName);
+            builder
+                .Stmt(Oz::ArrayAssign("agg_buffers", idx,
+                    Oz::Cast(columnPtr(columnIdx), ptrI64Type)))
+                .Stmt(Oz::FieldAssign(column(columnIdx), "Data",
+                    Oz::Cast(Oz::Ident(dataName), ptrI8Type)))
+                .Stmt(Oz::FieldAssign(column(columnIdx), "DataBitOffset", numI32(0)))
+                .Stmt(Oz::FieldAssign(column(columnIdx), "Offsets",
+                    Oz::Ident(offsetsName)))
+                .Stmt(Oz::FieldAssign(column(columnIdx), "OffsetWidth", numU8(8)));
+        } else {
+            builder
+                .Var(dataName, ptrI64Type)
+                .Assign(dataName, allocAs(ptrI64Type, Oz::Index("agg_bytes", idx)));
+            remember(dataName);
+            builder
+                .Stmt(Oz::ArrayAssign("agg_buffers", idx, Oz::Ident(dataName)))
+                .Stmt(Oz::FieldAssign(column(columnIdx), "Data",
+                    Oz::Cast(Oz::Ident(dataName), ptrI8Type)))
+                .Stmt(Oz::FieldAssign(column(columnIdx), "DataBitOffset", numI32(0)))
+                .Stmt(Oz::FieldAssign(column(columnIdx), "Offsets",
+                    Oz::NullPtr(ptrI64Type)))
+                .Stmt(Oz::FieldAssign(column(columnIdx), "OffsetWidth", numU8(0)));
+        }
 
         if (reducer.IsNullableOutput) {
             builder
@@ -2350,10 +2461,8 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinishRowSetAst(
                 .Stmt(Oz::ArrayAssign("agg_masks", idx, Oz::NullPtr(ptrU8Type)))
                 .Stmt(Oz::FieldAssign(column(columnIdx), "Mask", Oz::NullPtr(ptrU8Type)));
         }
-        builder
-            .Stmt(Oz::FieldAssign(column(columnIdx), "MaskBitOffset", numI32(0)))
-            .Stmt(Oz::FieldAssign(column(columnIdx), "Offsets", Oz::NullPtr(ptrI64Type)))
-            .Stmt(Oz::FieldAssign(column(columnIdx), "OffsetWidth", numU8(0)));
+        builder.Stmt(Oz::FieldAssign(
+            column(columnIdx), "MaskBitOffset", numI32(0)));
     }
 
     builder
@@ -2364,7 +2473,11 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinishRowSetAst(
             Oz::Ident("agg_buffers"),
             Oz::Ident("agg_masks"),
             Oz::Ident("size"),
-        }))
+        }));
+    for (auto& cleanup : StringCleanupCalls(layout)) {
+        builder.Stmt(std::move(cleanup));
+    }
+    builder
         .Stmt(Oz::Call("aht_destroy", {Oz::Ident("ht")}))
         .Stmt(Oz::If(
             Oz::Bin(TOperator("!="), Oz::Ident("finalized"), Oz::Ident("size")),
@@ -2383,12 +2496,14 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinishRowSetAst(
 
 NQumir::NAst::TExprPtr GenGenericAggregateMeasureAst(
     const TAggregateKeyDescriptor& key,
+    const TAggReducerLayout& layout,
     NQumir::NAst::TTypePtr hashTableType)
 {
     using namespace NQumir::NAst;
     NQumir::TLocation loc{};
     auto i64Type = std::make_shared<TIntegerType>(TIntegerType::I64);
     auto ptrI64Type = std::make_shared<TPointerType>(i64Type);
+    auto ptrPtrI64Type = std::make_shared<TPointerType>(ptrI64Type);
     auto ptrKeyType = std::make_shared<TPointerType>(key.StoredType);
     auto hashTableRefType = std::make_shared<TReferenceType>(
         AsNamed("HashTable", std::move(hashTableType)));
@@ -2412,6 +2527,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateMeasureAst(
     std::vector<TParam> params = {
         std::make_shared<TVarStmt>(loc, "ht", hashTableRefType),
         std::make_shared<TVarStmt>(loc, "output_key_bytes", ptrI64Type),
+        std::make_shared<TVarStmt>(loc, "output_agg_bytes", ptrI64Type),
         std::make_shared<TVarStmt>(loc, "output_capacity", i64Type),
     };
     std::vector<TExprPtr> body;
@@ -2449,6 +2565,28 @@ NQumir::NAst::TExprPtr GenGenericAggregateMeasureAst(
         }
     }
 
+    if (HasStringReducer(layout)) {
+        body.push_back(std::make_shared<TVarStmt>(loc, "agg_buffers", ptrPtrI64Type));
+        body.push_back(std::make_shared<TAssignExpr>(loc, "agg_buffers",
+            std::make_shared<TFieldAccessExpr>(loc, ident("ht"), "AggBuffers")));
+    }
+    for (size_t i = 0; i < layout.Reducers.size(); ++i) {
+        const auto& reducer = layout.Reducers[i];
+        TExprPtr bytes;
+        if (reducer.IsString()) {
+            bytes = std::make_shared<TCallExpr>(loc, ident("agg_string_measure"),
+                std::vector<TExprPtr>{
+                    std::make_shared<TIndexExpr>(loc, ident("agg_buffers"),
+                        number(static_cast<int64_t>(reducer.ExtraBufIdx))),
+                    ident("size")});
+        } else {
+            bytes = binary("*", ident("size"), number(AggStateByteWidth(reducer)));
+        }
+        body.push_back(std::make_shared<TArrayAssignExpr>(loc,
+            "output_agg_bytes", std::vector<TExprPtr>{number(static_cast<int64_t>(i))},
+            std::move(bytes)));
+    }
+
     body.push_back(std::make_shared<TVarStmt>(loc, "slot", i64Type));
     body.push_back(std::make_shared<TAssignExpr>(loc, "slot", number(0)));
     std::vector<TExprPtr> loop;
@@ -2474,7 +2612,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateMeasureAst(
         std::make_shared<TBlockExpr>(loc, std::move(loop))));
     body.push_back(std::make_shared<TReturnExpr>(loc, ident("size")));
 
-    auto function = std::make_shared<TFunDecl>(loc, "agg_measure_keys",
+    auto function = std::make_shared<TFunDecl>(loc, "agg_measure_outputs",
         std::vector<TGenericParam>{},
         std::move(params), std::make_shared<TBlockExpr>(loc, std::move(body)),
         i64Type);
@@ -2574,6 +2712,10 @@ std::vector<NQumir::NAst::TExprPtr> GenReducerFunDecls(
         const auto& r = layout.Reducers[i];
         const std::string& func = r.Func;
         const std::string name = "reduce_" + std::to_string(i);
+
+        if (r.IsString()) {
+            continue;
+        }
 
         if (r.IsBinInt()) {
             const std::string loBuf = "lo_buf";
@@ -2800,9 +2942,9 @@ NQumir::NAst::TExprPtr GenApplyReducersFunDecl(const TAggReducerLayout& layout)
         const std::string bufName = "buf_" + std::to_string(i);
         const std::string reduceName = "reduce_" + std::to_string(i);
         bindBuffer(bufName, r.ValueBufIdx, stmts);
-        if (r.IsBinInt()) {
+        if (r.IsBinInt() || r.IsString()) {
             // Legacy aht_update/agg_apply_reducers carries a single i64 value.
-            // BinInt aggregation is handled by the fused dispatch path, which
+            // Wide/string aggregation is handled by the fused dispatch path, which
             // materializes typed per-column values before calling reducers.
             continue;
         }

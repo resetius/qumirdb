@@ -50,6 +50,11 @@ std::string ReadSortKernel(const std::string& name) {
 
 namespace {
 
+bool HasStringReducer(const TAggReducerLayout& layout) {
+    return std::ranges::any_of(
+        layout.Reducers, [](const auto& reducer) { return reducer.IsString(); });
+}
+
 std::optional<NQumir::TError> AddParsedKernel(
     std::vector<NQumir::NAst::TExprPtr>& library,
     const std::string& source,
@@ -63,6 +68,17 @@ std::optional<NQumir::TError> AddParsedKernel(
         library.push_back(std::move(fn));
     }
     return std::nullopt;
+}
+
+std::optional<NQumir::TError> AddStringReducerLibrary(
+    std::vector<NQumir::NAst::TExprPtr>& library,
+    const TAggReducerLayout& layout)
+{
+    if (!HasStringReducer(layout)) {
+        return std::nullopt;
+    }
+    return AddParsedKernel(
+        library, ReadAggregationKernel("aggregation_string_reducer.oz"));
 }
 
 // Shared prefix of both join libraries: generic Robin Hood + HashTable
@@ -266,6 +282,9 @@ BuildGenericAggregateProgramAst(
         stmts.insert(
             stmts.end(), stringOperations->begin(), stringOperations->end());
     }
+    if (auto error = AddStringReducerLibrary(stmts, layout)) {
+        return std::unexpected(*error);
+    }
     auto keyOperations = GenKeyOperationFunDecls(key);
     stmts.insert(stmts.end(), keyOperations.begin(), keyOperations.end());
     auto ownership = GenKeyOwnershipFunDecls(key);
@@ -329,6 +348,9 @@ BuildGenericAggregateFinalizeProgramAst(
         parsed->insert(parsed->end(),
             stringOperations->begin(), stringOperations->end());
     }
+    if (auto error = AddStringReducerLibrary(*parsed, layout)) {
+        return std::unexpected(*error);
+    }
     auto entry = GenGenericAggregateFinalizeAst(
         key, layout, std::move(hashTableType), std::move(columnType));
     auto block = NQumir::NAst::TMaybeNode<NQumir::NAst::TBlockExpr>(entry);
@@ -381,6 +403,9 @@ BuildGenericAggregateFusedProgramAst(
         stmts.insert(
             stmts.end(), stringOperations->begin(), stringOperations->end());
     }
+    if (auto error = AddStringReducerLibrary(stmts, layout)) {
+        return std::unexpected(*error);
+    }
     auto keyOperations = GenKeyOperationFunDecls(key);
     stmts.insert(stmts.end(), keyOperations.begin(), keyOperations.end());
     auto ownership = GenKeyOwnershipFunDecls(key);
@@ -427,7 +452,7 @@ BuildGenericAggregateFusedProgramAst(
         return std::unexpected(*err);
     }
     if (auto err = appendEntry(
-            GenGenericAggregateMeasureAst(key, hashTableType),
+            GenGenericAggregateMeasureAst(key, layout, hashTableType),
             "generic aggregate measure")) {
         return std::unexpected(*err);
     }
@@ -449,15 +474,20 @@ BuildGenericAggregateFusedProgramAst(
 std::expected<NQumir::NAst::TExprPtr, NQumir::TError>
 BuildGenericAggregateMeasureProgramAst(
     const TAggregateKeyDescriptor& key,
+    const TAggReducerLayout& layout,
     NQumir::NAst::TTypePtr hashTableType)
 {
     std::vector<NQumir::NAst::TExprPtr> stmts;
+    if (auto error = AddStringReducerLibrary(stmts, layout)) {
+        return std::unexpected(*error);
+    }
     if (!key.StoredTypeName.empty() ||
         NQumir::NAst::TMaybeType<NQumir::NAst::TNamedType>(key.StoredType)) {
         stmts.push_back(std::make_shared<NQumir::NAst::TTypeDeclStmt>(
             NQumir::TLocation{}, key.StoredType));
     }
-    auto entry = GenGenericAggregateMeasureAst(key, std::move(hashTableType));
+    auto entry = GenGenericAggregateMeasureAst(
+        key, layout, std::move(hashTableType));
     auto block = NQumir::NAst::TMaybeNode<NQumir::NAst::TBlockExpr>(entry);
     if (!block || block.Cast()->Stmts.size() != 1) {
         return std::unexpected(NQumir::TError(
