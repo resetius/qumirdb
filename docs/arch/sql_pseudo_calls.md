@@ -14,12 +14,18 @@ Keep this list updated when adding another call name handled specially by
 |---|---|---|
 | `qdb_in_list(lhs, item...)` | SQL scalar `IN (...)` | Binds `lhs` once, hoists its nullable guard, and builds equality/OR expressions over its plain value. Per-item three-valued logic remains only for nullable items. The call never reaches Qumir name resolution. |
 | `strcat(a, b)` | SQL `a || b` | Becomes `qdb_string_concat(__arena__, a, b)`. `__arena__` is the project kernel's hidden scratch-arena parameter. `strcat` itself is not a runtime symbol. |
-| `regexp_replace(str, pattern, replacement)` | SQL function syntax | Constant `pattern` and `replacement` are registered once per query, then the call becomes `qdb_regexp_replace(__arena__, __regexes__[id], str)`. The current three-argument form uses the ECMAScript regex dialect and replaces only the first match; flags are not supported yet. |
+| `regexp_replace(str, pattern, replacement)` | SQL function syntax | Constant `pattern` and `replacement` are registered once per query, then the call becomes `qdb_regexp_replace(__arena__, __regexes__[id], str)`. The current three-argument form replaces only the first match; flags are not supported yet. |
 | `coalesce(a, ...)` | SQL function syntax | Becomes a typed `if` chain selecting the first valid argument. |
 
 `qdb_in_list` unwraps `Nullable[T]` internally only after testing `Valid`. There
 is intentionally no standalone `qdb_unwrap_nullable` call: an unguarded unwrap
 would make it easy to discard SQL NULL semantics.
+
+The native executor compiles regular expressions with PCRE2, while the browser
+executor uses JavaScript's ECMAScript `RegExp`. The engine does not currently
+validate a common regex subset, so engine-specific constructs may compile or
+behave differently between native and browser execution. Portable queries must
+use constructs with equivalent semantics in both dialects.
 
 ## Semantic bridge calls
 

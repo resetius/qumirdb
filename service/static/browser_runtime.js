@@ -2151,7 +2151,10 @@ function createAggregateState(kernel, layout, stage) {
   // init(ht, capacity)
   const ht = arena.alloc(layout.hashTable.size, 8);
   new Uint8Array(arena.memory.buffer, ht, layout.hashTable.size).fill(0);
-  dispatch(BigInt(ht), 0n, 4n, 0n);
+  if (dispatch(BigInt(ht), 0n, 4n, 0n) === 0n) {
+    arena.free(ht);
+    throw new Error('aggregate initialization failed');
+  }
 
   return {
     kernel,
@@ -2182,7 +2185,9 @@ function updateAggregateState(state, rowSet) {
     ? wasm.rowsetPtr
     : state.inputWriter.write(
         batch.columns, batch.rowCount, false, selection).rowsetPtr;
-  state.dispatch(BigInt(state.ht), BigInt(rowsetPtr), 0n, 1n);
+  if (state.dispatch(BigInt(state.ht), BigInt(rowsetPtr), 0n, 1n) < 0n) {
+    throw new Error('aggregate update failed');
+  }
 }
 
 function ensureGroupingSetScratch(state, rowCount) {
@@ -2282,7 +2287,10 @@ function updateGroupingSetsAggregateState(state, rowSet) {
     for (let si = 0; si < sets.length; ++si) {
       const view = makeGroupingSetRowSet(state, baseRowsetPtr, sets[si], si);
       try {
-        state.dispatch(BigInt(state.ht), BigInt(view.rowsetPtr), 0n, 1n);
+        if (state.dispatch(
+            BigInt(state.ht), BigInt(view.rowsetPtr), 0n, 1n) < 0n) {
+          throw new Error('aggregate update failed');
+        }
       } finally {
         freeGroupingSetRowSet(state, view);
       }

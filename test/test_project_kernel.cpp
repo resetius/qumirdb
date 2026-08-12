@@ -7,6 +7,7 @@
 #include <qdb/kernel/spec.h>
 #include <qdb/modules/qumirdb_runtime.h>
 #include <qdb/modules/qumirdb_types.h>
+#include <qdb/utils/regex.h>
 
 #include <qumir/codegen/llvm/llvm_initializer.h>
 #include <qumir/parser/core/lexer.h>
@@ -194,6 +195,19 @@ TEST(CompileProject, RegexpReplaceUsesCompiledQueryHandle) {
     EXPECT_EQ(text(1), "openai.com");
     EXPECT_EQ(text(2), "not-a-url");
     EXPECT_EQ(runtime->Regexes.Specs().size(), 1u);
+}
+
+TEST(CompileProject, PcreUsesExplicitMatchContexts) {
+    NUtils::TRegex regex("(a)(b)?");
+    NUtils::TRegexContext first;
+    NUtils::TRegexContext second;
+    auto ab = regex.Search(first, "xab");
+    auto a = regex.Search(second, "ya");
+    ASSERT_TRUE(ab);
+    ASSERT_TRUE(a);
+    EXPECT_EQ(ab->Capture(2)->End - ab->Capture(2)->Begin, 1u);
+    EXPECT_FALSE(a->Capture(2));
+    EXPECT_THROW(NUtils::TRegex("("), NUtils::TRegexError);
 }
 
 int main(int argc, char** argv) {

@@ -1,11 +1,13 @@
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(ARROW REQUIRED IMPORTED_TARGET arrow)
 pkg_check_modules(PARQUET REQUIRED IMPORTED_TARGET parquet)
+pkg_check_modules(PCRE2 REQUIRED IMPORTED_TARGET libpcre2-8)
 find_package(LLVM REQUIRED CONFIG)
 
 add_library(qumirdb
     stub.cpp
     utils/sha1.cpp
+    utils/regex.cpp
     catalog/external_module.cpp
     modules/qumirdb.cpp
     modules/qumirdb_runtime.cpp
@@ -97,4 +99,5 @@ endif()
 target_link_libraries(qumirdb PUBLIC
     PkgConfig::ARROW
     PkgConfig::PARQUET
+    PkgConfig::PCRE2
 )

@@ -53,7 +53,12 @@ void TAggregateProcessor::EnsureInit()
         return;
     }
     Initialized_ = true;
-    Kernels_.Dispatch(HashTable_.data(), nullptr, kInitialCapacity, kOpInit);
+    if (Kernels_.Dispatch(
+            HashTable_.data(), nullptr, kInitialCapacity, kOpInit) == 0)
+    {
+        Destroyed_ = true;
+        throw std::runtime_error("aggregate initialization failed");
+    }
 }
 
 void TAggregateProcessor::Add(TRowSet& rowSet)
@@ -62,7 +67,9 @@ void TAggregateProcessor::Add(TRowSet& rowSet)
         throw std::runtime_error("aggregate processor is already finished");
     }
     EnsureInit();
-    Kernels_.Dispatch(HashTable_.data(), &rowSet, 0, kOpUpdate);
+    if (Kernels_.Dispatch(HashTable_.data(), &rowSet, 0, kOpUpdate) < 0) {
+        throw std::runtime_error("aggregate update failed");
+    }
 }
 
 bool TAggregateProcessor::Finish(TRowSet& rowSet)

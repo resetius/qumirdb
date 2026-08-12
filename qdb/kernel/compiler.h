@@ -369,11 +369,8 @@ public:
     // Compiles the per-query generic update and finalize programs for `aggs`
     // grouped by `groupKeys`, over rows of `inputType`.
     //
-    // Current aggregate-value constraints (NQumir::TError if violated):
-    // - one or more integer/f64/string group keys;
-    // - agg.Func in {count, sum, min, max};
-    // - every agg with Arg references the same single integer column;
-    // - all reducer states are i64. count(*) aggs (Arg == nullptr) pass 0.
+    // Aggregate arguments may be integer/f64/BinInt; String supports MIN/MAX.
+    // count(*) has no argument. Unsupported function/type pairs raise TError.
     TAggregateKernels CompileAggregate(
         const NKernel::TOperatorKernelSpec& spec);
 
