@@ -8,6 +8,7 @@ add_library(qumirdb
     stub.cpp
     utils/sha1.cpp
     utils/regex.cpp
+    utils/rust_std_loader.cpp
     catalog/external_module.cpp
     modules/qumirdb.cpp
     modules/qumirdb_runtime.cpp
@@ -101,4 +102,5 @@ target_link_libraries(qumirdb PUBLIC
     PkgConfig::ARROW
     PkgConfig::PARQUET
     PkgConfig::PCRE2
+    ${CMAKE_DL_LIBS}
 )

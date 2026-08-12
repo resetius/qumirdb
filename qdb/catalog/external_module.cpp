@@ -2,6 +2,7 @@
 
 #include <qdb/plan/types/nullable.h>
 #include <qdb/sql/ast.h>
+#include <qdb/utils/rust_std_loader.h>
 #include <qdb/utils/sha1.h>
 
 #include <qumir/frontend/source_module_loader.h>
@@ -462,6 +463,11 @@ void CollectCallNames(const TExprPtr& expr, std::unordered_set<std::string>& nam
 } // namespace
 
 struct TExternalCatalogSnapshot::TState {
+    struct TRustRuntime {
+        std::mutex Mutex;
+        std::shared_ptr<NUtils::TRustStdLoader> Loader;
+    };
+
     struct TBitcodeCache {
         std::mutex Mutex;
         std::unordered_map<std::string, std::string> ByTarget;
@@ -476,6 +482,7 @@ struct TExternalCatalogSnapshot::TState {
     };
 
     std::map<std::string, std::shared_ptr<const TModule>> Modules;
+    std::shared_ptr<TRustRuntime> RustRuntime = std::make_shared<TRustRuntime>();
 };
 
 struct TExternalCatalogSnapshot::TResolvedTypes {
@@ -484,6 +491,22 @@ struct TExternalCatalogSnapshot::TResolvedTypes {
 };
 
 namespace {
+
+std::expected<std::monostate, TError> EnsureRustRuntime(
+    const TExternalCatalogSnapshot::TState& state)
+{
+    std::lock_guard lock(state.RustRuntime->Mutex);
+    if (state.RustRuntime->Loader) {
+        return std::monostate{};
+    }
+    try {
+        state.RustRuntime->Loader = std::make_shared<NUtils::TRustStdLoader>();
+        return std::monostate{};
+    } catch (const std::exception& e) {
+        return std::unexpected(TError(
+            "cannot load the native Rust std runtime: " + std::string(e.what())));
+    }
+}
 
 std::shared_ptr<TExternalCatalogSnapshot::TState::TModule> CloneModule(
     const std::shared_ptr<const TExternalCatalogSnapshot::TState::TModule>& source,
@@ -638,6 +661,17 @@ TExternalCatalogSnapshot::ComposeReferenced(
     }
     if (modules.empty()) {
         return std::optional<NQumir::NFrontend::TComposeResult>{};
+    }
+
+    // Cross-compiled modules bring their own target runtime. Native Rust
+    // bitcode instead resolves alloc/panic/etc. through the process symbols.
+    const bool usesNativeRust = target.empty() && std::ranges::any_of(
+        modules, [](const auto& module) { return module->Language == "rust"; });
+    if (usesNativeRust) {
+        auto loaded = EnsureRustRuntime(*State_);
+        if (!loaded) {
+            return std::unexpected(loaded.error());
+        }
     }
 
     auto inputBlock = TMaybeNode<TBlockExpr>(ast);
