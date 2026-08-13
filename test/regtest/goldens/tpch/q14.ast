@@ -6,9 +6,7 @@
             (call
               sum
               (if
-                (call
-                  qdb_is_true
-                  (call qdb_string_view_sql_like p_type (: (cast "PROMO%" <named StringView>) <named StringView>)))
+                (call qdb_is_true (call qdb_string_view_sql_like p_type (cast "PROMO%" <named StringView>)))
                 (* l_extendedprice (- 1 l_discount))
                 0)))
           (call sum (* l_extendedprice (- 1 l_discount))))

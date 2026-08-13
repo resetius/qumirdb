@@ -13,15 +13,12 @@
                     (call
                       qdb_in_list
                       i_category
-                      (: (cast "Jewelry" <named StringView>) <named StringView>)
-                      (: (cast "Sports" <named StringView>) <named StringView>)
-                      (: (cast "Books" <named StringView>) <named StringView>)))
+                      (cast "Jewelry" <named StringView>)
+                      (cast "Sports" <named StringView>)
+                      (cast "Books" <named StringView>)))
                   (== cs_sold_date_sk d_date_sk))
-                (<= (: (cast (: (cast "2001-01-12" <named StringView>) <named StringView>) <named DATE>) <named DATE>)
-                  d_date))
-              (<= d_date
-                (+ (: (cast (: (cast "2001-01-12" <named StringView>) <named StringView>) <named DATE>) <named DATE>)
-                  (: 30 i32)))))
+                (<= (cast (cast "2001-01-12" <named StringView>) <named DATE>) d_date))
+              (<= d_date (+ (cast (cast "2001-01-12" <named StringView>) <named DATE>) (: 30 i32)))))
           (keys i_item_id i_item_desc i_category i_class i_current_price)
           (agg sum_0 sum cs_ext_sales_price))
         (partition i_class)

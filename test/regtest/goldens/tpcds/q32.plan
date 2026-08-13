@@ -14,12 +14,8 @@
                 (rel project
                   (rel filter
                     (rel join (rel source "catalog_sales") (rel source "date_dim") () (inner))
-                    (&& (&& (&& (== cs_item_sk i_item_sk)
-                          (<= (: (cast "1998-03-18" <named StringView>) <named StringView>) d_date))
-                        (<= d_date
-                          (+ (: (cast (: (cast "1998-03-18" <named StringView>) <named StringView>) <named DATE>)
-                              <named DATE>)
-                            (: 90 i32))))
+                    (&& (&& (&& (== cs_item_sk i_item_sk) (<= (cast "1998-03-18" <named StringView>) d_date))
+                        (<= d_date (+ (cast (cast "1998-03-18" <named StringView>) <named DATE>) (: 90 i32))))
                       (== d_date_sk cs_sold_date_sk)))
                   (cs_ext_discount_amt cs_ext_discount_amt)
                   (__group__ 1))
@@ -30,10 +26,8 @@
             ()
             (inner))
           (&& (&& (&& (&& (&& (== i_manufact_id 269) (== i_item_sk cs_item_sk))
-                  (<= (: (cast "1998-03-18" <named StringView>) <named StringView>) d_date))
-                (<= d_date
-                  (+ (: (cast (: (cast "1998-03-18" <named StringView>) <named StringView>) <named DATE>) <named DATE>)
-                    (: 90 i32))))
+                  (<= (cast "1998-03-18" <named StringView>) d_date))
+                (<= d_date (+ (cast (cast "1998-03-18" <named StringView>) <named DATE>) (: 90 i32))))
               (== d_date_sk cs_sold_date_sk))
             (> cs_ext_discount_amt __scalar_0__)))
         (cs_ext_discount_amt cs_ext_discount_amt)

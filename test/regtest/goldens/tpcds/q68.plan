@@ -33,8 +33,8 @@
                       (call
                         qdb_in_list
                         |store.s_city|
-                        (: (cast "Midway" <named StringView>) <named StringView>)
-                        (: (cast "Fairview" <named StringView>) <named StringView>))))
+                        (cast "Midway" <named StringView>)
+                        (cast "Fairview" <named StringView>))))
                   (keys ss_ticket_number ss_customer_sk ss_addr_sk ca_city)
                   (agg sum_0 sum ss_ext_sales_price)
                   (agg sum_1 sum ss_ext_list_price)

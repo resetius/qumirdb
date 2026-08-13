@@ -36,9 +36,9 @@
               (call
                 qdb_in_list
                 ca_state
-                (: (cast "CO" <named StringView>) <named StringView>)
-                (: (cast "IL" <named StringView>) <named StringView>)
-                (: (cast "MN" <named StringView>) <named StringView>)))
+                (cast "CO" <named StringView>)
+                (cast "IL" <named StringView>)
+                (cast "MN" <named StringView>)))
             (== cd_demo_sk |c.c_current_cdemo_sk|))
           (subquery exists (query
         (select

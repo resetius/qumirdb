@@ -5,11 +5,7 @@
         (rel filter
           (rel join (rel source "orders") (rel source "lineitem") () (inner))
           (&& (&& (&& (&& (&& (== o_orderkey l_orderkey)
-                    (call
-                      qdb_in_list
-                      l_shipmode
-                      (: (cast "TRUCK" <named StringView>) <named StringView>)
-                      (: (cast "AIR" <named StringView>) <named StringView>)))
+                    (call qdb_in_list l_shipmode (cast "TRUCK" <named StringView>) (cast "AIR" <named StringView>)))
                   (< l_commitdate l_receiptdate))
                 (< l_shipdate l_commitdate))
               (>= l_receiptdate (: 8401 i32)))
@@ -18,15 +14,15 @@
         (arg_0 (if
             (call
               qdb_is_true
-              (|| (== o_orderpriority (: (cast "1-URGENT" <named StringView>) <named StringView>))
-                (== o_orderpriority (: (cast "2-HIGH" <named StringView>) <named StringView>))))
+              (|| (== o_orderpriority (cast "1-URGENT" <named StringView>))
+                (== o_orderpriority (cast "2-HIGH" <named StringView>))))
             1
             0))
         (arg_1 (if
             (call
               qdb_is_true
-              (&& (!= o_orderpriority (: (cast "1-URGENT" <named StringView>) <named StringView>))
-                (!= o_orderpriority (: (cast "2-HIGH" <named StringView>) <named StringView>))))
+              (&& (!= o_orderpriority (cast "1-URGENT" <named StringView>))
+                (!= o_orderpriority (cast "2-HIGH" <named StringView>))))
             1
             0)))
       (keys l_shipmode)

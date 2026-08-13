@@ -46,8 +46,8 @@
                               (== |store_sales.ss_store_sk| |store.s_store_sk|))
                             (== |store_sales.ss_hdemo_sk| |household_demographics.hd_demo_sk|))
                           (&& (<= 1 |date_dim.d_dom|) (<= |date_dim.d_dom| 2)))
-                        (|| (== |household_demographics.hd_buy_potential| (: (cast ">10000" <named StringView>) <named StringView>))
-                          (== |household_demographics.hd_buy_potential| (: (cast "Unknown" <named StringView>) <named StringView>))))
+                        (|| (== |household_demographics.hd_buy_potential| (cast ">10000" <named StringView>))
+                          (== |household_demographics.hd_buy_potential| (cast "Unknown" <named StringView>))))
                       (> |household_demographics.hd_vehicle_count| 0))
                     (> (if
                         (call qdb_is_true (> |household_demographics.hd_vehicle_count| 0))
@@ -58,10 +58,10 @@
                 (call
                   qdb_in_list
                   |store.s_county|
-                  (: (cast "Williamson County" <named StringView>) <named StringView>)
-                  (: (cast "Williamson County" <named StringView>) <named StringView>)
-                  (: (cast "Williamson County" <named StringView>) <named StringView>)
-                  (: (cast "Williamson County" <named StringView>) <named StringView>)))
+                  (cast "Williamson County" <named StringView>)
+                  (cast "Williamson County" <named StringView>)
+                  (cast "Williamson County" <named StringView>)
+                  (cast "Williamson County" <named StringView>)))
             )
             (group-by
               ss_ticket_number

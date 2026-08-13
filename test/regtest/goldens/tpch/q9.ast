@@ -39,7 +39,7 @@
                       (== p_partkey l_partkey))
                     (== o_orderkey l_orderkey))
                   (== s_nationkey n_nationkey))
-                (call qdb_string_view_sql_like p_name (: (cast "%turquoise%" <named StringView>) <named StringView>)))
+                (call qdb_string_view_sql_like p_name (cast "%turquoise%" <named StringView>)))
             )
           )
         )

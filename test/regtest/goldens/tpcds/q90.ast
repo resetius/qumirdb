@@ -2,8 +2,7 @@
   (select
     (select-list
       (item as am_pm_ratio
-        (/ (: (cast amc <named DECIMAL [15 4]>) <named DECIMAL [15 4]>)
-          (: (cast pmc <named DECIMAL [15 4]>) <named DECIMAL [15 4]>))
+        (/ (cast amc <named DECIMAL [15 4]>) (cast pmc <named DECIMAL [15 4]>))
       )
     )
     (from

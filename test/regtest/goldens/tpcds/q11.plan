@@ -31,7 +31,7 @@
         (customer_email_address c_email_address)
         (dyear d_year)
         (year_total sum_0)
-        (sale_type (: (cast "s" <named StringView>) <named StringView>)))
+        (sale_type (cast "s" <named StringView>)))
       (rel project
         (rel aggregate
           (rel project
@@ -62,7 +62,7 @@
         (customer_email_address c_email_address)
         (dyear d_year)
         (year_total sum_0)
-        (sale_type (: (cast "w" <named StringView>) <named StringView>)))))
+        (sale_type (cast "w" <named StringView>)))))
   (main
     (rel limit
       (rel sort
@@ -128,10 +128,10 @@
             (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (== |t_s_secyear.customer_id| |t_s_firstyear.customer_id|)
                                       (== |t_s_firstyear.customer_id| |t_w_secyear.customer_id|))
                                     (== |t_s_firstyear.customer_id| |t_w_firstyear.customer_id|))
-                                  (== |t_s_firstyear.sale_type| (: (cast "s" <named StringView>) <named StringView>)))
-                                (== |t_w_firstyear.sale_type| (: (cast "w" <named StringView>) <named StringView>)))
-                              (== |t_s_secyear.sale_type| (: (cast "s" <named StringView>) <named StringView>)))
-                            (== |t_w_secyear.sale_type| (: (cast "w" <named StringView>) <named StringView>)))
+                                  (== |t_s_firstyear.sale_type| (cast "s" <named StringView>)))
+                                (== |t_w_firstyear.sale_type| (cast "w" <named StringView>)))
+                              (== |t_s_secyear.sale_type| (cast "s" <named StringView>)))
+                            (== |t_w_secyear.sale_type| (cast "w" <named StringView>)))
                           (== |t_s_firstyear.dyear| 2001))
                         (== |t_s_secyear.dyear| (+ 2001 1)))
                       (== |t_w_firstyear.dyear| 2001))

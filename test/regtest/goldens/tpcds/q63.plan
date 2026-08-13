@@ -35,43 +35,43 @@
                     (|| (&& (&& (call
                             qdb_in_list
                             i_category
-                            (: (cast "Books" <named StringView>) <named StringView>)
-                            (: (cast "Children" <named StringView>) <named StringView>)
-                            (: (cast "Electronics" <named StringView>) <named StringView>))
+                            (cast "Books" <named StringView>)
+                            (cast "Children" <named StringView>)
+                            (cast "Electronics" <named StringView>))
                           (call
                             qdb_in_list
                             i_class
-                            (: (cast "personal" <named StringView>) <named StringView>)
-                            (: (cast "portable" <named StringView>) <named StringView>)
-                            (: (cast "reference" <named StringView>) <named StringView>)
-                            (: (cast "self-help" <named StringView>) <named StringView>)))
+                            (cast "personal" <named StringView>)
+                            (cast "portable" <named StringView>)
+                            (cast "reference" <named StringView>)
+                            (cast "self-help" <named StringView>)))
                         (call
                           qdb_in_list
                           i_brand
-                          (: (cast "scholaramalgamalg #14" <named StringView>) <named StringView>)
-                          (: (cast "scholaramalgamalg #7" <named StringView>) <named StringView>)
-                          (: (cast "exportiunivamalg #9" <named StringView>) <named StringView>)
-                          (: (cast "scholaramalgamalg #9" <named StringView>) <named StringView>)))
+                          (cast "scholaramalgamalg #14" <named StringView>)
+                          (cast "scholaramalgamalg #7" <named StringView>)
+                          (cast "exportiunivamalg #9" <named StringView>)
+                          (cast "scholaramalgamalg #9" <named StringView>)))
                       (&& (&& (call
                             qdb_in_list
                             i_category
-                            (: (cast "Women" <named StringView>) <named StringView>)
-                            (: (cast "Music" <named StringView>) <named StringView>)
-                            (: (cast "Men" <named StringView>) <named StringView>))
+                            (cast "Women" <named StringView>)
+                            (cast "Music" <named StringView>)
+                            (cast "Men" <named StringView>))
                           (call
                             qdb_in_list
                             i_class
-                            (: (cast "accessories" <named StringView>) <named StringView>)
-                            (: (cast "classical" <named StringView>) <named StringView>)
-                            (: (cast "fragrances" <named StringView>) <named StringView>)
-                            (: (cast "pants" <named StringView>) <named StringView>)))
+                            (cast "accessories" <named StringView>)
+                            (cast "classical" <named StringView>)
+                            (cast "fragrances" <named StringView>)
+                            (cast "pants" <named StringView>)))
                         (call
                           qdb_in_list
                           i_brand
-                          (: (cast "amalgimporto #1" <named StringView>) <named StringView>)
-                          (: (cast "edu packscholar #1" <named StringView>) <named StringView>)
-                          (: (cast "exportiimporto #1" <named StringView>) <named StringView>)
-                          (: (cast "importoamalg #1" <named StringView>) <named StringView>))))))
+                          (cast "amalgimporto #1" <named StringView>)
+                          (cast "edu packscholar #1" <named StringView>)
+                          (cast "exportiimporto #1" <named StringView>)
+                          (cast "importoamalg #1" <named StringView>))))))
                 (keys i_manager_id d_moy)
                 (agg sum_0 sum ss_sales_price))
               (partition i_manager_id)

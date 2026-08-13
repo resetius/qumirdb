@@ -21,14 +21,14 @@
                     (call
                       qdb_in_list
                       s_state
-                      (: (cast "TN" <named StringView>) <named StringView>)
-                      (: (cast "TN" <named StringView>) <named StringView>)
-                      (: (cast "TN" <named StringView>) <named StringView>)
-                      (: (cast "TN" <named StringView>) <named StringView>)
-                      (: (cast "TN" <named StringView>) <named StringView>)
-                      (: (cast "TN" <named StringView>) <named StringView>)
-                      (: (cast "TN" <named StringView>) <named StringView>)
-                      (: (cast "TN" <named StringView>) <named StringView>))))
+                      (cast "TN" <named StringView>)
+                      (cast "TN" <named StringView>)
+                      (cast "TN" <named StringView>)
+                      (cast "TN" <named StringView>)
+                      (cast "TN" <named StringView>)
+                      (cast "TN" <named StringView>)
+                      (cast "TN" <named StringView>)
+                      (cast "TN" <named StringView>))))
                 (i_category i_category)
                 (i_class i_class)
                 (ss_net_profit ss_net_profit)

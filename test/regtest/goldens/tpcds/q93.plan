@@ -16,7 +16,7 @@
                 ()
                 (inner))
               (&& (== sr_reason_sk r_reason_sk)
-                (== r_reason_desc (: (cast "Did not like the warranty" <named StringView>) <named StringView>))))
+                (== r_reason_desc (cast "Did not like the warranty" <named StringView>))))
             (ss_item_sk ss_item_sk)
             (ss_ticket_number ss_ticket_number)
             (ss_customer_sk ss_customer_sk)

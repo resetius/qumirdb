@@ -14,25 +14,25 @@
         ca_county
       )
       (item as agg1
-        (call avg (: (cast cs_quantity <named DECIMAL [12 2]>) <named DECIMAL [12 2]>))
+        (call avg (cast cs_quantity <named DECIMAL [12 2]>))
       )
       (item as agg2
-        (call avg (: (cast cs_list_price <named DECIMAL [12 2]>) <named DECIMAL [12 2]>))
+        (call avg (cast cs_list_price <named DECIMAL [12 2]>))
       )
       (item as agg3
-        (call avg (: (cast cs_coupon_amt <named DECIMAL [12 2]>) <named DECIMAL [12 2]>))
+        (call avg (cast cs_coupon_amt <named DECIMAL [12 2]>))
       )
       (item as agg4
-        (call avg (: (cast cs_sales_price <named DECIMAL [12 2]>) <named DECIMAL [12 2]>))
+        (call avg (cast cs_sales_price <named DECIMAL [12 2]>))
       )
       (item as agg5
-        (call avg (: (cast cs_net_profit <named DECIMAL [12 2]>) <named DECIMAL [12 2]>))
+        (call avg (cast cs_net_profit <named DECIMAL [12 2]>))
       )
       (item as agg6
-        (call avg (: (cast c_birth_year <named DECIMAL [12 2]>) <named DECIMAL [12 2]>))
+        (call avg (cast c_birth_year <named DECIMAL [12 2]>))
       )
       (item as agg7
-        (call avg (: (cast |cd1.cd_dep_count| <named DECIMAL [12 2]>) <named DECIMAL [12 2]>))
+        (call avg (cast |cd1.cd_dep_count| <named DECIMAL [12 2]>))
       )
     )
     (from
@@ -48,8 +48,8 @@
       (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (== cs_sold_date_sk d_date_sk) (== cs_item_sk i_item_sk))
                         (== cs_bill_cdemo_sk |cd1.cd_demo_sk|))
                       (== cs_bill_customer_sk c_customer_sk))
-                    (== |cd1.cd_gender| (: (cast "M" <named StringView>) <named StringView>)))
-                  (== |cd1.cd_education_status| (: (cast "College" <named StringView>) <named StringView>)))
+                    (== |cd1.cd_gender| (cast "M" <named StringView>)))
+                  (== |cd1.cd_education_status| (cast "College" <named StringView>)))
                 (== c_current_cdemo_sk |cd2.cd_demo_sk|))
               (== c_current_addr_sk ca_address_sk))
             (call qdb_in_list c_birth_month 9 5 12 4 1 10))
@@ -57,13 +57,13 @@
         (call
           qdb_in_list
           ca_state
-          (: (cast "ND" <named StringView>) <named StringView>)
-          (: (cast "WI" <named StringView>) <named StringView>)
-          (: (cast "AL" <named StringView>) <named StringView>)
-          (: (cast "NC" <named StringView>) <named StringView>)
-          (: (cast "OK" <named StringView>) <named StringView>)
-          (: (cast "MS" <named StringView>) <named StringView>)
-          (: (cast "TN" <named StringView>) <named StringView>)))
+          (cast "ND" <named StringView>)
+          (cast "WI" <named StringView>)
+          (cast "AL" <named StringView>)
+          (cast "NC" <named StringView>)
+          (cast "OK" <named StringView>)
+          (cast "MS" <named StringView>)
+          (cast "TN" <named StringView>)))
     )
     (group-by
       (rollup

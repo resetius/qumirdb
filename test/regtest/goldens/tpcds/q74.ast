@@ -21,7 +21,7 @@
                 (call max ss_net_paid)
               )
               (item as sale_type
-                (: (cast "s" <named StringView>) <named StringView>)
+                (cast "s" <named StringView>)
               )
             )
             (from
@@ -57,7 +57,7 @@
                 (call max ws_net_paid)
               )
               (item as sale_type
-                (: (cast "w" <named StringView>) <named StringView>)
+                (cast "w" <named StringView>)
               )
             )
             (from
@@ -102,10 +102,10 @@
       (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (== |t_s_secyear.customer_id| |t_s_firstyear.customer_id|)
                                 (== |t_s_firstyear.customer_id| |t_w_secyear.customer_id|))
                               (== |t_s_firstyear.customer_id| |t_w_firstyear.customer_id|))
-                            (== |t_s_firstyear.sale_type| (: (cast "s" <named StringView>) <named StringView>)))
-                          (== |t_w_firstyear.sale_type| (: (cast "w" <named StringView>) <named StringView>)))
-                        (== |t_s_secyear.sale_type| (: (cast "s" <named StringView>) <named StringView>)))
-                      (== |t_w_secyear.sale_type| (: (cast "w" <named StringView>) <named StringView>)))
+                            (== |t_s_firstyear.sale_type| (cast "s" <named StringView>)))
+                          (== |t_w_firstyear.sale_type| (cast "w" <named StringView>)))
+                        (== |t_s_secyear.sale_type| (cast "s" <named StringView>)))
+                      (== |t_w_secyear.sale_type| (cast "w" <named StringView>)))
                     (== |t_s_firstyear.year| 2001))
                   (== |t_s_secyear.year| (+ 2001 1)))
                 (== |t_w_firstyear.year| 2001))

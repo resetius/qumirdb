@@ -8,9 +8,7 @@
         total
       )
       (item
-        (* (/ (: (cast promotions <named DECIMAL [15 4]>) <named DECIMAL [15 4]>)
-            (: (cast total <named DECIMAL [15 4]>) <named DECIMAL [15 4]>))
-          100)
+        (* (/ (cast promotions <named DECIMAL [15 4]>) (cast total <named DECIMAL [15 4]>)) 100)
       )
     )
     (from
@@ -37,10 +35,9 @@
                               (== ca_address_sk c_current_addr_sk))
                             (== ss_item_sk i_item_sk))
                           (== ca_gmt_offset (- 7)))
-                        (== i_category (: (cast "Books" <named StringView>) <named StringView>)))
-                      (|| (|| (== p_channel_dmail (: (cast "Y" <named StringView>) <named StringView>))
-                          (== p_channel_email (: (cast "Y" <named StringView>) <named StringView>)))
-                        (== p_channel_tv (: (cast "Y" <named StringView>) <named StringView>))))
+                        (== i_category (cast "Books" <named StringView>)))
+                      (|| (|| (== p_channel_dmail (cast "Y" <named StringView>)) (== p_channel_email (cast "Y" <named StringView>)))
+                        (== p_channel_tv (cast "Y" <named StringView>))))
                     (== s_gmt_offset (- 7)))
                   (== d_year 1999))
                 (== d_moy 11))
@@ -69,7 +66,7 @@
                             (== ca_address_sk c_current_addr_sk))
                           (== ss_item_sk i_item_sk))
                         (== ca_gmt_offset (- 7)))
-                      (== i_category (: (cast "Books" <named StringView>) <named StringView>)))
+                      (== i_category (cast "Books" <named StringView>)))
                     (== s_gmt_offset (- 7)))
                   (== d_year 1999))
                 (== d_moy 11))

@@ -62,11 +62,11 @@
                 (call
                   qdb_in_list
                   |store.s_city|
-                  (: (cast "Midway" <named StringView>) <named StringView>)
-                  (: (cast "Fairview" <named StringView>) <named StringView>)
-                  (: (cast "Fairview" <named StringView>) <named StringView>)
-                  (: (cast "Fairview" <named StringView>) <named StringView>)
-                  (: (cast "Fairview" <named StringView>) <named StringView>)))
+                  (cast "Midway" <named StringView>)
+                  (cast "Fairview" <named StringView>)
+                  (cast "Fairview" <named StringView>)
+                  (cast "Fairview" <named StringView>)
+                  (cast "Fairview" <named StringView>)))
             )
             (group-by
               ss_ticket_number

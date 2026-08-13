@@ -30,13 +30,13 @@
               (&& (&& (call
                     qdb_in_list
                     (call qdb_substring c_phone (cast 1 i32) (cast 2 i32))
-                    (: (cast "27" <named StringView>) <named StringView>)
-                    (: (cast "20" <named StringView>) <named StringView>)
-                    (: (cast "22" <named StringView>) <named StringView>)
-                    (: (cast "34" <named StringView>) <named StringView>)
-                    (: (cast "29" <named StringView>) <named StringView>)
-                    (: (cast "23" <named StringView>) <named StringView>)
-                    (: (cast "17" <named StringView>) <named StringView>))
+                    (cast "27" <named StringView>)
+                    (cast "20" <named StringView>)
+                    (cast "22" <named StringView>)
+                    (cast "34" <named StringView>)
+                    (cast "29" <named StringView>)
+                    (cast "23" <named StringView>)
+                    (cast "17" <named StringView>))
                   (> c_acctbal
                     (subquery scalar (query
                 (select
@@ -53,13 +53,13 @@
                       (call
                         qdb_in_list
                         (call qdb_substring c_phone (cast 1 i32) (cast 2 i32))
-                        (: (cast "27" <named StringView>) <named StringView>)
-                        (: (cast "20" <named StringView>) <named StringView>)
-                        (: (cast "22" <named StringView>) <named StringView>)
-                        (: (cast "34" <named StringView>) <named StringView>)
-                        (: (cast "29" <named StringView>) <named StringView>)
-                        (: (cast "23" <named StringView>) <named StringView>)
-                        (: (cast "17" <named StringView>) <named StringView>)))
+                        (cast "27" <named StringView>)
+                        (cast "20" <named StringView>)
+                        (cast "22" <named StringView>)
+                        (cast "34" <named StringView>)
+                        (cast "29" <named StringView>)
+                        (cast "23" <named StringView>)
+                        (cast "17" <named StringView>)))
                   )
                 )
               )

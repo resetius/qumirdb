@@ -193,7 +193,7 @@
               (select
                 (select-list
                   (item as channel
-                    (: (cast "store" <named StringView>) <named StringView>)
+                    (cast "store" <named StringView>)
                   )
                   (item
                     i_brand_id
@@ -260,7 +260,7 @@
               (select
                 (select-list
                   (item as channel
-                    (: (cast "catalog" <named StringView>) <named StringView>)
+                    (cast "catalog" <named StringView>)
                   )
                   (item
                     i_brand_id
@@ -328,7 +328,7 @@
             (select
               (select-list
                 (item as channel
-                  (: (cast "web" <named StringView>) <named StringView>)
+                  (cast "web" <named StringView>)
                 )
                 (item
                   i_brand_id

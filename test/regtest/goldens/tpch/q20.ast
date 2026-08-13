@@ -35,7 +35,7 @@
                   (table part)
                 )
                 (where
-                  (call qdb_string_view_sql_like p_name (: (cast "thistle%" <named StringView>) <named StringView>))
+                  (call qdb_string_view_sql_like p_name (cast "thistle%" <named StringView>))
                 )
               )
             )
@@ -63,7 +63,7 @@
       )
       )
           (== s_nationkey n_nationkey))
-        (== n_name (: (cast "PERU" <named StringView>) <named StringView>)))
+        (== n_name (cast "PERU" <named StringView>)))
     )
   )
   (order-by

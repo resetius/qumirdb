@@ -58,7 +58,6 @@
           (|pt.pmc| pmc))
         ()
         (inner))
-      (am_pm_ratio (/ (: (cast amc <named DECIMAL [15 4]>) <named DECIMAL [15 4]>)
-          (: (cast pmc <named DECIMAL [15 4]>) <named DECIMAL [15 4]>))))
+      (am_pm_ratio (/ (cast amc <named DECIMAL [15 4]>) (cast pmc <named DECIMAL [15 4]>))))
     (am_pm_ratio asc nulls-default))
   (limit 100))

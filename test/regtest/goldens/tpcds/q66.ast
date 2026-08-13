@@ -161,11 +161,8 @@
                 (item as ship_carriers
                   (call
                     strcat
-                    (call
-                      strcat
-                      (: (cast "DIAMOND" <named StringView>) <named StringView>)
-                      (: (cast "," <named StringView>) <named StringView>))
-                    (: (cast "AIRBORNE" <named StringView>) <named StringView>))
+                    (call strcat (cast "DIAMOND" <named StringView>) (cast "," <named StringView>))
+                    (cast "AIRBORNE" <named StringView>))
                 )
                 (item as year
                   d_year
@@ -255,11 +252,7 @@
                         (== ws_ship_mode_sk sm_ship_mode_sk))
                       (== d_year 2002))
                     (&& (<= 49530 t_time) (<= t_time (+ 49530 28800))))
-                  (call
-                    qdb_in_list
-                    sm_carrier
-                    (: (cast "DIAMOND" <named StringView>) <named StringView>)
-                    (: (cast "AIRBORNE" <named StringView>) <named StringView>)))
+                  (call qdb_in_list sm_carrier (cast "DIAMOND" <named StringView>) (cast "AIRBORNE" <named StringView>)))
               )
               (group-by
                 w_warehouse_name
@@ -294,11 +287,8 @@
                 (item as ship_carriers
                   (call
                     strcat
-                    (call
-                      strcat
-                      (: (cast "DIAMOND" <named StringView>) <named StringView>)
-                      (: (cast "," <named StringView>) <named StringView>))
-                    (: (cast "AIRBORNE" <named StringView>) <named StringView>))
+                    (call strcat (cast "DIAMOND" <named StringView>) (cast "," <named StringView>))
+                    (cast "AIRBORNE" <named StringView>))
                 )
                 (item as year
                   d_year
@@ -388,11 +378,7 @@
                         (== cs_ship_mode_sk sm_ship_mode_sk))
                       (== d_year 2002))
                     (&& (<= 49530 t_time) (<= t_time (+ 49530 28800))))
-                  (call
-                    qdb_in_list
-                    sm_carrier
-                    (: (cast "DIAMOND" <named StringView>) <named StringView>)
-                    (: (cast "AIRBORNE" <named StringView>) <named StringView>)))
+                  (call qdb_in_list sm_carrier (cast "DIAMOND" <named StringView>) (cast "AIRBORNE" <named StringView>)))
               )
               (group-by
                 w_warehouse_name

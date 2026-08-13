@@ -65,11 +65,7 @@
                       (&& (<= 1 |date_dim.d_dom|) (<= |date_dim.d_dom| 2)))
                     (|| (== |household_demographics.hd_dep_count| 5) (== |household_demographics.hd_vehicle_count| 3)))
                   (call qdb_in_list |date_dim.d_year| 1999 (+ 1999 1) (+ 1999 2)))
-                (call
-                  qdb_in_list
-                  |store.s_city|
-                  (: (cast "Midway" <named StringView>) <named StringView>)
-                  (: (cast "Fairview" <named StringView>) <named StringView>)))
+                (call qdb_in_list |store.s_city| (cast "Midway" <named StringView>) (cast "Fairview" <named StringView>)))
             )
             (group-by
               ss_ticket_number

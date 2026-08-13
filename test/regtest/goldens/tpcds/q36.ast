@@ -42,14 +42,14 @@
         (call
           qdb_in_list
           s_state
-          (: (cast "TN" <named StringView>) <named StringView>)
-          (: (cast "TN" <named StringView>) <named StringView>)
-          (: (cast "TN" <named StringView>) <named StringView>)
-          (: (cast "TN" <named StringView>) <named StringView>)
-          (: (cast "TN" <named StringView>) <named StringView>)
-          (: (cast "TN" <named StringView>) <named StringView>)
-          (: (cast "TN" <named StringView>) <named StringView>)
-          (: (cast "TN" <named StringView>) <named StringView>)))
+          (cast "TN" <named StringView>)
+          (cast "TN" <named StringView>)
+          (cast "TN" <named StringView>)
+          (cast "TN" <named StringView>)
+          (cast "TN" <named StringView>)
+          (cast "TN" <named StringView>)
+          (cast "TN" <named StringView>)
+          (cast "TN" <named StringView>)))
     )
     (group-by
       (rollup

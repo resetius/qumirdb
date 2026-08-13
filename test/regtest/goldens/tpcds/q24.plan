@@ -61,7 +61,7 @@
                   (|ssales.i_units| i_units)
                   (|ssales.i_size| i_size)
                   (|ssales.netpaid| netpaid))
-                (== i_color (: (cast "orchid" <named StringView>) <named StringView>)))
+                (== i_color (cast "orchid" <named StringView>)))
               (keys c_last_name c_first_name s_store_name)
               (agg sum_0 sum netpaid))
             (rel project
