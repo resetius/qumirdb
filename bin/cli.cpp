@@ -146,6 +146,15 @@ NQdb::TSchema SchemaFromType(
     return NQdb::TSchema{std::span<const NQdb::TColumnSchema>(columns)};
 }
 
+enum class EExplainMode { Text, Sexpr, Both };
+
+std::optional<EExplainMode> ParseExplainMode(std::string_view value) {
+    if (value == "text") return EExplainMode::Text;
+    if (value == "sexpr" || value == "s-expr") return EExplainMode::Sexpr;
+    if (value == "both") return EExplainMode::Both;
+    return std::nullopt;
+}
+
 struct TConfig {
     ESyntax Syntax = ESyntax::Sexpr;
     std::string DataDir = ".";
@@ -153,6 +162,7 @@ struct TConfig {
     bool Verbose = false;
     bool EnableCbo = true;
     bool Timing = false;
+    EExplainMode ExplainMode = EExplainMode::Text;
     NQdb::NScheduler::TSettings Scheduler;
 };
 
@@ -268,11 +278,18 @@ int ExecutePlan(
     }
 
     if (explain) {
-        if (NQdb::CollectMaterializations(plan).empty()) {
+        const bool sexprAvailable = NQdb::CollectMaterializations(plan).empty();
+        const bool wantSexpr =
+            config.ExplainMode != EExplainMode::Text && sexprAvailable;
+        const bool wantText =
+            config.ExplainMode != EExplainMode::Sexpr || !sexprAvailable;
+        if (wantSexpr) {
             NQdb::NSexp::PrintRelPlan(std::cout, plan);
-            std::cout << "\n\n";
+            std::cout << (wantText ? "\n\n" : "\n");
         }
-        PrintPlanTreeWithCtes(std::cout, plan);
+        if (wantText) {
+            PrintPlanTreeWithCtes(std::cout, plan);
+        }
         return 0;
     }
 
@@ -545,7 +562,7 @@ bool HasCompleteSqlStatement(const std::string& text) {
 
 // Reads SQL statements from readline and runs complete batches terminated by ';'.
 int RunInteractive(
-    const TConfig& config,
+    TConfig config,
     NQdb::TExternalModuleCatalog& catalog)
 {
     const std::string historyPath = HistoryPath();
@@ -580,6 +597,18 @@ int RunInteractive(
             }
             if (input.starts_with("\\d")) {
                 DescribeTable(Trim(std::string_view(input).substr(2)), config);
+                continue;
+            }
+            if (input.starts_with("\\explain")) {
+                auto arg = Trim(std::string_view(input).substr(8));
+                if (arg.empty()) {
+                    std::cerr << "usage: \\explain <text|sexpr|both>\n";
+                } else if (auto mode = ParseExplainMode(arg)) {
+                    config.ExplainMode = *mode;
+                } else {
+                    std::cerr << "unknown explain mode '" << arg
+                              << "' (text|sexpr|both)\n";
+                }
                 continue;
             }
         }
@@ -631,11 +660,14 @@ void PrintHelp() {
         "  --shuffle-max-rows <n>       Maximum rows per materialized shuffle batch\n"
         "  --shuffle-target-bytes <n>   Target bytes per materialized shuffle batch\n"
         "  --nocbo                      Disable cost-based join reordering\n"
+        "  --explain-mode <mode>        explain output: text (default), sexpr, both\n"
         "  --verbose                    Print the logical and runtime plans\n"
         "  --timing                     Print per-phase timings (planning, kernel build, JIT LLVM)\n"
         "  --help|-h                    Show this help message\n"
         "\n"
-        "Without -i, qdb starts an interactive SQL prompt (statements end with ';').\n";
+        "Without -i, qdb starts an interactive SQL prompt (statements end with ';').\n"
+        "  \\d [table]                   Describe a table\n"
+        "  \\explain <text|sexpr|both>   Set the explain output format\n";
 }
 
 } // namespace
@@ -658,6 +690,17 @@ int main(int argc, char** argv) {
             config.Syntax = ESyntax::Sexpr;
         } else if (!std::strcmp(argv[i], "--sql")) {
             config.Syntax = ESyntax::Sql;
+        } else if (!std::strcmp(argv[i], "--explain-mode")) {
+            if (i + 1 >= argc) {
+                std::cerr << "--explain-mode requires an argument\n";
+                return 1;
+            }
+            auto mode = ParseExplainMode(argv[++i]);
+            if (!mode) {
+                std::cerr << "Invalid explain mode (text|sexpr|both)\n";
+                return 1;
+            }
+            config.ExplainMode = *mode;
         } else if (!std::strcmp(argv[i], "--data")) {
             if (i + 1 >= argc) {
                 std::cerr << "--data requires a directory argument\n";
