@@ -4,20 +4,24 @@
 #include <qumir/codegen/llvm/llvm_initializer.h>
 #include <qumir/parser/core/lexer.h>
 #include <qumir/parser/core/parser.h>
+#include <qumir/parser/core/printer.h>
 #include <qumir/parser/type.h>
 
 #include "plan_runner.h"
 #include <qdb/io/io.h>
 #include <qdb/kernel/compiler.h>
 #include <qdb/modules/qumirdb_runtime.h>
+#include <qdb/plan/build.h>
 #include <qdb/plan/ops/aggregate.h>
 #include <qdb/plan/ops/operator.h>
+#include <qdb/plan/ops/project.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/passes/column_pruning.h>
 #include <qdb/plan/passes/typing.h>
 #include <qdb/sexp/parser.h>
 #include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
+#include <qdb/sql/parser.h>
 
 #include <algorithm>
 #include <array>
@@ -62,6 +66,39 @@ TOperatorPtr ParsePlan(const std::string& sexp, ISource& source) {
     AnnotateTypes(root);
     ApplyColumnPruning(root);
     return root;
+}
+
+TOperatorPtr BuildSqlPlan(const std::string& sql, ISource& source) {
+    std::istringstream in(sql);
+    NSql::TTokenStream tokens(in);
+    NSql::TParser parser;
+    auto parsed = parser.Parse(tokens);
+    if (!parsed) {
+        throw std::runtime_error(parsed.error().ToString());
+    }
+    auto plan = BuildPlan(*parsed, [&](std::string_view table)
+        -> std::expected<TOperatorPtr, NQumir::TError>
+    {
+        return std::make_shared<TSourceOperator>(source, std::string(table));
+    });
+    if (!plan) {
+        throw std::runtime_error(plan.error().ToString());
+    }
+    return std::move(*plan);
+}
+
+std::shared_ptr<TAggregateOperator> FindAggregate(const TOperatorPtr& op) {
+    if (auto aggregate = TMaybeOp<TAggregateOperator>(op)) {
+        return aggregate.Cast();
+    }
+    for (const auto& child : op->Children()) {
+        if (auto childOp = TMaybeNode<IOperator>(child)) {
+            if (auto aggregate = FindAggregate(childOp.Cast())) {
+                return aggregate;
+            }
+        }
+    }
+    return nullptr;
 }
 
 struct TGroupStats {
@@ -110,6 +147,162 @@ std::string StringAt(const TColumn& column, int64_t row) {
 }
 
 } // namespace
+
+TEST(AggregateLogical, ReusesSumAndCountForAffineIntegerSums) {
+    std::ostringstream sql;
+    sql << "SELECT ";
+    for (int64_t offset = 0; offset < 90; ++offset) {
+        if (offset != 0) {
+            sql << ", ";
+        }
+        sql << "SUM(\"ResolutionWidth\"";
+        if (offset != 0) {
+            sql << " + " << offset;
+        }
+        sql << ") AS s" << offset;
+    }
+    sql << " FROM hits";
+
+    TMockSource source({"ResolutionWidth"});
+    auto root = BuildSqlPlan(sql.str(), source);
+    auto aggregate = FindAggregate(root);
+    ASSERT_NE(aggregate, nullptr);
+    ASSERT_EQ(aggregate->Aggs().size(), 2u);
+    EXPECT_EQ(aggregate->Aggs()[0].Func, "sum");
+    EXPECT_EQ(aggregate->Aggs()[1].Func, "count");
+    ASSERT_TRUE(aggregate->Aggs()[0].Arg);
+    ASSERT_TRUE(aggregate->Aggs()[1].Arg);
+    EXPECT_EQ(PrintAst(aggregate->Aggs()[0].Arg), "ResolutionWidth");
+    EXPECT_EQ(PrintAst(aggregate->Aggs()[1].Arg), "ResolutionWidth");
+
+    auto argProject = TMaybeOp<TProjectOperator>(aggregate->Input());
+    ASSERT_TRUE(argProject);
+    // One shared value column plus the synthetic global-aggregate key. Without
+    // the rewrite this project contains 90 independently materialized arguments.
+    EXPECT_EQ(argProject.Cast()->Projections().size(), 2u);
+
+    auto output = TMaybeOp<TProjectOperator>(root);
+    ASSERT_TRUE(output);
+    ASSERT_EQ(output.Cast()->Projections().size(), 90u);
+    EXPECT_EQ(PrintAst(output.Cast()->Projections()[0].Expression), "sum_0");
+    EXPECT_EQ(
+        PrintAst(output.Cast()->Projections()[89].Expression),
+        "(+ sum_0 (* 89 count_1))");
+}
+
+TEST(AggregateLogical, ReusesReducersAcrossAffineSumAverageAndCount) {
+    TMockSource source({"x"});
+    auto root = BuildSqlPlan(
+        "SELECT SUM(x + 10), SUM(x + 11), SUM(x + 100), "
+        "AVG(x + 123), AVG(x + 1234), COUNT(x + 17) FROM hits",
+        source);
+    auto aggregate = FindAggregate(root);
+    ASSERT_NE(aggregate, nullptr);
+    ASSERT_EQ(aggregate->Aggs().size(), 2u);
+    EXPECT_EQ(aggregate->Aggs()[0].Func, "sum");
+    EXPECT_EQ(aggregate->Aggs()[1].Func, "count");
+
+    auto output = TMaybeOp<TProjectOperator>(root);
+    ASSERT_TRUE(output);
+    ASSERT_EQ(output.Cast()->Projections().size(), 6u);
+    EXPECT_EQ(
+        PrintAst(output.Cast()->Projections()[0].Expression),
+        "(+ sum_0 (* 10 count_1))");
+    EXPECT_EQ(
+        PrintAst(output.Cast()->Projections()[3].Expression),
+        "(/ (+ sum_0 (* 123 count_1)) (cast count_1 f64))");
+    EXPECT_EQ(
+        PrintAst(output.Cast()->Projections()[5].Expression),
+        "count_1");
+}
+
+TEST(AggregateE2E, AffineIntegerAggregateRewritePreservesNullSemantics) {
+    std::array<int64_t, 5> keys = {1, 1, 1, 2, 2};
+    std::array<int64_t, 5> values = {10, 999, 4, 888, 777};
+    std::array<uint8_t, 1> mask = {0b00000101}; // valid at rows 0 and 2
+    std::vector<TColumn> columns = {
+        TColumn{.Data = reinterpret_cast<char*>(keys.data())},
+        TColumn{
+            .Data = reinterpret_cast<char*>(values.data()),
+            .Mask = mask.data(),
+        },
+    };
+    std::vector<TRowSet> batches = {TRowSet{
+        .Columns = columns.data(), .ColumnCount = 2, .RowCount = 5,
+        .Selection = nullptr, .RefCount = 1}};
+    TMockSource source(
+        {"k", "v"}, std::move(batches),
+        {std::make_shared<TIntegerType>(),
+         std::make_shared<TNullable>(std::make_shared<TIntegerType>())});
+
+    auto root = BuildSqlPlan(
+        "SELECT k, SUM(v), SUM(v + 1), SUM(v * 3), SUM(10 - v), "
+        "SUM(2 * v + 3), AVG(2 * v + 3), MIN(10 - v), MAX(10 - v), "
+        "COUNT(v + 7) "
+        "FROM t GROUP BY k",
+        source);
+    auto aggregate = FindAggregate(root);
+    ASSERT_NE(aggregate, nullptr);
+    ASSERT_EQ(aggregate->Aggs().size(), 4u);
+    EXPECT_EQ(aggregate->Aggs()[0].Func, "sum");
+    EXPECT_EQ(aggregate->Aggs()[1].Func, "count");
+    EXPECT_EQ(aggregate->Aggs()[2].Func, "max");
+    EXPECT_EQ(aggregate->Aggs()[3].Func, "min");
+
+    AnnotateTypes(root);
+    ApplyColumnPruning(root);
+    auto runtime = RunPlan(root);
+
+    TRowSet result{};
+    ASSERT_TRUE(runtime->Next(result));
+    ASSERT_EQ(result.ColumnCount, 10);
+    ASSERT_EQ(result.RowCount, 2);
+    auto* outKeys = reinterpret_cast<int64_t*>(result.Columns[0].Data);
+    auto* sum = reinterpret_cast<int64_t*>(result.Columns[1].Data);
+    auto* plusOne = reinterpret_cast<int64_t*>(result.Columns[2].Data);
+    auto* timesThree = reinterpret_cast<int64_t*>(result.Columns[3].Data);
+    auto* tenMinus = reinterpret_cast<int64_t*>(result.Columns[4].Data);
+    auto* scaledAndShifted = reinterpret_cast<int64_t*>(result.Columns[5].Data);
+    auto* average = reinterpret_cast<double*>(result.Columns[6].Data);
+    auto* minimum = reinterpret_cast<int64_t*>(result.Columns[7].Data);
+    auto* maximum = reinterpret_cast<int64_t*>(result.Columns[8].Data);
+    auto* count = reinterpret_cast<int64_t*>(result.Columns[9].Data);
+    for (int64_t row = 0; row < result.RowCount; ++row) {
+        if (outKeys[row] == 1) {
+            EXPECT_TRUE(IsValid(result.Columns[1], row));
+            EXPECT_TRUE(IsValid(result.Columns[2], row));
+            EXPECT_TRUE(IsValid(result.Columns[3], row));
+            EXPECT_TRUE(IsValid(result.Columns[4], row));
+            EXPECT_TRUE(IsValid(result.Columns[5], row));
+            EXPECT_TRUE(IsValid(result.Columns[6], row));
+            EXPECT_TRUE(IsValid(result.Columns[7], row));
+            EXPECT_TRUE(IsValid(result.Columns[8], row));
+            EXPECT_TRUE(IsValid(result.Columns[9], row));
+            EXPECT_EQ(sum[row], 14);
+            EXPECT_EQ(plusOne[row], 16);
+            EXPECT_EQ(timesThree[row], 42);
+            EXPECT_EQ(tenMinus[row], 6);
+            EXPECT_EQ(scaledAndShifted[row], 34);
+            EXPECT_DOUBLE_EQ(average[row], 17.0);
+            EXPECT_EQ(minimum[row], 0);
+            EXPECT_EQ(maximum[row], 6);
+            EXPECT_EQ(count[row], 2);
+        } else {
+            ASSERT_EQ(outKeys[row], 2);
+            EXPECT_FALSE(IsValid(result.Columns[1], row));
+            EXPECT_FALSE(IsValid(result.Columns[2], row));
+            EXPECT_FALSE(IsValid(result.Columns[3], row));
+            EXPECT_FALSE(IsValid(result.Columns[4], row));
+            EXPECT_FALSE(IsValid(result.Columns[5], row));
+            EXPECT_FALSE(IsValid(result.Columns[6], row));
+            EXPECT_FALSE(IsValid(result.Columns[7], row));
+            EXPECT_FALSE(IsValid(result.Columns[8], row));
+            EXPECT_TRUE(IsValid(result.Columns[9], row));
+            EXPECT_EQ(count[row], 0);
+        }
+    }
+    Release(&result);
+}
 
 // L6 (multiple groups): full pipeline sexp -> AnnotateTypes -> ApplyColumnPruning
 // -> TPhysicalPlanner::Build -> Next(), over an in-memory source with several

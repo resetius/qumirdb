@@ -356,6 +356,73 @@ TEST(SqlGroupingE2E, RollupGroupingColumns) {
     }));
 }
 
+TEST(SqlGroupingE2E, RollupKeepsComputedAggregateArgumentsIndependentOfMaskedKeys) {
+    std::array<int64_t, 3> keys = {1, 1, 2};
+    std::array<TColumn, 1> cols = {
+        TColumn{.Data = reinterpret_cast<char*>(keys.data())},
+    };
+    TRowSet batch{
+        .Columns = cols.data(), .ColumnCount = 1, .RowCount = 3, .RefCount = 1};
+    TMockSource t({"k"}, {batch});
+
+    auto plan = SqlPlan(
+        "select grouping(k) g, sum(k + 1) s, avg(k + 1) av, "
+        "min(k + 1) mn, max(k + 1) mx, count(k + 1) c "
+        "from t group by rollup(k);",
+        {{"t", &t}});
+
+    struct TRow {
+        int64_t Grouping;
+        int64_t Sum;
+        double Average;
+        int64_t Min;
+        int64_t Max;
+        int64_t Count;
+    };
+    std::vector<TRow> rows;
+    TRowSet out{};
+    while (plan->Next(out)) {
+        ASSERT_EQ(out.ColumnCount, 6);
+        const auto* grouping = reinterpret_cast<const int64_t*>(out.Columns[0].Data);
+        const auto* sum = reinterpret_cast<const int64_t*>(out.Columns[1].Data);
+        const auto* average = reinterpret_cast<const double*>(out.Columns[2].Data);
+        const auto* min = reinterpret_cast<const int64_t*>(out.Columns[3].Data);
+        const auto* max = reinterpret_cast<const int64_t*>(out.Columns[4].Data);
+        const auto* count = reinterpret_cast<const int64_t*>(out.Columns[5].Data);
+        for (int64_t i = 0; i < out.RowCount; ++i) {
+            for (int column = 0; column < 6; ++column) {
+                EXPECT_TRUE(IsValid(out.Columns[column], i));
+            }
+            rows.push_back({
+                grouping[i], sum[i], average[i], min[i], max[i], count[i]});
+        }
+        Release(&out);
+    }
+    std::ranges::sort(rows, {}, &TRow::Sum);
+    ASSERT_EQ(rows.size(), 3u);
+
+    EXPECT_EQ(rows[0].Grouping, 0);
+    EXPECT_EQ(rows[0].Sum, 3);
+    EXPECT_DOUBLE_EQ(rows[0].Average, 3.0);
+    EXPECT_EQ(rows[0].Min, 3);
+    EXPECT_EQ(rows[0].Max, 3);
+    EXPECT_EQ(rows[0].Count, 1);
+
+    EXPECT_EQ(rows[1].Grouping, 0);
+    EXPECT_EQ(rows[1].Sum, 4);
+    EXPECT_DOUBLE_EQ(rows[1].Average, 2.0);
+    EXPECT_EQ(rows[1].Min, 2);
+    EXPECT_EQ(rows[1].Max, 2);
+    EXPECT_EQ(rows[1].Count, 2);
+
+    EXPECT_EQ(rows[2].Grouping, 1);
+    EXPECT_EQ(rows[2].Sum, 7);
+    EXPECT_DOUBLE_EQ(rows[2].Average, 7.0 / 3.0);
+    EXPECT_EQ(rows[2].Min, 2);
+    EXPECT_EQ(rows[2].Max, 3);
+    EXPECT_EQ(rows[2].Count, 3);
+}
+
 // Duplicate grouping sets must produce duplicate rows: the aggregate keeps them
 // distinct by the ordinal grouping-set id (not a column bitmask), which the
 // parallel combine also keys on, so the parallelized path preserves this too.

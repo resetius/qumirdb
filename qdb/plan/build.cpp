@@ -264,8 +264,11 @@ struct TPlainAggKeyHash {
 // aggregate output columns, collecting the corresponding specs.
 class TAggCollector {
 public:
-    explicit TAggCollector(const NAst::TStructType* inputSchema = nullptr)
+    explicit TAggCollector(
+        const NAst::TStructType* inputSchema = nullptr,
+        bool enableAffineRewrite = true)
         : InputSchema_(inputSchema)
+        , EnableAffineRewrite_(enableAffineRewrite)
     { }
 
     std::expected<NAst::TExprPtr, TError> Rewrite(NAst::TExprPtr expr) {
@@ -340,6 +343,191 @@ public:
     }
 
 private:
+    struct TAffineForm {
+        NAst::TExprPtr Base;
+        int64_t Scale = 1;
+        int64_t Offset = 0;
+    };
+
+    static std::optional<int64_t> IntegerLiteral(const NAst::TExprPtr& expr) {
+        auto number = NAst::TMaybeNode<NAst::TNumberExpr>(expr);
+        if (!number || number.Cast()->IsFloat()) {
+            return std::nullopt;
+        }
+        return number.Cast()->IntValue;
+    }
+
+    static std::optional<int64_t> AddExact(int64_t left, int64_t right) {
+        int64_t result;
+        return __builtin_add_overflow(left, right, &result)
+            ? std::nullopt
+            : std::optional<int64_t>(result);
+    }
+
+    static std::optional<int64_t> SubExact(int64_t left, int64_t right) {
+        int64_t result;
+        return __builtin_sub_overflow(left, right, &result)
+            ? std::nullopt
+            : std::optional<int64_t>(result);
+    }
+
+    static std::optional<int64_t> MulExact(int64_t left, int64_t right) {
+        int64_t result;
+        return __builtin_mul_overflow(left, right, &result)
+            ? std::nullopt
+            : std::optional<int64_t>(result);
+    }
+
+    // Recognize a single column combined with integer literals through +, -, and
+    // *. Restricting the leaf to a column avoids duplicating evaluation of a
+    // potentially volatile computed expression when SUM(base) and COUNT(base)
+    // are both emitted.
+    static std::optional<TAffineForm> ExtractAffine(const NAst::TExprPtr& expr) {
+        if (NAst::TMaybeNode<NAst::TIdentExpr>(expr)) {
+            return TAffineForm{.Base = expr};
+        }
+        auto binary = NAst::TMaybeNode<NAst::TBinaryExpr>(expr);
+        if (!binary) {
+            return std::nullopt;
+        }
+
+        const auto leftConstant = IntegerLiteral(binary.Cast()->Left);
+        const auto rightConstant = IntegerLiteral(binary.Cast()->Right);
+        if (leftConstant.has_value() == rightConstant.has_value()) {
+            return std::nullopt;
+        }
+        const bool constantOnLeft = leftConstant.has_value();
+        const int64_t constant = constantOnLeft ? *leftConstant : *rightConstant;
+        auto affine = ExtractAffine(constantOnLeft
+            ? binary.Cast()->Right
+            : binary.Cast()->Left);
+        if (!affine) {
+            return std::nullopt;
+        }
+
+        if (binary.Cast()->Operator == "+") {
+            auto offset = AddExact(affine->Offset, constant);
+            if (!offset) return std::nullopt;
+            affine->Offset = *offset;
+            return affine;
+        }
+        if (binary.Cast()->Operator == "-") {
+            auto scale = constantOnLeft
+                ? SubExact(0, affine->Scale)
+                : std::optional<int64_t>(affine->Scale);
+            auto offset = constantOnLeft
+                ? SubExact(constant, affine->Offset)
+                : SubExact(affine->Offset, constant);
+            if (!scale || !offset) return std::nullopt;
+            affine->Scale = *scale;
+            affine->Offset = *offset;
+            return affine;
+        }
+        if (binary.Cast()->Operator == "*") {
+            auto scale = MulExact(affine->Scale, constant);
+            auto offset = MulExact(affine->Offset, constant);
+            if (!scale || !offset) return std::nullopt;
+            affine->Scale = *scale;
+            affine->Offset = *offset;
+            return affine;
+        }
+        return std::nullopt;
+    }
+
+    bool IsIntegerColumn(const NAst::TExprPtr& expr) const {
+        auto ident = NAst::TMaybeNode<NAst::TIdentExpr>(expr);
+        if (!ident || !InputSchema_) {
+            return false;
+        }
+        NAst::TTypePtr type;
+        for (const auto& [name, candidate] : InputSchema_->Fields) {
+            if (name == ident.Cast()->Name) {
+                type = candidate;
+                break;
+            }
+        }
+        type = NAst::UnwrapNamedType(UnwrapNullableType(type));
+        return static_cast<bool>(NAst::TMaybeType<NAst::TIntegerType>(type));
+    }
+
+    NAst::TExprPtr EmitPlain(
+        const std::string& func,
+        NAst::TExprPtr arg,
+        TLocation loc)
+    {
+        TPlainAggKey key{
+            .Func = func,
+            .Arg = arg ? NAst::NCore::PrintAst(arg) : std::string("*"),
+        };
+        if (auto it = PlainSpecNames_.find(key); it != PlainSpecNames_.end()) {
+            return Ident(std::move(loc), it->second);
+        }
+        std::string name = NextName(func);
+        Specs_.push_back({ .Name = name, .Func = func, .Arg = std::move(arg) });
+        PlainSpecNames_.emplace(std::move(key), name);
+        return Ident(std::move(loc), std::move(name));
+    }
+
+    std::optional<NAst::TExprPtr> TryEmitAffineAggregate(
+        const std::string& func,
+        const NAst::TExprPtr& arg,
+        TLocation loc)
+    {
+        if (!EnableAffineRewrite_) {
+            return std::nullopt;
+        }
+        auto affine = ExtractAffine(arg);
+        if (!affine || !IsIntegerColumn(affine->Base)) {
+            return std::nullopt;
+        }
+
+        if (func == "count") {
+            return EmitPlain("count", CloneExpr(affine->Base), std::move(loc));
+        }
+
+        std::string reducer = func;
+        if ((func == "min" || func == "max") && affine->Scale < 0) {
+            reducer = func == "min" ? "max" : "min";
+        } else if (func == "avg") {
+            reducer = "sum";
+        }
+        auto value = EmitPlain(reducer, CloneExpr(affine->Base), loc);
+        if (affine->Scale != 1) {
+            value = Binary(
+                loc,
+                "*",
+                std::make_shared<NAst::TNumberExpr>(loc, affine->Scale),
+                std::move(value));
+        }
+
+        if (func == "sum" || func == "avg") {
+            NAst::TExprPtr count;
+            if (func == "avg" || affine->Offset != 0) {
+                count = EmitPlain("count", CloneExpr(affine->Base), loc);
+            }
+            if (affine->Offset != 0) {
+                auto contribution = Binary(
+                    loc,
+                    "*",
+                    std::make_shared<NAst::TNumberExpr>(loc, affine->Offset),
+                    CloneExpr(count));
+                value = Binary(loc, "+", std::move(value), std::move(contribution));
+            }
+            if (func == "avg") {
+                auto divisor = std::make_shared<NAst::TCastExpr>(
+                    loc, std::move(count), std::make_shared<NAst::TFloatType>());
+                value = Binary(loc, "/", std::move(value), std::move(divisor));
+            }
+        } else if (affine->Offset != 0) {
+            value = Binary(
+                loc,
+                "+",
+                std::move(value),
+                std::make_shared<NAst::TNumberExpr>(loc, affine->Offset));
+        }
+        return value;
+    }
+
     std::expected<NAst::TTypePtr, TError> StddevArgType(
         const TAggCall& agg,
         TLocation loc) const
@@ -457,6 +645,18 @@ private:
             return EmitStddevSamp(agg, loc);
         }
 
+        NAst::TExprPtr arg = (agg.Func == "count" && agg.Star)
+            ? nullptr
+            : agg.Arg;
+        if (arg && (agg.Func == "sum" || agg.Func == "avg" ||
+                    agg.Func == "min" || agg.Func == "max" ||
+                    agg.Func == "count"))
+        {
+            if (auto rewritten = TryEmitAffineAggregate(agg.Func, arg, loc)) {
+                return std::move(*rewritten);
+            }
+        }
+
         // avg has no aggregate kernel; express it as sum / count. The count is over the
         // argument (not count(*)): SQL avg(x) ignores rows where x IS NULL.
         if (agg.Func == "avg") {
@@ -474,20 +674,7 @@ private:
                 loc, NAst::TOperator('/'), Ident(loc, sumName), std::move(count));
         }
 
-        NAst::TExprPtr arg = (agg.Func == "count" && agg.Star)
-            ? nullptr
-            : agg.Arg;
-        TPlainAggKey key{
-            .Func = agg.Func,
-            .Arg = arg ? NAst::NCore::PrintAst(arg) : std::string("*"),
-        };
-        if (auto it = PlainSpecNames_.find(key); it != PlainSpecNames_.end()) {
-            return Ident(loc, it->second);
-        }
-        std::string name = NextName(agg.Func);
-        Specs_.push_back({ .Name = name, .Func = agg.Func, .Arg = std::move(arg) });
-        PlainSpecNames_.emplace(std::move(key), name);
-        return Ident(loc, name);
+        return EmitPlain(agg.Func, std::move(arg), std::move(loc));
     }
 
     std::string NextName(const std::string& func) {
@@ -496,6 +683,7 @@ private:
 
     std::vector<TAggregateSpec> Specs_;
     const NAst::TStructType* InputSchema_ = nullptr;
+    bool EnableAffineRewrite_ = true;
     int Counter_ = 0;
     std::optional<std::string> DistinctColumn_;
     std::set<std::string> DistinctSpecNames_;
@@ -1974,9 +2162,24 @@ std::expected<TOperatorPtr, TError> BuildSelect(
         return std::unexpected(TError("empty select list"));
     }
 
+    std::optional<TGroupingParse> parsedGrouping;
+    if (select.GroupBy) {
+        auto parsed = ParseGrouping(*select.GroupBy);
+        if (!parsed) {
+            return std::unexpected(parsed.error());
+        }
+        parsedGrouping = std::move(*parsed);
+    }
+    const bool multiSet = parsedGrouping && parsedGrouping->Sets.size() > 1;
+
     auto inputSchemaType = node->OutputColumns();
     auto inputSchema = NAst::TMaybeType<NAst::TStructType>(inputSchemaType);
-    TAggCollector collector(inputSchema ? inputSchema.Cast().get() : nullptr);
+    // Grouping-sets execution masks key columns for sets that omit them. Keep
+    // computed aggregate arguments materialized separately: collapsing `sum(k+1)`
+    // to reducers over `k` would make the subtotal consume the masked key.
+    TAggCollector collector(
+        inputSchema ? inputSchema.Cast().get() : nullptr,
+        !multiSet);
     const bool distinct = select.Quantifier == NSql::ESetQuantifier::Distinct;
     std::vector<TProjectionSpec> projections;
     std::unordered_map<std::string, NAst::TExprPtr> selectAliases;
@@ -2088,14 +2291,10 @@ std::expected<TOperatorPtr, TError> BuildSelect(
     std::vector<TGroupKey> groupKeys;
     std::vector<std::vector<size_t>> groupingSets;
     bool hasGroupingSyntax = false;
-    if (select.GroupBy) {
-        auto parsed = ParseGrouping(*select.GroupBy);
-        if (!parsed) {
-            return std::unexpected(parsed.error());
-        }
-        groupKeys = std::move(parsed->Keys);
-        groupingSets = std::move(parsed->Sets);
-        hasGroupingSyntax = parsed->HasGroupingSyntax;
+    if (parsedGrouping) {
+        groupKeys = std::move(parsedGrouping->Keys);
+        groupingSets = std::move(parsedGrouping->Sets);
+        hasGroupingSyntax = parsedGrouping->HasGroupingSyntax;
     }
     auto inputHasColumn = [&](const std::string& name) {
         if (!inputSchema) {
@@ -2159,8 +2358,6 @@ std::expected<TOperatorPtr, TError> BuildSelect(
     }
     // A single set over all keys is a plain aggregate; >1 set needs the kernel's
     // grouping-sets machinery (keys become nullable, masked per set).
-    bool multiSet = groupingSets.size() > 1;
-
     std::unordered_map<std::string, std::string> computedKeys; // PrintAst -> name
     for (const auto& key : groupKeys) {
         if (key.Computed) {

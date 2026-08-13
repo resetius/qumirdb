@@ -114,6 +114,34 @@ aggregate keys=[l_returnflag] aggs=[sum_0=sum(arg_0)]
 Plain-column arguments (`sum(l_quantity)`) are passed through unchanged; the
 inner project is then omitted unless a global key is needed (below).
 
+### Affine integer aggregates
+
+Before argument materialization, aggregates over one integer column and integer
+literals are normalized using the affine form `a * x + b`:
+
+```
+sum(a * x + b)  =>  a * sum(x) + b * count(x)
+avg(a * x + b)  =>  (a * sum(x) + b * count(x)) / count(x)
+count(a * x + b) => count(x)
+min(a * x + b)  =>  a * min(x) + b
+max(a * x + b)  =>  a * max(x) + b
+```
+
+For a negative `a`, `min` and `max` exchange places. The collector deduplicates
+the resulting base slots, so a wide select list such as `sum(x + 10),
+sum(x + 11), avg(x + 123), avg(x + 1234)` uses only `sum(x)` and `count(x)`
+reducers. (`avg` already has no native reducer in qdb.) `count(x)`, not
+`count(*)`, preserves SQL NULL semantics; an all-NULL group remains NULL because
+the derived value still depends on the nullable base aggregate. The rewrite is
+intentionally limited to integer columns. Floating-point aggregates keep their
+original row-wise expressions because changing the evaluation or accumulation
+order can change rounding.
+
+The rewrite is disabled when a `GROUPING SETS`, `ROLLUP`, or `CUBE` expansion
+produces multiple sets. Those kernels mask omitted grouping-key columns; a
+computed argument such as `sum(k + 1)` must remain a separate materialized
+column so subtotal sets still aggregate the original `k` values.
+
 ### Global aggregate (no GROUP BY)
 
 The grouping-key descriptor requires at least one key, so a constant key is
