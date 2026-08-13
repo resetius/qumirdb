@@ -46,7 +46,7 @@
               ((|ctr1.ctr_store_sk| __corr_0_0__))
               (left))
             (&& (&& (&& (> |ctr1.ctr_total_return| __scalar_0__) (== s_store_sk |ctr1.ctr_store_sk|))
-                (== s_state (: (cast "TN" <named StringView>) <named StringView>)))
+                (== s_state (cast "TN" <named StringView>)))
               (== |ctr1.ctr_customer_sk| c_customer_sk)))
           (c_customer_id c_customer_id))
         (c_customer_id asc nulls-default))

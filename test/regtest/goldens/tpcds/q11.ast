@@ -33,7 +33,7 @@
                 (call sum (- ss_ext_list_price ss_ext_discount_amt))
               )
               (item as sale_type
-                (: (cast "s" <named StringView>) <named StringView>)
+                (cast "s" <named StringView>)
               )
             )
             (from
@@ -85,7 +85,7 @@
                 (call sum (- ws_ext_list_price ws_ext_discount_amt))
               )
               (item as sale_type
-                (: (cast "w" <named StringView>) <named StringView>)
+                (cast "w" <named StringView>)
               )
             )
             (from
@@ -136,10 +136,10 @@
       (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (&& (== |t_s_secyear.customer_id| |t_s_firstyear.customer_id|)
                                 (== |t_s_firstyear.customer_id| |t_w_secyear.customer_id|))
                               (== |t_s_firstyear.customer_id| |t_w_firstyear.customer_id|))
-                            (== |t_s_firstyear.sale_type| (: (cast "s" <named StringView>) <named StringView>)))
-                          (== |t_w_firstyear.sale_type| (: (cast "w" <named StringView>) <named StringView>)))
-                        (== |t_s_secyear.sale_type| (: (cast "s" <named StringView>) <named StringView>)))
-                      (== |t_w_secyear.sale_type| (: (cast "w" <named StringView>) <named StringView>)))
+                            (== |t_s_firstyear.sale_type| (cast "s" <named StringView>)))
+                          (== |t_w_firstyear.sale_type| (cast "w" <named StringView>)))
+                        (== |t_s_secyear.sale_type| (cast "s" <named StringView>)))
+                      (== |t_w_secyear.sale_type| (cast "w" <named StringView>)))
                     (== |t_s_firstyear.dyear| 2001))
                   (== |t_s_secyear.dyear| (+ 2001 1)))
                 (== |t_w_firstyear.dyear| 2001))

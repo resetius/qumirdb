@@ -12,10 +12,8 @@
     )
     (where
       (&& (&& (&& (&& (== i_manufact_id 269) (== i_item_sk ws_item_sk))
-            (&& (<= (: (cast "1998-03-18" <named StringView>) <named StringView>) d_date)
-              (<= d_date
-                (+ (: (cast (: (cast "1998-03-18" <named StringView>) <named StringView>) <named DATE>) <named DATE>)
-                  (: 90 i32)))))
+            (&& (<= (cast "1998-03-18" <named StringView>) d_date)
+              (<= d_date (+ (cast (cast "1998-03-18" <named StringView>) <named DATE>) (: 90 i32)))))
           (== d_date_sk ws_sold_date_sk))
         (> ws_ext_discount_amt
           (subquery scalar (query
@@ -31,10 +29,8 @@
           )
           (where
             (&& (&& (== ws_item_sk i_item_sk)
-                (&& (<= (: (cast "1998-03-18" <named StringView>) <named StringView>) d_date)
-                  (<= d_date
-                    (+ (: (cast (: (cast "1998-03-18" <named StringView>) <named StringView>) <named DATE>) <named DATE>)
-                      (: 90 i32)))))
+                (&& (<= (cast "1998-03-18" <named StringView>) d_date)
+                  (<= d_date (+ (cast (cast "1998-03-18" <named StringView>) <named DATE>) (: 90 i32)))))
               (== d_date_sk ws_sold_date_sk))
           )
         )

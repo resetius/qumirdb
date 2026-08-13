@@ -77,7 +77,7 @@
                         )
                       )
                       (where
-                        (== i_category (: (cast "Sports" <named StringView>) <named StringView>))
+                        (== i_category (cast "Sports" <named StringView>))
                       )
                     )
                     (select
@@ -126,7 +126,7 @@
                         )
                       )
                       (where
-                        (== i_category (: (cast "Sports" <named StringView>) <named StringView>))
+                        (== i_category (cast "Sports" <named StringView>))
                       )
                     )
                   )
@@ -176,7 +176,7 @@
                       )
                     )
                     (where
-                      (== i_category (: (cast "Sports" <named StringView>) <named StringView>))
+                      (== i_category (cast "Sports" <named StringView>))
                     )
                   )
                 )
@@ -237,8 +237,7 @@
               (== |curr_yr.i_manufact_id| |prev_yr.i_manufact_id|))
             (== |curr_yr.d_year| 2002))
           (== |prev_yr.d_year| (- 2002 1)))
-        (< (/ (: (cast |curr_yr.sales_cnt| <named DECIMAL [17 2]>) <named DECIMAL [17 2]>)
-            (: (cast |prev_yr.sales_cnt| <named DECIMAL [17 2]>) <named DECIMAL [17 2]>))
+        (< (/ (cast |curr_yr.sales_cnt| <named DECIMAL [17 2]>) (cast |prev_yr.sales_cnt| <named DECIMAL [17 2]>))
           0.90000000000000002))
     )
   )

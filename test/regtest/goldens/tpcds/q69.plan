@@ -30,9 +30,9 @@
               (call
                 qdb_in_list
                 ca_state
-                (: (cast "CO" <named StringView>) <named StringView>)
-                (: (cast "IL" <named StringView>) <named StringView>)
-                (: (cast "MN" <named StringView>) <named StringView>)))
+                (cast "CO" <named StringView>)
+                (cast "IL" <named StringView>)
+                (cast "MN" <named StringView>)))
             (== cd_demo_sk |c.c_current_cdemo_sk|)))
         (keys cd_gender cd_marital_status cd_education_status cd_purchase_estimate cd_credit_rating)
         (agg count_0 count))

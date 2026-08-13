@@ -57,27 +57,27 @@
                 (|| (&& (call
                       qdb_in_list
                       i_category
-                      (: (cast "Home" <named StringView>) <named StringView>)
-                      (: (cast "Books" <named StringView>) <named StringView>)
-                      (: (cast "Electronics" <named StringView>) <named StringView>))
+                      (cast "Home" <named StringView>)
+                      (cast "Books" <named StringView>)
+                      (cast "Electronics" <named StringView>))
                     (call
                       qdb_in_list
                       i_class
-                      (: (cast "wallpaper" <named StringView>) <named StringView>)
-                      (: (cast "parenting" <named StringView>) <named StringView>)
-                      (: (cast "musical" <named StringView>) <named StringView>)))
+                      (cast "wallpaper" <named StringView>)
+                      (cast "parenting" <named StringView>)
+                      (cast "musical" <named StringView>)))
                   (&& (call
                       qdb_in_list
                       i_category
-                      (: (cast "Shoes" <named StringView>) <named StringView>)
-                      (: (cast "Jewelry" <named StringView>) <named StringView>)
-                      (: (cast "Men" <named StringView>) <named StringView>))
+                      (cast "Shoes" <named StringView>)
+                      (cast "Jewelry" <named StringView>)
+                      (cast "Men" <named StringView>))
                     (call
                       qdb_in_list
                       i_class
-                      (: (cast "womens" <named StringView>) <named StringView>)
-                      (: (cast "birdal" <named StringView>) <named StringView>)
-                      (: (cast "pants" <named StringView>) <named StringView>)))))
+                      (cast "womens" <named StringView>)
+                      (cast "birdal" <named StringView>)
+                      (cast "pants" <named StringView>)))))
             )
             (group-by
               i_category

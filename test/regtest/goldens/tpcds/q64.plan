@@ -112,12 +112,12 @@
                     (call
                       qdb_in_list
                       i_color
-                      (: (cast "maroon" <named StringView>) <named StringView>)
-                      (: (cast "burnished" <named StringView>) <named StringView>)
-                      (: (cast "dim" <named StringView>) <named StringView>)
-                      (: (cast "steel" <named StringView>) <named StringView>)
-                      (: (cast "navajo" <named StringView>) <named StringView>)
-                      (: (cast "chocolate" <named StringView>) <named StringView>)))
+                      (cast "maroon" <named StringView>)
+                      (cast "burnished" <named StringView>)
+                      (cast "dim" <named StringView>)
+                      (cast "steel" <named StringView>)
+                      (cast "navajo" <named StringView>)
+                      (cast "chocolate" <named StringView>)))
                   (<= 35 i_current_price))
                 (<= i_current_price (+ 35 10)))
               (<= (+ 35 1) i_current_price))

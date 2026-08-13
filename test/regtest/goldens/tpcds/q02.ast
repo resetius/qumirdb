@@ -56,60 +56,25 @@
               d_week_seq
             )
             (item as sun_sales
-              (call
-                sum
-                (if
-                  (call qdb_is_true (== d_day_name (: (cast "Sunday" <named StringView>) <named StringView>)))
-                  sales_price
-                  (call qdb_sql_null)))
+              (call sum (if (call qdb_is_true (== d_day_name (cast "Sunday" <named StringView>))) sales_price (call qdb_sql_null)))
             )
             (item as mon_sales
-              (call
-                sum
-                (if
-                  (call qdb_is_true (== d_day_name (: (cast "Monday" <named StringView>) <named StringView>)))
-                  sales_price
-                  (call qdb_sql_null)))
+              (call sum (if (call qdb_is_true (== d_day_name (cast "Monday" <named StringView>))) sales_price (call qdb_sql_null)))
             )
             (item as tue_sales
-              (call
-                sum
-                (if
-                  (call qdb_is_true (== d_day_name (: (cast "Tuesday" <named StringView>) <named StringView>)))
-                  sales_price
-                  (call qdb_sql_null)))
+              (call sum (if (call qdb_is_true (== d_day_name (cast "Tuesday" <named StringView>))) sales_price (call qdb_sql_null)))
             )
             (item as wed_sales
-              (call
-                sum
-                (if
-                  (call qdb_is_true (== d_day_name (: (cast "Wednesday" <named StringView>) <named StringView>)))
-                  sales_price
-                  (call qdb_sql_null)))
+              (call sum (if (call qdb_is_true (== d_day_name (cast "Wednesday" <named StringView>))) sales_price (call qdb_sql_null)))
             )
             (item as thu_sales
-              (call
-                sum
-                (if
-                  (call qdb_is_true (== d_day_name (: (cast "Thursday" <named StringView>) <named StringView>)))
-                  sales_price
-                  (call qdb_sql_null)))
+              (call sum (if (call qdb_is_true (== d_day_name (cast "Thursday" <named StringView>))) sales_price (call qdb_sql_null)))
             )
             (item as fri_sales
-              (call
-                sum
-                (if
-                  (call qdb_is_true (== d_day_name (: (cast "Friday" <named StringView>) <named StringView>)))
-                  sales_price
-                  (call qdb_sql_null)))
+              (call sum (if (call qdb_is_true (== d_day_name (cast "Friday" <named StringView>))) sales_price (call qdb_sql_null)))
             )
             (item as sat_sales
-              (call
-                sum
-                (if
-                  (call qdb_is_true (== d_day_name (: (cast "Saturday" <named StringView>) <named StringView>)))
-                  sales_price
-                  (call qdb_sql_null)))
+              (call sum (if (call qdb_is_true (== d_day_name (cast "Saturday" <named StringView>))) sales_price (call qdb_sql_null)))
             )
           )
           (from

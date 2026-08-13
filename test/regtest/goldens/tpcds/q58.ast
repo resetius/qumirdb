@@ -41,7 +41,7 @@
                         (table date_dim)
                       )
                       (where
-                        (== d_date (: (cast "1998-02-19" <named StringView>) <named StringView>))
+                        (== d_date (cast "1998-02-19" <named StringView>))
                       )
                     )
                   )
@@ -99,7 +99,7 @@
                         (table date_dim)
                       )
                       (where
-                        (== d_date (: (cast "1998-02-19" <named StringView>) <named StringView>))
+                        (== d_date (cast "1998-02-19" <named StringView>))
                       )
                     )
                   )
@@ -157,7 +157,7 @@
                         (table date_dim)
                       )
                       (where
-                        (== d_date (: (cast "1998-02-19" <named StringView>) <named StringView>))
+                        (== d_date (cast "1998-02-19" <named StringView>))
                       )
                     )
                   )

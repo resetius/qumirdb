@@ -19,9 +19,9 @@
                 (call
                   qdb_in_list
                   i_color
-                  (: (cast "orchid" <named StringView>) <named StringView>)
-                  (: (cast "chiffon" <named StringView>) <named StringView>)
-                  (: (cast "lace" <named StringView>) <named StringView>)))
+                  (cast "orchid" <named StringView>)
+                  (cast "chiffon" <named StringView>)
+                  (cast "lace" <named StringView>)))
               (__qdb_in__i_item_id i_item_id))
             ()
             (left_semi)
@@ -53,9 +53,9 @@
                 (call
                   qdb_in_list
                   i_color
-                  (: (cast "orchid" <named StringView>) <named StringView>)
-                  (: (cast "chiffon" <named StringView>) <named StringView>)
-                  (: (cast "lace" <named StringView>) <named StringView>)))
+                  (cast "orchid" <named StringView>)
+                  (cast "chiffon" <named StringView>)
+                  (cast "lace" <named StringView>)))
               (__qdb_in__i_item_id i_item_id))
             ()
             (left_semi)
@@ -87,9 +87,9 @@
                 (call
                   qdb_in_list
                   i_color
-                  (: (cast "orchid" <named StringView>) <named StringView>)
-                  (: (cast "chiffon" <named StringView>) <named StringView>)
-                  (: (cast "lace" <named StringView>) <named StringView>)))
+                  (cast "orchid" <named StringView>)
+                  (cast "chiffon" <named StringView>)
+                  (cast "lace" <named StringView>)))
               (__qdb_in__i_item_id i_item_id))
             ()
             (left_semi)

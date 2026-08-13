@@ -21,10 +21,8 @@
           )
           (where
             (&& (&& (== ss_sold_date_sk d_date_sk)
-                (&& (<= (: (cast (: (cast "1998-08-04" <named StringView>) <named StringView>) <named DATE>) <named DATE>) d_date)
-                  (<= d_date
-                    (+ (: (cast (: (cast "1998-08-04" <named StringView>) <named StringView>) <named DATE>) <named DATE>)
-                      (: 30 i32)))))
+                (&& (<= (cast (cast "1998-08-04" <named StringView>) <named DATE>) d_date)
+                  (<= d_date (+ (cast (cast "1998-08-04" <named StringView>) <named DATE>) (: 30 i32)))))
               (== ss_store_sk s_store_sk))
           )
           (group-by
@@ -54,10 +52,8 @@
           )
           (where
             (&& (&& (== sr_returned_date_sk d_date_sk)
-                (&& (<= (: (cast (: (cast "1998-08-04" <named StringView>) <named StringView>) <named DATE>) <named DATE>) d_date)
-                  (<= d_date
-                    (+ (: (cast (: (cast "1998-08-04" <named StringView>) <named StringView>) <named DATE>) <named DATE>)
-                      (: 30 i32)))))
+                (&& (<= (cast (cast "1998-08-04" <named StringView>) <named DATE>) d_date)
+                  (<= d_date (+ (cast (cast "1998-08-04" <named StringView>) <named DATE>) (: 30 i32)))))
               (== sr_store_sk s_store_sk))
           )
           (group-by
@@ -86,9 +82,8 @@
           )
           (where
             (&& (== cs_sold_date_sk d_date_sk)
-              (&& (<= (: (cast (: (cast "1998-08-04" <named StringView>) <named StringView>) <named DATE>) <named DATE>) d_date)
-                (<= d_date
-                  (+ (: (cast (: (cast "1998-08-04" <named StringView>) <named StringView>) <named DATE>) <named DATE>) (: 30 i32)))))
+              (&& (<= (cast (cast "1998-08-04" <named StringView>) <named DATE>) d_date)
+                (<= d_date (+ (cast (cast "1998-08-04" <named StringView>) <named DATE>) (: 30 i32)))))
           )
           (group-by
             cs_call_center_sk
@@ -116,9 +111,8 @@
           )
           (where
             (&& (== cr_returned_date_sk d_date_sk)
-              (&& (<= (: (cast (: (cast "1998-08-04" <named StringView>) <named StringView>) <named DATE>) <named DATE>) d_date)
-                (<= d_date
-                  (+ (: (cast (: (cast "1998-08-04" <named StringView>) <named StringView>) <named DATE>) <named DATE>) (: 30 i32)))))
+              (&& (<= (cast (cast "1998-08-04" <named StringView>) <named DATE>) d_date)
+                (<= d_date (+ (cast (cast "1998-08-04" <named StringView>) <named DATE>) (: 30 i32)))))
           )
           (group-by
             cr_call_center_sk
@@ -147,10 +141,8 @@
           )
           (where
             (&& (&& (== ws_sold_date_sk d_date_sk)
-                (&& (<= (: (cast (: (cast "1998-08-04" <named StringView>) <named StringView>) <named DATE>) <named DATE>) d_date)
-                  (<= d_date
-                    (+ (: (cast (: (cast "1998-08-04" <named StringView>) <named StringView>) <named DATE>) <named DATE>)
-                      (: 30 i32)))))
+                (&& (<= (cast (cast "1998-08-04" <named StringView>) <named DATE>) d_date)
+                  (<= d_date (+ (cast (cast "1998-08-04" <named StringView>) <named DATE>) (: 30 i32)))))
               (== ws_web_page_sk wp_web_page_sk))
           )
           (group-by
@@ -180,10 +172,8 @@
           )
           (where
             (&& (&& (== wr_returned_date_sk d_date_sk)
-                (&& (<= (: (cast (: (cast "1998-08-04" <named StringView>) <named StringView>) <named DATE>) <named DATE>) d_date)
-                  (<= d_date
-                    (+ (: (cast (: (cast "1998-08-04" <named StringView>) <named StringView>) <named DATE>) <named DATE>)
-                      (: 30 i32)))))
+                (&& (<= (cast (cast "1998-08-04" <named StringView>) <named DATE>) d_date)
+                  (<= d_date (+ (cast (cast "1998-08-04" <named StringView>) <named DATE>) (: 30 i32)))))
               (== wr_web_page_sk wp_web_page_sk))
           )
           (group-by
@@ -219,7 +209,7 @@
               (select
                 (select-list
                   (item as channel
-                    (: (cast "store channel" <named StringView>) <named StringView>)
+                    (cast "store channel" <named StringView>)
                   )
                   (item as id
                     |ss.s_store_sk|
@@ -247,7 +237,7 @@
               (select
                 (select-list
                   (item as channel
-                    (: (cast "catalog channel" <named StringView>) <named StringView>)
+                    (cast "catalog channel" <named StringView>)
                   )
                   (item as id
                     cs_call_center_sk
@@ -271,7 +261,7 @@
             (select
               (select-list
                 (item as channel
-                  (: (cast "web channel" <named StringView>) <named StringView>)
+                  (cast "web channel" <named StringView>)
                 )
                 (item as id
                   |ws.wp_web_page_sk|

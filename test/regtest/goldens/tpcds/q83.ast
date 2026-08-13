@@ -43,9 +43,9 @@
                         (call
                           qdb_in_list
                           d_date
-                          (: (cast "1998-01-02" <named StringView>) <named StringView>)
-                          (: (cast "1998-10-15" <named StringView>) <named StringView>)
-                          (: (cast "1998-11-10" <named StringView>) <named StringView>))
+                          (cast "1998-01-02" <named StringView>)
+                          (cast "1998-10-15" <named StringView>)
+                          (cast "1998-11-10" <named StringView>))
                       )
                     )
                   )
@@ -105,9 +105,9 @@
                         (call
                           qdb_in_list
                           d_date
-                          (: (cast "1998-01-02" <named StringView>) <named StringView>)
-                          (: (cast "1998-10-15" <named StringView>) <named StringView>)
-                          (: (cast "1998-11-10" <named StringView>) <named StringView>))
+                          (cast "1998-01-02" <named StringView>)
+                          (cast "1998-10-15" <named StringView>)
+                          (cast "1998-11-10" <named StringView>))
                       )
                     )
                   )
@@ -167,9 +167,9 @@
                         (call
                           qdb_in_list
                           d_date
-                          (: (cast "1998-01-02" <named StringView>) <named StringView>)
-                          (: (cast "1998-10-15" <named StringView>) <named StringView>)
-                          (: (cast "1998-11-10" <named StringView>) <named StringView>))
+                          (cast "1998-01-02" <named StringView>)
+                          (cast "1998-10-15" <named StringView>)
+                          (cast "1998-11-10" <named StringView>))
                       )
                     )
                   )

@@ -25,7 +25,7 @@
               (select
                 (select-list
                   (item as channel
-                    (: (cast "web" <named StringView>) <named StringView>)
+                    (cast "web" <named StringView>)
                   )
                   (item
                     |web.item|
@@ -70,12 +70,12 @@
                                     |ws.ws_item_sk|
                                   )
                                   (item as return_ratio
-                                    (/ (: (cast (call sum (call coalesce |wr.wr_return_quantity| 0)) <named DECIMAL [15 4]>) <named DECIMAL [15 4]>)
-                                      (: (cast (call sum (call coalesce |ws.ws_quantity| 0)) <named DECIMAL [15 4]>) <named DECIMAL [15 4]>))
+                                    (/ (cast (call sum (call coalesce |wr.wr_return_quantity| 0)) <named DECIMAL [15 4]>)
+                                      (cast (call sum (call coalesce |ws.ws_quantity| 0)) <named DECIMAL [15 4]>))
                                   )
                                   (item as currency_ratio
-                                    (/ (: (cast (call sum (call coalesce |wr.wr_return_amt| 0)) <named DECIMAL [15 4]>) <named DECIMAL [15 4]>)
-                                      (: (cast (call sum (call coalesce |ws.ws_net_paid| 0)) <named DECIMAL [15 4]>) <named DECIMAL [15 4]>))
+                                    (/ (cast (call sum (call coalesce |wr.wr_return_amt| 0)) <named DECIMAL [15 4]>)
+                                      (cast (call sum (call coalesce |ws.ws_net_paid| 0)) <named DECIMAL [15 4]>))
                                   )
                                 )
                                 (from
@@ -112,7 +112,7 @@
               (select
                 (select-list
                   (item as channel
-                    (: (cast "catalog" <named StringView>) <named StringView>)
+                    (cast "catalog" <named StringView>)
                   )
                   (item
                     |catalog.item|
@@ -157,12 +157,12 @@
                                     |cs.cs_item_sk|
                                   )
                                   (item as return_ratio
-                                    (/ (: (cast (call sum (call coalesce |cr.cr_return_quantity| 0)) <named DECIMAL [15 4]>) <named DECIMAL [15 4]>)
-                                      (: (cast (call sum (call coalesce |cs.cs_quantity| 0)) <named DECIMAL [15 4]>) <named DECIMAL [15 4]>))
+                                    (/ (cast (call sum (call coalesce |cr.cr_return_quantity| 0)) <named DECIMAL [15 4]>)
+                                      (cast (call sum (call coalesce |cs.cs_quantity| 0)) <named DECIMAL [15 4]>))
                                   )
                                   (item as currency_ratio
-                                    (/ (: (cast (call sum (call coalesce |cr.cr_return_amount| 0)) <named DECIMAL [15 4]>) <named DECIMAL [15 4]>)
-                                      (: (cast (call sum (call coalesce |cs.cs_net_paid| 0)) <named DECIMAL [15 4]>) <named DECIMAL [15 4]>))
+                                    (/ (cast (call sum (call coalesce |cr.cr_return_amount| 0)) <named DECIMAL [15 4]>)
+                                      (cast (call sum (call coalesce |cs.cs_net_paid| 0)) <named DECIMAL [15 4]>))
                                   )
                                 )
                                 (from
@@ -201,7 +201,7 @@
             (select
               (select-list
                 (item as channel
-                  (: (cast "store" <named StringView>) <named StringView>)
+                  (cast "store" <named StringView>)
                 )
                 (item
                   |store.item|
@@ -246,12 +246,12 @@
                                   |sts.ss_item_sk|
                                 )
                                 (item as return_ratio
-                                  (/ (: (cast (call sum (call coalesce |sr.sr_return_quantity| 0)) <named DECIMAL [15 4]>) <named DECIMAL [15 4]>)
-                                    (: (cast (call sum (call coalesce |sts.ss_quantity| 0)) <named DECIMAL [15 4]>) <named DECIMAL [15 4]>))
+                                  (/ (cast (call sum (call coalesce |sr.sr_return_quantity| 0)) <named DECIMAL [15 4]>)
+                                    (cast (call sum (call coalesce |sts.ss_quantity| 0)) <named DECIMAL [15 4]>))
                                 )
                                 (item as currency_ratio
-                                  (/ (: (cast (call sum (call coalesce |sr.sr_return_amt| 0)) <named DECIMAL [15 4]>) <named DECIMAL [15 4]>)
-                                    (: (cast (call sum (call coalesce |sts.ss_net_paid| 0)) <named DECIMAL [15 4]>) <named DECIMAL [15 4]>))
+                                  (/ (cast (call sum (call coalesce |sr.sr_return_amt| 0)) <named DECIMAL [15 4]>)
+                                    (cast (call sum (call coalesce |sts.ss_net_paid| 0)) <named DECIMAL [15 4]>))
                                 )
                               )
                               (from

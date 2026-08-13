@@ -10,10 +10,7 @@
               ()
               (left)
               (&& (== c_custkey o_custkey)
-                (! (call
-                    qdb_string_view_sql_like
-                    o_comment
-                    (: (cast "%special%packages%" <named StringView>) <named StringView>)))))
+                (! (call qdb_string_view_sql_like o_comment (cast "%special%packages%" <named StringView>)))))
             (keys c_custkey)
             (agg count_0 count o_orderkey))
           (c_custkey c_custkey)

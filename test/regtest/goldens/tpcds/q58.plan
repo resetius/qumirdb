@@ -14,9 +14,7 @@
                 (rel join
                   (rel source "date_dim")
                   (rel project
-                    (rel filter
-                      (rel source "date_dim")
-                      (== d_date (: (cast "1998-02-19" <named StringView>) <named StringView>)))
+                    (rel filter (rel source "date_dim") (== d_date (cast "1998-02-19" <named StringView>)))
                     (__scalar_0__ d_week_seq))
                   ()
                   (inner))
@@ -45,9 +43,7 @@
                 (rel join
                   (rel source "date_dim")
                   (rel project
-                    (rel filter
-                      (rel source "date_dim")
-                      (== d_date (: (cast "1998-02-19" <named StringView>) <named StringView>)))
+                    (rel filter (rel source "date_dim") (== d_date (cast "1998-02-19" <named StringView>)))
                     (__scalar_0__ d_week_seq))
                   ()
                   (inner))
@@ -76,9 +72,7 @@
                 (rel join
                   (rel source "date_dim")
                   (rel project
-                    (rel filter
-                      (rel source "date_dim")
-                      (== d_date (: (cast "1998-02-19" <named StringView>) <named StringView>)))
+                    (rel filter (rel source "date_dim") (== d_date (cast "1998-02-19" <named StringView>)))
                     (__scalar_0__ d_week_seq))
                   ()
                   (inner))

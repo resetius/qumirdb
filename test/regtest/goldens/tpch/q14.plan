@@ -5,9 +5,7 @@
         (rel join (rel source "lineitem") (rel source "part") () (inner))
         (&& (&& (== l_partkey p_partkey) (>= l_shipdate (: 8460 i32))) (< l_shipdate (+ (: 8460 i32) (: 30 i32)))))
       (arg_0 (if
-          (call
-            qdb_is_true
-            (call qdb_string_view_sql_like p_type (: (cast "PROMO%" <named StringView>) <named StringView>)))
+          (call qdb_is_true (call qdb_string_view_sql_like p_type (cast "PROMO%" <named StringView>)))
           (* l_extendedprice (- 1 l_discount))
           0))
       (arg_1 (* l_extendedprice (- 1 l_discount)))

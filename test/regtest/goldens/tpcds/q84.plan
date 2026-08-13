@@ -19,8 +19,7 @@
           (rel source "store_returns")
           ()
           (inner))
-        (&& (&& (&& (&& (&& (&& (&& (== ca_city (: (cast "Hopewell" <named StringView>) <named StringView>))
-                      (== c_current_addr_sk ca_address_sk))
+        (&& (&& (&& (&& (&& (&& (&& (== ca_city (cast "Hopewell" <named StringView>)) (== c_current_addr_sk ca_address_sk))
                     (>= ib_lower_bound 32287))
                   (<= ib_upper_bound (+ 32287 50000)))
                 (== ib_income_band_sk hd_income_band_sk))
@@ -30,10 +29,7 @@
       (customer_id c_customer_id)
       (customername (call
           strcat
-          (call
-            strcat
-            (call coalesce c_last_name (: (cast "" <named StringView>) <named StringView>))
-            (: (cast ", " <named StringView>) <named StringView>))
-          (call coalesce c_first_name (: (cast "" <named StringView>) <named StringView>)))))
+          (call strcat (call coalesce c_last_name (cast "" <named StringView>)) (cast ", " <named StringView>))
+          (call coalesce c_first_name (cast "" <named StringView>)))))
     (customer_id asc nulls-default))
   (limit 100))

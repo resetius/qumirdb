@@ -9,31 +9,31 @@
           (d_week_seq d_week_seq)
           (ss_store_sk ss_store_sk)
           (arg_0 (if
-              (call qdb_is_true (== d_day_name (: (cast "Sunday" <named StringView>) <named StringView>)))
+              (call qdb_is_true (== d_day_name (cast "Sunday" <named StringView>)))
               ss_sales_price
               (call qdb_sql_null)))
           (arg_1 (if
-              (call qdb_is_true (== d_day_name (: (cast "Monday" <named StringView>) <named StringView>)))
+              (call qdb_is_true (== d_day_name (cast "Monday" <named StringView>)))
               ss_sales_price
               (call qdb_sql_null)))
           (arg_2 (if
-              (call qdb_is_true (== d_day_name (: (cast "Tuesday" <named StringView>) <named StringView>)))
+              (call qdb_is_true (== d_day_name (cast "Tuesday" <named StringView>)))
               ss_sales_price
               (call qdb_sql_null)))
           (arg_3 (if
-              (call qdb_is_true (== d_day_name (: (cast "Wednesday" <named StringView>) <named StringView>)))
+              (call qdb_is_true (== d_day_name (cast "Wednesday" <named StringView>)))
               ss_sales_price
               (call qdb_sql_null)))
           (arg_4 (if
-              (call qdb_is_true (== d_day_name (: (cast "Thursday" <named StringView>) <named StringView>)))
+              (call qdb_is_true (== d_day_name (cast "Thursday" <named StringView>)))
               ss_sales_price
               (call qdb_sql_null)))
           (arg_5 (if
-              (call qdb_is_true (== d_day_name (: (cast "Friday" <named StringView>) <named StringView>)))
+              (call qdb_is_true (== d_day_name (cast "Friday" <named StringView>)))
               ss_sales_price
               (call qdb_sql_null)))
           (arg_6 (if
-              (call qdb_is_true (== d_day_name (: (cast "Saturday" <named StringView>) <named StringView>)))
+              (call qdb_is_true (== d_day_name (cast "Saturday" <named StringView>)))
               ss_sales_price
               (call qdb_sql_null))))
         (keys d_week_seq ss_store_sk)

@@ -10,8 +10,8 @@
           (if
             (call
               qdb_is_true
-              (|| (== o_orderpriority (: (cast "1-URGENT" <named StringView>) <named StringView>))
-                (== o_orderpriority (: (cast "2-HIGH" <named StringView>) <named StringView>))))
+              (|| (== o_orderpriority (cast "1-URGENT" <named StringView>))
+                (== o_orderpriority (cast "2-HIGH" <named StringView>))))
             1
             0))
       )
@@ -21,8 +21,8 @@
           (if
             (call
               qdb_is_true
-              (&& (!= o_orderpriority (: (cast "1-URGENT" <named StringView>) <named StringView>))
-                (!= o_orderpriority (: (cast "2-HIGH" <named StringView>) <named StringView>))))
+              (&& (!= o_orderpriority (cast "1-URGENT" <named StringView>))
+                (!= o_orderpriority (cast "2-HIGH" <named StringView>))))
             1
             0))
       )
@@ -33,11 +33,7 @@
     )
     (where
       (&& (&& (&& (&& (&& (== o_orderkey l_orderkey)
-                (call
-                  qdb_in_list
-                  l_shipmode
-                  (: (cast "TRUCK" <named StringView>) <named StringView>)
-                  (: (cast "AIR" <named StringView>) <named StringView>)))
+                (call qdb_in_list l_shipmode (cast "TRUCK" <named StringView>) (cast "AIR" <named StringView>)))
               (< l_commitdate l_receiptdate))
             (< l_shipdate l_commitdate))
           (>= l_receiptdate (: 8401 i32)))

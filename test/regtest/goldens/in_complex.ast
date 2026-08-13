@@ -9,11 +9,7 @@
       (table customer_address)
     )
     (where
-      (call
-        qdb_in_list
-        (call substr ca_zip 1 5)
-        (: (cast "89436" <named StringView>) <named StringView>)
-        (: (cast "30868" <named StringView>) <named StringView>))
+      (call qdb_in_list (call substr ca_zip 1 5) (cast "89436" <named StringView>) (cast "30868" <named StringView>))
     )
   )
 )

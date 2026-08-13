@@ -40,8 +40,7 @@
               (table reason)
             )
             (where
-              (&& (== sr_reason_sk r_reason_sk)
-                (== r_reason_desc (: (cast "Did not like the warranty" <named StringView>) <named StringView>)))
+              (&& (== sr_reason_sk r_reason_sk) (== r_reason_desc (cast "Did not like the warranty" <named StringView>)))
             )
           )
         )

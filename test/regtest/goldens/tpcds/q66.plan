@@ -31,8 +31,8 @@
                         (call
                           qdb_in_list
                           sm_carrier
-                          (: (cast "DIAMOND" <named StringView>) <named StringView>)
-                          (: (cast "AIRBORNE" <named StringView>) <named StringView>))))
+                          (cast "DIAMOND" <named StringView>)
+                          (cast "AIRBORNE" <named StringView>))))
                     (w_warehouse_name w_warehouse_name)
                     (w_warehouse_sq_ft w_warehouse_sq_ft)
                     (w_city w_city)
@@ -97,11 +97,8 @@
                 (w_country w_country)
                 (ship_carriers (call
                     strcat
-                    (call
-                      strcat
-                      (: (cast "DIAMOND" <named StringView>) <named StringView>)
-                      (: (cast "," <named StringView>) <named StringView>))
-                    (: (cast "AIRBORNE" <named StringView>) <named StringView>)))
+                    (call strcat (cast "DIAMOND" <named StringView>) (cast "," <named StringView>))
+                    (cast "AIRBORNE" <named StringView>)))
                 (year d_year)
                 (jan_sales sum_0)
                 (feb_sales sum_1)
@@ -153,8 +150,8 @@
                         (call
                           qdb_in_list
                           sm_carrier
-                          (: (cast "DIAMOND" <named StringView>) <named StringView>)
-                          (: (cast "AIRBORNE" <named StringView>) <named StringView>))))
+                          (cast "DIAMOND" <named StringView>)
+                          (cast "AIRBORNE" <named StringView>))))
                     (w_warehouse_name w_warehouse_name)
                     (w_warehouse_sq_ft w_warehouse_sq_ft)
                     (w_city w_city)
@@ -219,11 +216,8 @@
                 (w_country w_country)
                 (ship_carriers (call
                     strcat
-                    (call
-                      strcat
-                      (: (cast "DIAMOND" <named StringView>) <named StringView>)
-                      (: (cast "," <named StringView>) <named StringView>))
-                    (: (cast "AIRBORNE" <named StringView>) <named StringView>)))
+                    (call strcat (cast "DIAMOND" <named StringView>) (cast "," <named StringView>))
+                    (cast "AIRBORNE" <named StringView>)))
                 (year d_year)
                 (jan_sales sum_0)
                 (feb_sales sum_1)

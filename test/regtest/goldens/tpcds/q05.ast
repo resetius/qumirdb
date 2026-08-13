@@ -39,10 +39,10 @@
                         ss_net_profit
                       )
                       (item as return_amt
-                        (: (cast 0 <named DECIMAL [7 2]>) <named DECIMAL [7 2]>)
+                        (cast 0 <named DECIMAL [7 2]>)
                       )
                       (item as net_loss
-                        (: (cast 0 <named DECIMAL [7 2]>) <named DECIMAL [7 2]>)
+                        (cast 0 <named DECIMAL [7 2]>)
                       )
                     )
                     (from
@@ -58,10 +58,10 @@
                         sr_returned_date_sk
                       )
                       (item as sales_price
-                        (: (cast 0 <named DECIMAL [7 2]>) <named DECIMAL [7 2]>)
+                        (cast 0 <named DECIMAL [7 2]>)
                       )
                       (item as profit
-                        (: (cast 0 <named DECIMAL [7 2]>) <named DECIMAL [7 2]>)
+                        (cast 0 <named DECIMAL [7 2]>)
                       )
                       (item as return_amt
                         sr_return_amt
@@ -82,10 +82,8 @@
           )
           (where
             (&& (&& (== date_sk d_date_sk)
-                (&& (<= (: (cast (: (cast "1998-08-04" <named StringView>) <named StringView>) <named DATE>) <named DATE>) d_date)
-                  (<= d_date
-                    (+ (: (cast (: (cast "1998-08-04" <named StringView>) <named StringView>) <named DATE>) <named DATE>)
-                      (: 14 i32)))))
+                (&& (<= (cast (cast "1998-08-04" <named StringView>) <named DATE>) d_date)
+                  (<= d_date (+ (cast (cast "1998-08-04" <named StringView>) <named DATE>) (: 14 i32)))))
               (== store_sk s_store_sk))
           )
           (group-by
@@ -133,10 +131,10 @@
                         cs_net_profit
                       )
                       (item as return_amt
-                        (: (cast 0 <named DECIMAL [7 2]>) <named DECIMAL [7 2]>)
+                        (cast 0 <named DECIMAL [7 2]>)
                       )
                       (item as net_loss
-                        (: (cast 0 <named DECIMAL [7 2]>) <named DECIMAL [7 2]>)
+                        (cast 0 <named DECIMAL [7 2]>)
                       )
                     )
                     (from
@@ -152,10 +150,10 @@
                         cr_returned_date_sk
                       )
                       (item as sales_price
-                        (: (cast 0 <named DECIMAL [7 2]>) <named DECIMAL [7 2]>)
+                        (cast 0 <named DECIMAL [7 2]>)
                       )
                       (item as profit
-                        (: (cast 0 <named DECIMAL [7 2]>) <named DECIMAL [7 2]>)
+                        (cast 0 <named DECIMAL [7 2]>)
                       )
                       (item as return_amt
                         cr_return_amount
@@ -176,10 +174,8 @@
           )
           (where
             (&& (&& (== date_sk d_date_sk)
-                (&& (<= (: (cast (: (cast "1998-08-04" <named StringView>) <named StringView>) <named DATE>) <named DATE>) d_date)
-                  (<= d_date
-                    (+ (: (cast (: (cast "1998-08-04" <named StringView>) <named StringView>) <named DATE>) <named DATE>)
-                      (: 14 i32)))))
+                (&& (<= (cast (cast "1998-08-04" <named StringView>) <named DATE>) d_date)
+                  (<= d_date (+ (cast (cast "1998-08-04" <named StringView>) <named DATE>) (: 14 i32)))))
               (== page_sk cp_catalog_page_sk))
           )
           (group-by
@@ -227,10 +223,10 @@
                         ws_net_profit
                       )
                       (item as return_amt
-                        (: (cast 0 <named DECIMAL [7 2]>) <named DECIMAL [7 2]>)
+                        (cast 0 <named DECIMAL [7 2]>)
                       )
                       (item as net_loss
-                        (: (cast 0 <named DECIMAL [7 2]>) <named DECIMAL [7 2]>)
+                        (cast 0 <named DECIMAL [7 2]>)
                       )
                     )
                     (from
@@ -246,10 +242,10 @@
                         wr_returned_date_sk
                       )
                       (item as sales_price
-                        (: (cast 0 <named DECIMAL [7 2]>) <named DECIMAL [7 2]>)
+                        (cast 0 <named DECIMAL [7 2]>)
                       )
                       (item as profit
-                        (: (cast 0 <named DECIMAL [7 2]>) <named DECIMAL [7 2]>)
+                        (cast 0 <named DECIMAL [7 2]>)
                       )
                       (item as return_amt
                         wr_return_amt
@@ -276,10 +272,8 @@
           )
           (where
             (&& (&& (== date_sk d_date_sk)
-                (&& (<= (: (cast (: (cast "1998-08-04" <named StringView>) <named StringView>) <named DATE>) <named DATE>) d_date)
-                  (<= d_date
-                    (+ (: (cast (: (cast "1998-08-04" <named StringView>) <named StringView>) <named DATE>) <named DATE>)
-                      (: 14 i32)))))
+                (&& (<= (cast (cast "1998-08-04" <named StringView>) <named DATE>) d_date)
+                  (<= d_date (+ (cast (cast "1998-08-04" <named StringView>) <named DATE>) (: 14 i32)))))
               (== wsr_web_site_sk web_site_sk))
           )
           (group-by
@@ -315,10 +309,10 @@
               (select
                 (select-list
                   (item as channel
-                    (: (cast "store channel" <named StringView>) <named StringView>)
+                    (cast "store channel" <named StringView>)
                   )
                   (item as id
-                    (call strcat (: (cast "store" <named StringView>) <named StringView>) s_store_id)
+                    (call strcat (cast "store" <named StringView>) s_store_id)
                   )
                   (item
                     sales
@@ -337,10 +331,10 @@
               (select
                 (select-list
                   (item as channel
-                    (: (cast "catalog channel" <named StringView>) <named StringView>)
+                    (cast "catalog channel" <named StringView>)
                   )
                   (item as id
-                    (call strcat (: (cast "catalog_page" <named StringView>) <named StringView>) cp_catalog_page_id)
+                    (call strcat (cast "catalog_page" <named StringView>) cp_catalog_page_id)
                   )
                   (item
                     sales
@@ -360,10 +354,10 @@
             (select
               (select-list
                 (item as channel
-                  (: (cast "web channel" <named StringView>) <named StringView>)
+                  (cast "web channel" <named StringView>)
                 )
                 (item as id
-                  (call strcat (: (cast "web_site" <named StringView>) <named StringView>) web_site_id)
+                  (call strcat (cast "web_site" <named StringView>) web_site_id)
                 )
                 (item
                   sales
