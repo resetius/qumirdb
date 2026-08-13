@@ -4,6 +4,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -11,8 +12,15 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
+import { isDeepStrictEqual } from 'node:util';
 
 const args = process.argv.slice(2);
+const printGoldens = process.env.QDB_PRINT_GOLDENS === '1';
+const canonizeIndex = args.indexOf('--canonize');
+const canonizeGoldens = canonizeIndex >= 0;
+if (canonizeGoldens) {
+  args.splice(canonizeIndex, 1);
+}
 let xmlOutputPath = null;
 const xmlIndex = args.indexOf('--xml');
 if (xmlIndex >= 0) {
@@ -21,16 +29,18 @@ if (xmlIndex >= 0) {
 }
 const [exporter, nativeRunner, runtimePath, goldensDir] = args;
 const usageError = !exporter || !nativeRunner || !runtimePath || !goldensDir ||
-  args.length !== 4 || (xmlIndex >= 0 && !xmlOutputPath)
+  args.length !== 4 || (xmlIndex >= 0 && !xmlOutputPath) ||
+  (printGoldens && canonizeGoldens)
   ? new Error(
     'usage: run.mjs <qdb_plan_export> <native_runner> '
-      + '<browser_runtime> <goldens> [--xml <junit.xml>]')
+      + '<browser_runtime> <goldens> [--canonize] [--xml <junit.xml>]')
   : null;
 
 let executeBrowserPipelineScheduled;
 let Type;
 let printType;
 let prettifyType;
+let canonizedGoldenCount = 0;
 
 function xmlEscape(value) {
   return String(value ?? '')
@@ -543,6 +553,26 @@ function readGolden(name, mode) {
   return JSON.parse(readFileSync(file, 'utf8'));
 }
 
+function writeGolden(name, mode, snapshot) {
+  try {
+    if (isDeepStrictEqual(snapshot, readGolden(name, mode))) {
+      return false;
+    }
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
+  }
+  mkdirSync(goldensDir, { recursive: true });
+  const file = path.join(goldensDir, `${name}.${mode}.json`);
+  const temporary = `${file}.tmp-${process.pid}`;
+  try {
+    writeFileSync(temporary, `${JSON.stringify(snapshot, null, 2)}\n`, 'utf8');
+    renameSync(temporary, file);
+  } finally {
+    rmSync(temporary, { force: true });
+  }
+  return true;
+}
+
 function nativeResult(name, mode) {
   return JSON.parse(run(nativeRunner, [name, mode]));
 }
@@ -622,8 +652,6 @@ async function runWasmCacheContract() {
   }
 }
 
-const printGoldens = process.env.QDB_PRINT_GOLDENS === '1';
-
 async function runFixture(name, mode) {
   const snapshotBundle = exportBundle(name, mode, false);
   assertStablePhysicalGroups(name, mode, snapshotBundle);
@@ -633,8 +661,10 @@ async function runFixture(name, mode) {
     console.log(JSON.stringify(snapshot, null, 2));
     return;
   }
-  assert.deepEqual(snapshot, readGolden(name, mode),
-    `${name}/${mode}: exported exec JSON changed`);
+  if (!canonizeGoldens) {
+    assert.deepEqual(snapshot, readGolden(name, mode),
+      `${name}/${mode}: exported exec JSON changed`);
+  }
 
   if (name === 'join' && mode === 'threaded') {
     const repeated = exportBundle(name, mode, false);
@@ -655,6 +685,15 @@ async function runFixture(name, mode) {
     normalizeResult(browser),
     normalizeResult(nativeResult(name, mode)),
     `${name}/${mode}: browser and native results differ`);
+
+  // Canonize only a snapshot that passed the same stability and execution
+  // checks as the normal test. The temporary-file rename keeps each golden
+  // replacement atomic if the runner is interrupted.
+  if (canonizeGoldens) {
+    if (writeGolden(name, mode, snapshot)) {
+      canonizedGoldenCount += 1;
+    }
+  }
 }
 
 async function main() {
@@ -826,6 +865,9 @@ async function main() {
   if (failures) {
     console.error(`plan export integration failures: ${failures}`);
     process.exitCode = 1;
+  } else if (canonizeGoldens) {
+    console.log(
+      `plan export goldens updated: ${canonizedGoldenCount} in ${goldensDir}`);
   } else if (!printGoldens) {
     console.log('plan export golden and native/browser parity checks passed');
   }

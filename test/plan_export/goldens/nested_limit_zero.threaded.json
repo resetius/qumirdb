@@ -16,8 +16,16 @@
       "table": "t"
     },
     {
-      "entrypoints": {},
       "id": 1,
+      "kind": "limit",
+      "label": "limit 0",
+      "limit": 0,
+      "offset": 0,
+      "stageId": 6
+    },
+    {
+      "entrypoints": {},
+      "id": 2,
       "kind": "project",
       "output": [
         {
@@ -28,14 +36,6 @@
           "type": "i64"
         }
       ],
-      "stageId": 6
-    },
-    {
-      "id": 2,
-      "kind": "limit",
-      "label": "limit 0",
-      "limit": 0,
-      "offset": 0,
       "stageId": 5
     },
     {

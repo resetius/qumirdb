@@ -24,8 +24,16 @@
       "stageId": 7
     },
     {
-      "entrypoints": {},
       "id": 2,
+      "kind": "limit",
+      "label": "limit 2",
+      "limit": 2,
+      "offset": 1,
+      "stageId": 6
+    },
+    {
+      "entrypoints": {},
+      "id": 3,
       "kind": "project",
       "output": [
         {
@@ -36,14 +44,6 @@
           "type": "i64"
         }
       ],
-      "stageId": 6
-    },
-    {
-      "id": 3,
-      "kind": "limit",
-      "label": "limit 2",
-      "limit": 2,
-      "offset": 1,
       "stageId": 5
     },
     {
