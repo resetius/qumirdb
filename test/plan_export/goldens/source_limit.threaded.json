@@ -16,8 +16,16 @@
       "table": "t"
     },
     {
-      "entrypoints": {},
       "id": 1,
+      "kind": "limit",
+      "label": "limit 10",
+      "limit": 10,
+      "offset": 0,
+      "stageId": 2
+    },
+    {
+      "entrypoints": {},
+      "id": 2,
       "kind": "project",
       "output": [
         {
@@ -28,7 +36,7 @@
           "type": "i64"
         }
       ],
-      "stageId": 2
+      "stageId": 1
     }
   ],
   "edges": [
@@ -37,11 +45,13 @@
       "input": 0,
       "kind": "one-to-one",
       "to": 1
+    },
+    {
+      "from": 1,
+      "input": 0,
+      "kind": "one-to-one",
+      "to": 2
     }
   ],
-  "root": 1,
-  "limit": {
-    "limit": 10,
-    "offset": 0
-  }
+  "root": 2
 }
