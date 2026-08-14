@@ -66,6 +66,27 @@ TEST(SexpPrinter, Source) {
     EXPECT_EQ(PrintAst(op, MakePrintOpts()), "(rel source)");
 }
 
+TEST(SexpParser, SourceRowGroupPredicateRoundtrip) {
+    NQdb::TMockSource src({"x"});
+    auto sourceOp = std::make_shared<TSourceOperator>(src);
+    const std::string input =
+        "(rel source \"data.parquet\" \"t\" (> |t.x| 5))";
+
+    TRelParserOptions opts;
+    opts.SourceFactory = [&](std::string_view path, NQumir::TLocation)
+        -> TOperatorPtr
+    {
+        sourceOp = std::make_shared<TSourceOperator>(src, std::string(path));
+        return sourceOp;
+    };
+    auto p = MakeParser(std::move(opts));
+    auto expr = Parse(p, input);
+
+    ASSERT_NE(expr, nullptr);
+    ASSERT_TRUE(sourceOp->RowGroupPredicate());
+    EXPECT_EQ(PrintAst(expr, MakePrintOpts()), input);
+}
+
 TEST(SexpPrinter, Filter) {
     NQdb::TMockSource src({"x"});
     auto source = std::make_shared<TSourceOperator>(src);
@@ -109,6 +130,19 @@ TEST(SexpParser, SourceNoFactory) {
     std::istringstream in("(rel source)");
     TTokenStream ts(in);
     EXPECT_FALSE(p.Parse(ts).has_value());
+}
+
+TEST(SexpParser, SourceRejectsInvalidTrailingTokenClearly) {
+    auto p = MakeParser();
+    std::istringstream in("(rel source \"data.parquet\" ])");
+    TTokenStream ts(in);
+    auto parsed = p.Parse(ts);
+
+    ASSERT_FALSE(parsed.has_value());
+    EXPECT_NE(
+        parsed.error().ToString().find(
+            "(rel source) expects ')' or alias string"),
+        std::string::npos);
 }
 
 TEST(SexpParser, Filter) {

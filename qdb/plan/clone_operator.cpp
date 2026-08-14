@@ -85,6 +85,9 @@ TOperatorPtr Reconstruct(const TOperatorPtr& op) {
         if (!n.Cast()->GetAlias().empty()) {
             src->SetAlias(n.Cast()->GetAlias());
         }
+        if (n.Cast()->RowGroupPredicate()) {
+            src->SetRowGroupPredicate(CloneExpr(n.Cast()->RowGroupPredicate()));
+        }
         return src;
     }
     if (auto n = TMaybeOp<TCteRef>(op)) {

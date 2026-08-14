@@ -1,17 +1,14 @@
 #include <qdb/kernel/annotate_type.h>
 
 #include <qdb/catalog/external_module.h>
+#include <qdb/kernel/vm_function.h>
 #include <qdb/plan/clone_expr.h>
 #include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
 
 #include <qumir/error.h>
 #include <qumir/parser/core/printer.h>
-#include <qumir/frontend/compose.h>
 #include <qumir/frontend/source_module_loader.h>
-#include <qumir/modules/system/system.h>
-#include <qumir/semantics/name_resolution/name_resolver.h>
-#include <qumir/semantics/transform/transform.h>
 
 #include <algorithm>
 #include <functional>
@@ -72,6 +69,11 @@ TTypePtr ExternalReturnType(
 [[noreturn]] void ThrowTyping(std::string_view stage, const NQumir::TError& cause) {
     throw NQumir::TError(
         "project type inference [" + std::string(stage) + "]: " + cause.ToString());
+}
+
+[[noreturn]] void ThrowTyping(std::string_view stage, const std::string& cause) {
+    throw NQumir::TError(
+        "project type inference [" + std::string(stage) + "]: " + cause);
 }
 
 // Planner column type -> the qumir type the annotator should see. String columns are
@@ -154,17 +156,21 @@ public:
         std::shared_ptr<const TExternalCatalogSnapshot> externalCatalog = nullptr)
         : ExternalCatalog_(std::move(externalCatalog))
     {
-        System_ = std::make_shared<NQumir::NRegistry::SystemModule>();
-        Resolver_.ApplyPragmas(Pragmas_);
-        Resolver_.RegisterModule(System_.get());
-        if (auto reg = Loader_.RegisterSourceModule(
-                std::string(QDB_SOURCE_DIR) + "/modules/qumirdb.oz"); !reg) {
-            LoadError_ = reg.error();
+        if (ExternalCatalog_) {
+            OwnedFrontend_ = std::make_unique<TVmFrontendContext>(
+                std::vector<std::string>{
+                    std::string(QDB_SOURCE_DIR) + "/modules/qumirdb.oz",
+                });
+            Frontend_ = OwnedFrontend_.get();
+        } else {
+            Frontend_ = &QumirdbVmContext();
         }
         if (ExternalCatalog_) {
             ExternalModuleNames_ = ExternalCatalog_->ModuleNames();
-            if (auto reg = ExternalCatalog_->RegisterDeclarations(Loader_); !reg) {
-                LoadError_ = reg.error();
+            if (auto error = Frontend_->RegisterExternalDeclarations(
+                    *ExternalCatalog_))
+            {
+                LoadError_ = std::move(*error);
             }
         }
     }
@@ -192,18 +198,17 @@ public:
 
         // Annotation writes ->Type in place, so type a clone, not the plan's node.
         auto cloned = CloneExpr(expr);
-        // The resolver is shared, so each throwaway function needs a unique name — a
-        // fixed one would clash ("overload differs only in return type") on reuse.
-        // TODO: reclaim the per-call symbol/scope instead of leaking a name (needs a
-        // name_resolver checkpoint/rollback that survives generic instantiation).
-        const std::string tag = std::to_string(Counter_++);
-        const std::string resultName = "__result_" + tag + "__";
+        // Unique names also make diagnostics and any resolver-owned generated
+        // symbols unambiguous across independent annotation calls.
+        const std::string functionName =
+            Frontend_->UniqueName("__annotate_");
+        const std::string resultName = "__result_" + functionName;
         auto resultVar = std::make_shared<TVarStmt>(loc, resultName, nullptr);
         resultVar->Init = cloned;
         auto body = std::make_shared<TBlockExpr>(
             loc, std::vector<TExprPtr>{resultVar});
         auto fn = std::make_shared<TFunDecl>(
-            loc, "__annotate_" + tag + "__", std::vector<TGenericParam>{},
+            loc, functionName, std::vector<TGenericParam>{},
             std::move(params), body, std::make_shared<TVoidType>());
         std::vector<TExprPtr> statements{
             std::make_shared<TUseExpr>(loc, "qumirdb")};
@@ -213,24 +218,11 @@ public:
         statements.push_back(fn);
         TExprPtr module = std::make_shared<TBlockExpr>(loc, std::move(statements));
 
-        // Shared loader + resolver so qumirdb.oz is parsed only once. LoadAndCompose
-        // still re-inlines and re-resolves it each call (the pending optimization), but
-        // reparsing the source per call would cost seconds.
-        auto composed = NQumir::NFrontend::LoadAndCompose(Loader_, module, Pragmas_);
-        if (!composed) {
-            ThrowTyping("compose", composed.error());
-        }
-        TExprPtr ast = std::move(composed->Ast);
-        Resolver_.ApplyPragmas(composed->Pragmas);
-        Resolver_.GetOrCreateRootScope()->RootLevel = false;
-
-        if (auto err = Resolver_.Resolve(ast)) {
-            ThrowTyping("resolve", *err);
-        }
-        if (auto transformed = NQumir::NTransform::Pipeline(ast, Resolver_, {}); !transformed) {
+        auto transformed = Frontend_->Transform(std::move(module));
+        if (!transformed) {
             ThrowTyping("annotate", transformed.error());
         }
-        auto type = FindResultType(ast, resultName);
+        auto type = FindResultType(*transformed, resultName);
         if (!type) {
             throw NQumir::TError(
                 "project type inference: annotator produced no type for '" +
@@ -271,11 +263,11 @@ private:
         NQumir::TLocation loc{};
         TExprPtr module = std::make_shared<TBlockExpr>(loc,
             std::vector<TExprPtr>{std::make_shared<TUseExpr>(loc, "qumirdb")});
-        auto composed = NQumir::NFrontend::LoadAndCompose(Loader_, module, Pragmas_);
+        auto composed = Frontend_->Compose(std::move(module));
         if (!composed) {
             return;
         }
-        CollectReturns(composed->Ast);
+        CollectReturns(*composed);
     }
 
     void CollectReturns(const TExprPtr& node) {
@@ -292,12 +284,9 @@ private:
         }
     }
 
-    const std::vector<TPragma> Pragmas_{TPragma{"language", {"overloads"}, {}}};
-    std::shared_ptr<NQumir::NRegistry::SystemModule> System_;
-    NQumir::NFrontend::TSourceModuleLoader Loader_;
-    NQumir::NSemantics::TNameResolver Resolver_;
-    std::optional<NQumir::TError> LoadError_;
-    uint64_t Counter_ = 0;
+    std::unique_ptr<TVmFrontendContext> OwnedFrontend_;
+    TVmFrontendContext* Frontend_ = nullptr;
+    std::optional<std::string> LoadError_;
     bool ExternsBuilt_ = false;
     std::unordered_map<std::string, TTypePtr> ExternReturns_;
     std::shared_ptr<const TExternalCatalogSnapshot> ExternalCatalog_;
@@ -1649,6 +1638,67 @@ TTypePtr AnnotateExprType(
             NQumir::NAst::NCore::PrintAst(expr) + "'");
     }
     return t;
+}
+
+TTypePtr EffectiveBinaryNumericType(
+    const TExprPtr& left,
+    const TExprPtr& right)
+{
+    if (!left || !right) {
+        return nullptr;
+    }
+    TTypePtr leftType = UnwrapNamedType(ValueType(left->Type));
+    TTypePtr rightType = UnwrapNamedType(ValueType(right->Type));
+    if (IsInt(leftType) && IsInt(rightType)) {
+        if (IsIntLiteral(right)) {
+            rightType = leftType;
+        } else if (IsIntLiteral(left)) {
+            leftType = rightType;
+        }
+    }
+    const bool leftNumeric = IsInt(leftType) || IsFloat(leftType);
+    const bool rightNumeric = IsInt(rightType) || IsFloat(rightType);
+    return leftNumeric && rightNumeric
+        ? CommonNumeric(leftType, rightType)
+        : nullptr;
+}
+
+TTypePtr AnnotateExprTreeTypes(
+    const TExprPtr& expr,
+    const TStructType& inputType,
+    const TAnnotationContext* context)
+{
+    TAnnotationScope scope(context);
+    if (!expr) {
+        throw NQumir::TError("expression type inference: null expression");
+    }
+
+    std::function<TTypePtr(const TExprPtr&)> annotate =
+        [&](const TExprPtr& node) -> TTypePtr
+    {
+        for (auto* child : node->MutableChildren()) {
+            if (*child) {
+                annotate(*child);
+            }
+        }
+        if (auto binary = TMaybeNode<TBinaryExpr>(node)) {
+            auto leftType = UnwrapNamedType(ValueType(binary.Cast()->Left->Type));
+            auto rightType = UnwrapNamedType(ValueType(binary.Cast()->Right->Type));
+            if (IsInt(leftType) && IsInt(rightType)) {
+                if (IsIntLiteral(binary.Cast()->Right)) {
+                    binary.Cast()->Right->Type = leftType;
+                } else if (IsIntLiteral(binary.Cast()->Left)) {
+                    binary.Cast()->Left->Type = rightType;
+                }
+            }
+        }
+        auto type = InferType(node, inputType);
+        if (type) {
+            node->Type = type;
+        }
+        return type ? type : node->Type;
+    };
+    return annotate(expr);
 }
 
 namespace {

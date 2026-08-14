@@ -73,6 +73,16 @@ std::optional<EFrameBoundKind> ParseFrameBoundKind(std::string_view name) {
     return std::nullopt;
 }
 
+bool CanStartExpression(const TToken& token) {
+    return token.Type == TToken::Integer
+        || token.Type == TToken::Float
+        || token.Type == TToken::String
+        || token.Type == TToken::Char
+        || token.Type == TToken::Boolean
+        || token.Type == TToken::Identifier
+        || IParseHandle::IsOp(token, '(');
+}
+
 TNodeParserMap MakeRelParsers(TRelParserOptions options) {
     TNodeParserMap parsers;
     parsers["rel"] = [opts = options](IParseHandle& h, TLocation loc) -> TAstTask {
@@ -87,14 +97,25 @@ TNodeParserMap MakeRelParsers(TRelParserOptions options) {
             if (pathTok.Type != TToken::String) {
                 co_return IParseHandle::MakeError(pathTok, "(rel source) expects a path string");
             }
-            // Optional explicit alias: (rel source "path" "alias")
+            // Optional explicit alias and row-group predicate hint:
+            // (rel source "path" "alias" (> x 5))
             std::string explicitAlias;
+            TExprPtr rowGroupPredicate;
             auto peek = h.Next();
             if (peek.Type == TToken::String) {
                 explicitAlias = peek.Name;
+                peek = h.Next();
+            }
+            if (!IParseHandle::IsOp(peek, ')')) {
+                if (!CanStartExpression(peek)) {
+                    co_return IParseHandle::MakeError(
+                        peek,
+                        "(rel source) expects ')' or alias string, optionally "
+                        "followed by a row-group predicate expression");
+                }
+                h.Unget(peek);
+                rowGroupPredicate = co_await h.Expr();
                 co_await h.Take(')');
-            } else if (!IParseHandle::IsOp(peek, ')')) {
-                co_return IParseHandle::MakeError(peek, "(rel source) expects ')' or alias string");
             }
             if (!opts.SourceFactory) {
                 co_return TError(loc, "(rel source) requires a SourceFactory");
@@ -104,6 +125,11 @@ TNodeParserMap MakeRelParsers(TRelParserOptions options) {
             if (!explicitAlias.empty()) {
                 if (auto* src = dynamic_cast<TSourceOperator*>(opExpr.get())) {
                     src->SetAlias(std::move(explicitAlias));
+                }
+            }
+            if (rowGroupPredicate) {
+                if (auto* src = dynamic_cast<TSourceOperator*>(opExpr.get())) {
+                    src->SetRowGroupPredicate(std::move(rowGroupPredicate));
                 }
             }
             co_return opExpr;

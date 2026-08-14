@@ -7,7 +7,10 @@
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/ops/stats.h>
 #include <qdb/plan/pipeline.h>
+#include <qdb/plan/passes/row_group_predicate.h>
+#include <qdb/plan/passes/typing.h>
 
+#include <qumir/parser/core/printer.h>
 #include <qumir/parser/type.h>
 
 #include <bit>
@@ -36,11 +39,15 @@ std::vector<uint64_t> Hist(std::initializer_list<T> values) {
     return out;
 }
 
-void WriteParquet(const std::string& path, std::shared_ptr<arrow::RecordBatch> batch) {
+void WriteParquet(
+    const std::string& path,
+    std::shared_ptr<arrow::RecordBatch> batch,
+    int64_t rowGroupRows = 1024)
+{
     auto outfile = arrow::io::FileOutputStream::Open(path).ValueOrDie();
     auto table = arrow::Table::FromRecordBatches({batch}).ValueOrDie();
     auto status = parquet::arrow::WriteTable(
-        *table, arrow::default_memory_pool(), outfile, /*chunk*/ 1024);
+        *table, arrow::default_memory_pool(), outfile, rowGroupRows);
     ASSERT_TRUE(status.ok()) << status.ToString();
 }
 
@@ -155,6 +162,51 @@ TEST(StatsTest, ParquetStandardStats) {
     EXPECT_FALSE(nameStats->MinValue.has_value());  // string: no numeric min/max
 }
 
+TEST(StatsTest, ParquetRowGroupPredicateUsesPerGroupBounds) {
+    const std::string path = "/tmp/test_stats_qdb_row_groups.parquet";
+    arrow::Int64Builder x;
+    (void)x.AppendValues({0, 1, 100, 101, 0, 1});
+    auto schema = arrow::schema({
+        arrow::field("x", arrow::int64(), /*nullable*/ false),
+    });
+    auto batch = arrow::RecordBatch::Make(
+        schema, 6, {x.Finish().ValueOrDie()});
+    WriteParquet(path, batch, /*rowGroupRows*/ 2);
+
+    NQdb::TParquetSource source(path);
+    ASSERT_EQ(source.ScanRowGroups().size(), 3u);
+    NQdb::TOperatorPtr sourceOp =
+        std::make_shared<NQdb::TSourceOperator>(source, path);
+
+    auto filter = NQdb::MakeFilter(sourceOp, "(> x 50)");
+    ASSERT_TRUE(filter.has_value()) << filter.error().ToString();
+    NQdb::AnnotateTypes(*filter);
+    auto typedFilter = NQdb::TMaybeOp<NQdb::TFilterOperator>(*filter).Cast();
+    auto kept = source.PruneRowGroups(typedFilter->Predicate(), "");
+    ASSERT_EQ(kept.size(), 1u);
+    EXPECT_EQ(kept[0].RowGroup, 1u);
+
+    auto sparse = NQdb::MakeFilter(sourceOp, "(< x 10)");
+    ASSERT_TRUE(sparse.has_value()) << sparse.error().ToString();
+    NQdb::AnnotateTypes(*sparse);
+    auto sparseFilter = NQdb::TMaybeOp<NQdb::TFilterOperator>(*sparse).Cast();
+    auto sparseGroups = source.PruneRowGroups(sparseFilter->Predicate(), "");
+    ASSERT_EQ(sparseGroups.size(), 2u);
+    EXPECT_EQ(sparseGroups[0].RowGroup, 0u);
+    EXPECT_EQ(sparseGroups[1].RowGroup, 2u);
+
+    auto impossible = NQdb::MakeFilter(sourceOp, "(> x 200)");
+    ASSERT_TRUE(impossible.has_value()) << impossible.error().ToString();
+    NQdb::AnnotateTypes(*impossible);
+    auto impossibleFilter =
+        NQdb::TMaybeOp<NQdb::TFilterOperator>(*impossible).Cast();
+    EXPECT_TRUE(source.PruneRowGroups(impossibleFilter->Predicate(), "").empty());
+
+    auto emptySource = source.MakeRowGroupsSource({});
+    NQdb::TRowSet rowSet{};
+    EXPECT_FALSE(emptySource->Next(rowSet));
+}
+
 // ─── EstimateStats: filter selectivity propagation (source → filter) ─────────
 // NOTE: exercises the whole stats-propagation pipeline. Expected to go green
 // once EstimateStats actually computes per-node stats (calls ComputeStatsFor),
@@ -205,7 +257,8 @@ struct TStatsSource : NQdb::ISource {
 
 TEST(StatsTest, FilterSelectivityPropagation) {
     TStatsSource src;
-    NQdb::TOperatorPtr plan = std::make_shared<NQdb::TSourceOperator>(src, "t");
+    auto sourceOp = std::make_shared<NQdb::TSourceOperator>(src, "t");
+    NQdb::TOperatorPtr plan = sourceOp;
 
     auto filter = NQdb::MakeFilter(plan, "(< x 250)");
     ASSERT_TRUE(filter.has_value()) << filter.error().ToString();
@@ -217,6 +270,27 @@ TEST(StatsTest, FilterSelectivityPropagation) {
     // x < 250 over uniform [0,1000) => ~25% of 1000 rows.
     EXPECT_GE(plan->Stats_->RowCount, 200u);
     EXPECT_LE(plan->Stats_->RowCount, 300u);
+    EXPECT_TRUE(sourceOp->RowGroupPredicate());
+    EXPECT_TRUE(NQdb::TMaybeOp<NQdb::TFilterOperator>(plan));
+}
+
+TEST(StatsTest, RowGroupHintCollectsNestedFilterChain) {
+    TStatsSource src;
+    auto source = std::make_shared<NQdb::TSourceOperator>(src, "t");
+    auto inner = NQdb::MakeFilter(source, "(> x 10)");
+    ASSERT_TRUE(inner.has_value()) << inner.error().ToString();
+    auto outer = NQdb::MakeFilter(*inner, "(< x 20)");
+    ASSERT_TRUE(outer.has_value()) << outer.error().ToString();
+
+    NQdb::AnnotateTypes(*outer);
+    NQdb::AttachRowGroupPredicates(*outer);
+
+    ASSERT_TRUE(source->RowGroupPredicate());
+    const auto hint = NQumir::NAst::NCore::PrintAst(
+        source->RowGroupPredicate());
+    EXPECT_NE(hint.find("&&"), std::string::npos);
+    EXPECT_NE(hint.find("(> x 10)"), std::string::npos);
+    EXPECT_NE(hint.find("(< x 20)"), std::string::npos);
 }
 
 // Project renames x -> y. Projection preserves row count and carries the

@@ -9,6 +9,7 @@
 #include <qdb/plan/passes/cte_reuse.h>
 #include <qdb/plan/passes/top_sort.h>
 #include <qdb/plan/passes/push_limit.h>
+#include <qdb/plan/passes/row_group_predicate.h>
 #include <qdb/plan/passes/typing.h>
 #include <qdb/plan/plan_print.h>
 
@@ -61,24 +62,38 @@ void OptimizeOne(TOperatorPtr& plan, TPlanPassOptions& options) {
     EstimateStats(plan);
 }
 
+template <class TFn>
+void ForEachPlan(TOperatorPtr& main, TFn&& fn, bool includeMain = true) {
+    for (const auto& def : CollectCteDefinitions(main)) {
+        fn(def->Plan, def.get());
+    }
+    if (includeMain) {
+        fn(main, nullptr);
+    }
+}
+
 } // namespace
 
 void ApplyPlanPasses(TOperatorPtr& plan, TPlanPassOptions options) {
-    for (const auto& def : CollectCteDefinitions(plan)) {
-        OptimizeOne(def->Plan, options);
-        def->OutputType = def->Plan->OutputColumns();
-    }
-    OptimizeOne(plan, options);
+    ForEachPlan(plan, [&](TOperatorPtr& current, TCteDefinition* def) {
+        OptimizeOne(current, options);
+        if (def) {
+            def->OutputType = current->OutputColumns();
+        }
+    });
     PushConsumerPredicatesIntoDefinitions(plan, options.Annotation);
     auto usage = PropagateCteDemands(plan);
     // PropagateCteDemands narrowed definition schemas; refresh their cost
     // (dependency-first, so nested definitions are estimated before their users)
     // for the cost-based reuse decision.
-    for (const auto& def : CollectCteDefinitions(plan)) {
-        EstimateStats(def->Plan);
-    }
+    ForEachPlan(plan, [](TOperatorPtr& current, TCteDefinition*) {
+        EstimateStats(current);
+    }, false);
     auto decisions = ChooseCteReuse(usage);
     plan = ApplyCteReuse(std::move(plan), decisions);
+    ForEachPlan(plan, [](TOperatorPtr& current, TCteDefinition*) {
+        AttachRowGroupPredicates(current);
+    });
     if (std::getenv("QDB_DUMP_PASSES") != nullptr) {
         std::cerr << "\n===== after ApplyCteReuse =====\n";
         PrintPlanTreeWithCtes(std::cerr, plan);

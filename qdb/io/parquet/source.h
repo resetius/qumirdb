@@ -4,9 +4,13 @@
 #include <qdb/plan/ops/stats.h>
 #include <qdb/scheduler/scan_split.h>
 
+#include <qumir/parser/ast.h>
+
 #include <memory>
+#include <iosfwd>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_set>
 #include <vector>
 
@@ -39,9 +43,12 @@ public:
     bool Next(TRowSet& rowSet) override;
     void RestrictColumns(const std::unordered_set<std::string>& names) override;
     std::vector<NScheduler::TScanRowGroup> ScanRowGroups() const override;
-    std::unique_ptr<TParquetSource> MakeRowGroupRangeSource(
-        size_t firstRowGroup,
-        size_t rowGroupCount) const;
+    std::vector<NScheduler::TScanRowGroup> PruneRowGroups(
+        const NQumir::NAst::TExprPtr& predicate,
+        std::string_view sourceAlias,
+        std::ostream* diagnostics = nullptr) const;
+    std::unique_ptr<TParquetSource> MakeRowGroupsSource(
+        const std::vector<size_t>& rowGroups) const;
 
     const TStatsPtr Stats() const override;
 
@@ -49,7 +56,7 @@ private:
     friend class TParquetFile;
     TParquetSource(
         std::shared_ptr<TParquetFileData> file,
-        std::vector<int> rowGroups,
+        std::optional<std::vector<int>> rowGroups,
         std::optional<std::unordered_set<std::string>> restrictedColumns);
 
     void ResetReader();
@@ -58,7 +65,8 @@ private:
     void RefreshSchema();
 
     std::shared_ptr<TParquetFileData> File_;
-    std::vector<int> RowGroups_;
+    // nullopt means the full file; an engaged empty vector is an empty scan.
+    std::optional<std::vector<int>> RowGroups_;
     std::optional<std::unordered_set<std::string>> RestrictedColumns_;
     std::shared_ptr<arrow::RecordBatchReader> Reader_;
     std::vector<std::string> Names_;

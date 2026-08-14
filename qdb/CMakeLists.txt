@@ -13,6 +13,7 @@ add_library(qumirdb
     modules/qumirdb.cpp
     modules/qumirdb_runtime.cpp
     io/parquet/source.cpp
+    io/parquet/row_group_predicate.cpp
     io/text/sink.cpp
     plan/ops/source.cpp
     plan/ops/filter.cpp
@@ -42,6 +43,8 @@ add_library(qumirdb
     plan/passes/cbo/dpccp.cpp
     plan/passes/top_sort.cpp
     plan/passes/push_limit.cpp
+    plan/passes/predicate_requirements.cpp
+    plan/passes/row_group_predicate.cpp
     plan/passes/flatten_conjuncts.cpp
     plan/passes/flatten_disjuncts.cpp
     plan/passes/factor_conjuncts.cpp
@@ -52,6 +55,7 @@ add_library(qumirdb
     plan/pipeline.cpp
     plan/plan_print.cpp
     plan/build.cpp
+    kernel/vm_function.cpp
     kernel/column_value.cpp
     kernel/gen.cpp
     kernel/aggregate_key.cpp

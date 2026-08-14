@@ -45,6 +45,20 @@ NQumir::NAst::TTypePtr AnnotateExprType(
     const NQumir::NAst::TStructType& inputType,
     const TAnnotationContext* context = nullptr);
 
+// Annotates every node in an expression tree with the same rule-based type
+// inference used by kernels. Integer literals adopt the adjacent integer
+// operand type, matching Qumir overload resolution.
+NQumir::NAst::TTypePtr AnnotateExprTreeTypes(
+    const NQumir::NAst::TExprPtr& expr,
+    const NQumir::NAst::TStructType& inputType,
+    const TAnnotationContext* context = nullptr);
+
+// Effective common type used by a numeric binary operator/comparison after
+// AnnotateExprTreeTypes. Returns nullptr for a non-numeric or incompatible pair.
+NQumir::NAst::TTypePtr EffectiveBinaryNumericType(
+    const NQumir::NAst::TExprPtr& left,
+    const NQumir::NAst::TExprPtr& right);
+
 // Heavy rewrite, run once per kernel just before compilation (never during logical
 // planning). Rewrites null-strict ops/calls/casts, AND/OR (SQL 3VL) and CASE/`if`
 // branches so nullability is explicit in the AST (guards on `.Valid`, results wrapped

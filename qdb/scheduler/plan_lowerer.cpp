@@ -35,6 +35,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <utility>
 
 namespace NQdb {
@@ -410,7 +411,8 @@ public:
 
     size_t OutputLanes(const TOperatorPtr& op) const {
         if (auto n = TMaybeOp<TSourceOperator>(op)) {
-            return std::max<size_t>(ScanSplits(*n.Cast()).size(), 1);
+            auto splits = ScanSplits(*n.Cast());
+            return std::max<size_t>(splits ? splits->size() : 0, 1);
         }
         if (TMaybeOp<TCteConsumer>(op)) {
             return 1;
@@ -871,15 +873,46 @@ private:
         return false;
     }
 
-    std::vector<NScheduler::TScanSplit> ScanSplits(TSourceOperator& src) const {
+    using TSourceSplits =
+        std::optional<std::vector<NScheduler::TScanSplit>>;
+
+    TSourceSplits ScanSplits(TSourceOperator& src) const {
+        if (auto found = ScanSplitCache_.find(&src);
+            found != ScanSplitCache_.end())
+        {
+            return found->second;
+        }
         auto* metadata =
             dynamic_cast<NScheduler::IScanMetadataSource*>(&src.GetSource());
         if (!metadata) {
-            return {};
+            return std::nullopt;
         }
-        return NScheduler::BuildScanSplits(
-            metadata->ScanRowGroups(),
-            Settings_.ScanSplit);
+        auto rowGroups = metadata->ScanRowGroups();
+        if (auto* parquet = dynamic_cast<TParquetSource*>(&src.GetSource());
+            parquet && src.RowGroupPredicate())
+        {
+            rowGroups = parquet->PruneRowGroups(
+                src.RowGroupPredicate(),
+                src.GetAlias(),
+                Settings_.Diagnostics.RowGroupPredicate
+                    ? Settings_.Diagnostics.Output
+                    : nullptr);
+        }
+        if (rowGroups.empty()) {
+            TSourceSplits empty = std::vector<NScheduler::TScanSplit>{};
+            ScanSplitCache_.emplace(&src, empty);
+            return empty;
+        }
+        auto splits = NScheduler::BuildScanSplits(
+            rowGroups, Settings_.ScanSplit);
+        // An engaged empty value is reserved for a proven empty scan. If a
+        // future strategy declines a non-empty input by returning {}, use the
+        // original source rather than silently dropping all rows.
+        TSourceSplits result = splits.empty()
+            ? TSourceSplits{std::nullopt}
+            : TSourceSplits{std::move(splits)};
+        ScanSplitCache_.emplace(&src, result);
+        return result;
     }
 
     // Number of hash-shuffle partitions for a shuffled operator (grouped
@@ -941,7 +974,7 @@ private:
         auto outputType = BuildSourceRuntimeType(src);
         const auto execStageId = NewExecStage(
             &src, EExecPlanNodeKind::Source);
-        auto splits = ScanSplits(src);
+        auto splitPlan = ScanSplits(src);
         auto* sourcePtr = &src.GetSource();
         auto* parquetSource = dynamic_cast<TParquetSource*>(sourcePtr);
         auto code = std::make_shared<NScheduler::TSourceCode>(
@@ -950,17 +983,26 @@ private:
                 return sourceState->Source->Next(rowSet);
             });
 
-        const size_t lanes = std::max<size_t>(splits.size(), 1);
+        const size_t lanes = std::max<size_t>(
+            splitPlan ? splitPlan->size() : 0, 1);
         TLoweredOutput result;
         result.OutputType = std::move(outputType);
         result.Producers.reserve(lanes);
         for (size_t p = 0; p < lanes; ++p) {
-            const auto* split = splits.empty() ? nullptr : &splits[p];
+            const auto* split = splitPlan && !splitPlan->empty()
+                ? &(*splitPlan)[p]
+                : nullptr;
             std::shared_ptr<void> state;
-            if (parquetSource && split && split->RowGroupCount) {
-                auto owned = parquetSource->MakeRowGroupRangeSource(
-                    split->FirstRowGroup,
-                    split->RowGroupCount);
+            if (parquetSource && split && !split->RowGroups.empty()) {
+                auto owned = parquetSource->MakeRowGroupsSource(split->RowGroups);
+                auto* ptr = owned.get();
+                state = std::make_shared<TSchedulerSourceState>(
+                    TSchedulerSourceState{
+                        .Source = ptr,
+                        .OwnedSource = std::move(owned),
+                    });
+            } else if (parquetSource && splitPlan && splitPlan->empty()) {
+                auto owned = parquetSource->MakeRowGroupsSource({});
                 auto* ptr = owned.get();
                 state = std::make_shared<TSchedulerSourceState>(
                     TSchedulerSourceState{
@@ -2351,6 +2393,11 @@ private:
     std::vector<TGeneratedKernel>* KernelSink_ = nullptr;
     std::shared_ptr<const TExternalCatalogSnapshot> ExternalCatalog_;
     std::shared_ptr<TRuntimeContext> RuntimeContext_;
+    // Split planning includes Parquet predicate compilation and evaluation;
+    // OutputLanes and LowerSource both query it. nullopt means "use the original
+    // source", while an engaged empty vector is a proven empty scan.
+    mutable std::unordered_map<const TSourceOperator*, TSourceSplits>
+        ScanSplitCache_;
     std::unordered_map<const TCteMaterialization*, TMaterializedProducer> Materialized_;
     std::vector<TLoweredExecStage> ExecStages_;
     NScheduler::TTaskGroupId LastTaskGroupId_ =

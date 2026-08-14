@@ -676,6 +676,10 @@ int main(int argc, char** argv) {
     NQumir::NCodeGen::TLLVMInitializer llvmInit;
 
     TConfig config;
+    if (std::getenv("QDB_DEBUG_ROW_GROUP_PREDICATE")) {
+        config.Scheduler.Diagnostics.RowGroupPredicate = true;
+        config.Scheduler.Diagnostics.Output = &std::cerr;
+    }
     NQdb::TExternalModuleCatalog catalog;
     std::string queryFile;
 

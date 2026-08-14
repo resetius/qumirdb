@@ -155,3 +155,35 @@ join left [c_custkey = o_custkey]
 - inner/semi/anti joins may carry keys and a residual;
 - outer joins carry keys and **no** residual;
 - a `filter` remains only where a predicate could not be pushed further down.
+
+## Parquet row-group pruning
+
+After relational rewrites and CTE reuse, `AttachRowGroupPredicates` collects the
+complete chain of filters immediately above each source and stores a cloned
+predicate on `TSourceOperator`. The filter itself remains in the plan and still
+checks every emitted row; the source predicate is only a conservative scan hint.
+
+`BuildPredicateSuperset` is shared with CTE predicate propagation. It groups
+conjuncts by their referenced column set. For alternative CTE consumers, a group
+is retained only when every consumer constrains those columns, and their
+conditions are combined with `OR`. A source path is the single-alternative case,
+so its conjuncts are preserved, including expressions over several columns.
+
+During scheduler lowering, a Parquet source compiles the hint once into a Qumir
+VM function over an interval domain. Column identifiers receive the row group's
+typed `min`, `max`, `null_count`, and NaN possibilities. Comparisons, boolean
+operators, and supported arithmetic are evaluated abstractly. Unsupported
+syntax, missing or invalid statistics, overflow, and VM failures all mean
+"possibly true" and keep the row group. A row group is removed only when `TRUE`
+is impossible under SQL `WHERE` semantics.
+
+The frontend context caches parsed `.oz` modules across compilations, while each
+compiled function has independent resolver/lowering state. VM evaluation returns
+the scalar truth bits directly, without formatting and reparsing a string.
+Lowering caches the resulting explicit split list per source. In that cache,
+`nullopt` means "use the original source", an engaged non-empty list means the
+chosen row groups, and an engaged empty list is a proven empty scan.
+
+The source hint is included in text plans and S-expression round-trips. Optional
+diagnostics are carried explicitly through scheduler settings; only the CLI maps
+`QDB_DEBUG_ROW_GROUP_PREDICATE` to that option.

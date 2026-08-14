@@ -17,6 +17,9 @@ SQL → logical plan → idempotent rewrite passes → physical plan. Entry poin
 6. **ExtractEquiJoins** — lift equi-keys (equivalence classes), push predicates
    per side, leave residuals. [predicate_pushdown.md](predicate_pushdown.md).
 7. **ApplyColumnPruning** — narrow each op's required input columns.
+8. **AttachRowGroupPredicates** — attach a conservative Parquet row-group
+   pruning hint without removing the row-level filter.
+   [predicate_pushdown.md](predicate_pushdown.md#parquet-row-group-pruning).
 
 Detailed algorithm docs:
 

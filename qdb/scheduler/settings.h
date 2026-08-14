@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <iosfwd>
 
 namespace NQdb {
 namespace NScheduler {
@@ -55,12 +56,20 @@ struct TAggregateSettings {
     bool CascadeGlobal = false;
 };
 
+struct TDiagnosticsSettings {
+    // Disabled by default. Applications may opt in and provide the destination
+    // explicitly; the execution library never reads process environment state.
+    bool RowGroupPredicate = false;
+    std::ostream* Output = nullptr;
+};
+
 struct TSettings {
     TSchedulerSettings Scheduler;
     TQueueSettings Queue;
     TScanSplitSettings ScanSplit;
     THashShuffleSettings HashShuffle;
     TAggregateSettings Aggregate;
+    TDiagnosticsSettings Diagnostics;
 };
 
 } // namespace NScheduler
