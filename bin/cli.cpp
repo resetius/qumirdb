@@ -30,6 +30,8 @@
 #include <readline/history.h>
 #include <readline/readline.h>
 
+#include <sys/resource.h>
+
 #include <cctype>
 #include <chrono>
 #include <cstdlib>
@@ -254,6 +256,18 @@ private:
     int64_t Rows_ = 0;
 };
 
+// User + system CPU time consumed by the process across all threads.
+std::chrono::duration<double> ProcessCpuTime() {
+    rusage usage{};
+    if (getrusage(RUSAGE_SELF, &usage) != 0) {
+        return std::chrono::duration<double>::zero();
+    }
+    auto seconds = [](const timeval& tv) {
+        return static_cast<double>(tv.tv_sec) + static_cast<double>(tv.tv_usec) * 1e-6;
+    };
+    return std::chrono::duration<double>(seconds(usage.ru_utime) + seconds(usage.ru_stime));
+}
+
 int ExecutePlan(
     NQdb::TOperatorPtr plan,
     const TConfig& config,
@@ -323,6 +337,7 @@ int ExecutePlan(
 
     TCountingSink counting(*sink);
     auto start = std::chrono::steady_clock::now();
+    auto cpuStart = ProcessCpuTime();
     std::string error;
     if (!NQdb::NScheduler::RunPlanIntoSink(
             std::move(lowered), counting, config.Scheduler, diagnostics, &error)) {
@@ -331,13 +346,15 @@ int ExecutePlan(
     }
     counting.Flush();
     auto elapsed = std::chrono::steady_clock::now() - start;
+    auto cpuElapsed = ProcessCpuTime() - cpuStart;
     if (config.Timing) {
         std::cerr << "Planning: "
                   << std::chrono::duration<double>(planElapsed).count() << " seconds\n"
                   << "KernelBuild: "
                   << std::chrono::duration<double>(buildElapsed).count() << " seconds\n"
                   << "JitLLVM: "
-                  << std::chrono::duration<double>(llvmElapsed).count() << " seconds\n";
+                  << std::chrono::duration<double>(llvmElapsed).count() << " seconds\n"
+                  << "Cpu: " << cpuElapsed.count() << " seconds\n";
     }
     std::cerr << "Returned " << counting.Rows() << " rows in "
               << std::chrono::duration<double>(elapsed).count() << " seconds\n";
@@ -662,7 +679,7 @@ void PrintHelp() {
         "  --nocbo                      Disable cost-based join reordering\n"
         "  --explain-mode <mode>        explain output: text (default), sexpr, both\n"
         "  --verbose                    Print the logical and runtime plans\n"
-        "  --timing                     Print per-phase timings (planning, kernel build, JIT LLVM)\n"
+        "  --timing                     Print per-phase timings (planning, kernel build, JIT LLVM, CPU)\n"
         "  --help|-h                    Show this help message\n"
         "\n"
         "Without -i, qdb starts an interactive SQL prompt (statements end with ';').\n"
