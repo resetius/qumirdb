@@ -1252,9 +1252,26 @@ function createQdbEnv(getMemory, holder) {
     while (mem[end] !== 0) ++end;
     return mem.subarray(start, end);
   };
+  // A by-value struct argument crosses the wasm boundary as one pointer (byval),
+  // and a struct result is written through the leading sret argument: qumir
+  // coerces wasm external calls to the target C ABI, exactly like the native
+  // build. Only structs declared as such in qumirdb.oz are affected —
+  // qdb_filter_string_compare takes an explicit pointer/size pair and stays flat.
+  const svBytes = (ptr) => {
+    const dv = new DataView(getMemory().buffer);
+    const at = Number(ptr);
+    return bytesAt(readPointer(dv, at), dv.getBigInt64(at + 8, true));
+  };
+  // BinInt{Lo,Hi} is a 128-bit two's-complement value, little-endian.
+  const binIntAt = (ptr) => {
+    const dv = new DataView(getMemory().buffer);
+    const at = Number(ptr);
+    return (BigInt.asIntN(64, dv.getBigInt64(at + 8, true)) << 64n)
+      + dv.getBigUint64(at, true);
+  };
   // Size-aware: CAST(<string column> AS DATE) passes a non-null-terminated StringView.
-  const sqlDate = (data, size) => {
-    const bytes = bytesAt(data, size);
+  const sqlDate = (str) => {
+    const bytes = svBytes(str);
     const parts = [0, 0, 0];
     let idx = 0;
     for (const b of bytes) {
@@ -1268,8 +1285,8 @@ function createQdbEnv(getMemory, holder) {
     return daysFromCivil(parts[0], parts[1], parts[2]);
   };
   // year/month are approximate (365/30). amount and unit are StringViews.
-  const sqlInterval = (ad, as, ud, us) => {
-    const bytes = bytesAt(ad, as);
+  const sqlInterval = (amount, unit) => {
+    const bytes = svBytes(amount);
     let n = 0;
     let neg = false;
     for (const b of bytes) {
@@ -1282,13 +1299,15 @@ function createQdbEnv(getMemory, holder) {
       for (let i = 0; i < bs.length; ++i) if (bs[i] !== text.charCodeAt(i)) return false;
       return true;
     };
-    const u = bytesAt(ud, us);
+    const u = svBytes(unit);
     if (bytesEqual(u, 'year') || bytesEqual(u, 'years')) return (n * 365) | 0;
     if (bytesEqual(u, 'month') || bytesEqual(u, 'months')) return (n * 30) | 0;
     return n | 0;
   };
-  const substring = (out, data, size, start, length) => {
-    const strSize = Number(size);
+  const substring = (out, str, start, length) => {
+    const view = new DataView(getMemory().buffer);
+    const data = readPointer(view, Number(str));
+    const strSize = Number(view.getBigInt64(Number(str) + 8, true));
     let offset = Number(start) - 1;
     if (offset < 0) offset = 0;
     let len = Number(length);
@@ -1303,9 +1322,12 @@ function createQdbEnv(getMemory, holder) {
     dv.setBigUint64(Number(out), BigInt(data) + BigInt(offset), true);
     dv.setBigInt64(Number(out) + 8, BigInt(len), true);
   };
-  const stringConcat = (out, _arena, ld, ls, rd, rs) => {
-    const leftSize = Math.max(Number(ls), 0);
-    const rightSize = Math.max(Number(rs), 0);
+  const stringConcat = (out, _arena, left, right) => {
+    const args = new DataView(getMemory().buffer);
+    const ld = readPointer(args, Number(left));
+    const rd = readPointer(args, Number(right));
+    const leftSize = Math.max(Number(args.getBigInt64(Number(left) + 8, true)), 0);
+    const rightSize = Math.max(Number(args.getBigInt64(Number(right) + 8, true)), 0);
     const size = leftSize + rightSize;
     const dv = new DataView(getMemory().buffer);
     if (size <= 0) {
@@ -1327,16 +1349,10 @@ function createQdbEnv(getMemory, holder) {
     writePointer(outView, Number(out), ptr);
     outView.setBigInt64(Number(out) + 8, BigInt(size), true);
   };
-  const regexpReplace = (out, _arena, handle, data, size) => {
-    // wasm64 lowers a trailing 16-byte StringView argument indirectly here.
-    // Keep the split form too so this import remains valid if the ABI classifier
-    // can place both fields directly after a future signature change.
-    if (size === undefined) {
-      const arg = Number(data);
-      const dv = new DataView(getMemory().buffer);
-      data = readPointer(dv, arg);
-      size = dv.getBigInt64(arg + 8, true);
-    }
+  const regexpReplace = (out, _arena, handle, str) => {
+    const args = new DataView(getMemory().buffer);
+    const data = readPointer(args, Number(str));
+    const size = args.getBigInt64(Number(str) + 8, true);
     const program = holder.regexPrograms?.[Number(handle) - 1];
     if (!program) {
       throw new Error(`kernel used unknown regex handle ${String(handle)}`);
@@ -1360,8 +1376,6 @@ function createQdbEnv(getMemory, holder) {
     writePointer(dv, Number(out), ptr);
     dv.setBigInt64(Number(out) + 8, BigInt(encoded.length), true);
   };
-  const binIntArg = (lo, hi) =>
-    (BigInt.asIntN(64, BigInt(hi)) << 64n) + BigInt.asUintN(64, BigInt(lo));
   const writeDecimalResult = (out, value) => {
     writeBinIntRaw(new DataView(getMemory().buffer), Number(out), value);
   };
@@ -1370,23 +1384,23 @@ function createQdbEnv(getMemory, holder) {
     writeDecimalResult(out, BigInt(value) * pow10(scale));
   const decimalFromF64 = (out, value, scale) =>
     writeDecimalResult(out, BigInt(Math.round(Number(value) * Number(pow10(scale)))));
-  const decimalScaleUp = (out, lo, hi, delta) =>
-    writeDecimalResult(out, binIntArg(lo, hi) * pow10(delta));
-  const decimalBinary = (out, llo, lhi, rlo, rhi, op) =>
-    writeDecimalResult(out, op(binIntArg(llo, lhi), binIntArg(rlo, rhi)));
-  const decimalNeg = (out, lo, hi) => {
-    const value = binIntArg(lo, hi);
+  const decimalScaleUp = (out, value, delta) =>
+    writeDecimalResult(out, binIntAt(value) * pow10(delta));
+  const decimalBinary = (out, left, right, op) =>
+    writeDecimalResult(out, op(binIntAt(left), binIntAt(right)));
+  const decimalNeg = (out, ptr) => {
+    const value = binIntAt(ptr);
     if (value === -(1n << 127n)) {
       throw new Error('decimal negation overflow');
     }
     writeDecimalResult(out, -value);
   };
-  const decimalMulI64 = (out, lo, hi, rhs) =>
-    writeDecimalResult(out, binIntArg(lo, hi) * BigInt(rhs));
-  const decimalDivI64 = (out, lo, hi, rhs) =>
-    writeDecimalResult(out, binIntArg(lo, hi) / BigInt(rhs));
-  const decimalCompare = (llo, lhi, rlo, rhi, op) =>
-    op(binIntArg(llo, lhi), binIntArg(rlo, rhi)) ? 1 : 0;
+  const decimalMulI64 = (out, left, rhs) =>
+    writeDecimalResult(out, binIntAt(left) * BigInt(rhs));
+  const decimalDivI64 = (out, left, rhs) =>
+    writeDecimalResult(out, binIntAt(left) / BigInt(rhs));
+  const decimalCompare = (left, right, op) =>
+    op(binIntAt(left), binIntAt(right)) ? 1 : 0;
 
   return {
     sqrt: Math.sqrt,
@@ -1403,8 +1417,8 @@ function createQdbEnv(getMemory, holder) {
     qdb_filter_string_compare: (ld, ls, rd, rs) =>
       BigInt(compareBytes(bytesAt(ld, ls), bytesAt(rd, rs))),
     // Pattern is a StringView (string literals are emitted as StringView).
-    qdb_string_view_sql_like: (sd, ss, pd, ps) =>
-      BigInt(sqlLikeBytes(bytesAt(sd, ss), bytesAt(pd, ps))),
+    qdb_string_view_sql_like: (str, pattern) =>
+      BigInt(sqlLikeBytes(svBytes(str), svBytes(pattern))),
     qdb_substring: substring,
     qdb_string_concat: stringConcat,
     qdb_regexp_replace: regexpReplace,
@@ -1435,27 +1449,27 @@ function createQdbEnv(getMemory, holder) {
     qdb_decimal_from_i64: decimalFromI64,
     qdb_decimal_from_f64: decimalFromF64,
     qdb_decimal_scale_up: decimalScaleUp,
-    qdb_decimal_add: (out, llo, lhi, rlo, rhi) =>
-      decimalBinary(out, llo, lhi, rlo, rhi, (l, r) => l + r),
-    qdb_decimal_sub: (out, llo, lhi, rlo, rhi) =>
-      decimalBinary(out, llo, lhi, rlo, rhi, (l, r) => l - r),
+    qdb_decimal_add: (out, left, right) =>
+      decimalBinary(out, left, right, (l, r) => l + r),
+    qdb_decimal_sub: (out, left, right) =>
+      decimalBinary(out, left, right, (l, r) => l - r),
     qdb_decimal_neg: decimalNeg,
     qdb_decimal_mul_i64: decimalMulI64,
     qdb_decimal_div_i64: decimalDivI64,
-    qdb_decimal_div: (out, llo, lhi, rlo, rhi) =>
-      decimalBinary(out, llo, lhi, rlo, rhi, (l, r) => l / r),
-    qdb_decimal_eq: (llo, lhi, rlo, rhi) =>
-      decimalCompare(llo, lhi, rlo, rhi, (l, r) => l === r),
-    qdb_decimal_ne: (llo, lhi, rlo, rhi) =>
-      decimalCompare(llo, lhi, rlo, rhi, (l, r) => l !== r),
-    qdb_decimal_lt: (llo, lhi, rlo, rhi) =>
-      decimalCompare(llo, lhi, rlo, rhi, (l, r) => l < r),
-    qdb_decimal_le: (llo, lhi, rlo, rhi) =>
-      decimalCompare(llo, lhi, rlo, rhi, (l, r) => l <= r),
-    qdb_decimal_gt: (llo, lhi, rlo, rhi) =>
-      decimalCompare(llo, lhi, rlo, rhi, (l, r) => l > r),
-    qdb_decimal_ge: (llo, lhi, rlo, rhi) =>
-      decimalCompare(llo, lhi, rlo, rhi, (l, r) => l >= r),
+    qdb_decimal_div: (out, left, right) =>
+      decimalBinary(out, left, right, (l, r) => l / r),
+    qdb_decimal_eq: (left, right) =>
+      decimalCompare(left, right, (l, r) => l === r),
+    qdb_decimal_ne: (left, right) =>
+      decimalCompare(left, right, (l, r) => l !== r),
+    qdb_decimal_lt: (left, right) =>
+      decimalCompare(left, right, (l, r) => l < r),
+    qdb_decimal_le: (left, right) =>
+      decimalCompare(left, right, (l, r) => l <= r),
+    qdb_decimal_gt: (left, right) =>
+      decimalCompare(left, right, (l, r) => l > r),
+    qdb_decimal_ge: (left, right) =>
+      decimalCompare(left, right, (l, r) => l >= r),
 
     // Cast a string-literal char* to a StringView {Data = lit, Size = strlen}
     // (sret out pointer). Matches qdb_lit_to_sv in qumirdb_runtime.cpp.
