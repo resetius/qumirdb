@@ -1,0 +1,246 @@
+#include <gtest/gtest.h>
+
+#include "plan_runner.h"
+
+#include <qdb/io/parquet/source.h>
+#include <qdb/plan/build.h>
+#include <qdb/plan/ops/source.h>
+#include <qdb/plan/pipeline.h>
+#include <qdb/sql/parser.h>
+
+#include <qumir/codegen/llvm/llvm_initializer.h>
+#include <qumir/parser/ast.h>
+
+#include <arrow/api.h>
+#include <arrow/io/api.h>
+#include <parquet/arrow/writer.h>
+
+#include <algorithm>
+#include <cstdint>
+#include <cstdlib>
+#include <filesystem>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <vector>
+
+namespace {
+
+using namespace NQdb;
+
+void CheckArrow(const arrow::Status& status) {
+    if (!status.ok()) {
+        throw std::runtime_error(status.ToString());
+    }
+}
+
+class TTempDir {
+public:
+    TTempDir() {
+        auto pattern =
+            (std::filesystem::temp_directory_path()
+                / "qdb-row-group-pushdown-XXXXXX").string();
+        std::vector<char> writable(pattern.begin(), pattern.end());
+        writable.push_back('\0');
+        const char* created = ::mkdtemp(writable.data());
+        if (!created) {
+            throw std::runtime_error("failed to create temporary directory");
+        }
+        Path_ = created;
+    }
+
+    ~TTempDir() {
+        std::error_code error;
+        std::filesystem::remove_all(Path_, error);
+    }
+
+    const std::filesystem::path& Path() const {
+        return Path_;
+    }
+
+private:
+    std::filesystem::path Path_;
+};
+
+void WriteFixture(const std::string& path) {
+    arrow::Int64Builder id;
+    arrow::Int32Builder signedValue;
+    arrow::UInt32Builder unsignedValue;
+    arrow::DoubleBuilder floatValue;
+    arrow::Int64Builder nullableValue;
+
+    CheckArrow(id.AppendValues({0, 1, 2, 3, 4, 5}));
+    CheckArrow(signedValue.AppendValues({0, 1, 100, 101, 0, 1}));
+    CheckArrow(unsignedValue.AppendValues(
+        {1, 2, 100, 101, 4000000000U, 4000000001U}));
+    CheckArrow(floatValue.AppendValues(
+        {0.5, 1.5, 100.5, 101.5, -10.0, -9.0}));
+    CheckArrow(nullableValue.AppendNull());
+    CheckArrow(nullableValue.AppendNull());
+    CheckArrow(nullableValue.Append(100));
+    CheckArrow(nullableValue.AppendNull());
+    CheckArrow(nullableValue.Append(1));
+    CheckArrow(nullableValue.Append(2));
+
+    auto schema = arrow::schema({
+        arrow::field("id", arrow::int64(), false),
+        arrow::field("signed_value", arrow::int32(), false),
+        arrow::field("unsigned_value", arrow::uint32(), false),
+        arrow::field("float_value", arrow::float64(), false),
+        arrow::field("nullable_value", arrow::int64(), true),
+    });
+    auto batch = arrow::RecordBatch::Make(schema, 6, {
+        id.Finish().ValueOrDie(),
+        signedValue.Finish().ValueOrDie(),
+        unsignedValue.Finish().ValueOrDie(),
+        floatValue.Finish().ValueOrDie(),
+        nullableValue.Finish().ValueOrDie(),
+    });
+    auto output = arrow::io::FileOutputStream::Open(path).ValueOrDie();
+    auto table = arrow::Table::FromRecordBatches({batch}).ValueOrDie();
+    CheckArrow(parquet::arrow::WriteTable(
+        *table, arrow::default_memory_pool(), output, /*chunk_size*/ 2));
+    CheckArrow(output->Close());
+}
+
+std::shared_ptr<TSourceOperator> FindSource(const TOperatorPtr& node) {
+    if (auto source = TMaybeOp<TSourceOperator>(node)) {
+        return source.Cast();
+    }
+    for (const auto& child : node->Children()) {
+        if (auto op = NQumir::NAst::TMaybeNode<IOperator>(child)) {
+            if (auto source = FindSource(op.Cast())) {
+                return source;
+            }
+        }
+    }
+    return nullptr;
+}
+
+TOperatorPtr BuildSqlPlan(std::string_view sql, TParquetSource& source) {
+    std::istringstream input{std::string(sql)};
+    NSql::TTokenStream tokens(input);
+    NSql::TParser parser;
+    auto parsed = parser.Parse(tokens);
+    if (!parsed) {
+        throw std::runtime_error(parsed.error().ToString());
+    }
+    auto plan = BuildPlan(*parsed, [&](std::string_view table)
+        -> std::expected<TOperatorPtr, NQumir::TError>
+    {
+        return std::make_shared<TSourceOperator>(source, std::string(table));
+    });
+    if (!plan) {
+        throw std::runtime_error(plan.error().ToString());
+    }
+    ApplyPlanPasses(*plan, {.EnableCbo = false});
+    return *plan;
+}
+
+struct TRunResult {
+    std::vector<int64_t> Ids;
+    std::string Diagnostics;
+};
+
+TRunResult RunQuery(
+    const std::string& path,
+    std::string_view sql,
+    bool enablePruning)
+{
+    TParquetSource source(path);
+    auto plan = BuildSqlPlan(sql, source);
+    auto sourceOp = FindSource(plan);
+    if (!sourceOp) {
+        throw std::runtime_error("test plan has no parquet source");
+    }
+    if (!sourceOp->RowGroupPredicate()) {
+        throw std::runtime_error("row-group predicate was not attached");
+    }
+    if (!enablePruning) {
+        sourceOp->SetRowGroupPredicate(nullptr);
+    }
+
+    std::ostringstream diagnostics;
+    NScheduler::TSettings settings;
+    settings.ScanSplit.Strategy = NScheduler::EScanSplitStrategy::RowGroupRange;
+    settings.ScanSplit.MaxScanTasks = 3;
+    settings.Diagnostics.RowGroupPredicate = enablePruning;
+    settings.Diagnostics.Output = &diagnostics;
+
+    auto runtime = RunPlan(plan, settings);
+    std::vector<int64_t> ids;
+    TRowSet rows{};
+    while (runtime->Next(rows)) {
+        const auto* values = reinterpret_cast<const int64_t*>(rows.Columns[0].Data);
+        for (int64_t row = 0; row < rows.RowCount; ++row) {
+            if (!rows.Selection || rows.Selection[row]) {
+                ids.push_back(values[row]);
+            }
+        }
+        Release(&rows);
+    }
+    std::ranges::sort(ids);
+    return {.Ids = std::move(ids), .Diagnostics = diagnostics.str()};
+}
+
+void ExpectSameAsFullScan(
+    const std::string& path,
+    std::string_view sql,
+    const std::vector<int64_t>& expected)
+{
+    const auto pruned = RunQuery(path, sql, true);
+    const auto full = RunQuery(path, sql, false);
+    EXPECT_EQ(pruned.Ids, full.Ids);
+    EXPECT_EQ(pruned.Ids, expected);
+    EXPECT_NE(pruned.Diagnostics.find("may_be_true=0"), std::string::npos);
+}
+
+} // namespace
+
+TEST(RowGroupPushdownE2E, MatchesFullScanAcrossParquetPhysicalTypes) {
+    TTempDir tempDir;
+    const std::string path =
+        (tempDir.Path() / "physical-types.parquet").string();
+    WriteFixture(path);
+
+    ExpectSameAsFullScan(
+        path,
+        "SELECT id FROM t WHERE signed_value > 50",
+        {2, 3});
+    ExpectSameAsFullScan(
+        path,
+        "SELECT id FROM t WHERE unsigned_value > 3000000000",
+        {4, 5});
+    ExpectSameAsFullScan(
+        path,
+        "SELECT id FROM t WHERE float_value < 0.0",
+        {4, 5});
+    ExpectSameAsFullScan(
+        path,
+        "SELECT id FROM t WHERE nullable_value > 50",
+        {2});
+}
+
+TEST(RowGroupPushdownE2E, AllPrunedProducesAnEmptyScan) {
+    TTempDir tempDir;
+    const std::string path =
+        (tempDir.Path() / "empty-scan.parquet").string();
+    WriteFixture(path);
+
+    const auto pruned = RunQuery(
+        path, "SELECT id FROM t WHERE signed_value > 1000", true);
+    const auto full = RunQuery(
+        path, "SELECT id FROM t WHERE signed_value > 1000", false);
+    EXPECT_TRUE(pruned.Ids.empty());
+    EXPECT_EQ(pruned.Ids, full.Ids);
+    EXPECT_NE(pruned.Diagnostics.find("rg=0 may_be_true=0"), std::string::npos);
+    EXPECT_NE(pruned.Diagnostics.find("rg=1 may_be_true=0"), std::string::npos);
+    EXPECT_NE(pruned.Diagnostics.find("rg=2 may_be_true=0"), std::string::npos);
+}
+
+int main(int argc, char** argv) {
+    ::testing::InitGoogleTest(&argc, argv);
+    NQumir::NCodeGen::TLLVMInitializer initializer;
+    return RUN_ALL_TESTS();
+}

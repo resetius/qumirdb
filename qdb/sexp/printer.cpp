@@ -36,6 +36,11 @@ static void PrintRel(NQumir::NAst::TExpr& expr, TPrinter& printer, TPrintFrame f
             out << ' ';
             printer.PrintString(src.GetAlias(), '"');
         }
+        if (src.RowGroupPredicate()) {
+            printer.Separator(frame.Level + 1);
+            printer.PrintExpr(
+                src.RowGroupPredicate(), frame.AllowTypeWrap, frame.Level + 1);
+        }
         out << ')';
         return;
     }

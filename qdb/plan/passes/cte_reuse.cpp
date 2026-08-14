@@ -1,14 +1,12 @@
 #include <qdb/plan/passes/cte_reuse.h>
 
-#include <qdb/plan/clone_expr.h>
 #include <qdb/plan/clone_operator.h>
 #include <qdb/plan/ops/aggregate.h>
 #include <qdb/plan/ops/cte_consumer.h>
 #include <qdb/plan/passes/equijoin.h>
 #include <qdb/plan/passes/estimate_stats.h>
-#include <qdb/plan/passes/flatten_conjuncts.h>
+#include <qdb/plan/passes/predicate_requirements.h>
 #include <qdb/plan/passes/typing.h>
-#include <qdb/plan/passes/unbound_vars.h>
 #include <qdb/plan/ops/filter.h>
 #include <qdb/plan/ops/join.h>
 #include <qdb/plan/ops/limit.h>
@@ -16,8 +14,6 @@
 #include <qdb/plan/ops/sort.h>
 #include <qdb/plan/ops/union.h>
 #include <qdb/plan/ops/window.h>
-
-#include <qumir/parser/core/printer.h>
 
 #include <cassert>
 #include <stdexcept>
@@ -245,80 +241,18 @@ void CollectRefPredicates(const TOperatorPtr& op, TRefPredicates& out) {
     }
 }
 
-TExprPtr Reduce(std::vector<TExprPtr> parts, const char* op) {
-    TExprPtr acc;
-    for (auto& part : parts) {
-        acc = acc
-            ? std::make_shared<TBinaryExpr>(NQumir::TLocation{}, TOperator(op), acc, part)
-            : std::move(part);
-    }
-    return acc;
-}
-
-// Per column, OR the references' constraints; AND the columns. A column
-// qualifies only if every reference constrains it with a single-column conjunct.
-TExprPtr BuildPushablePredicate(const TCteDefinition& def, const std::vector<TExprPtr>& refs) {
-    const size_t n = refs.size();
-    if (n < 2) {
+TExprPtr BuildPushablePredicate(
+    const TCteDefinition& def,
+    const std::vector<TExprPtr>& refs)
+{
+    if (refs.size() < 2) {
         return nullptr;
-    }
-    for (const auto& pred : refs) {
-        if (!pred) {
-            return nullptr;
-        }
     }
     auto* schema = static_cast<TStructType*>(def.OutputType.get());
     if (!schema) {
         return nullptr;
     }
-    std::unordered_set<std::string> outputs;
-    for (const auto& [name, type] : schema->Fields) {
-        outputs.insert(name);
-    }
-
-    std::vector<std::unordered_map<std::string, std::vector<TExprPtr>>> byColumn(n);
-    for (size_t i = 0; i < n; ++i) {
-        std::vector<TExprPtr> conjuncts;
-        FlattenConjuncts(refs[i], conjuncts);
-        for (const auto& conj : conjuncts) {
-            auto vars = FindUnboundVars(conj);
-            if (vars.size() != 1) {
-                continue;
-            }
-            const std::string& col = *vars.begin();
-            if (outputs.contains(col)) {
-                byColumn[i][col].push_back(conj);
-            }
-        }
-    }
-
-    std::vector<TExprPtr> columnPredicates;
-    for (const auto& [name, type] : schema->Fields) {
-        bool constrainedEverywhere = true;
-        for (size_t i = 0; i < n; ++i) {
-            if (!byColumn[i].contains(name)) {
-                constrainedEverywhere = false;
-                break;
-            }
-        }
-        if (!constrainedEverywhere) {
-            continue;
-        }
-        std::vector<TExprPtr> perRef;
-        std::unordered_set<std::string> seen; // distinct constraints only
-        for (size_t i = 0; i < n; ++i) {
-            std::vector<TExprPtr> cloned;
-            for (const auto& conj : byColumn[i].at(name)) {
-                cloned.push_back(CloneExpr(conj));
-            }
-            auto conjoined = Reduce(std::move(cloned), "&&");
-            if (seen.insert(NQumir::NAst::NCore::PrintAst(conjoined)).second) {
-                perRef.push_back(std::move(conjoined));
-            }
-        }
-        columnPredicates.push_back(Reduce(std::move(perRef), "||"));
-    }
-    return Reduce(std::move(columnPredicates), "&&");
+    return BuildPredicateSuperset(*schema, refs);
 }
 
 } // namespace

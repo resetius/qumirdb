@@ -16,8 +16,8 @@ struct TScanRowGroup {
 };
 
 struct TScanSplit {
-    size_t FirstRowGroup = 0;
-    size_t RowGroupCount = 0;
+    // Predicate pruning can leave a non-contiguous set of row groups.
+    std::vector<size_t> RowGroups;
     int64_t RowCount = 0;
     int64_t ByteSize = 0;
     bool SerialRead = false;

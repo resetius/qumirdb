@@ -160,7 +160,7 @@ TEST(IOTest, ParquetRowGroupRangeSource) {
     EXPECT_EQ(rowGroups[2].RowCount, 1);
 
     source->RestrictColumns({"id"});
-    auto split = source->MakeRowGroupRangeSource(1, 1);
+    auto split = source->MakeRowGroupsSource({1});
     EXPECT_EQ(split->Stats().get(), source->Stats().get());
     TRowSet rowSet = {};
     ASSERT_TRUE(split->Next(rowSet));

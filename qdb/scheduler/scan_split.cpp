@@ -11,10 +11,10 @@ TScanSplit MakeSingleSplit(
     bool serialRead)
 {
     TScanSplit split;
-    split.FirstRowGroup = rowGroups.front().RowGroup;
-    split.RowGroupCount = rowGroups.size();
+    split.RowGroups.reserve(rowGroups.size());
     split.SerialRead = serialRead;
     for (const auto& rowGroup : rowGroups) {
+        split.RowGroups.push_back(rowGroup.RowGroup);
         split.RowCount += rowGroup.RowCount;
         split.ByteSize += rowGroup.ByteSize;
     }
@@ -61,9 +61,9 @@ std::vector<TScanSplit> BuildScanSplits(
     for (size_t begin = 0; begin < groupCount; begin += groupsPerTask) {
         const size_t end = std::min(begin + groupsPerTask, groupCount);
         TScanSplit split;
-        split.FirstRowGroup = rowGroups[begin].RowGroup;
-        split.RowGroupCount = end - begin;
+        split.RowGroups.reserve(end - begin);
         for (size_t i = begin; i < end; ++i) {
+            split.RowGroups.push_back(rowGroups[i].RowGroup);
             split.RowCount += rowGroups[i].RowCount;
             split.ByteSize += rowGroups[i].ByteSize;
         }

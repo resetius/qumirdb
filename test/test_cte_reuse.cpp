@@ -14,6 +14,8 @@
 #include <qdb/plan/pipeline.h>
 #include <qdb/sql/parser.h>
 
+#include <qumir/parser/core/printer.h>
+
 #include <expected>
 #include <map>
 #include <memory>
@@ -381,6 +383,27 @@ TEST(CteReuse, ConsumerPredicatePushedToDefinitionSource) {
     auto filter = FindFilter(consumers[0]->Materialization()->Plan);
     ASSERT_TRUE(filter != nullptr);
     EXPECT_TRUE(TMaybeOp<TSourceOperator>(filter->Input()));
+}
+
+TEST(CteReuse, MultiColumnConsumerPredicatesUseSharedSupersetBuilder) {
+    NQdb::TMockSource t({"a", "b"});
+    std::map<std::string, ISource*> tables = {{"t", &t}};
+
+    auto plan = BuildSqlPlan(
+        "WITH x AS (SELECT a, b FROM t) "
+        "SELECT p.a FROM x p JOIN x q ON p.a = q.a "
+        "WHERE p.a + p.b < 10 AND q.a + q.b < 20",
+        tables);
+    ApplyPlanPasses(plan);
+
+    auto consumers = FindConsumers(plan);
+    ASSERT_EQ(consumers.size(), 2u);
+    auto filter = FindFilter(consumers[0]->Materialization()->Plan);
+    ASSERT_TRUE(filter != nullptr);
+    const auto predicate = NQumir::NAst::NCore::PrintAst(
+        filter->Predicate());
+    EXPECT_NE(predicate.find("||"), std::string::npos);
+    EXPECT_NE(predicate.find("+"), std::string::npos);
 }
 
 // One reference is unconstrained (q has no predicate), so it needs every row;

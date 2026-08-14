@@ -154,6 +154,9 @@ std::string PlanLabel(const TOperatorPtr& op) {
         if (!src->GetAlias().empty()) {
             label += " AS " + src->GetAlias();
         }
+        if (src->RowGroupPredicate()) {
+            label += " row-groups " + ExprLine(src->RowGroupPredicate());
+        }
         return label;
     }
     if (auto filter = TMaybeOp<TFilterOperator>(op)) {

@@ -1,4 +1,5 @@
 #include <qdb/io/parquet/source.h>
+#include <qdb/io/parquet/row_group_predicate.h>
 #include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
 
@@ -17,6 +18,7 @@
 #include <llvm/Support/JSON.h>
 
 #include <bit>
+#include <cmath>
 #include <numeric>
 #include <unordered_map>
 #include <utility>
@@ -132,12 +134,16 @@ struct TParquetFileData {
     void Open();
     void LoadColumnStats();
     void LoadStandardColumnStats(TStats& stats);
+    void LoadRowGroupRanges();
 
     std::string Path;
     std::shared_ptr<parquet::arrow::FileReader> FileReader;
     std::shared_ptr<arrow::Schema> FileSchema;
     std::vector<std::string> FileNames;
+    std::vector<TColumnSchema> FileColumns;
+    TSchema FullSchema;
     std::vector<NScheduler::TScanRowGroup> RowGroups;
+    std::vector<std::vector<TRowGroupColumnRange>> RowGroupRanges;
     TStatsPtr Stats;
 };
 
@@ -173,8 +179,17 @@ void TParquetFileData::Open()
     for (const auto& field : FileSchema->fields()) {
         FileNames.push_back(field->name());
     }
+    FileColumns.reserve(FileSchema->num_fields());
+    for (int field = 0; field < FileSchema->num_fields(); ++field) {
+        FileColumns.push_back({
+            .Name = FileNames[static_cast<size_t>(field)],
+            .Type = ArrowFieldToQumir(FileSchema->field(field)),
+        });
+    }
+    FullSchema = TSchema{FileColumns};
 
     LoadColumnStats();
+    LoadRowGroupRanges();
 
     auto metadata = FileReader->parquet_reader()->metadata();
     RowGroups.reserve(static_cast<size_t>(metadata->num_row_groups()));
@@ -188,6 +203,154 @@ void TParquetFileData::Open()
     }
 }
 
+void TParquetFileData::LoadRowGroupRanges()
+{
+    auto metadata = FileReader->parquet_reader()->metadata();
+    const int numRowGroups = metadata->num_row_groups();
+    RowGroupRanges.resize(static_cast<size_t>(numRowGroups));
+
+    std::unordered_map<std::string_view, size_t> fieldByName;
+    fieldByName.reserve(FileNames.size());
+    for (size_t field = 0; field < FileNames.size(); ++field) {
+        fieldByName.emplace(FileNames[field], field);
+    }
+
+    for (int rg = 0; rg < numRowGroups; ++rg) {
+        const auto rowGroup = metadata->RowGroup(rg);
+        auto& ranges = RowGroupRanges[static_cast<size_t>(rg)];
+        ranges.resize(FileNames.size());
+        for (size_t field = 0; field < FileNames.size(); ++field) {
+            ranges[field].MayBeNull = FileSchema->field(static_cast<int>(field))->nullable();
+            ranges[field].MayBeValue = rowGroup->num_rows() > 0;
+        }
+
+        for (int column = 0; column < metadata->num_columns(); ++column) {
+            const auto* descriptor = metadata->schema()->Column(column);
+            auto found = fieldByName.find(descriptor->name());
+            if (found == fieldByName.end()) {
+                continue; // nested/unsupported schema shape
+            }
+            const size_t field = found->second;
+            auto& range = ranges[field];
+            const auto typeId = FileSchema->field(static_cast<int>(field))->type()->id();
+            range.MayBeNaN =
+                typeId == arrow::Type::FLOAT || typeId == arrow::Type::DOUBLE;
+
+            auto chunk = rowGroup->ColumnChunk(column);
+            if (!chunk->is_stats_set()) {
+                continue;
+            }
+            auto stats = chunk->statistics();
+            if (!stats) {
+                continue;
+            }
+            if (stats->HasNullCount()) {
+                const int64_t nulls = stats->null_count();
+                range.MayBeNull = nulls > 0;
+                range.MayBeValue = nulls < rowGroup->num_rows();
+            }
+            if (!range.MayBeValue || !stats->HasMinMax()) {
+                continue;
+            }
+
+            switch (typeId) {
+                case arrow::Type::INT8:
+                case arrow::Type::INT16:
+                case arrow::Type::INT32:
+                case arrow::Type::DATE32: {
+                    if (descriptor->physical_type() != parquet::Type::INT32) {
+                        break;
+                    }
+                    auto typed = std::static_pointer_cast<parquet::Int32Statistics>(stats);
+                    const int64_t lo = typed->min();
+                    const int64_t hi = typed->max();
+                    if (lo <= hi) {
+                        range.MinValue = std::bit_cast<uint64_t>(lo);
+                        range.MaxValue = std::bit_cast<uint64_t>(hi);
+                        range.HasBounds = true;
+                    }
+                    break;
+                }
+                case arrow::Type::INT64:
+                case arrow::Type::DATE64: {
+                    if (descriptor->physical_type() != parquet::Type::INT64) {
+                        break;
+                    }
+                    auto typed = std::static_pointer_cast<parquet::Int64Statistics>(stats);
+                    const int64_t lo = typed->min();
+                    const int64_t hi = typed->max();
+                    if (lo <= hi) {
+                        range.MinValue = std::bit_cast<uint64_t>(lo);
+                        range.MaxValue = std::bit_cast<uint64_t>(hi);
+                        range.HasBounds = true;
+                    }
+                    break;
+                }
+                case arrow::Type::UINT8:
+                case arrow::Type::UINT16:
+                case arrow::Type::UINT32: {
+                    if (descriptor->physical_type() != parquet::Type::INT32) {
+                        break;
+                    }
+                    auto typed = std::static_pointer_cast<parquet::Int32Statistics>(stats);
+                    const uint64_t lo = static_cast<uint32_t>(typed->min());
+                    const uint64_t hi = static_cast<uint32_t>(typed->max());
+                    if (lo <= hi) {
+                        range.MinValue = lo;
+                        range.MaxValue = hi;
+                        range.HasBounds = true;
+                    }
+                    break;
+                }
+                case arrow::Type::UINT64: {
+                    if (descriptor->physical_type() != parquet::Type::INT64) {
+                        break;
+                    }
+                    auto typed = std::static_pointer_cast<parquet::Int64Statistics>(stats);
+                    const uint64_t lo = static_cast<uint64_t>(typed->min());
+                    const uint64_t hi = static_cast<uint64_t>(typed->max());
+                    if (lo <= hi) {
+                        range.MinValue = lo;
+                        range.MaxValue = hi;
+                        range.HasBounds = true;
+                    }
+                    break;
+                }
+                case arrow::Type::FLOAT: {
+                    if (descriptor->physical_type() != parquet::Type::FLOAT) {
+                        break;
+                    }
+                    auto typed = std::static_pointer_cast<parquet::FloatStatistics>(stats);
+                    const double lo = typed->min();
+                    const double hi = typed->max();
+                    if (!std::isnan(lo) && !std::isnan(hi) && lo <= hi) {
+                        range.MinValue = std::bit_cast<uint64_t>(lo);
+                        range.MaxValue = std::bit_cast<uint64_t>(hi);
+                        range.HasBounds = true;
+                    }
+                    break;
+                }
+                case arrow::Type::DOUBLE: {
+                    if (descriptor->physical_type() != parquet::Type::DOUBLE) {
+                        break;
+                    }
+                    auto typed = std::static_pointer_cast<parquet::DoubleStatistics>(stats);
+                    const double lo = typed->min();
+                    const double hi = typed->max();
+                    if (!std::isnan(lo) && !std::isnan(hi) && lo <= hi) {
+                        range.MinValue = std::bit_cast<uint64_t>(lo);
+                        range.MaxValue = std::bit_cast<uint64_t>(hi);
+                        range.HasBounds = true;
+                    }
+                    break;
+                }
+                default:
+                    break;
+            }
+        }
+    }
+}
+
 TParquetFile::TParquetFile(const std::string& path)
     : Data_(std::make_shared<TParquetFileData>(path))
 {}
@@ -197,17 +360,17 @@ TParquetFile::~TParquetFile() = default;
 std::unique_ptr<TParquetSource> TParquetFile::MakeSource() const
 {
     return std::unique_ptr<TParquetSource>(
-        new TParquetSource(Data_, {}, std::nullopt));
+        new TParquetSource(Data_, std::nullopt, std::nullopt));
 }
 
 TParquetSource::TParquetSource(const std::string& path)
     : TParquetSource(
-        std::make_shared<TParquetFileData>(path), {}, std::nullopt)
+        std::make_shared<TParquetFileData>(path), std::nullopt, std::nullopt)
 {}
 
 TParquetSource::TParquetSource(
     std::shared_ptr<TParquetFileData> file,
-    std::vector<int> rowGroups,
+    std::optional<std::vector<int>> rowGroups,
     std::optional<std::unordered_set<std::string>> restrictedColumns)
     : File_(std::move(file))
     , RowGroups_(std::move(rowGroups))
@@ -218,8 +381,8 @@ TParquetSource::TParquetSource(
 
 std::vector<int> TParquetSource::EffectiveRowGroups() const
 {
-    if (!RowGroups_.empty()) {
-        return RowGroups_;
+    if (RowGroups_) {
+        return *RowGroups_;
     }
 
     const int numRgs = static_cast<int>(File_->RowGroups.size());
@@ -518,17 +681,58 @@ std::vector<NScheduler::TScanRowGroup> TParquetSource::ScanRowGroups() const
     return File_->RowGroups;
 }
 
-std::unique_ptr<TParquetSource> TParquetSource::MakeRowGroupRangeSource(
-    size_t firstRowGroup,
-    size_t rowGroupCount) const
+std::vector<NScheduler::TScanRowGroup> TParquetSource::PruneRowGroups(
+    const NQumir::NAst::TExprPtr& predicate,
+    std::string_view sourceAlias,
+    std::ostream* diagnostics) const
+{
+    if (!predicate) {
+        return File_->RowGroups;
+    }
+    auto evaluator = TRowGroupPredicateEvaluator::Compile(
+        predicate, File_->FullSchema, sourceAlias, diagnostics);
+    if (!evaluator || File_->RowGroupRanges.size() != File_->RowGroups.size()) {
+        return File_->RowGroups;
+    }
+
+    std::vector<NScheduler::TScanRowGroup> kept;
+    kept.reserve(File_->RowGroups.size());
+    for (size_t rg = 0; rg < File_->RowGroups.size(); ++rg) {
+        const bool mayBeTrue = evaluator->MayBeTrue(File_->RowGroupRanges[rg]);
+        if (diagnostics) {
+            *diagnostics << "row-group predicate: rg=" << rg
+                         << " may_be_true=" << mayBeTrue;
+            for (size_t column = 0;
+                 column < File_->RowGroupRanges[rg].size(); ++column)
+            {
+                const auto& range = File_->RowGroupRanges[rg][column];
+                *diagnostics << " col=" << File_->FileNames[column]
+                             << " bounds=" << range.HasBounds
+                             << " min_bits=" << range.MinValue
+                             << " max_bits=" << range.MaxValue
+                             << " null=" << range.MayBeNull
+                             << " value=" << range.MayBeValue;
+            }
+            *diagnostics << '\n';
+        }
+        if (mayBeTrue) {
+            kept.push_back(File_->RowGroups[rg]);
+        }
+    }
+    return kept;
+}
+
+std::unique_ptr<TParquetSource> TParquetSource::MakeRowGroupsSource(
+    const std::vector<size_t>& selectedRowGroups) const
 {
     std::vector<int> rowGroups;
-    rowGroups.reserve(rowGroupCount);
-    for (size_t i = 0; i < rowGroupCount; ++i) {
-        rowGroups.push_back(static_cast<int>(firstRowGroup + i));
+    rowGroups.reserve(selectedRowGroups.size());
+    for (size_t rowGroup : selectedRowGroups) {
+        rowGroups.push_back(static_cast<int>(rowGroup));
     }
     return std::unique_ptr<TParquetSource>(new TParquetSource(
-        File_, std::move(rowGroups), RestrictedColumns_));
+        File_, std::optional<std::vector<int>>(std::move(rowGroups)),
+        RestrictedColumns_));
 }
 
 const TSchema& TParquetSource::Schema() const {
