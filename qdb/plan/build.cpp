@@ -988,6 +988,99 @@ struct TGroupingParse {
     bool HasGroupingSyntax = false;
 };
 
+// Returns the base column for the deliberately small class of deterministic
+// expressions that we can reconstruct above an aggregate.  If that base is
+// itself a group key, the expression cannot split one of its groups and is
+// therefore redundant in the physical hash key.
+std::optional<std::string> AffineGroupKeyBase(const NAst::TExprPtr& expr) {
+    if (auto ident = NAst::TMaybeNode<NAst::TIdentExpr>(expr)) {
+        return ident.Cast()->Name;
+    }
+    auto binary = NAst::TMaybeNode<NAst::TBinaryExpr>(expr);
+    if (!binary || (binary.Cast()->Operator != "+" &&
+                    binary.Cast()->Operator != "-" &&
+                    binary.Cast()->Operator != "*"))
+    {
+        return std::nullopt;
+    }
+    auto isIntegerLiteral = [](const NAst::TExprPtr& candidate) {
+        auto number = NAst::TMaybeNode<NAst::TNumberExpr>(candidate);
+        return number && !number.Cast()->IsFloat();
+    };
+    const bool leftConstant = isIntegerLiteral(binary.Cast()->Left);
+    const bool rightConstant = isIntegerLiteral(binary.Cast()->Right);
+    if (leftConstant == rightConstant) {
+        return std::nullopt;
+    }
+    return AffineGroupKeyBase(
+        leftConstant ? binary.Cast()->Right : binary.Cast()->Left);
+}
+
+bool IsLiteralGroupKey(const NAst::TExprPtr& expr) {
+    // In the current qdb dialect GROUP BY 1 is the literal 1, not a SELECT-list
+    // ordinal.  If ordinals are added, they must be resolved before this check.
+    if (NAst::TMaybeNode<NAst::TNumberExpr>(expr) ||
+        NAst::TMaybeNode<NAst::TStringLiteralExpr>(expr))
+    {
+        return true;
+    }
+    if (auto cast = NAst::TMaybeNode<NAst::TCastExpr>(expr)) {
+        return IsLiteralGroupKey(cast.Cast()->Operand);
+    }
+    return false;
+}
+
+// This normalization intentionally lives in the SQL builder rather than a
+// later optimizer pass: it must run after GROUP BY aliases are resolved but
+// before a computed expression is hidden behind its materialized gb_n column.
+// Removed expressions remain in SELECT/HAVING and are evaluated once per output
+// group from the retained base key.  Grouping sets are intentionally excluded:
+// their individual key subsets and GROUPING() bit positions are observable SQL
+// state.
+void NarrowPlainGroupKeys(
+    std::vector<TGroupKey>& keys,
+    std::vector<std::vector<size_t>>& sets,
+    bool hasGroupingSyntax)
+{
+    if (hasGroupingSyntax || keys.size() < 2) {
+        return;
+    }
+
+    std::unordered_set<std::string> directKeys;
+    for (const auto& key : keys) {
+        if (!key.Computed) {
+            if (auto ident = NAst::TMaybeNode<NAst::TIdentExpr>(key.Expression)) {
+                directKeys.insert(ident.Cast()->Name);
+            }
+        }
+    }
+
+    std::vector<TGroupKey> narrowed;
+    narrowed.reserve(keys.size());
+    for (auto& key : keys) {
+        bool redundant = IsLiteralGroupKey(key.Expression);
+        if (!redundant && key.Computed) {
+            if (auto base = AffineGroupKeyBase(key.Expression)) {
+                redundant = directKeys.contains(*base);
+            }
+        }
+        if (!redundant) {
+            narrowed.push_back(std::move(key));
+        }
+    }
+
+    // Keep the grouped-empty-input behavior distinct from a global aggregate.
+    if (narrowed.empty()) {
+        return;
+    }
+    keys = std::move(narrowed);
+    sets.assign(1, {});
+    sets.front().reserve(keys.size());
+    for (size_t i = 0; i < keys.size(); ++i) {
+        sets.front().push_back(i);
+    }
+}
+
 bool IsGroupingSyntax(const NSql::TSqlNodePtr& element) {
     return NSql::TMaybeNode<NSql::TSqlRollUp>(element)
         || NSql::TMaybeNode<NSql::TSqlCube>(element)
@@ -2356,6 +2449,7 @@ std::expected<TOperatorPtr, TError> BuildSelect(
         key.Expression = CloneExpr(alias->second);
         key.Computed = true;
     }
+    NarrowPlainGroupKeys(groupKeys, groupingSets, hasGroupingSyntax);
     // A single set over all keys is a plain aggregate; >1 set needs the kernel's
     // grouping-sets machinery (keys become nullable, masked per set).
     std::unordered_map<std::string, std::string> computedKeys; // PrintAst -> name

@@ -114,6 +114,37 @@ aggregate keys=[l_returnflag] aggs=[sum_0=sum(arg_0)]
 Plain-column arguments (`sum(l_quantity)`) are passed through unchanged; the
 inner project is then omitted unless a global key is needed (below).
 
+### Functionally dependent group-key narrowing
+
+For a plain `GROUP BY`, the builder removes key components that cannot split a
+group already defined by another retained component:
+
+```sql
+GROUP BY 1, url
+-- physical group key: url
+
+GROUP BY client_ip, client_ip - 1, client_ip - 2
+-- physical group key: client_ip
+```
+
+The current conservative rule recognizes literal keys and integer affine
+expressions (`x + c`, `x - c`, `c - x`, and `x * c`) when the base column `x`
+is itself a group key. A literal is removed only when another key remains, so a
+grouped empty input is not accidentally changed into a global aggregate. The
+removed expressions stay in SELECT/HAVING and are evaluated from the retained
+key once per output group.
+
+This rewrite intentionally runs inside `BuildSelect`, after GROUP BY aliases
+are resolved and before computed keys become materialized `gb_n` columns. A
+later plan pass would otherwise see only the synthetic column reference and
+would have to reconstruct its dependency through the lower project. In the
+current qdb SQL dialect an integer in GROUP BY is a literal expression, not a
+SELECT-list ordinal; ordinal support must resolve such references before this
+rewrite.
+
+`GROUPING SETS`, `ROLLUP`, and `CUBE` are excluded because their key subsets and
+`GROUPING()` bit positions are observable.
+
 ### Affine integer aggregates
 
 Before argument materialization, aggregates over one integer column and integer

@@ -342,6 +342,75 @@ TEST(SortPlan, GroupByColumnAliasUsesInputColumnDirectly) {
     EXPECT_NO_THROW(AnnotateTypes(*plan));
 }
 
+TEST(SortPlan, GroupByDropsConstantFromCompositeKey) {
+    auto i64 = std::make_shared<NQumir::NAst::TIntegerType>();
+    NQdb::TMockSource source(TMockColumns{}, {{"url", i64}});
+    auto plan = BuildSqlPlan(
+        "SELECT 1, url, count(*) AS c FROM t GROUP BY 1, url", source);
+    ASSERT_TRUE(plan.has_value()) << (plan ? "" : plan.error().ToString());
+
+    auto topProject = TMaybeOp<TProjectOperator>(*plan);
+    ASSERT_TRUE(topProject);
+    EXPECT_EQ(
+        NQumir::NAst::NCore::PrintAst(
+            topProject.Cast()->Projections()[0].Expression),
+        "1");
+
+    auto aggregate = TMaybeOp<TAggregateOperator>(topProject.Cast()->Input());
+    ASSERT_TRUE(aggregate);
+    EXPECT_EQ(aggregate.Cast()->GroupKeys(), (std::vector<std::string>{"url"}));
+    EXPECT_TRUE(TMaybeOp<TSourceOperator>(aggregate.Cast()->Input()));
+
+    AssignSourceAliases(*plan);
+    QualifyColumns(*plan);
+    EXPECT_NO_THROW(AnnotateTypes(*plan));
+}
+
+TEST(SortPlan, GroupByDropsAffineKeysDeterminedByRetainedColumn) {
+    auto i64 = std::make_shared<NQumir::NAst::TIntegerType>();
+    NQdb::TMockSource source(TMockColumns{}, {{"client_ip", i64}});
+    auto plan = BuildSqlPlan(
+        "SELECT client_ip, client_ip - 1, client_ip - 2, client_ip - 3, "
+        "count(*) AS c FROM t GROUP BY client_ip, client_ip - 1, "
+        "client_ip - 2, client_ip - 3",
+        source);
+    ASSERT_TRUE(plan.has_value()) << (plan ? "" : plan.error().ToString());
+
+    auto topProject = TMaybeOp<TProjectOperator>(*plan);
+    ASSERT_TRUE(topProject);
+    EXPECT_EQ(
+        NQumir::NAst::NCore::PrintAst(
+            topProject.Cast()->Projections()[1].Expression),
+        "(- client_ip 1)");
+
+    auto aggregate = TMaybeOp<TAggregateOperator>(topProject.Cast()->Input());
+    ASSERT_TRUE(aggregate);
+    EXPECT_EQ(
+        aggregate.Cast()->GroupKeys(),
+        (std::vector<std::string>{"client_ip"}));
+    EXPECT_TRUE(TMaybeOp<TSourceOperator>(aggregate.Cast()->Input()));
+
+    AssignSourceAliases(*plan);
+    QualifyColumns(*plan);
+    EXPECT_NO_THROW(AnnotateTypes(*plan));
+}
+
+TEST(SortPlan, GroupByKeepsAffineKeyWithoutItsBaseKey) {
+    auto i64 = std::make_shared<NQumir::NAst::TIntegerType>();
+    NQdb::TMockSource source(TMockColumns{}, {{"client_ip", i64}});
+    auto plan = BuildSqlPlan(
+        "SELECT client_ip - 1, count(*) AS c FROM t GROUP BY client_ip - 1",
+        source);
+    ASSERT_TRUE(plan.has_value()) << (plan ? "" : plan.error().ToString());
+
+    auto topProject = TMaybeOp<TProjectOperator>(*plan);
+    ASSERT_TRUE(topProject);
+    auto aggregate = TMaybeOp<TAggregateOperator>(topProject.Cast()->Input());
+    ASSERT_TRUE(aggregate);
+    EXPECT_EQ(aggregate.Cast()->GroupKeys(), (std::vector<std::string>{"gb_0"}));
+    EXPECT_TRUE(TMaybeOp<TProjectOperator>(aggregate.Cast()->Input()));
+}
+
 TEST(SortPlan, ColumnPruningKeepsSortKeyColumns) {
     using namespace NQumir::NAst;
 
