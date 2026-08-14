@@ -126,8 +126,8 @@ string-bearing: LookupKey != StoredKey
 Every descriptor generates the same ownership helpers. For a key without
 owned leaves, `key_owned_bytes` returns zero and `key_clone_owned` is an
 identity operation that ignores its byte buffer. Generic update code can
-therefore always execute `lookup -> allocate owned bytes -> clone -> insert`;
-the allocator step is skipped when the requested size is zero.
+therefore always execute `lookup -> allocate an arena slice -> clone -> insert`;
+the allocation step is skipped when the requested size is zero.
 
 ## Generated type helpers
 
@@ -159,24 +159,37 @@ details; they are not persisted.
 
 ## Owned byte storage
 
-The first correct implementation should allocate one contiguous byte block per
-new group, containing all string leaves of its key. Generated clone code sets
-each `OwnedString.Data` into that block.
+Each new group receives one contiguous byte slice containing all string leaves
+of its key. Generated clone code sets each `OwnedString.Data` into that slice.
 
-The table owns a registry of these blocks and frees them in `aht_destroy`.
-Rehash copies `OwnedString` handles and never clones or frees their bytes.
+Slices come from a table-owned chunked arena. Chunks start at 4 KiB and grow
+geometrically up to 2 MiB; a request larger than that receives an exactly sized
+chunk. Each chunk has a 24-byte `{magic, capacity, used}` header and allocations
+bump the `used` offset. The magic distinguishes arena chunks from foreign or
+legacy registry entries before their allocator fields are read; a mismatch
+fails allocation without modifying the registry. This turns the allocation
+cost from one allocation per unique string-bearing group into roughly one
+allocation per arena chunk.
+
+Only the most recent chunk accepts new slices. If a request does not fit, its
+remaining tail is not revisited; this keeps allocation constant-time at the
+cost of up to roughly 2x fragmentation for adversarial sizes. Ordinary short
+string keys leave much smaller tails.
+
+The table owns a registry of chunk bases. `aht_destroy` delegates its cleanup
+to the shared `owned_arena_destroy` lifecycle helper, so allocation ownership
+has one destruction path across aggregation and join kernels. Rehash copies
+`OwnedString` handles and never clones or frees their bytes. If insertion fails
+after allocation, the most recent slice is rewound; an empty chunk may remain
+registered for reuse.
 
 The registry reuses the three previously unused 8-byte scratch slots in
 `HashTable`: `OwnedBlocks`, `OwnedBlockCount`, and `OwnedBlockCapacity` at
 offsets 40, 48, and 56. The table ABI therefore remains 104 bytes.
 
-This is intentionally simpler than designing the final query allocator now.
-It costs one allocation per unique string-bearing group. Later, the registry
-can be replaced by a chunked query arena while keeping `OwnedString` and the
-generic table contract unchanged.
-
 Allocation must happen only after borrowed lookup reports a miss. A failure
-during clone/registration must leave the table unchanged and return an error.
+during allocation or insertion must leave the table logically unchanged and
+return an error.
 
 ## String output
 

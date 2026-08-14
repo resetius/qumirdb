@@ -9,29 +9,91 @@
 #include <qumir/codegen/llvm/llvm_initializer.h>
 #include <qumir/runner/runner_llvm.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace {
+
+using TArenaAllocate =
+    uint8_t*(*)(uint8_t***, int64_t*, int64_t*, int64_t);
+using TArenaDestroy = void(*)(uint8_t***, int64_t*, int64_t*);
+using TArenaRewind = void(*)(uint8_t**, int64_t, uint8_t*, int64_t);
+using TArenaAdapterTest = bool(*)();
+
+constexpr const char* ArenaAdapterTestSource = R"(
+(block
+  ;; Exercise the HashTable adapters without exporting or mirroring its ABI.
+  (fun test_aht_owned_arena_adapters () -> bool
+    (block
+      (var ht HashTable)
+      (field_assign ht OwnedBlocks (cast 0 <ptr <ptr u8>>))
+      (field_assign ht OwnedBlockCount 0)
+      (field_assign ht OwnedBlockCapacity 0)
+      (var ok = #t)
+      (var allocation = (cast 0 <ptr u8>))
+      (var index = 0)
+      (while (&& ok (< index 10000))
+        (block
+          (= allocation (call aht_owned_arena_alloc ht 17))
+          (if (== (cast allocation i64) 0)
+            (block (= ok #f)))
+          (= index (+ index 1))))
+
+      ;; Six chunks force the registry to reallocate from four to eight slots.
+      (if (!= (field ht OwnedBlockCount) 6)
+        (block (= ok #f)))
+      (if (!= (field ht OwnedBlockCapacity) 8)
+        (block (= ok #f)))
+
+      (var rewind_target = (call aht_owned_arena_alloc ht 19))
+      (if (== (cast rewind_target i64) 0)
+        (block (= ok #f)))
+      (call aht_owned_arena_rewind ht rewind_target 19)
+      (var reused = (call aht_owned_arena_alloc ht 19))
+      (if (!= (cast reused i64) (cast rewind_target i64))
+        (block (= ok #f)))
+
+      (call owned_arena_destroy
+        (field ht OwnedBlocks)
+        (field ht OwnedBlockCount)
+        (field ht OwnedBlockCapacity))
+      (return (&& ok
+                  (== (cast (field ht OwnedBlocks) i64) 0)
+                  (== (field ht OwnedBlockCount) 0)
+                  (== (field ht OwnedBlockCapacity) 0))))))
+)";
 
 std::unique_ptr<NQumir::TLLVMRunner> CompileOwnedBlocks(
     const std::string& entryName,
     void*& entry)
 {
-    auto library = NQdb::NKernel::ParseFunctionLibrary(
-        NQdb::NKernel::ReadAggregationKernel("owned_blocks.oz"));
-    if (!library) {
-        ADD_FAILURE() << library.error().ToString();
+    std::vector<NQumir::NAst::TExprPtr> functions;
+    for (const char* name : {
+             "owned_arena_lifecycle.oz", "owned_blocks.oz"}) {
+        auto library = NQdb::NKernel::ParseFunctionLibrary(
+            NQdb::NKernel::ReadAggregationKernel(name));
+        if (!library) {
+            ADD_FAILURE() << name << ": " << library.error().ToString();
+            return {};
+        }
+        functions.insert(functions.end(), library->begin(), library->end());
+    }
+    auto adapter = NQdb::NKernel::ParseFunctionLibrary(ArenaAdapterTestSource);
+    if (!adapter) {
+        ADD_FAILURE() << "arena adapter test: " << adapter.error().ToString();
         return {};
     }
+    functions.insert(functions.end(), adapter->begin(), adapter->end());
     NQumir::TLLVMRunnerOptions options;
     options.CoreInput = true;
     options.NativeCode = true;
     NQdb::NTest::ConfigureQumirDbSourceModule(options);
     auto runner = std::make_unique<NQumir::TLLVMRunner>(options);
     auto program = std::make_shared<NQumir::NAst::TBlockExpr>(
-        NQumir::TLocation{}, std::move(*library));
+        NQumir::TLocation{}, std::move(functions));
     NQdb::NTest::AddQumirDbUse(program);
     std::string error;
     entry = runner->CompileKernelAst(program, entryName, &error);
@@ -39,96 +101,143 @@ std::unique_ptr<NQumir::TLLVMRunner> CompileOwnedBlocks(
     return runner;
 }
 
-TEST(OwnedBlocks, NullBlockDoesNotEnterRegistry) {
+TEST(OwnedBlocks, ArenaPacksSmallAllocationsIntoGrowingChunks) {
+    void* allocateEntry = nullptr;
+    auto allocateRunner =
+        CompileOwnedBlocks("owned_arena_alloc", allocateEntry);
+    ASSERT_NE(allocateEntry, nullptr);
+    void* destroyEntry = nullptr;
+    auto destroyRunner =
+        CompileOwnedBlocks("owned_arena_destroy", destroyEntry);
+    ASSERT_NE(destroyEntry, nullptr);
+    auto allocate = reinterpret_cast<TArenaAllocate>(allocateEntry);
+    auto destroy = reinterpret_cast<TArenaDestroy>(destroyEntry);
+
+    uint8_t** blocks = nullptr;
+    int64_t count = 0;
+    int64_t capacity = 0;
+    std::vector<uint8_t*> allocations;
+    allocations.reserve(10'000);
+    for (int64_t i = 0; i < 10'000; ++i) {
+        auto* bytes = allocate(&blocks, &count, &capacity, 17);
+        ASSERT_NE(bytes, nullptr);
+        std::fill_n(bytes, 17, static_cast<uint8_t>(i));
+        allocations.push_back(bytes);
+    }
+
+    ASSERT_EQ(count, 6);
+    int64_t expectedCapacity = 4'096;
+    for (int64_t i = 0; i < count; ++i) {
+        EXPECT_EQ(reinterpret_cast<int64_t*>(blocks[i])[1], expectedCapacity);
+        expectedCapacity *= 2;
+    }
+    for (int64_t i = 0; i < 10'000; ++i) {
+        EXPECT_EQ(allocations[i][0], static_cast<uint8_t>(i));
+        EXPECT_EQ(allocations[i][16], static_cast<uint8_t>(i));
+    }
+
+    destroy(&blocks, &count, &capacity);
+    EXPECT_EQ(blocks, nullptr);
+    EXPECT_EQ(count, 0);
+    EXPECT_EQ(capacity, 0);
+}
+
+TEST(OwnedBlocks, ArenaCanRewindMostRecentAllocation) {
+    void* allocateEntry = nullptr;
+    auto allocateRunner =
+        CompileOwnedBlocks("owned_arena_alloc", allocateEntry);
+    ASSERT_NE(allocateEntry, nullptr);
+    void* rewindEntry = nullptr;
+    auto rewindRunner = CompileOwnedBlocks("owned_arena_rewind", rewindEntry);
+    ASSERT_NE(rewindEntry, nullptr);
+    void* destroyEntry = nullptr;
+    auto destroyRunner =
+        CompileOwnedBlocks("owned_arena_destroy", destroyEntry);
+    ASSERT_NE(destroyEntry, nullptr);
+    auto allocate = reinterpret_cast<TArenaAllocate>(allocateEntry);
+    auto rewind = reinterpret_cast<TArenaRewind>(rewindEntry);
+    auto destroy = reinterpret_cast<TArenaDestroy>(destroyEntry);
+
+    uint8_t** blocks = nullptr;
+    int64_t count = 0;
+    int64_t capacity = 0;
+    auto* first = allocate(&blocks, &count, &capacity, 11);
+    auto* second = allocate(&blocks, &count, &capacity, 37);
+    ASSERT_NE(first, nullptr);
+    ASSERT_NE(second, nullptr);
+    rewind(blocks, count, first, 11);
+    auto* third = allocate(&blocks, &count, &capacity, 19);
+    EXPECT_EQ(third, second + 37);
+    rewind(blocks, count, third, 19);
+    EXPECT_EQ(allocate(&blocks, &count, &capacity, 19), third);
+    EXPECT_EQ(count, 1);
+
+    destroy(&blocks, &count, &capacity);
+}
+
+TEST(OwnedBlocks, ArenaCapsGrowthAfterOversizedAllocation) {
+    void* allocateEntry = nullptr;
+    auto allocateRunner =
+        CompileOwnedBlocks("owned_arena_alloc", allocateEntry);
+    ASSERT_NE(allocateEntry, nullptr);
+    void* destroyEntry = nullptr;
+    auto destroyRunner =
+        CompileOwnedBlocks("owned_arena_destroy", destroyEntry);
+    ASSERT_NE(destroyEntry, nullptr);
+    auto allocate = reinterpret_cast<TArenaAllocate>(allocateEntry);
+    auto destroy = reinterpret_cast<TArenaDestroy>(destroyEntry);
+
+    uint8_t** blocks = nullptr;
+    int64_t count = 0;
+    int64_t capacity = 0;
+    ASSERT_NE(allocate(&blocks, &count, &capacity, 3 * 1024 * 1024), nullptr);
+    ASSERT_NE(allocate(&blocks, &count, &capacity, 1), nullptr);
+    ASSERT_EQ(count, 2);
+    EXPECT_EQ(reinterpret_cast<int64_t*>(blocks[0])[1], 3 * 1024 * 1024);
+    EXPECT_EQ(reinterpret_cast<int64_t*>(blocks[1])[1], 2 * 1024 * 1024);
+
+    destroy(&blocks, &count, &capacity);
+}
+
+TEST(OwnedBlocks, ArenaRejectsForeignBlockWithoutMutation) {
+    void* allocateEntry = nullptr;
+    auto allocateRunner =
+        CompileOwnedBlocks("owned_arena_alloc", allocateEntry);
+    ASSERT_NE(allocateEntry, nullptr);
+    void* destroyEntry = nullptr;
+    auto destroyRunner =
+        CompileOwnedBlocks("owned_arena_destroy", destroyEntry);
+    ASSERT_NE(destroyEntry, nullptr);
+    auto allocate = reinterpret_cast<TArenaAllocate>(allocateEntry);
+    auto destroy = reinterpret_cast<TArenaDestroy>(destroyEntry);
+
+    auto** blocks = static_cast<uint8_t**>(qdb_alloc(sizeof(uint8_t*)));
+    ASSERT_NE(blocks, nullptr);
+    auto* foreign = static_cast<uint8_t*>(qdb_alloc(64));
+    ASSERT_NE(foreign, nullptr);
+    auto* plausibleHeader = reinterpret_cast<int64_t*>(foreign);
+    plausibleHeader[0] = 4'096;
+    plausibleHeader[1] = 0;
+    blocks[0] = foreign;
+    int64_t count = 1;
+    int64_t capacity = 1;
+
+    auto* bytes = allocate(&blocks, &count, &capacity, 17);
+    EXPECT_EQ(bytes, nullptr);
+    EXPECT_EQ(count, 1);
+    EXPECT_EQ(capacity, 1);
+    EXPECT_EQ(blocks[0], foreign);
+    EXPECT_EQ(plausibleHeader[1], 0);
+
+    destroy(&blocks, &count, &capacity);
+}
+
+TEST(OwnedBlocks, HashTableAdaptersWriteBackReallocatedRegistry) {
     void* entry = nullptr;
-    auto runner = CompileOwnedBlocks("owned_blocks_register", entry);
+    auto runner = CompileOwnedBlocks("test_aht_owned_arena_adapters", entry);
     ASSERT_NE(entry, nullptr);
-    auto registerBlock = reinterpret_cast<bool(*)(
-        uint8_t***, int64_t*, int64_t*, uint8_t*)>(entry);
-
-    uint8_t** blocks = nullptr;
-    int64_t count = 0;
-    int64_t capacity = 0;
-    EXPECT_TRUE(registerBlock(&blocks, &count, &capacity, nullptr));
-    EXPECT_EQ(blocks, nullptr);
-    EXPECT_EQ(count, 0);
-    EXPECT_EQ(capacity, 0);
-}
-
-TEST(OwnedBlocks, GrowsAndDestroysRegisteredBlocks) {
-    void* registerEntry = nullptr;
-    auto registerRunner = CompileOwnedBlocks(
-        "owned_blocks_register", registerEntry);
-    ASSERT_NE(registerEntry, nullptr);
-    void* destroyEntry = nullptr;
-    auto destroyRunner = CompileOwnedBlocks(
-        "owned_blocks_destroy", destroyEntry);
-    ASSERT_NE(destroyEntry, nullptr);
-    auto registerBlock = reinterpret_cast<bool(*)(
-        uint8_t***, int64_t*, int64_t*, uint8_t*)>(registerEntry);
-    auto destroy = reinterpret_cast<void(*)(
-        uint8_t***, int64_t*, int64_t*)>(destroyEntry);
-
-    uint8_t** blocks = nullptr;
-    int64_t count = 0;
-    int64_t capacity = 0;
-    for (int64_t i = 0; i < 10; ++i) {
-        auto* block = static_cast<uint8_t*>(qdb_alloc(i + 1));
-        ASSERT_NE(block, nullptr);
-        block[0] = static_cast<uint8_t>(i);
-        ASSERT_TRUE(registerBlock(&blocks, &count, &capacity, block));
-        EXPECT_EQ(count, i + 1);
-        EXPECT_GE(capacity, count);
-        EXPECT_EQ(blocks[i], block);
-    }
-    EXPECT_EQ(capacity, 16);
-
-    destroy(&blocks, &count, &capacity);
-    EXPECT_EQ(blocks, nullptr);
-    EXPECT_EQ(count, 0);
-    EXPECT_EQ(capacity, 0);
-}
-
-TEST(OwnedBlocks, ReserveThenCommitCannotReallocate) {
-    void* reserveEntry = nullptr;
-    auto reserveRunner = CompileOwnedBlocks("owned_blocks_reserve", reserveEntry);
-    ASSERT_NE(reserveEntry, nullptr);
-    void* commitEntry = nullptr;
-    auto commitRunner = CompileOwnedBlocks("owned_blocks_commit", commitEntry);
-    ASSERT_NE(commitEntry, nullptr);
-    void* destroyEntry = nullptr;
-    auto destroyRunner = CompileOwnedBlocks(
-        "owned_blocks_destroy", destroyEntry);
-    ASSERT_NE(destroyEntry, nullptr);
-    auto reserve = reinterpret_cast<bool(*)(
-        uint8_t***, int64_t*, int64_t*, int64_t)>(reserveEntry);
-    auto commit = reinterpret_cast<bool(*)(
-        uint8_t***, int64_t*, int64_t*, uint8_t*)>(commitEntry);
-    auto destroy = reinterpret_cast<void(*)(
-        uint8_t***, int64_t*, int64_t*)>(destroyEntry);
-
-    uint8_t** blocks = nullptr;
-    int64_t count = 0;
-    int64_t capacity = 0;
-    ASSERT_TRUE(reserve(&blocks, &count, &capacity, 3));
-    ASSERT_EQ(capacity, 4);
-    auto** reservedStorage = blocks;
-    for (int64_t i = 0; i < 3; ++i) {
-        auto* block = static_cast<uint8_t*>(qdb_alloc(1));
-        ASSERT_NE(block, nullptr);
-        ASSERT_TRUE(commit(&blocks, &count, &capacity, block));
-        EXPECT_EQ(blocks, reservedStorage);
-    }
-    EXPECT_EQ(count, 3);
-    auto* uncommitted = static_cast<uint8_t*>(qdb_alloc(1));
-    ASSERT_NE(uncommitted, nullptr);
-    ASSERT_TRUE(commit(&blocks, &count, &capacity, uncommitted));
-    auto* rejected = static_cast<uint8_t*>(qdb_alloc(1));
-    ASSERT_NE(rejected, nullptr);
-    EXPECT_FALSE(commit(&blocks, &count, &capacity, rejected));
-    qdb_free(rejected);
-
-    destroy(&blocks, &count, &capacity);
+    auto testAdapters = reinterpret_cast<TArenaAdapterTest>(entry);
+    EXPECT_TRUE(testAdapters());
 }
 
 TEST(OwnedBlocks, HashTableUsesFormerScratchSlots) {

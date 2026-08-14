@@ -94,6 +94,10 @@ BuildJoinLibraryBase() {
         return std::unexpected(*e);
     }
     if (auto e = AddParsedKernel(library,
+            ReadAggregationKernel("owned_arena_lifecycle.oz"))) {
+        return std::unexpected(*e);
+    }
+    if (auto e = AddParsedKernel(library,
             ReadAggregationKernel("aggregation_hashtable_generic.oz"),
             {"aht_update"})) {
         return std::unexpected(*e);
@@ -293,6 +297,15 @@ BuildGenericAggregateProgramAst(
     stmts.insert(stmts.end(), reducerDecls.begin(), reducerDecls.end());
     stmts.push_back(GenApplyReducersFunDecl(layout));
 
+    auto arenaLifecycle = ParseFunctionLibrary(
+        ReadAggregationKernel("owned_arena_lifecycle.oz"));
+    if (!arenaLifecycle) {
+        return std::unexpected(NQumir::TError(
+            "owned_arena_lifecycle.oz: " +
+            arenaLifecycle.error().ToString()));
+    }
+    stmts.insert(stmts.end(), arenaLifecycle->begin(), arenaLifecycle->end());
+
     auto lifecycle = ParseFunctionLibrary(
         ReadAggregationKernel("aggregation_hashtable_generic.oz"),
         {"rh_lookup_slot", "rh_insert_displace", "aht_rehash", "aht_update"});
@@ -413,6 +426,15 @@ BuildGenericAggregateFusedProgramAst(
     auto reducerDecls = GenReducerFunDecls(layout);
     stmts.insert(stmts.end(), reducerDecls.begin(), reducerDecls.end());
     stmts.push_back(GenApplyReducersFunDecl(layout));
+
+    auto arenaLifecycle = ParseFunctionLibrary(
+        ReadAggregationKernel("owned_arena_lifecycle.oz"));
+    if (!arenaLifecycle) {
+        return std::unexpected(NQumir::TError(
+            "owned_arena_lifecycle.oz: " +
+            arenaLifecycle.error().ToString()));
+    }
+    stmts.insert(stmts.end(), arenaLifecycle->begin(), arenaLifecycle->end());
 
     auto lifecycle = ParseFunctionLibrary(
         ReadAggregationKernel("aggregation_hashtable_generic.oz"),

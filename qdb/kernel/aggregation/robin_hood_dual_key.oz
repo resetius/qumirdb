@@ -90,9 +90,7 @@
       (var owned_block = (cast (: 0 i64) <ptr u8>))
       (if (> owned_bytes (: 0 i64))
         (block
-          (if (! (call aht_owned_blocks_reserve ht (: 1 i64)))
-            (block (return (: -1 i64))))
-          (= owned_block (cast (call qdb_alloc owned_bytes) <ptr u8>))
+          (= owned_block (call aht_owned_arena_alloc ht owned_bytes))
           (if (== (cast owned_block i64) (: 0 i64))
             (block (return (: -1 i64))))))
       (var stored_key = (call key_clone_owned key owned_block))
@@ -101,7 +99,8 @@
         stored_key dense_slot))
         (block
           (if (!= (cast owned_block i64) (: 0 i64))
-            (block (call qdb_free (cast owned_block <ptr i8>))))
+            (block (call aht_owned_arena_rewind
+              ht owned_block owned_bytes)))
           (return (: -1 i64))))
       (var group_keys = (cast (field ht GroupKeys)
         <ptr StoredKey>))
@@ -114,7 +113,6 @@
           (var agg_buffer = (index agg_buffers agg))
           (= agg_buffer [dense_slot] (: 0 i64))
           (= agg (+ agg (: 1 i64)))))
-      (call aht_owned_blocks_commit ht owned_block)
       (field_assign ht Size (+ dense_slot (: 1 i64)))
       (= out_is_new (: 1 i64))
       (return dense_slot)))
