@@ -2842,7 +2842,7 @@ llvm::json::Object BuildBundle(
 
 void PrintHelp(const char* argv0) {
     std::cout << "Usage: " << argv0
-              << " --stdin-json --stdout-json [--cache dir]\n";
+              << " --stdin-json --stdout-json [--cache dir] [--version]\n";
 }
 
 } // namespace
@@ -2866,6 +2866,9 @@ int main(int argc, char** argv) {
             cacheDir = argv[++i];
         } else if (!std::strcmp(argv[i], "--help")) {
             PrintHelp(argv[0]);
+            return 0;
+        } else if (!std::strcmp(argv[i], "--version")) {
+            std::cout << QDB_VERSION_STRING << "\n";
             return 0;
         }
     }

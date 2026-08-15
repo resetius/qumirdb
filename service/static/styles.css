@@ -154,6 +154,66 @@ button:hover {
   }
 }
 
+.version-link {
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+  border-bottom: 1px dashed currentColor;
+}
+
+.version-link:hover {
+  color: var(--text);
+}
+
+.version-dialog {
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 16px 20px;
+  min-width: 320px;
+}
+
+.version-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.5);
+}
+
+.version-dialog h3 {
+  margin: 0 0 12px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.version-dialog dl {
+  margin: 0 0 14px;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 6px 14px;
+  font-size: 13px;
+}
+
+.version-dialog dt {
+  color: var(--muted);
+}
+
+.version-dialog dd {
+  margin: 0;
+  font-family: ui-monospace, monospace;
+  word-break: break-all;
+}
+
+@media (max-width: 900px) {
+  .version-link {
+    display: none;
+  }
+}
+
 .status {
   color: var(--muted);
   font-size: 12px;

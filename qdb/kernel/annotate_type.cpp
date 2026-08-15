@@ -5,6 +5,7 @@
 #include <qdb/plan/clone_expr.h>
 #include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
+#include <qdb/utils/module_path.h>
 
 #include <qumir/error.h>
 #include <qumir/parser/core/printer.h>
@@ -159,7 +160,7 @@ public:
         if (ExternalCatalog_) {
             OwnedFrontend_ = std::make_unique<TVmFrontendContext>(
                 std::vector<std::string>{
-                    std::string(QDB_SOURCE_DIR) + "/modules/qumirdb.oz",
+                    NUtils::ModuleFile("qumirdb.oz"),
                 });
             Frontend_ = OwnedFrontend_.get();
         } else {

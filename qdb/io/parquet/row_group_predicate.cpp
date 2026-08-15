@@ -4,6 +4,7 @@
 #include <qdb/kernel/vm_function.h>
 #include <qdb/plan/clone_expr.h>
 #include <qdb/plan/types/nullable.h>
+#include <qdb/utils/module_path.h>
 
 #include <qumir/parser/core/printer.h>
 
@@ -28,7 +29,7 @@ constexpr const char* EvalFn = "__row_group_predicate__";
 
 TVmFrontendContext& RowGroupVmContext() {
     static TVmFrontendContext context({
-        std::string(QDB_SOURCE_DIR) + "/modules/row_group_interval.oz",
+        NUtils::ModuleFile("row_group_interval.oz"),
     });
     return context;
 }

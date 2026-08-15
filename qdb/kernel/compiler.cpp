@@ -15,6 +15,7 @@
 #include <qdb/exec/runtime_context.h>
 #include <qdb/modules/qumirdb.h>
 #include <qdb/modules/qumirdb_runtime.h>
+#include <qdb/utils/module_path.h>
 
 #include <qumir/codegen/llvm/llvm_initializer.h>
 #include <qumir/error.h>
@@ -151,7 +152,7 @@ NQumir::TLLVMRunnerOptions KernelRunnerOptions() {
     // TODO: Fix definite-assignment performance on large fused ASTs and re-enable it.
     opts.RunDefiniteAssignment = false;
     opts.OptLevel = 3;
-    opts.ModuleFiles = {std::string(QDB_SOURCE_DIR) + "/modules/qumirdb.oz"};
+    opts.ModuleFiles = {NUtils::ModuleFile("qumirdb.oz")};
     return opts;
 }
 

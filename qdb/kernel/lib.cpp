@@ -1,12 +1,12 @@
 #include <qdb/kernel/lib.h>
 
 #include <qdb/kernel/gen.h>
+#include <qdb/utils/module_path.h>
 
 #include <qumir/parser/core/lexer.h>
 #include <qumir/parser/core/parser.h>
 
 #include <algorithm>
-#include <filesystem>
 #include <fstream>
 #include <optional>
 #include <sstream>
@@ -15,37 +15,34 @@
 namespace NQdb {
 namespace NKernel {
 
-std::string ReadAggregationKernel(const std::string& name) {
-    auto path = std::filesystem::path(__FILE__).parent_path() / "aggregation" / name;
+namespace {
+
+std::string ReadKernel(
+    const char* kind, const std::string& name, const char* what)
+{
+    auto path = NUtils::KernelFile(kind, name);
     std::ifstream input(path);
     if (!input) {
-        throw std::runtime_error("cannot open aggregation kernel: " + path.string());
+        throw std::runtime_error(
+            std::string("cannot open ") + what + " kernel: " + path);
     }
     std::ostringstream source;
     source << input.rdbuf();
     return source.str();
+}
+
+} // namespace
+
+std::string ReadAggregationKernel(const std::string& name) {
+    return ReadKernel("aggregation", name, "aggregation");
 }
 
 std::string ReadJoinKernel(const std::string& name) {
-    auto path = std::filesystem::path(__FILE__).parent_path() / "join" / name;
-    std::ifstream input(path);
-    if (!input) {
-        throw std::runtime_error("cannot open join kernel: " + path.string());
-    }
-    std::ostringstream source;
-    source << input.rdbuf();
-    return source.str();
+    return ReadKernel("join", name, "join");
 }
 
 std::string ReadSortKernel(const std::string& name) {
-    auto path = std::filesystem::path(__FILE__).parent_path() / "sort" / name;
-    std::ifstream input(path);
-    if (!input) {
-        throw std::runtime_error("cannot open sort kernel: " + path.string());
-    }
-    std::ostringstream source;
-    source << input.rdbuf();
-    return source.str();
+    return ReadKernel("sort", name, "sort");
 }
 
 namespace {

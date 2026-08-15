@@ -681,6 +681,7 @@ void PrintHelp() {
         "  --verbose                    Print the logical and runtime plans\n"
         "  --timing                     Print per-phase timings (planning, kernel build, JIT LLVM, CPU)\n"
         "  --help|-h                    Show this help message\n"
+        "  --version|-v                 Show version information\n"
         "\n"
         "Without -i, qdb starts an interactive SQL prompt (statements end with ';').\n"
         "  \\d [table]                   Describe a table\n"
@@ -858,6 +859,9 @@ int main(int argc, char** argv) {
             config.Timing = true;
         } else if (!std::strcmp(argv[i], "--help") || !std::strcmp(argv[i], "-h")) {
             PrintHelp();
+            return 0;
+        } else if (!std::strcmp(argv[i], "--version") || !std::strcmp(argv[i], "-v")) {
+            std::cout << QDB_VERSION_STRING << "\n";
             return 0;
         } else {
             std::cerr << "Unknown option: " << argv[i] << "\n";

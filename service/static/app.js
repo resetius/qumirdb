@@ -81,19 +81,70 @@ window.addEventListener('DOMContentLoaded', async () => {
   await initDatasets();
   initActions();
   await loadSharedFromQuery();
-  initSourceDownload();
+  initServerInfo();
 });
 
-async function initSourceDownload() {
-  const link = $('#source-download');
-  if (!link) {
+async function initServerInfo() {
+  const info = await getJson('/api/version');
+  if (!info) {
     return;
   }
-  const info = await getJson('/api/version');
-  if (info && info.sourceAvailable) {
+  initSourceDownload(info);
+  initVersion(info);
+}
+
+function initSourceDownload(info) {
+  const link = $('#source-download');
+  if (link && info.sourceAvailable) {
     link.hidden = false;
     window.lucide?.createIcons();
   }
+}
+
+function initVersion(info) {
+  const el = $('#version');
+  if (!el || (!info.service && !info.engine)) {
+    return;
+  }
+  const full = info.service || info.engine;
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'version-link';
+  button.title = 'Version details';
+  button.textContent = full.length > 14 ? `${full.slice(0, 13)}…` : full;
+  button.addEventListener('click', () => showVersionDialog(info));
+  el.textContent = '';
+  el.appendChild(button);
+}
+
+function showVersionDialog(info) {
+  let dialog = $('#version-dialog');
+  if (!dialog) {
+    dialog = document.createElement('dialog');
+    dialog.id = 'version-dialog';
+    dialog.className = 'version-dialog';
+    dialog.innerHTML = '<h3>Version</h3><dl></dl>'
+      + '<form method="dialog"><button type="submit">Close</button></form>';
+    document.body.appendChild(dialog);
+    dialog.addEventListener('click', event => {
+      if (event.target === dialog) {
+        dialog.close();
+      }
+    });
+  }
+  const list = dialog.querySelector('dl');
+  list.textContent = '';
+  for (const [label, value] of [['Service', info.service], ['Engine', info.engine]]) {
+    if (!value) {
+      continue;
+    }
+    const dt = document.createElement('dt');
+    dt.textContent = label;
+    const dd = document.createElement('dd');
+    dd.textContent = value;
+    list.append(dt, dd);
+  }
+  dialog.showModal();
 }
 
 function initEditor() {

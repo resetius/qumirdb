@@ -1,5 +1,7 @@
 #pragma once
 
+#include <qdb/utils/module_path.h>
+
 #include <qumir/parser/ast.h>
 #include <qumir/runner/runner_llvm.h>
 
@@ -8,7 +10,7 @@
 namespace NQdb::NTest {
 
 inline void ConfigureQumirDbSourceModule(NQumir::TLLVMRunnerOptions& options) {
-    options.ModuleFiles = {std::string(QDB_SOURCE_DIR) + "/modules/qumirdb.oz"};
+    options.ModuleFiles = {NUtils::ModuleFile("qumirdb.oz")};
 }
 
 inline void AddQumirDbUse(const NQumir::NAst::TExprPtr& ast) {
