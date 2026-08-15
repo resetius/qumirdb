@@ -157,6 +157,9 @@ void TParquetFileData::Open()
 
     parquet::ArrowReaderProperties arrowProps;
     arrowProps.set_batch_size(1 << 18);
+    // QDB schedules reads itself; Arrow pre-buffering would perform data I/O
+    // while constructing the logical source, before scan pruning.
+    arrowProps.set_pre_buffer(false);
     parquet::arrow::FileReaderBuilder builder;
     auto status = builder
         .memory_pool(GetMemoryPool())
