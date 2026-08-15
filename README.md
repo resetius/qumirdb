@@ -50,13 +50,20 @@ Useful focused builds:
 ```bash
 cmake --build build --target qdb
 cmake --build build --target qdb_plan_export
+```
+
+The web service is optional and disabled by default:
+
+```bash
+cmake -S . -B build -G Ninja -DQDB_BUILD_SERVICE=ON
 cmake --build build --target qdb_web
-cmake --build build --target test_sort
 ```
 
 Run tests:
 
 ```bash
+cmake -S . -B build -G Ninja -DQDB_BUILD_TESTS=ON
+cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
@@ -109,6 +116,7 @@ Example:
 Build and start the web server:
 
 ```bash
+cmake -S . -B build -G Ninja -DQDB_BUILD_SERVICE=ON
 cmake --build build --target qdb_web
 ./build/service/qdb_web --port 8080 --data /path/to/pq1 --cache /path/to/jit-cache
 ```

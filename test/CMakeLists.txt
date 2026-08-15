@@ -67,11 +67,11 @@ target_link_libraries(plan_export_native_runner PRIVATE qumirdb)
 target_compile_features(plan_export_native_runner PRIVATE cxx_std_23)
 
 # JavaScript execution tests (Node.js required), matching externals/qumir.
-find_program(NODE_EXECUTABLE node)
-if(NODE_EXECUTABLE)
+find_program(QDB_NODE_EXECUTABLE node)
+if(QDB_NODE_EXECUTABLE)
     add_test(
         NAME test_plan_export_integration
-        COMMAND ${NODE_EXECUTABLE} ${CMAKE_SOURCE_DIR}/test/plan_export/run.mjs
+        COMMAND ${QDB_NODE_EXECUTABLE} ${CMAKE_SOURCE_DIR}/test/plan_export/run.mjs
             $<TARGET_FILE:qdb_plan_export>
             $<TARGET_FILE:plan_export_native_runner>
             ${CMAKE_SOURCE_DIR}/service/static/browser_runtime.js

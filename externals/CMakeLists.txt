@@ -1,2 +1,4 @@
 add_subdirectory(qumir)
-add_subdirectory(coroio)
+if(QDB_BUILD_SERVICE)
+    add_subdirectory(coroio)
+endif()
