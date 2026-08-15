@@ -51,3 +51,9 @@ Physical execution:
   filtering and aggregation, including dual lookup/storage key types.
 - [SQL expression pseudo-calls](sql_pseudo_calls.md) - call-shaped parser and
   typing markers for `IN`, concatenation, and SQL NULL semantics.
+
+Deployment:
+
+- [Rust toolchain](rust_toolchain.md) - toolchain external `CREATE MODULE`
+  compilation needs, why the Rust release is pinned to the linked LLVM, and how
+  to configure it for the packaged service user.
