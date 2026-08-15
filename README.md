@@ -148,6 +148,24 @@ dataset in the UI:
   --local-data ~/Projects/tpch/pq1
 ```
 
+### Dataset Map
+
+Instead of listing every directory on the command line, point `--data-dir <dir>`
+at a directory holding a `datasets.map` descriptor:
+
+```text
+# <kind> <path> [alias]
+# kind: server | local
+
+server  data/sample          sample
+local   ~/Projects/tpch/pq1  tpch_scale1
+```
+
+Lines starting with `#` are comments, relative paths are resolved against the
+directory holding the map, and `~` is expanded. The packaged systemd unit uses
+`--data-dir /var/lib/qumirdb-data`, so a deployment is configured by editing
+`/var/lib/qumirdb-data/datasets.map` rather than the unit file.
+
 `--local-data` does not run queries directly. The UI shows a download action;
 pressing it downloads the parquet files from the server into browser OPFS and
 creates a normal browser dataset. Download progress is byte-based and downloads

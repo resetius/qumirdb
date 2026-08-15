@@ -37,6 +37,9 @@ using namespace NNet;
 
 namespace {
 
+// Dataset descriptor read from every --data-dir.
+constexpr std::string_view DatasetMapName = "datasets.map";
+
 struct TOptions {
     std::function<TPipe(const std::string&, const std::vector<std::string>&, bool)> PipeFactory;
     NNet::TPollerBase* Poller = nullptr;
@@ -47,6 +50,8 @@ struct TOptions {
     std::string SharedLinksDir = "shared";
     std::vector<std::string> DataDirs;
     std::vector<std::string> LocalDataDirs;
+    // Directories holding a dataset map; see DatasetMapName.
+    std::vector<std::string> DataRoots;
 };
 
 enum class EDatasetKind {
@@ -198,9 +203,22 @@ struct TDataDirArg {
     std::optional<std::string> Alias;
 };
 
-TDataDirArg ParseDataDirArg(std::string_view value) {
+// Paths from a dataset map are relative to the directory holding it.
+std::filesystem::path ResolveDataPath(
+    std::string_view value, const std::filesystem::path& base)
+{
+    auto path = ExpandUserPath(value);
+    if (base.empty() || path.is_absolute()) {
+        return path;
+    }
+    return base / path;
+}
+
+TDataDirArg ParseDataDirArg(
+    std::string_view value, const std::filesystem::path& base = {})
+{
     const std::string text = Trim(value);
-    auto directPath = ExpandUserPath(text);
+    auto directPath = ResolveDataPath(text, base);
     if (IsDirectory(directPath)) {
         return {.Path = std::move(directPath)};
     }
@@ -214,12 +232,56 @@ TDataDirArg ParseDataDirArg(std::string_view value) {
         return {.Path = std::move(directPath)};
     }
 
-    auto path = ExpandUserPath(text.substr(0, aliasBegin));
+    auto path = ResolveDataPath(text.substr(0, aliasBegin), base);
     auto alias = Trim(std::string_view(text).substr(aliasBegin, end - aliasBegin + 1));
     if (alias.empty() || !IsDirectory(path)) {
         return {.Path = std::move(directPath)};
     }
     return {.Path = std::move(path), .Alias = std::move(alias)};
+}
+
+struct TDataDirEntry {
+    EDatasetKind Kind = EDatasetKind::Server;
+    TDataDirArg Dir;
+};
+
+// `<server|local> <path> [alias]` per line, '#' starts a comment.
+std::vector<TDataDirEntry> ReadDatasetMap(const std::filesystem::path& root) {
+    std::vector<TDataDirEntry> entries;
+    const auto mapPath = root / DatasetMapName;
+    std::ifstream input(mapPath);
+    if (!input) {
+        std::cerr << "[QumirDB Web] no dataset map: " << mapPath << "\n";
+        return entries;
+    }
+
+    for (std::string line; std::getline(input, line); ) {
+        const std::string text = Trim(line);
+        if (text.empty() || text.front() == '#') {
+            continue;
+        }
+        const auto kindEnd = text.find_first_of(" \t");
+        const std::string kindText = text.substr(0, kindEnd);
+        const std::string rest =
+            kindEnd == std::string::npos ? "" : Trim(std::string_view(text).substr(kindEnd));
+        if (rest.empty()) {
+            std::cerr << "[QumirDB Web] " << mapPath << ": missing path in: " << text << "\n";
+            continue;
+        }
+
+        EDatasetKind kind;
+        if (kindText == "server") {
+            kind = EDatasetKind::Server;
+        } else if (kindText == "local") {
+            kind = EDatasetKind::Local;
+        } else {
+            std::cerr << "[QumirDB Web] " << mapPath << ": unknown dataset kind '"
+                      << kindText << "'\n";
+            continue;
+        }
+        entries.push_back({.Kind = kind, .Dir = ParseDataDirArg(rest, root)});
+    }
+    return entries;
 }
 
 std::string SchemaTypeName(const NQumir::NAst::TTypePtr& type) {
@@ -896,8 +958,7 @@ private:
         ServerDatasets_.clear();
         size_t serverIndex = 0;
         size_t localIndex = 0;
-        auto addDir = [&](const std::string& dirValue, EDatasetKind kind, size_t index) {
-            auto arg = ParseDataDirArg(dirValue);
+        auto addDir = [&](const TDataDirArg& arg, EDatasetKind kind, size_t index) {
             std::error_code ec;
             fs::path dir = fs::weakly_canonical(arg.Path, ec);
             if (ec || dir.empty()) {
@@ -918,11 +979,19 @@ private:
             ServerDatasets_.push_back(std::move(dataset));
         };
 
+        for (const auto& root : Options_.DataRoots) {
+            for (const auto& entry : ReadDatasetMap(ExpandUserPath(root))) {
+                addDir(
+                    entry.Dir,
+                    entry.Kind,
+                    entry.Kind == EDatasetKind::Server ? serverIndex++ : localIndex++);
+            }
+        }
         for (const auto& dirValue : Options_.DataDirs) {
-            addDir(dirValue, EDatasetKind::Server, serverIndex++);
+            addDir(ParseDataDirArg(dirValue), EDatasetKind::Server, serverIndex++);
         }
         for (const auto& dirValue : Options_.LocalDataDirs) {
-            addDir(dirValue, EDatasetKind::Local, localIndex++);
+            addDir(ParseDataDirArg(dirValue), EDatasetKind::Local, localIndex++);
         }
     }
 
@@ -1329,7 +1398,7 @@ private:
 int main(int argc, char** argv) {
     NNet::TInitializer init;
 
-    int port = 8080;
+    int port = 8081;
     TOptions options;
     for (int i = 1; i < argc; ++i) {
         if (!std::strcmp(argv[i], "--port") && i + 1 < argc) {
@@ -1348,12 +1417,18 @@ int main(int argc, char** argv) {
             options.DataDirs.push_back(argv[++i]);
         } else if (!std::strcmp(argv[i], "--local-data") && i + 1 < argc) {
             options.LocalDataDirs.push_back(argv[++i]);
+        } else if (!std::strcmp(argv[i], "--data-dir") && i + 1 < argc) {
+            options.DataRoots.push_back(argv[++i]);
         } else if (!std::strcmp(argv[i], "--help")) {
             std::cout << "Usage: " << argv[0]
                       << " [--port n] [--static-dir dir] [--binary-dir dir]"
                       << " [--source-dir dir] [--cache dir]"
-                      << " [--shared-links-dir dir]"
-                      << " [--data 'dir [alias]' ...] [--local-data 'dir [alias]' ...]\n";
+                      << " [--shared-links-dir dir] [--data-dir dir ...]"
+                      << " [--data 'dir [alias]' ...] [--local-data 'dir [alias]' ...]\n"
+                      << "\n--data-dir reads " << DatasetMapName
+                      << " from the given directory; each line is\n"
+                         "  <server|local> <path> [alias]\n"
+                         "with '#' comments and paths taken relative to that directory.\n";
             return 0;
         }
     }
