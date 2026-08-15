@@ -1,6 +1,7 @@
 #include <qdb/kernel/vm_function.h>
 
 #include <qdb/catalog/external_module.h>
+#include <qdb/utils/module_path.h>
 
 #include <qumir/frontend/compose.h>
 #include <qumir/frontend/source_module_loader.h>
@@ -166,7 +167,7 @@ std::expected<void, std::string> TVmFrontendContext::Lower(
 
 TVmFrontendContext& QumirdbVmContext() {
     static TVmFrontendContext context({
-        std::string(QDB_SOURCE_DIR) + "/modules/qumirdb.oz",
+        NUtils::ModuleFile("qumirdb.oz"),
     });
     return context;
 }

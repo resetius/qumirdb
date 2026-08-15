@@ -8,6 +8,7 @@ add_library(qumirdb
     stub.cpp
     utils/sha1.cpp
     utils/regex.cpp
+    utils/module_path.cpp
     utils/rust_std_loader.cpp
     catalog/external_module.cpp
     modules/qumirdb.cpp
@@ -108,3 +109,19 @@ target_link_libraries(qumirdb PUBLIC
     PkgConfig::PCRE2
     ${CMAKE_DL_LIBS}
 )
+
+# Modules and kernel libraries written in oz are read at kernel compile time,
+# so they ship next to the binaries that use them.
+install(FILES
+    modules/qumirdb.oz
+    modules/row_group_interval.oz
+    DESTINATION ${QDB_MODULES_DIR}
+    COMPONENT engine)
+
+install(DIRECTORY
+    kernel/aggregation
+    kernel/join
+    kernel/sort
+    DESTINATION ${QDB_MODULES_DIR}
+    COMPONENT engine
+    FILES_MATCHING PATTERN "*.oz")

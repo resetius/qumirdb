@@ -9,4 +9,19 @@ target_compile_definitions(qdb_web PRIVATE
     QDB_SERVICE_STATIC_DIR="${CMAKE_CURRENT_SOURCE_DIR}/static"
     QDB_BUILD_BIN_DIR="$<TARGET_FILE_DIR:qdb_plan_export>"
     QDB_SOURCE_ROOT_DIR="${CMAKE_SOURCE_DIR}"
+    QDB_VERSION_STRING="${QDB_VERSION_STRING}"
 )
+
+install(PROGRAMS $<TARGET_FILE:qdb_web>
+    DESTINATION bin
+    RENAME qumirdb-service
+    COMPONENT service)
+
+install(DIRECTORY static/
+    DESTINATION share/qumirdb-service/static
+    COMPONENT service)
+
+configure_file(qumirdb-service.service.in qumirdb-service.service @ONLY)
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/qumirdb-service.service
+    DESTINATION lib/systemd/system
+    COMPONENT service)

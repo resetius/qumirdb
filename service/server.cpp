@@ -162,6 +162,21 @@ std::string Trim(std::string_view value) {
     return std::string(value.substr(begin, end - begin + 1));
 }
 
+// The engine is packaged separately: keep the first line of its --version output
+// and drop control characters.
+std::string SanitizeVersion(std::string_view raw) {
+    std::string out;
+    for (char c : raw) {
+        if (c == '\n' || c == '\r') {
+            break;
+        }
+        if (static_cast<unsigned char>(c) >= 0x20) {
+            out += c;
+        }
+    }
+    return Trim(out);
+}
+
 std::filesystem::path ExpandUserPath(std::string_view value) {
     std::string text = Trim(value);
     if (text == "~" || text.starts_with("~/")) {
@@ -496,10 +511,13 @@ private:
     TFuture<void> Get(const TRequest& request, TResponse& response) {
         const auto& path = request.Uri().Path();
         if (path == "/api/version") {
+            std::string engine = co_await EngineVersion();
             co_await SendJson(response, ToJsonString(llvm::json::Object{
                 {"name", "QumirDB Workbench"},
                 {"version", 1},
                 {"sourceAvailable", SourceAvailable_},
+                {"service", QDB_VERSION_STRING},
+                {"engine", engine},
             }));
             co_return;
         }
@@ -668,6 +686,44 @@ private:
         co_await SendJson(response,
             killed ? "{\"ok\":true,\"killed\":true}"
                    : "{\"ok\":true,\"killed\":false}");
+    }
+
+    // The engine ships in its own package and may be upgraded without restarting
+    // us, so its version is asked for and cached briefly.
+    TFuture<std::string> EngineVersion() {
+        auto now = std::chrono::steady_clock::now();
+        if (!EngineVersion_.empty() &&
+            (now - EngineVersionTime_) < VersionCacheDuration)
+        {
+            co_return EngineVersion_;
+        }
+
+        auto exporter = (BinaryBase_ / "qdb_plan_export").generic_string();
+        auto pipe = Options_.PipeFactory(
+            exporter,
+            std::vector<std::string>{"--version"},
+            /*stderrToStdout=*/false);
+        pipe.CloseWrite();
+
+        std::string output;
+        char buf[256];
+        auto reader = TByteReader(pipe);
+        for (;;) {
+            ssize_t n = co_await reader.ReadSome(buf, sizeof(buf));
+            if (n < 0) {
+                continue;
+            }
+            if (n == 0) {
+                break;
+            }
+            output.append(buf, static_cast<size_t>(n));
+        }
+
+        const int exitCode = co_await WaitForPipe(pipe);
+        auto version = exitCode == 0 ? SanitizeVersion(output) : std::string{};
+        EngineVersion_ = version.empty() ? "unknown" : std::move(version);
+        EngineVersionTime_ = now;
+        co_return EngineVersion_;
     }
 
     TFuture<void> Explain(TRequest& request, TResponse& response) {
@@ -1265,6 +1321,9 @@ private:
     bool SourceAvailable_ = false;
     std::vector<TServerDataset> ServerDatasets_;
     std::unordered_map<std::string, int> ActiveRuns_;
+    static constexpr std::chrono::minutes VersionCacheDuration{5};
+    std::string EngineVersion_;
+    std::chrono::steady_clock::time_point EngineVersionTime_;
 };
 
 int main(int argc, char** argv) {
