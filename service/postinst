@@ -1,15 +1,20 @@
 #!/bin/sh
 set -e
 
-# The data directory itself is left to the administrator; only the account the
-# service runs under is created here.
+DATA_DIR=/var/lib/qumirdb-data
+
 if [ "$1" = "configure" ]; then
     if ! getent passwd qumirdb >/dev/null; then
         adduser --system --group --no-create-home \
-                --home /var/lib/qumirdb-data \
+                --home "$DATA_DIR" \
                 --gecos "QumirDB workbench service" \
                 qumirdb
     fi
+
+    # Datasets are listed in $DATA_DIR/datasets.map, written by the administrator.
+    mkdir -p "$DATA_DIR/cache" "$DATA_DIR/shared"
+    chown qumirdb:qumirdb "$DATA_DIR" "$DATA_DIR/cache" "$DATA_DIR/shared"
+    chmod 0755 "$DATA_DIR"
 fi
 
 if [ -d /run/systemd/system ]; then

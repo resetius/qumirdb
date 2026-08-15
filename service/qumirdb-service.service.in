@@ -4,12 +4,12 @@ After=network.target
 
 [Service]
 ExecStart=@CMAKE_INSTALL_PREFIX@/bin/qumirdb-service \
-    --port 8080 \
+    --port 8081 \
     --static-dir @CMAKE_INSTALL_PREFIX@/share/qumirdb-service/static \
     --binary-dir @CMAKE_INSTALL_PREFIX@/@QDB_PRIVATE_BINDIR@ \
     --cache @QDB_DATA_DIR@/cache \
     --shared-links-dir @QDB_DATA_DIR@/shared \
-    --data @QDB_DATA_DIR@/data
+    --data-dir @QDB_DATA_DIR@
 User=qumirdb
 Group=qumirdb
 Restart=on-failure
