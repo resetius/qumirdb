@@ -21,6 +21,10 @@ SQL → logical plan → idempotent rewrite passes → physical plan. Entry poin
    pruning hint without removing the row-level filter.
    [predicate_pushdown.md](predicate_pushdown.md#parquet-row-group-pruning).
 
+- [Optimizations](optimizations.md) - every rewrite in one place: build-time,
+  pipeline passes, the CTE phase and the execution-time ones, each with a
+  minimal query and the plan before and after.
+
 Detailed algorithm docs:
 
 - [Logical plan build](logical_plan_build.md) - SQL AST → naive operator tree:
