@@ -72,7 +72,7 @@ if(QDB_NODE_EXECUTABLE)
     add_test(
         NAME test_plan_export_integration
         COMMAND ${QDB_NODE_EXECUTABLE} ${CMAKE_SOURCE_DIR}/test/plan_export/run.mjs
-            $<TARGET_FILE:qdb_plan_export>
+            $<TARGET_FILE:qdb>
             $<TARGET_FILE:plan_export_native_runner>
             ${CMAKE_SOURCE_DIR}/service/static/browser_runtime.js
             ${CMAKE_SOURCE_DIR}/test/plan_export/goldens

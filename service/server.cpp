@@ -760,9 +760,9 @@ private:
             co_return EngineVersion_;
         }
 
-        auto exporter = (BinaryBase_ / "qdb_plan_export").generic_string();
+        auto engine = (BinaryBase_ / "qdb").generic_string();
         auto pipe = Options_.PipeFactory(
-            exporter,
+            engine,
             std::vector<std::string>{"--version"},
             /*stderrToStdout=*/false);
         pipe.CloseWrite();
@@ -790,8 +790,9 @@ private:
 
     TFuture<void> Explain(TRequest& request, TResponse& response) {
         std::string body = co_await request.ReadBodyFull();
-        auto exporter = (BinaryBase_ / "qdb_plan_export").generic_string();
+        auto exporter = (BinaryBase_ / "qdb").generic_string();
         std::vector<std::string> exporterArgs{
+            "--plan-export",
             "--stdin-json",
             "--stdout-json",
         };
@@ -826,7 +827,7 @@ private:
         if (exitCode != 0) {
             std::string json =
                 "{\"ok\":false,\"error\":{\"stage\":\"export\","
-                "\"message\":\"qdb_plan_export failed with code " +
+                "\"message\":\"qdb --plan-export failed with code " +
                 std::to_string(exitCode) + "\",\"output\":\"" +
                 JsonEscape(output) + "\"}}";
             co_await SendJson(response, json, 500);

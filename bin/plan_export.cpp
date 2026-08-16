@@ -1,3 +1,5 @@
+#include "plan_export.h"
+
 #include <qdb/catalog/external_module.h>
 #include <qdb/exec/plan_builder.h>
 #include <qdb/exec/planner_helpers.h>
@@ -2842,12 +2844,14 @@ llvm::json::Object BuildBundle(
 
 void PrintHelp(const char* argv0) {
     std::cout << "Usage: " << argv0
-              << " --stdin-json --stdout-json [--cache dir] [--version]\n";
+              << " --plan-export --stdin-json --stdout-json [--cache dir]\n";
 }
 
 } // namespace
 
-int main(int argc, char** argv) {
+namespace NQdb {
+
+int RunPlanExport(int argc, char** argv) {
     NQumir::NCodeGen::TLLVMInitializer llvmInit;
 
     bool stdinJson = false;
@@ -2860,21 +2864,18 @@ int main(int argc, char** argv) {
             stdoutJson = true;
         } else if (!std::strcmp(argv[i], "--cache")) {
             if (i + 1 >= argc) {
-                std::cerr << "qdb_plan_export: --cache requires a directory\n";
+                std::cerr << "qdb --plan-export: --cache requires a directory\n";
                 return 2;
             }
             cacheDir = argv[++i];
         } else if (!std::strcmp(argv[i], "--help")) {
             PrintHelp(argv[0]);
             return 0;
-        } else if (!std::strcmp(argv[i], "--version")) {
-            std::cout << QDB_VERSION_STRING << "\n";
-            return 0;
         }
     }
 
     if (!stdinJson || !stdoutJson) {
-        std::cerr << "qdb_plan_export: expected --stdin-json --stdout-json\n";
+        std::cerr << "qdb --plan-export: expected --stdin-json --stdout-json\n";
         return 2;
     }
 
@@ -2892,3 +2893,5 @@ int main(int argc, char** argv) {
     std::cout << ToJsonString(std::move(bundle)) << "\n";
     return 0;
 }
+
+} // namespace NQdb

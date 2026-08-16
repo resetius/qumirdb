@@ -28,11 +28,13 @@ if (xmlIndex >= 0) {
   args.splice(xmlIndex, 2);
 }
 const [exporter, nativeRunner, runtimePath, goldensDir] = args;
+// The exporter lives inside the qdb binary, behind --plan-export.
+const exporterBaseArgs = ['--plan-export', '--stdin-json', '--stdout-json'];
 const usageError = !exporter || !nativeRunner || !runtimePath || !goldensDir ||
   args.length !== 4 || (xmlIndex >= 0 && !xmlOutputPath) ||
   (printGoldens && canonizeGoldens)
   ? new Error(
-    'usage: run.mjs <qdb_plan_export> <native_runner> '
+    'usage: run.mjs <qdb> <native_runner> '
       + '<browser_runtime> <goldens> [--canonize] [--xml <junit.xml>]')
   : null;
 
@@ -177,7 +179,7 @@ function exportBundle(name, mode, embedWasm, cacheDir = null) {
       embedWasm,
     },
   };
-  const exporterArgs = ['--stdin-json', '--stdout-json'];
+  const exporterArgs = [...exporterBaseArgs];
   if (cacheDir) {
     exporterArgs.push('--cache', cacheDir);
   }
@@ -220,7 +222,7 @@ function runSchemaTypeContract() {
 
   const bundle = JSON.parse(run(
     exporter,
-    ['--stdin-json', '--stdout-json'],
+    exporterBaseArgs,
     JSON.stringify(schemaTypeRequest(printed))));
   assert.equal(bundle.ok, true, bundle.error?.message);
   const source = bundle.exec?.nodes?.find(node => node.kind === 'source');
@@ -237,7 +239,7 @@ function runSchemaTypeContract() {
 
   const legacy = JSON.parse(run(
     exporter,
-    ['--stdin-json', '--stdout-json'],
+    exporterBaseArgs,
     JSON.stringify(schemaTypeRequest('Nullable<DECIMAL(18,2)>'))));
   assert.equal(legacy.ok, false, 'legacy schema type syntax is still accepted');
   assert.match(legacy.error?.message || '', /unexpected trailing input/);
@@ -262,7 +264,7 @@ function runTypeErrorDiagnosticContract() {
   };
   const bundle = JSON.parse(run(
     exporter,
-    ['--stdin-json', '--stdout-json'],
+    exporterBaseArgs,
     JSON.stringify(request)));
   assert.equal(bundle.ok, true, 'type-error bundle was not formed');
   assert.equal(bundle.exec?.supported, false, 'invalid expression compiled');
@@ -307,7 +309,7 @@ SELECT orbit_result(a) FROM t;
   };
   const bundle = JSON.parse(run(
     exporter,
-    ['--stdin-json', '--stdout-json'],
+    exporterBaseArgs,
     JSON.stringify(request)));
   assert.equal(bundle.ok, true, bundle.error?.message);
   assert.equal(
@@ -370,7 +372,7 @@ ORDER BY REGEXP_REPLACE(
   };
   const bundle = JSON.parse(run(
     exporter,
-    ['--stdin-json', '--stdout-json'],
+    exporterBaseArgs,
     JSON.stringify(request)));
   assert.equal(bundle.ok, true, bundle.error?.message);
   assert.equal(
@@ -423,7 +425,7 @@ async function runStringAggregateBatchContract() {
   };
   const bundle = JSON.parse(run(
     exporter,
-    ['--stdin-json', '--stdout-json'],
+    exporterBaseArgs,
     JSON.stringify(request)));
   assert.equal(bundle.ok, true, bundle.error?.message);
   assert.equal(
@@ -483,7 +485,7 @@ SELECT kumir_root(a) FROM t;
   };
   const bundle = JSON.parse(run(
     exporter,
-    ['--stdin-json', '--stdout-json'],
+    exporterBaseArgs,
     JSON.stringify(request)));
   assert.equal(bundle.ok, true, bundle.error?.message);
   assert.equal(

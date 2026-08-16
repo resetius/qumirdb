@@ -1,3 +1,5 @@
+#include "plan_export.h"
+
 #include <qdb/catalog/external_module.h>
 #include <qdb/exec/planner_helpers.h>
 #include <qdb/io/parquet/source.h>
@@ -682,6 +684,8 @@ void PrintHelp() {
         "  --timing                     Print per-phase timings (planning, kernel build, JIT LLVM, CPU)\n"
         "  --help|-h                    Show this help message\n"
         "  --version|-v                 Show version information\n"
+        "  --plan-export                Plan/runtime bundle export mode for the web UI\n"
+        "                               (--stdin-json --stdout-json [--cache <dir>])\n"
         "\n"
         "Without -i, qdb starts an interactive SQL prompt (statements end with ';').\n"
         "  \\d [table]                   Describe a table\n"
@@ -691,6 +695,12 @@ void PrintHelp() {
 } // namespace
 
 int main(int argc, char** argv) {
+    for (int i = 1; i < argc; ++i) {
+        if (!std::strcmp(argv[i], "--plan-export")) {
+            return NQdb::RunPlanExport(argc, argv);
+        }
+    }
+
     NQumir::NCodeGen::TLLVMInitializer llvmInit;
 
     TConfig config;

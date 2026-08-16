@@ -1,6 +1,6 @@
 // Browser execution runtime for simple one-to-one pipelines.
 //
-// Drives the standalone WASM kernels emitted by qdb_plan_export (bundle.exec):
+// Drives the standalone WASM kernels emitted by `qdb --plan-export` (bundle.exec):
 // marshals a columnar batch into a kernel module's linear memory as
 // TColumn[]/TRowSet per the verified 8-byte-pointer layout, runs the kernel, and
 // reads results back. See PLAN_BROWSER_EXECUTION.md for the ABI/layout facts.

@@ -18,9 +18,8 @@ rowset pipelines.
 
 - `qdb/` - engine library: SQL/parser, logical plan, passes, kernel generation,
   execution, scheduler, parquet IO.
-- `bin/` - command line tools:
-  - `qdb` - native query runner.
-  - `qdb_plan_export` - exports plans/runtime bundles for the web UI.
+- `bin/` - the `qdb` command line tool: native query runner, plus the
+  `--plan-export` mode that produces plans/runtime bundles for the web UI.
 - `service/` - web server and static browser workbench.
 - `test/` - C++ unit and regression tests.
 - `benchmark/` - TPC-H, TPC-DS, and ClickBench query packs and runners.
@@ -49,7 +48,6 @@ Useful focused builds:
 
 ```bash
 cmake --build build --target qdb
-cmake --build build --target qdb_plan_export
 ```
 
 The web service is optional and disabled by default:
@@ -179,14 +177,14 @@ header.
 
 ## Plan Export
 
-`qdb_plan_export` is the bridge used by the web workbench. It accepts JSON on
+`qdb --plan-export` is the bridge used by the web workbench. It accepts JSON on
 stdin and can emit logical/physical graphs plus browser runtime bundles.
 
-The service calls it internally, but it can also be useful when debugging plan
-generation:
+The service spawns the same `qdb` binary in this mode, and it is also useful
+when debugging plan generation:
 
 ```bash
-./build/bin/qdb_plan_export \
+./build/bin/qdb --plan-export \
   --stdin-json --stdout-json --cache /path/to/jit-cache < request.json
 ```
 
