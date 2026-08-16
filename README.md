@@ -50,6 +50,19 @@ Useful focused builds:
 cmake --build build --target qdb
 ```
 
+LLVM is linked statically by default, which is what makes the binary ~86 MB —
+about 50 MB of it is LLVM's optimizer and code generator. When the platform
+ships a shared `libLLVM` (`llvm-config --shared-mode` prints `shared`), link
+against it instead:
+
+```bash
+cmake -S . -B build -G Ninja -DQDB_LLVM_LINK_SHARED=ON
+```
+
+That yields a 7 MB `qdb` and a 3.5 MB `qdb_web` at the cost of a runtime
+dependency on the LLVM package. The flag is forwarded to the qumir submodule as
+`QUMIR_LLVM_LINK_SHARED`.
+
 The web service is optional and disabled by default:
 
 ```bash

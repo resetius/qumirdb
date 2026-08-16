@@ -53,6 +53,7 @@ jobs:
           -DCMAKE_CXX_COMPILER=g++-14 \
           -DCMAKE_C_COMPILER=gcc-14 \
           -DQDB_BUILD_SERVICE=ON \
+          -DQDB_LLVM_LINK_SHARED=ON \
           -DQDB_BUILD_NUMBER=${{ github.run_number }}
 
     - name: build

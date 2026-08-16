@@ -1,10 +1,14 @@
 cmake_minimum_required(VERSION 3.30)
-project(qumirdb VERSION 0.2.0)
+project(qumirdb VERSION 0.3.0)
 enable_testing()
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(QDB_BUILD_SERVICE "Build QumirDB web service" OFF)
 option(QDB_BUILD_TESTS "Build QumirDB tests" OFF)
+# Static LLVM archives add ~50 MB to every binary linking the codegen; the shared
+# libLLVM trades that for a runtime dependency on the LLVM package.
+option(QDB_LLVM_LINK_SHARED "Link the shared libLLVM instead of static LLVM archives" OFF)
+set(QUMIR_LLVM_LINK_SHARED ${QDB_LLVM_LINK_SHARED})
 set(QDB_BUILD_NUMBER "0" CACHE STRING "Build number, becomes the Debian revision after the hyphen")
 
 # The upstream version is bumped by hand above; the build number rides along as the
