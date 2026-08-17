@@ -74,6 +74,8 @@ window.addEventListener('DOMContentLoaded', async () => {
   window.lucide?.createIcons();
   initEditor();
   initDrawers();
+  initTooltips();
+  initFooterLinks();
   initTabs();
   initGraphControls();
   initDiagnosticCopy();
@@ -84,20 +86,75 @@ window.addEventListener('DOMContentLoaded', async () => {
   initServerInfo();
 });
 
-async function initServerInfo() {
-  const info = await getJson('/api/version');
-  if (!info) {
+// Hover hints for the footer. The native `title` popup is slow, cannot be
+// styled, and on links the browser also parks the URL in the status bar — hence
+// buttons plus a positioned element. Delegated, so the version button added
+// later is covered too.
+function initTooltips() {
+  const bar = document.querySelector('.appbar');
+  const canHover = window.matchMedia?.('(hover: hover) and (pointer: fine)').matches;
+  if (!bar || !canHover) {
     return;
   }
-  initSourceDownload(info);
-  initVersion(info);
+
+  let tip = null;
+  const show = target => {
+    const text = target.getAttribute('data-tooltip');
+    if (!text) {
+      return;
+    }
+    if (!tip) {
+      tip = document.createElement('div');
+      tip.className = 'q-tooltip';
+      document.body.appendChild(tip);
+    }
+    tip.textContent = text;
+    tip.style.display = 'block';
+    const box = target.getBoundingClientRect();
+    // The footer sits at the bottom, so the hint goes above its element.
+    tip.style.top = `${Math.max(4, box.top - tip.offsetHeight - 8)}px`;
+    tip.style.left = `${Math.max(8, Math.min(
+      window.innerWidth - tip.offsetWidth - 8,
+      box.left + box.width / 2 - tip.offsetWidth / 2))}px`;
+  };
+  const hide = () => {
+    if (tip) {
+      tip.style.display = 'none';
+    }
+  };
+  const targetOf = event => event.target.closest?.('[data-tooltip]');
+
+  bar.addEventListener('mouseover', event => {
+    const target = targetOf(event);
+    if (target) {
+      show(target);
+    }
+  });
+  bar.addEventListener('focusin', event => {
+    const target = targetOf(event);
+    if (target) {
+      show(target);
+    }
+  });
+  bar.addEventListener('mouseout', hide);
+  bar.addEventListener('focusout', hide);
+  bar.addEventListener('click', hide);
+  document.addEventListener('scroll', hide, { passive: true, capture: true });
+  window.addEventListener('blur', hide);
 }
 
-function initSourceDownload(info) {
-  const link = $('#source-download');
-  if (link && info.sourceAvailable) {
-    link.hidden = false;
-    window.lucide?.createIcons();
+function initFooterLinks() {
+  for (const button of document.querySelectorAll('.appbar-link[data-href]')) {
+    button.addEventListener('click', () => {
+      window.open(button.dataset.href, '_blank', 'noopener');
+    });
+  }
+}
+
+async function initServerInfo() {
+  const info = await getJson('/api/version');
+  if (info) {
+    initVersion(info);
   }
 }
 
@@ -110,7 +167,7 @@ function initVersion(info) {
   const button = document.createElement('button');
   button.type = 'button';
   button.className = 'version-link';
-  button.title = 'Version details';
+  button.dataset.tooltip = 'Version details';
   button.textContent = full.length > 14 ? `${full.slice(0, 13)}…` : full;
   button.addEventListener('click', () => showVersionDialog(info));
   el.textContent = '';

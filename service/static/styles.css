@@ -79,7 +79,7 @@ button:hover {
 .app-shell {
   height: 100%;
   display: grid;
-  grid-template-rows: 48px 1fr;
+  grid-template-rows: 48px 1fr 26px;
   overflow: hidden;
 }
 
@@ -110,51 +110,72 @@ button:hover {
   font-weight: 700;
 }
 
-.brand-tech {
+.appbar {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding-left: 10px;
-  margin-left: 4px;
-  border-left: 1px solid var(--line);
+  gap: 8px;
+  padding: 0 12px;
+  border-top: 1px solid var(--line);
+  background: var(--panel);
   font-size: 12px;
   color: var(--muted);
 }
 
-.brand-tech-label {
+.appbar-label {
   text-transform: uppercase;
   letter-spacing: 0.04em;
   font-size: 10px;
 }
 
-.brand-tech a {
-  color: var(--muted);
-  text-decoration: none;
+.appbar-sep {
+  opacity: 0.5;
 }
 
-.brand-tech a:hover {
+.appbar-link {
+  /* Reset the global button chrome: these read as links, not controls. */
+  height: auto;
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.appbar-link:hover {
   color: var(--accent);
 }
 
-@media (max-width: 720px) {
-  .brand-tech {
-    display: none;
-  }
+.appbar-link:focus-visible {
+  outline: 1px solid var(--line);
+  outline-offset: 2px;
 }
 
-.copyright {
-  color: var(--muted);
+.appbar .version {
+  margin-left: auto;
+}
+
+/* Positioned from JS: native title tooltips are slow and cannot be styled. */
+.q-tooltip {
+  position: fixed;
+  z-index: 4000;
+  max-width: 60vw;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--panel-2);
+  color: var(--text);
   font-size: 12px;
-  white-space: nowrap;
-}
-
-@media (max-width: 900px) {
-  .copyright {
-    display: none;
-  }
+  white-space: pre;
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.5);
+  pointer-events: none;
 }
 
 .version-link {
+  height: auto;
+  line-height: 1;
   background: none;
   border: none;
   padding: 0;

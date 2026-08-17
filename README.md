@@ -26,6 +26,24 @@ rowset pipelines.
 - `docs/arch/` - design notes for planner, scheduler, joins, aggregation, and
   kernel dispatch.
 
+## Architecture
+
+Design notes live in [docs/arch/](docs/arch/README.md):
+
+- [Optimizations](docs/arch/optimizations.md) - every rewrite the engine does,
+  with a minimal query and the plan before and after.
+- [Logical plan build](docs/arch/logical_plan_build.md) - SQL AST to operator
+  tree, aggregate rewrites, CTEs.
+- [Predicate pushdown](docs/arch/predicate_pushdown.md) and
+  [join reorder](docs/arch/join_reorder.md) - the two passes that decide how
+  much data the scans return.
+- [Aggregation](docs/arch/aggregation.md) and [join](docs/arch/join.md) -
+  generated kernels, hash tables, runtime ABI.
+- [Scheduler runtime](docs/arch/scheduler_runtime.md) and
+  [dispatch](docs/arch/dispatch.md) - the physical graph, tasks and connections.
+- [Kernel compilation phases](docs/arch/kernel-compilation-phases.md) - how a
+  plan becomes Qumir code, LLVM IR and finally machine code or wasm.
+
 ## Build
 
 Requirements:
@@ -43,25 +61,6 @@ Configure and build:
 cmake -S . -B build -G Ninja
 cmake --build build
 ```
-
-Useful focused builds:
-
-```bash
-cmake --build build --target qdb
-```
-
-LLVM is linked statically by default, which is what makes the binary ~86 MB —
-about 50 MB of it is LLVM's optimizer and code generator. When the platform
-ships a shared `libLLVM` (`llvm-config --shared-mode` prints `shared`), link
-against it instead:
-
-```bash
-cmake -S . -B build -G Ninja -DQDB_LLVM_LINK_SHARED=ON
-```
-
-That yields a 7 MB `qdb` and a 3.5 MB `qdb_web` at the cost of a runtime
-dependency on the LLVM package. The flag is forwarded to the qumir submodule as
-`QUMIR_LLVM_LINK_SHARED`.
 
 The web service is optional and disabled by default:
 
@@ -254,13 +253,3 @@ benchmark/clickbench/run_clickbench.sh /path/to/clickbench 0,7,42
 Use `QDB_ARGS` and `OUT_DIR` as with the other benchmark runners. Queries that
 require unsupported string operations are skipped unless
 `ALLOW_UNSUPPORTED=1` is set.
-
-## Development Notes
-
-- Prefer changing generated/static kernel code in `qdb/kernel/` and `.oz`
-  modules rather than duplicating heavy operator logic in C++ or JavaScript.
-- Browser execution should keep data as wasm rowsets as long as possible and
-  materialize JavaScript rows only at the final result boundary.
-- Web downloads and browser datasets use OPFS; IndexedDB stores only metadata.
-- Keep plan/runtime changes covered by focused tests in `test/` and, when
-  relevant, TPC-H smoke runs through `benchmark/tpch/run_tpch.sh`.
