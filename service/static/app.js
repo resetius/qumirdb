@@ -2,6 +2,7 @@ import { getJson, postJson } from './api.js';
 import { renderGraph } from './graph.js';
 import { tpchQueries } from './tpch_queries.js';
 import { tpcdsQueries } from './tpcds_queries.js';
+import { externalQueries } from './external_queries.js';
 import {
   addFilesToBrowserDataset,
   addStoredFilesToBrowserDataset,
@@ -33,6 +34,7 @@ const MAX_PERSISTED_RESULT_ROWS = 1000;
 const BROWSER_EXPLAIN_PREFETCH_CONCURRENCY = 4;
 const TPCH_QUERY_FOLDER_ID = 'tpch';
 const TPCDS_QUERY_FOLDER_ID = 'tpcds';
+const EXTERNAL_QUERY_FOLDER_ID = 'external';
 const OBSOLETE_BENCHMARK_QUERY_IDS = new Set([
   'tpcds-q14',
   'tpcds-q23',
@@ -611,7 +613,8 @@ function initQueries() {
 function benchmarkQuerySets() {
   return [
     { folderId: TPCH_QUERY_FOLDER_ID, queries: tpchQueries },
-    { folderId: TPCDS_QUERY_FOLDER_ID, queries: tpcdsQueries }
+    { folderId: TPCDS_QUERY_FOLDER_ID, queries: tpcdsQueries },
+    { folderId: EXTERNAL_QUERY_FOLDER_ID, queries: externalQueries }
   ];
 }
 
@@ -690,6 +693,7 @@ function defaultQueryFolders() {
   return [
     { id: TPCH_QUERY_FOLDER_ID, name: 'TPC-H' },
     { id: TPCDS_QUERY_FOLDER_ID, name: 'TPC-DS' },
+    { id: EXTERNAL_QUERY_FOLDER_ID, name: 'External Functions' },
     { id: DEFAULT_QUERY_FOLDER_ID, name: 'Queries' }
   ];
 }
