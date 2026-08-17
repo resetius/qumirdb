@@ -91,7 +91,7 @@ TFixture MakeFixture(std::string_view name) {
         fixture.Tables.emplace("t", std::make_unique<TFixtureTable>(
             std::vector<std::string>{"k", "v"},
             std::vector<std::vector<int64_t>>{
-                {1, 1, 2, 2, 2}, {10, 20, 3, 4, 5}}));
+                {1, 2, 3, 4, 4}, {10, 20, 3, 4, 5}}));
         return fixture;
     }
     if (name == "join") {

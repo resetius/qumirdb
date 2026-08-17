@@ -94,7 +94,12 @@ const fixtures = {
   aggregate: {
     sql: 'SELECT k AS k, sum(v) AS s FROM t GROUP BY k',
     tables: {
-      t: { k: [1, 1, 2, 2, 2], v: [10, 20, 3, 4, 5] },
+      t: { k: [1, 2, 3, 4, 4], v: [10, 20, 3, 4, 5] },
+    },
+    stats: {
+      t: {
+        columns: [{ name: 'k', ndv: 4, ndv_exact: true }],
+      },
     },
   },
   join: {
@@ -142,6 +147,7 @@ function datasetFor(fixture) {
           rows: rowCount,
           bytes: rowCount * Object.keys(columns).length * 8,
           rowGroups: 4,
+          ...(fixture.stats?.[name] || {}),
         },
       };
     }),

@@ -53,8 +53,10 @@ struct TSchedulerUnaryStage {
 };
 
 struct TAggregateBlockingState {
-    explicit TAggregateBlockingState(TAggregateKernels kernels)
-        : Processor(std::move(kernels))
+    explicit TAggregateBlockingState(
+        TAggregateKernels kernels,
+        int64_t initialCapacity)
+        : Processor(std::move(kernels), initialCapacity)
     {}
 
     TAggregateProcessor Processor;
@@ -1285,7 +1287,8 @@ private:
         const NQumir::NAst::TTypePtr& childType,
         TAggregateOperator& aggregate,
         std::string stage,
-        TExecStageId execStageId)
+        TExecStageId execStageId,
+        int64_t initialCapacity = 4)
     {
         auto* inputType =
             static_cast<NQumir::NAst::TStructType*>(childType.get());
@@ -1326,8 +1329,9 @@ private:
             });
         return TBlockingTail{
             .Code = std::move(code),
-            .MakeState = [kernels]() -> std::shared_ptr<void> {
-                return std::make_shared<TAggregateBlockingState>(*kernels);
+            .MakeState = [kernels, initialCapacity]() -> std::shared_ptr<void> {
+                return std::make_shared<TAggregateBlockingState>(
+                    *kernels, initialCapacity);
             },
             .OutputType = ComputeAggregateOutputType(
                 childType, aggregate.GroupKeys(), aggregate.Aggs()),
@@ -1577,7 +1581,8 @@ private:
                 execStageId,
                 [&, group](const NQumir::NAst::TTypePtr& childType) {
                     return BuildAggregateTail(
-                        childType, aggregate, group, execStageId);
+                        childType, aggregate, group, execStageId,
+                        EstimateAggregateInitialCapacity(aggregate, 1));
                 },
                 outConn,
                 outLaneOffset);
@@ -1635,7 +1640,8 @@ private:
             [&]() {
                 TStageDiagnosticsScope diagnosticsScope(Diagnostics_, aggregateGroup);
                 return BuildAggregateTail(
-                    childType, aggregate, aggregateGroup, execStageId);
+                    childType, aggregate, aggregateGroup, execStageId,
+                    EstimateAggregateInitialCapacity(aggregate, parts));
             }();
 
         auto& shufRef = AddConn<NScheduler::THashShuffleConnection>(

@@ -1,6 +1,8 @@
 #include <gtest/gtest.h>
 
 #include <qdb/io/parquet/source.h>
+#include <qdb/exec/planner_helpers.h>
+#include <qdb/plan/ops/aggregate.h>
 #include <qdb/plan/ops/filter.h>
 #include <qdb/plan/ops/join.h>
 #include <qdb/plan/ops/project.h>
@@ -272,6 +274,21 @@ TEST(StatsTest, FilterSelectivityPropagation) {
     EXPECT_LE(plan->Stats_->RowCount, 300u);
     EXPECT_TRUE(sourceOp->RowGroupPredicate());
     EXPECT_TRUE(NQdb::TMaybeOp<NQdb::TFilterOperator>(plan));
+}
+
+TEST(StatsTest, AggregateInitialCapacityUsesNdvAndPartitionCount) {
+    TStatsSource src({{"x", 100}}, 1000);
+    auto input = std::make_shared<NQdb::TSourceOperator>(src, "t");
+    input->Stats_ = src.Stats_;
+    NQdb::TAggregateOperator aggregate(input, {"x"}, {});
+
+    // ceil(100 / 0.75) rounds up to the next power of two.
+    EXPECT_EQ(NQdb::EstimateAggregateInitialCapacity(aggregate, 1), 256);
+    // Four disjoint partition-local tables each expect 25 groups.
+    EXPECT_EQ(NQdb::EstimateAggregateInitialCapacity(aggregate, 4), 64);
+
+    NQdb::TAggregateOperator missingStats(input, {"unknown"}, {});
+    EXPECT_EQ(NQdb::EstimateAggregateInitialCapacity(missingStats, 1), 4);
 }
 
 TEST(StatsTest, RowGroupHintCollectsNestedFilterChain) {
