@@ -2382,6 +2382,10 @@ struct TExecPlanCodec {
                     {"kind", "aggregate"},
                     {"label", AggregatePlanLabel(*aggregate)},
                     {"groupKeys", StringArray(aggregate->GroupKeys())},
+                    {"initialCapacity",
+                        aggregate->GroupingSets().empty()
+                            ? EstimateAggregateInitialCapacity(*aggregate, 1)
+                            : int64_t{4}},
                     {"entrypoints", EntrypointsJson(*ref)},
                     {"keyCount", static_cast<int64_t>(keyCount)},
                     {"output", std::move(output)},

@@ -16,6 +16,7 @@
       "entrypoints": {},
       "groupKeys": ["t.k"],
       "id": 1,
+      "initialCapacity": 8,
       "keyCount": 1,
       "kind": "aggregate",
       "label": "aggregate keys=[t.k] aggs=[sum_0=sum]",

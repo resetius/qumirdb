@@ -36,8 +36,11 @@ constexpr int64_t kOpDestroy = 2;
 
 } // namespace
 
-TAggregateProcessor::TAggregateProcessor(TAggregateKernels kernels)
+TAggregateProcessor::TAggregateProcessor(
+    TAggregateKernels kernels,
+    int64_t initialCapacity)
     : Kernels_(std::move(kernels))
+    , InitialCapacity_(std::max(initialCapacity, kInitialCapacity))
 {
 }
 
@@ -54,7 +57,7 @@ void TAggregateProcessor::EnsureInit()
     }
     Initialized_ = true;
     if (Kernels_.Dispatch(
-            HashTable_.data(), nullptr, kInitialCapacity, kOpInit) == 0)
+            HashTable_.data(), nullptr, InitialCapacity_, kOpInit) == 0)
     {
         Destroyed_ = true;
         throw std::runtime_error("aggregate initialization failed");

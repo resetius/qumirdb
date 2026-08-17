@@ -2162,10 +2162,17 @@ function createAggregateState(kernel, layout, stage) {
 
   const output = stage.output;
 
+  // Browser execution contracts the native physical lanes into one semantic
+  // aggregate, so the exported capacity is sized for one complete hash table.
+  const initialCapacity = Number.isSafeInteger(stage.initialCapacity)
+      && stage.initialCapacity >= 4
+    ? stage.initialCapacity
+    : 4;
+
   // init(ht, capacity)
   const ht = arena.alloc(layout.hashTable.size, 8);
   new Uint8Array(arena.memory.buffer, ht, layout.hashTable.size).fill(0);
-  if (dispatch(BigInt(ht), 0n, 4n, 0n) === 0n) {
+  if (dispatch(BigInt(ht), 0n, BigInt(initialCapacity), 0n) === 0n) {
     arena.free(ht);
     throw new Error('aggregate initialization failed');
   }

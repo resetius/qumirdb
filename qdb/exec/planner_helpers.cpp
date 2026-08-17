@@ -15,6 +15,8 @@
 #include <qumir/parser/type.h>
 
 #include <algorithm>
+#include <bit>
+#include <limits>
 #include <ostream>
 #include <stdexcept>
 #include <string>
@@ -123,6 +125,62 @@ void PrintKernelSpec(std::ostream* out, const NKernel::TOperatorKernelSpec& spec
 }
 
 } // namespace
+
+int64_t EstimateAggregateInitialCapacity(
+    const TAggregateOperator& aggregate,
+    size_t partitionCount)
+{
+    constexpr uint64_t DefaultCapacity = 4;
+    const auto inputStats = aggregate.Input()->Stats_;
+    if (!inputStats || aggregate.GroupKeys().empty()) {
+        return DefaultCapacity;
+    }
+
+    uint64_t groups = 1;
+    for (const auto& key : aggregate.GroupKeys()) {
+        auto it = inputStats->ColumnStats.find(key);
+        if (it == inputStats->ColumnStats.end() ||
+            !it->second || !it->second->Ndv)
+        {
+            return DefaultCapacity;
+        }
+        const uint64_t ndv = *it->second->Ndv;
+        if (ndv == 0) {
+            return DefaultCapacity;
+        }
+        if (groups > inputStats->RowCount / ndv) {
+            groups = inputStats->RowCount;
+        } else {
+            groups *= ndv;
+        }
+    }
+    groups = std::min(groups, inputStats->RowCount);
+
+    const uint64_t partitions = std::max<uint64_t>(partitionCount, 1);
+    const uint64_t groupsPerPartition =
+        groups / partitions + (groups % partitions != 0);
+    // The Robin Hood table grows before the next insertion would cross 75%.
+    uint64_t required = groupsPerPartition >
+            (std::numeric_limits<uint64_t>::max() - 2) / 4
+        ? std::numeric_limits<uint64_t>::max()
+        : (groupsPerPartition * 4 + 2) / 3;
+
+    // NDV may be a HyperLogLog estimate (TStats::NdvIsExact) and a filter
+    // below the aggregate can cut the real group count by orders of magnitude
+    // Cap the up-front allocation so a wrong guess costs a few doublings
+    // instead of gigabytes: aht_init allocates keys and group_keys of
+    // key_size each, two i64 metadata arrays and one i64 buffer per aggregate
+    constexpr uint64_t ByteBudget = 256ull << 20;
+    constexpr uint64_t AssumedKeyBytes = 16;
+    const uint64_t slotBytes = 16 +
+        8 * aggregate.Aggs().size() +
+        2 * AssumedKeyBytes * aggregate.GroupKeys().size();
+    required = std::min(
+        required, std::max(ByteBudget / slotBytes, DefaultCapacity));
+
+    return static_cast<int64_t>(
+        std::bit_ceil(std::max(required, DefaultCapacity)));
+}
 
 NQumir::NAst::TTypePtr BuildSourceRuntimeType(TSourceOperator& src)
 {

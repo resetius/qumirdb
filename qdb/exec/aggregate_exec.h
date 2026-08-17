@@ -10,7 +10,9 @@ namespace NQdb {
 
 class TAggregateProcessor {
 public:
-    explicit TAggregateProcessor(TAggregateKernels kernels);
+    explicit TAggregateProcessor(
+        TAggregateKernels kernels,
+        int64_t initialCapacity = 4);
     ~TAggregateProcessor();
 
     TAggregateProcessor(const TAggregateProcessor&) = delete;
@@ -25,6 +27,7 @@ private:
 
 private:
     TAggregateKernels Kernels_;
+    int64_t InitialCapacity_ = 4;
     std::array<uint8_t, TKernelCompiler::kHashTableSize> HashTable_ = {};
     bool Initialized_ = false;
     bool Finished_ = false;

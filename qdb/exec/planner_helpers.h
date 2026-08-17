@@ -5,6 +5,7 @@
 #include <qdb/exec/sort_exec.h>
 #include <qdb/exec/unary_process.h>
 #include <qdb/kernel/compiler.h>
+#include <qdb/plan/ops/aggregate.h>
 #include <qdb/plan/ops/filter.h>
 #include <qdb/plan/ops/join.h>
 #include <qdb/plan/ops/project.h>
@@ -36,6 +37,13 @@ struct TFilterColumnPlan {
 TFilterColumnPlan BuildFilterColumnPlan(
     const TFilterOperator& filter,
     const NQumir::NAst::TTypePtr& inputType);
+
+// Estimate a power-of-two Robin Hood table capacity from group-key NDVs.
+// partitionCount is the number of disjoint tables that will share the groups;
+// use one for a semantic/browser aggregate that owns the complete input.
+int64_t EstimateAggregateInitialCapacity(
+    const TAggregateOperator& aggregate,
+    size_t partitionCount = 1);
 
 // Compilation-free projection layout: column plan, computed-expression types
 // and the output struct. Shared by the runtime process builder and the plan
