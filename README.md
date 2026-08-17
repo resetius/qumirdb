@@ -14,6 +14,10 @@ The current workload focus is TPC-H-style columnar execution: parquet scans,
 filters, projections, joins, aggregates, sort/top-sort, and scheduler-driven
 rowset pipelines.
 
+A live playground runs at **[db.qumir.dev](https://db.qumir.dev)**: write SQL,
+inspect the logical and physical plans, and execute the query either on the
+server or in your own browser.
+
 ## Repository Layout
 
 - `qdb/` - engine library: SQL/parser, logical plan, passes, kernel generation,
@@ -123,7 +127,8 @@ Example:
 
 ## Web Workbench
 
-Build and start the web server:
+The workbench is what [db.qumir.dev](https://db.qumir.dev) serves. To run your
+own instance, build and start the web server:
 
 ```bash
 cmake -S . -B build -G Ninja -DQDB_BUILD_SERVICE=ON
