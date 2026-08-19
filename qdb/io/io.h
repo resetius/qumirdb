@@ -23,6 +23,7 @@ struct TRowSet {
     int64_t ColumnCount;
     int64_t RowCount;
     uint8_t* Selection; // nullptr = all rows selected; Selection[i]==0 skips row i
+    uint64_t* Hash; // nullptr = not precomputed; Hash[i] is a shuffle-consistent rh_hash of row i's key
 
     void (*Destroy)(TRowSet*);
     void* Private;

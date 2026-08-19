@@ -1883,7 +1883,8 @@ llvm::json::Object ExecLayoutJson(int64_t heapBase, int wasmBits) {
                 {"columnCount", 8},
                 {"rowCount", 16},
                 {"selection", 24},
-                {"private", 32},
+                {"hash", 28},
+                {"private", 36},
             }},
             {"stringView", llvm::json::Object{
                 {"size", 16},
@@ -1912,16 +1913,17 @@ llvm::json::Object ExecLayoutJson(int64_t heapBase, int wasmBits) {
                 {"offsetWidth", 40},
             }},
             {"rowset", llvm::json::Object{
-                {"size", 56},
+                {"size", 64},
                 {"columns", 0},
                 {"columnCount", 8},
                 {"rowCount", 16},
                 {"selection", 24},
+                {"hash", 32},
                 // Private holds the owners list for kernel-materialized rowsets
                 // (owners[0] = count, then one qdb_alloc'd pointer per buffer);
                 // the runtime walks it to free join output. See
                 // destroyKernelOwnedRowSet.
-                {"private", 40},
+                {"private", 48},
             }},
             {"stringView", llvm::json::Object{
                 {"size", 16},

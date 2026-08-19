@@ -45,6 +45,7 @@ std::optional<ETaskResult> FlushPendingOutput(
 struct THashShuffleRowSetData {
     std::shared_ptr<TRowSet> Input;
     std::vector<uint8_t> Selection;
+    std::shared_ptr<std::vector<uint64_t>> Hashes; // nullptr if not computed for this batch
 };
 
 struct TShuffleColumnData {
@@ -468,6 +469,7 @@ struct THashShuffleTask::TPendingOutput {
 struct THashShuffleTask::TBufferedBatch {
     std::shared_ptr<TRowSet> Input;
     std::vector<int32_t> Rows;
+    std::shared_ptr<std::vector<uint64_t>> Hashes; // nullptr if not computed for this batch
 };
 
 struct THashShuffleTask::TDestinationBuffer {
@@ -577,7 +579,7 @@ void THashShuffleTask::ScatterBuffered(TRowSet& rowSet) {
             rows[0].push_back(static_cast<int32_t>(row));
         }
         bytes[0] = rows[0].size() * estimatedRowBytes;
-        AddBufferedRows(0, input, std::move(rows[0]), bytes[0]);
+        AddBufferedRows(0, input, std::move(rows[0]), bytes[0], nullptr);
         return;
     }
 
@@ -585,6 +587,7 @@ void THashShuffleTask::ScatterBuffered(TRowSet& rowSet) {
     if (!Code_->Hash(input.get(), Hashes_.data())) {
         throw std::runtime_error("hash shuffle hash kernel failed");
     }
+    auto hashes = std::make_shared<std::vector<uint64_t>>(Hashes_);
 
     for (int64_t row = 0; row < input->RowCount; ++row) {
         if (!RowSelected(*input, row)) {
@@ -597,7 +600,7 @@ void THashShuffleTask::ScatterBuffered(TRowSet& rowSet) {
 
     for (size_t dst = 0; dst < partitions; ++dst) {
         bytes[dst] = rows[dst].size() * estimatedRowBytes;
-        AddBufferedRows(dst, input, std::move(rows[dst]), bytes[dst]);
+        AddBufferedRows(dst, input, std::move(rows[dst]), bytes[dst], hashes);
     }
 }
 
@@ -634,6 +637,7 @@ void THashShuffleTask::ScatterViews(TRowSet& rowSet) {
     if (!Code_->Hash(&rowSet, Hashes_.data())) {
         throw std::runtime_error("hash shuffle hash kernel failed");
     }
+    auto hashes = std::make_shared<std::vector<uint64_t>>(Hashes_);
 
     std::vector<std::vector<uint8_t>> selections(partitions);
     std::vector<size_t> counts(partitions, 0);
@@ -661,6 +665,7 @@ void THashShuffleTask::ScatterViews(TRowSet& rowSet) {
         auto* data = new THashShuffleRowSetData;
         data->Input = input;
         data->Selection = std::move(selections[dst]);
+        data->Hashes = hashes;
         Pending_.push_back(TPendingOutput{
             .DstLane = dst,
             .RowSet = TRowSet{
@@ -668,6 +673,7 @@ void THashShuffleTask::ScatterViews(TRowSet& rowSet) {
                 .ColumnCount = input->ColumnCount,
                 .RowCount = input->RowCount,
                 .Selection = data->Selection.data(),
+                .Hash = data->Hashes->data(),
                 .Destroy = DestroyHashShuffleRowSet,
                 .Private = data,
                 .RefCount = 1,
@@ -679,7 +685,8 @@ void THashShuffleTask::ScatterViews(TRowSet& rowSet) {
 void THashShuffleTask::AddBufferedRows(size_t dst,
     const std::shared_ptr<TRowSet>& input,
     std::vector<int32_t>&& rows,
-    size_t bytes)
+    size_t bytes,
+    const std::shared_ptr<std::vector<uint64_t>>& hashes)
 {
     if (rows.empty()) {
         return;
@@ -690,6 +697,7 @@ void THashShuffleTask::AddBufferedRows(size_t dst,
     buffer.Batches.push_back(TBufferedBatch{
         .Input = input,
         .Rows = std::move(rows),
+        .Hashes = hashes,
     });
 
     const size_t targetRows = Code_->TargetOutputBatchRows;
@@ -717,6 +725,7 @@ void THashShuffleTask::FlushBuffer(size_t dst) {
         for (int32_t row : batch.Rows) {
             data->Selection[static_cast<size_t>(row)] = 0xff;
         }
+        data->Hashes = batch.Hashes;
         Pending_.push_back(TPendingOutput{
             .DstLane = dst,
             .RowSet = TRowSet{
@@ -724,6 +733,7 @@ void THashShuffleTask::FlushBuffer(size_t dst) {
                 .ColumnCount = batch.Input->ColumnCount,
                 .RowCount = batch.Input->RowCount,
                 .Selection = data->Selection.data(),
+                .Hash = data->Hashes ? data->Hashes->data() : nullptr,
                 .Destroy = DestroyHashShuffleRowSet,
                 .Private = data,
                 .RefCount = 1,

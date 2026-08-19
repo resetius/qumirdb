@@ -27,6 +27,7 @@
     (ColumnCount i64)
     (RowCount i64)
     (Selection <ptr u8>)
+    (Hash <ptr u64>)
     (Destroy <ptr i64>)
     (Private <ptr i64>)
     (RefCount i64)>)

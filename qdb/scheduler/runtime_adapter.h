@@ -258,7 +258,8 @@ private:
     void AddBufferedRows(size_t dst,
         const std::shared_ptr<TRowSet>& input,
         std::vector<int32_t>&& rows,
-        size_t bytes);
+        size_t bytes,
+        const std::shared_ptr<std::vector<uint64_t>>& hashes);
     void FlushBuffer(size_t dst);
     void FlushAllBuffers();
     ETaskResult PushPending();
