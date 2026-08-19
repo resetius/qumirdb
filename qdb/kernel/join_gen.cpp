@@ -228,15 +228,18 @@ NQumir::NAst::TExprPtr GenJoinInsertKeyOnlyAst(
   body.push_back(var("stored_witness", key.StoredType));
   body.push_back(assign("stored_witness", ZeroValueExpr(key.StoredType)));
 
-  auto insertCall =
-      call("jt_insert_slot_only",
-           {ident("own"), std::move(keyValue), ident("stored_witness")});
+  auto u64Type = std::make_shared<TIntegerType>(TIntegerType::U64);
+  auto insertCall = call("jt_insert_slot_only",
+      {ident("own"), ident("key_value"), ident("stored_witness"),
+       cast(call("rh_hash", {ident("key_value")}), u64Type)});
 
   std::vector<TExprPtr> process;
   for (auto &kf : keyFields) {
     process.insert(process.end(), std::make_move_iterator(kf.Setup.begin()),
                    std::make_move_iterator(kf.Setup.end()));
   }
+  process.push_back(var("key_value", key.LookupType));
+  process.push_back(assign("key_value", std::move(keyValue)));
   process.push_back(std::make_shared<TIfExpr>(
       loc,
       std::make_shared<TUnaryExpr>(loc, TOperator("!"), std::move(insertCall)),
@@ -431,13 +434,16 @@ NQumir::NAst::TExprPtr GenJoinBatchAst(
     const TJoinKeyDescriptor &key, bool isLeft, const std::string &funcName,
     NQumir::NAst::TTypePtr columnType, NQumir::NAst::TTypePtr rowSetType,
     NQumir::NAst::TTypePtr hashTableType, NQumir::NAst::TTypePtr pairBufferType,
-    NQumir::NAst::TTypePtr stringViewType, EJoinBatchMode mode) {
+    NQumir::NAst::TTypePtr stringViewType, EJoinBatchMode mode,
+    bool hasPrecomputedHash) {
   NQumir::TLocation loc{};
 
   auto i64Type = std::make_shared<TIntegerType>();
   auto u8Type = std::make_shared<TIntegerType>(TIntegerType::U8);
+  auto u64Type = std::make_shared<TIntegerType>(TIntegerType::U64);
   auto boolType = std::make_shared<TBoolType>();
   auto ptrU8Type = std::make_shared<TPointerType>(u8Type);
+  auto ptrU64Type = std::make_shared<TPointerType>(u64Type);
   auto ptrI64Type = std::make_shared<TPointerType>(i64Type);
 
   auto ident = [&](const std::string &name) -> TExprPtr {
@@ -534,6 +540,10 @@ NQumir::NAst::TExprPtr GenJoinBatchAst(
   // generic dual-key call sites; a zero value works for every mode.
   body.push_back(var("stored_witness", key.StoredType));
   body.push_back(assign("stored_witness", ZeroValueExpr(key.StoredType)));
+  if (hasPrecomputedHash) {
+    body.push_back(var("hash_ptr", ptrU64Type));
+    body.push_back(assign("hash_ptr", field("batch", "Hash")));
+  }
   body.push_back(var("i", i64Type));
   body.push_back(assign("i", numI64(0)));
 
@@ -576,23 +586,44 @@ NQumir::NAst::TExprPtr GenJoinBatchAst(
   auto ownRowId = binary("+", binary("<<", ident("batch_idx"), numI64(32)),
                          binary("&", ident("i"), numI64(0xffffffff)));
 
+  std::vector<TExprPtr> keyValueSetup = {
+      var("key_value", key.LookupType),
+      assign("key_value", std::move(keyValue)),
+      var("hash_value", u64Type),
+  };
+  if (hasPrecomputedHash) {
+    // hash_ptr is only guaranteed non-null when the shuffle upstream produced
+    // a single-batch (view) output; the rarer multi-batch gather path leaves
+    // it null, so fall back to rh_hash per row.
+    keyValueSetup.push_back(std::make_shared<TIfExpr>(loc,
+        binary("!=", cast(ident("hash_ptr"), i64Type), numI64(0)),
+        block({assign("hash_value",
+            std::make_shared<TIndexExpr>(loc, ident("hash_ptr"), ident("i")))}),
+        block({assign("hash_value",
+            cast(call("rh_hash", {ident("key_value")}), u64Type))})));
+  } else {
+    keyValueSetup.push_back(assign("hash_value",
+        cast(call("rh_hash", {ident("key_value")}), u64Type)));
+  }
+
   TExprPtr emitCall;
   if (mode == EJoinBatchMode::ProbeInsert) {
     emitCall = call("jt_emit_and_insert", {
                                               ident("own"),
                                               ident("opp"),
-                                              std::move(keyValue),
+                                              ident("key_value"),
                                               ident("stored_witness"),
                                               std::move(ownRowId),
                                               numI64(isLeft ? 1 : 0),
                                               ident("pairs"),
                                               ident("left_store"),
                                               ident("right_store"),
+                                              ident("hash_value"),
                                           });
   } else if (mode == EJoinBatchMode::ProbeOnly) {
     emitCall = call("jt_probe_and_emit", {
                                              ident("build"),
-                                             std::move(keyValue),
+                                             ident("key_value"),
                                              ident("stored_witness"),
                                              std::move(ownRowId),
                                              numI64(isLeft ? 1 : 0),
@@ -601,24 +632,27 @@ NQumir::NAst::TExprPtr GenJoinBatchAst(
                                              ident("right_store"),
                                              ident("batch"),
                                              ident("batch"),
+                                             ident("hash_value"),
                                          });
   } else if (mode == EJoinBatchMode::InsertOnly) {
     emitCall = call("jt_insert_row_only", {
                                               ident("own"),
-                                              std::move(keyValue),
+                                              ident("key_value"),
                                               ident("stored_witness"),
                                               std::move(ownRowId),
+                                              ident("hash_value"),
                                           });
   } else {
     emitCall = call("jt_probe_and_mark", {
                                              ident("build"),
                                              ident("matched"),
-                                             std::move(keyValue),
+                                             ident("key_value"),
                                              ident("stored_witness"),
                                              std::move(ownRowId),
                                              ident("left_store"),
                                              ident("right_store"),
                                              ident("batch"),
+                                             ident("hash_value"),
                                          });
   }
 
@@ -628,6 +662,9 @@ NQumir::NAst::TExprPtr GenJoinBatchAst(
                    std::make_move_iterator(keyField.Setup.begin()),
                    std::make_move_iterator(keyField.Setup.end()));
   }
+  process.insert(process.end(),
+                 std::make_move_iterator(keyValueSetup.begin()),
+                 std::make_move_iterator(keyValueSetup.end()));
   // if (!jt_emit_and_insert(...)) return false;
   process.push_back(std::make_shared<TIfExpr>(
       loc,
@@ -661,22 +698,22 @@ NQumir::NAst::TExprPtr GenJoinProcessAst(
     const TJoinKeyDescriptor &key, bool isLeft, const std::string &funcName,
     NQumir::NAst::TTypePtr columnType, NQumir::NAst::TTypePtr rowSetType,
     NQumir::NAst::TTypePtr hashTableType, NQumir::NAst::TTypePtr pairBufferType,
-    NQumir::NAst::TTypePtr stringViewType) {
+    NQumir::NAst::TTypePtr stringViewType, bool hasPrecomputedHash) {
   return GenJoinBatchAst(key, isLeft, funcName, std::move(columnType),
                          std::move(rowSetType), std::move(hashTableType),
                          std::move(pairBufferType), std::move(stringViewType),
-                         EJoinBatchMode::ProbeInsert);
+                         EJoinBatchMode::ProbeInsert, hasPrecomputedHash);
 }
 
 NQumir::NAst::TExprPtr GenJoinInsertRowsOnlyAst(
     const TJoinKeyDescriptor &key, bool isLeft, const std::string &funcName,
     NQumir::NAst::TTypePtr columnType, NQumir::NAst::TTypePtr rowSetType,
     NQumir::NAst::TTypePtr hashTableType, NQumir::NAst::TTypePtr pairBufferType,
-    NQumir::NAst::TTypePtr stringViewType) {
+    NQumir::NAst::TTypePtr stringViewType, bool hasPrecomputedHash) {
   return GenJoinBatchAst(key, isLeft, funcName, std::move(columnType),
                          std::move(rowSetType), std::move(hashTableType),
                          std::move(pairBufferType), std::move(stringViewType),
-                         EJoinBatchMode::InsertOnly);
+                         EJoinBatchMode::InsertOnly, hasPrecomputedHash);
 }
 
 NQumir::NAst::TExprPtr GenJoinProbeAst(const TJoinKeyDescriptor &key,
@@ -685,22 +722,23 @@ NQumir::NAst::TExprPtr GenJoinProbeAst(const TJoinKeyDescriptor &key,
                                        NQumir::NAst::TTypePtr rowSetType,
                                        NQumir::NAst::TTypePtr hashTableType,
                                        NQumir::NAst::TTypePtr pairBufferType,
-                                       NQumir::NAst::TTypePtr stringViewType) {
+                                       NQumir::NAst::TTypePtr stringViewType,
+                                       bool hasPrecomputedHash) {
   return GenJoinBatchAst(key, isLeft, funcName, std::move(columnType),
                          std::move(rowSetType), std::move(hashTableType),
                          std::move(pairBufferType), std::move(stringViewType),
-                         EJoinBatchMode::ProbeOnly);
+                         EJoinBatchMode::ProbeOnly, hasPrecomputedHash);
 }
 
 NQumir::NAst::TExprPtr GenJoinProbeMarkAst(
     const TJoinKeyDescriptor &key, bool isLeft, const std::string &funcName,
     NQumir::NAst::TTypePtr columnType, NQumir::NAst::TTypePtr rowSetType,
     NQumir::NAst::TTypePtr hashTableType, NQumir::NAst::TTypePtr pairBufferType,
-    NQumir::NAst::TTypePtr stringViewType) {
+    NQumir::NAst::TTypePtr stringViewType, bool hasPrecomputedHash) {
   return GenJoinBatchAst(key, isLeft, funcName, std::move(columnType),
                          std::move(rowSetType), std::move(hashTableType),
                          std::move(pairBufferType), std::move(stringViewType),
-                         EJoinBatchMode::ProbeMark);
+                         EJoinBatchMode::ProbeMark, hasPrecomputedHash);
 }
 
 NQumir::NAst::TExprPtr

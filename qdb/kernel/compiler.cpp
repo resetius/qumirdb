@@ -1800,7 +1800,7 @@ TAggregateKernels TKernelCompiler::CompileAggregate(
 
     auto program = NKernel::BuildGenericAggregateFusedProgramAst(
         inputType, keyDescriptor, layout,
-        columnType, rowSetType, hashTableType);
+        columnType, rowSetType, hashTableType, spec.HasPrecomputedHash);
     if (!program) {
         throw NQumir::TError(
             "CompileAggregate: " + program.error().ToString());
@@ -1927,7 +1927,7 @@ TJoinKernels TKernelCompiler::CompileJoin(
 
     return CompileJoin(
         *leftType.Cast(), *rightType.Cast(), keys, spec.JoinType,
-        residualPredicate, innerType, leftFieldCount);
+        residualPredicate, innerType, leftFieldCount, spec.HasPrecomputedHash);
 }
 
 TCrossJoinKernels TKernelCompiler::CompileCrossJoin(
@@ -2194,7 +2194,8 @@ TJoinKernels TKernelCompiler::CompileJoin(
     EJoinType type,
     const NQumir::NAst::TExprPtr& residualPredicate,
     const NQumir::NAst::TStructType* innerType,
-    size_t leftFieldCount)
+    size_t leftFieldCount,
+    bool hasPrecomputedHash)
 {
     using namespace NQumir::NAst;
 
@@ -2287,25 +2288,25 @@ TJoinKernels TKernelCompiler::CompileJoin(
         for (auto& f : *library) program.push_back(std::move(f));
         program.push_back(NKernel::GenJoinProcessAst(keyDesc, /*isLeft=*/true,
             "jt_process_left", columnType, rowSetType, hashTableType, pairBufferType,
-            stringViewType));
+            stringViewType, hasPrecomputedHash));
         program.push_back(NKernel::GenJoinProcessAst(keyDesc, /*isLeft=*/false,
             "jt_process_right", columnType, rowSetType, hashTableType, pairBufferType,
-            stringViewType));
+            stringViewType, hasPrecomputedHash));
         program.push_back(NKernel::GenJoinProbeAst(keyDesc, /*isLeft=*/true,
             "jt_probe_left_stream", columnType, rowSetType, hashTableType, pairBufferType,
-            stringViewType));
+            stringViewType, hasPrecomputedHash));
         program.push_back(NKernel::GenJoinProbeAst(keyDesc, /*isLeft=*/false,
             "jt_probe_right_stream", columnType, rowSetType, hashTableType, pairBufferType,
-            stringViewType));
+            stringViewType, hasPrecomputedHash));
         if (isResidualSemiAnti) {
             program.push_back(NKernel::GenJoinInsertRowsOnlyAst(
                 keyDesc, /*isLeft=*/true, "jt_insert_left_only",
                 columnType, rowSetType, hashTableType, pairBufferType,
-                stringViewType));
+                stringViewType, hasPrecomputedHash));
             program.push_back(NKernel::GenJoinProbeMarkAst(
                 keyDesc, /*isLeft=*/false, "jt_probe_right_mark",
                 columnType, rowSetType, hashTableType, pairBufferType,
-                stringViewType));
+                stringViewType, hasPrecomputedHash));
         }
         if (isSemiAnti && !isResidualSemiAnti) {
             program.push_back(NKernel::GenJoinInsertKeyOnlyAst(

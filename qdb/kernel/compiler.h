@@ -415,7 +415,8 @@ private:
         EJoinType type,
         const NQumir::NAst::TExprPtr& residualPredicate = nullptr,
         const NQumir::NAst::TStructType* innerType = nullptr,
-        size_t leftFieldCount = 0);
+        size_t leftFieldCount = 0,
+        bool hasPrecomputedHash = false);
 
     // Wrap a freshly built kernel program: create its slot, append to Sink_,
     // and (if BindNow_) JIT-finalize immediately. Returns the emitted kernel

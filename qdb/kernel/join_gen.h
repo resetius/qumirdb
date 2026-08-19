@@ -45,6 +45,9 @@ NQumir::NAst::TExprPtr GenJoinFinalizeSemiAntiAst(
 //              batch: <ref TRowSet>, key_columns: <ptr i64>,
 //              batch_idx: i64, pairs: <ref PairBuffer>) -> bool
 //
+// hasPrecomputedHash: read batch.Hash[i] instead of calling rh_hash(key) —
+// set when this batch comes straight from a hash shuffle keyed on the same
+// join columns (plan_lowerer.cpp decides this).
 NQumir::NAst::TExprPtr GenJoinProcessAst(
     const TJoinKeyDescriptor& key,
     bool isLeft,
@@ -53,7 +56,8 @@ NQumir::NAst::TExprPtr GenJoinProcessAst(
     NQumir::NAst::TTypePtr rowSetType,
     NQumir::NAst::TTypePtr hashTableType,
     NQumir::NAst::TTypePtr pairBufferType,
-    NQumir::NAst::TTypePtr stringViewType);
+    NQumir::NAst::TTypePtr stringViewType,
+    bool hasPrecomputedHash = false);
 
 // Generates one side's insert-only function (same ABI as GenJoinProcessAst):
 // reads keys from the batch and inserts row ids into the own table without
@@ -66,7 +70,8 @@ NQumir::NAst::TExprPtr GenJoinInsertRowsOnlyAst(
     NQumir::NAst::TTypePtr rowSetType,
     NQumir::NAst::TTypePtr hashTableType,
     NQumir::NAst::TTypePtr pairBufferType,
-    NQumir::NAst::TTypePtr stringViewType);
+    NQumir::NAst::TTypePtr stringViewType,
+    bool hasPrecomputedHash = false);
 
 // Generates one side's probe-only function (jt_probe_left_stream /
 // jt_probe_right_stream): reads stream batch keys, probes the already-built
@@ -79,7 +84,8 @@ NQumir::NAst::TExprPtr GenJoinProbeAst(
     NQumir::NAst::TTypePtr rowSetType,
     NQumir::NAst::TTypePtr hashTableType,
     NQumir::NAst::TTypePtr pairBufferType,
-    NQumir::NAst::TTypePtr stringViewType);
+    NQumir::NAst::TTypePtr stringViewType,
+    bool hasPrecomputedHash = false);
 
 // Generates residual SEMI/ANTI right-side probe: reads right batch keys, probes
 // the left build table, applies jt_residual_filter, and marks matched left row
@@ -92,7 +98,8 @@ NQumir::NAst::TExprPtr GenJoinProbeMarkAst(
     NQumir::NAst::TTypePtr rowSetType,
     NQumir::NAst::TTypePtr hashTableType,
     NQumir::NAst::TTypePtr pairBufferType,
-    NQumir::NAst::TTypePtr stringViewType);
+    NQumir::NAst::TTypePtr stringViewType,
+    bool hasPrecomputedHash = false);
 
 // Generates the cacheable rowset hash worker for shuffle:
 //   <funcName>(batch: <ref TRowSet>, hashes: <ptr u64>,

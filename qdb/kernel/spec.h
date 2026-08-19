@@ -73,6 +73,11 @@ struct TOperatorKernelSpec {
     EJoinType JoinType = EJoinType::Inner;
     std::vector<TKernelEntrypointSpec> Entrypoints;
     std::vector<std::string> SourceModules;
+
+    // Set by the caller (plan_lowerer.cpp) when this operator sits directly
+    // downstream of a hash shuffle keyed on the same columns: the generated
+    // dispatch reads batch.Hash[i] instead of recomputing rh_hash(key).
+    bool HasPrecomputedHash = false;
 };
 
 std::string_view KernelKindName(EOperatorKernelKind kind);

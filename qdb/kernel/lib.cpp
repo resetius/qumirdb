@@ -386,7 +386,8 @@ BuildGenericAggregateFusedProgramAst(
     const TAggReducerLayout& layout,
     NQumir::NAst::TTypePtr columnType,
     NQumir::NAst::TTypePtr rowSetType,
-    NQumir::NAst::TTypePtr hashTableType)
+    NQumir::NAst::TTypePtr hashTableType,
+    bool hasPrecomputedHash)
 {
     using namespace NQumir::NAst;
 
@@ -466,7 +467,8 @@ BuildGenericAggregateFusedProgramAst(
     };
     if (auto err = appendEntry(
             GenGenericAggregateDispatchAst(
-                inputType, key, layout, columnType, rowSetType, hashTableType),
+                inputType, key, layout, columnType, rowSetType, hashTableType,
+                hasPrecomputedHash),
             "generic aggregate dispatch")) {
         return std::unexpected(*err);
     }

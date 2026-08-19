@@ -53,13 +53,14 @@
                           (var right_row_id i64)
                           (var left_store <ptr TRowSet>)
                           (var right_store <ptr TRowSet>)
-                          (var stream_right_batch <ref TRowSet>)) -> bool
+                          (var stream_right_batch <ref TRowSet>)
+                          (var hash u64)) -> bool
     (block
       (var build_keys =
         (cast (field build Keys) <ptr StoredKey>))
       (var build_slot = (call rh_lookup_dual build_keys (field build Dist)
                           (field build SlotId) (field build Capacity) key
-                          (cast (call rh_hash key) u64)))
+                          hash))
       (if (!= build_slot (: -1 i64))
         (block
           (var build_aggs = (field build AggBuffers))
