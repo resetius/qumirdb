@@ -1964,7 +1964,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
 
     std::vector<TParam> params = {
         std::make_shared<TVarStmt>(loc, "ht", hashTableRefType),
-        std::make_shared<TVarStmt>(loc, "output_key_buffers", ptrPtrU8Type),
+        std::make_shared<TVarStmt>(loc, "columns", ptrColumnType),
         std::make_shared<TVarStmt>(loc, "output_buffers", ptrPtrI64Type),
         std::make_shared<TVarStmt>(loc, "output_agg_masks", ptrPtrU8Type),
         std::make_shared<TVarStmt>(loc, "output_capacity", i64Type),
@@ -1994,22 +1994,16 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
     for (size_t fieldIndex = 0; fieldIndex < key.Fields.size(); ++fieldIndex) {
         const bool isString = TMaybeType<TStringType>(
             UnwrapNamedType(key.Fields[fieldIndex].Type));
-        const std::string columnName =
-            "output_column_" + std::to_string(fieldIndex);
         const std::string maskName =
             "output_mask_" + std::to_string(fieldIndex);
-        project.push_back(std::make_shared<TVarStmt>(
-            loc, columnName, ptrColumnType));
-        auto raw = std::make_shared<TIndexExpr>(loc,
-            ident("output_key_buffers"),
-            std::make_shared<TNumberExpr>(
-                loc, static_cast<int64_t>(fieldIndex)));
-        project.push_back(std::make_shared<TAssignExpr>(loc, columnName,
-            std::make_shared<TCastExpr>(loc,
-                std::make_shared<TCastExpr>(loc, std::move(raw), i64Type),
-                ptrColumnType)));
-        auto column = std::make_shared<TIndexExpr>(
-            loc, ident(columnName), std::make_shared<TNumberExpr>(loc, int64_t{0}));
+        // Index() on `columns` gives this field's address directly, scaled
+        // by qumir's real TColumn size. No pointer-array/cast step needed
+        // here (see column() in agg_finish_rowset, which fills this same
+        // `columns` array).
+        auto fieldIndexLit = [&]() {
+            return std::make_shared<TNumberExpr>(loc, static_cast<int64_t>(fieldIndex));
+        };
+        auto column = std::make_shared<TIndexExpr>(loc, ident("columns"), fieldIndexLit());
         if (key.Fields[fieldIndex].IsNullable) {
             project.push_back(std::make_shared<TVarStmt>(loc, maskName, ptrU8Type));
             project.push_back(std::make_shared<TAssignExpr>(loc, maskName,
@@ -2022,8 +2016,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
                 "output_offsets_" + std::to_string(fieldIndex);
             const std::string copyResultName =
                 "output_copy_result_" + std::to_string(fieldIndex);
-            column = std::make_shared<TIndexExpr>(
-                loc, ident(columnName), std::make_shared<TNumberExpr>(loc, int64_t{0}));
+            column = std::make_shared<TIndexExpr>(loc, ident("columns"), fieldIndexLit());
             project.push_back(std::make_shared<TVarStmt>(loc, dataName, ptrU8Type));
             project.push_back(std::make_shared<TAssignExpr>(loc, dataName,
                 std::make_shared<TCastExpr>(loc,
@@ -2031,8 +2024,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
                         std::make_shared<TFieldAccessExpr>(
                             loc, column, "Data"), i64Type),
                     ptrU8Type)));
-            column = std::make_shared<TIndexExpr>(
-                loc, ident(columnName), std::make_shared<TNumberExpr>(loc, int64_t{0}));
+            column = std::make_shared<TIndexExpr>(loc, ident("columns"), fieldIndexLit());
             project.push_back(std::make_shared<TVarStmt>(
                 loc, offsetsName, ptrI64Type));
             project.push_back(std::make_shared<TAssignExpr>(loc, offsetsName,
@@ -2056,8 +2048,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
         const std::string name = "output_key_" + std::to_string(fieldIndex);
         auto ptrFieldType = std::make_shared<TPointerType>(key.Fields[fieldIndex].Type);
         project.push_back(std::make_shared<TVarStmt>(loc, name, ptrFieldType));
-        column = std::make_shared<TIndexExpr>(
-            loc, ident(columnName), std::make_shared<TNumberExpr>(loc, int64_t{0}));
+        column = std::make_shared<TIndexExpr>(loc, ident("columns"), fieldIndexLit());
         project.push_back(std::make_shared<TAssignExpr>(loc, name,
             std::make_shared<TCastExpr>(loc,
                 std::make_shared<TCastExpr>(loc,
@@ -2235,8 +2226,12 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinishRowSetAst(
     using namespace NQumir::NAst;
     namespace Oz = NKernel::NOz;
 
-    constexpr int64_t kColumnSize = 48;
-    constexpr int64_t kPtrSize = 8;
+    // Conservative (native/wasm64) sizes, used only for qdb_alloc calls.
+    // Real strides can be smaller under wasm32 (24 and 4 bytes), never
+    // larger, so this never under-allocates. Never use these for address
+    // math — use column() below, which qumir scales to the real target size.
+    constexpr int64_t ColumnSize = 48;
+    constexpr int64_t PtrSize = 8;
 
     auto i64Type = std::make_shared<TIntegerType>(TIntegerType::I64);
     auto i32Type = std::make_shared<TIntegerType>(TIntegerType::I32);
@@ -2268,20 +2263,31 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinishRowSetAst(
             Oz::Call("qdb_alloc", {std::move(byteSize)}),
             std::move(type));
     };
+    // Index() on a ptr TColumn array gives the element's address, scaled by
+    // the real TColumn size. Use this for FieldAssign/FieldAccess only: its
+    // result cannot be cast to a raw pointer, since qumir has no address-of
+    // operator and a struct value cannot become a Ptr.
     auto column = [&](size_t idx) -> TExprPtr {
         return Oz::Index("columns", number(static_cast<int64_t>(idx)));
     };
+    // TODO(wasm32): the string-reducer branch below still needs a raw
+    // address for agg_string_finalize_at, which column() cannot give (see
+    // above). It falls back to a fixed ColumnSize stride — correct for
+    // wasm64, wrong for wasm32 the same way the key-field bug was. No
+    // current query hits this (string MIN/MAX plus wasm32), so it stays
+    // open. Fix it like the key-field path: pass `columns` and index it
+    // inside the callee.
     auto columnPtr = [&](size_t idx) -> TExprPtr {
         return Oz::Cast(Oz::Add(
             Oz::Cast(Oz::Ident("columns"), i64Type),
-            number(static_cast<int64_t>(idx) * kColumnSize)),
+            number(static_cast<int64_t>(idx) * ColumnSize)),
             ptrColumnType);
     };
 
     const int64_t keyCount = static_cast<int64_t>(key.Fields.size());
     const int64_t aggCount = static_cast<int64_t>(layout.Reducers.size());
     const int64_t columnCount = keyCount + aggCount;
-    int64_t ownedPtrCount = 6; // columns + byte sizes + pointer tables.
+    int64_t ownedPtrCount = 5; // columns + byte sizes + pointer tables.
     for (const auto& field : key.Fields) {
         ++ownedPtrCount; // Data
         if (field.IsNullable) {
@@ -2315,7 +2321,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinishRowSetAst(
                 number(3)))
         .Var("owners", ptrI64Type)
         .Assign("owners", allocAs(ptrI64Type,
-            number((ownedPtrCount + 1) * kPtrSize)))
+            number((ownedPtrCount + 1) * PtrSize)))
         .Stmt(Oz::ArrayAssign("owners", number(0), number(ownedPtrCount)))
         .Var("owner_idx", i64Type)
         .Assign("owner_idx", number(1));
@@ -2331,37 +2337,31 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinishRowSetAst(
     builder
         .Var("columns", ptrColumnType)
         .Assign("columns", allocAs(ptrColumnType,
-            number(std::max<int64_t>(columnCount, 1) * kColumnSize)));
+            number(std::max<int64_t>(columnCount, 1) * ColumnSize)));
     remember("columns");
 
     builder
         .Var("key_bytes", ptrI64Type)
         .Assign("key_bytes", allocAs(ptrI64Type,
-            number(std::max<int64_t>(keyCount, 1) * kPtrSize)));
+            number(std::max<int64_t>(keyCount, 1) * PtrSize)));
     remember("key_bytes");
 
     builder
         .Var("agg_bytes", ptrI64Type)
         .Assign("agg_bytes", allocAs(ptrI64Type,
-            number(std::max<int64_t>(aggCount, 1) * kPtrSize)));
+            number(std::max<int64_t>(aggCount, 1) * PtrSize)));
     remember("agg_bytes");
-
-    builder
-        .Var("key_column_ptrs", ptrPtrU8Type)
-        .Assign("key_column_ptrs", allocAs(ptrPtrU8Type,
-            number(std::max<int64_t>(keyCount, 1) * kPtrSize)));
-    remember("key_column_ptrs");
 
     builder
         .Var("agg_buffers", ptrPtrI64Type)
         .Assign("agg_buffers", allocAs(ptrPtrI64Type,
-            number(std::max<int64_t>(aggCount, 1) * kPtrSize)));
+            number(std::max<int64_t>(aggCount, 1) * PtrSize)));
     remember("agg_buffers");
 
     builder
         .Var("agg_masks", ptrPtrU8Type)
         .Assign("agg_masks", allocAs(ptrPtrU8Type,
-            number(std::max<int64_t>(aggCount, 1) * kPtrSize)));
+            number(std::max<int64_t>(aggCount, 1) * PtrSize)));
     remember("agg_masks");
 
     builder
@@ -2419,8 +2419,6 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinishRowSetAst(
                 .Stmt(Oz::FieldAssign(column(i), "Offsets", Oz::NullPtr(ptrI64Type)))
                 .Stmt(Oz::FieldAssign(column(i), "OffsetWidth", numU8(0)));
         }
-        builder.Stmt(Oz::ArrayAssign("key_column_ptrs", idx,
-            Oz::Cast(columnPtr(i), ptrU8Type)));
     }
 
     for (size_t i = 0; i < layout.Reducers.size(); ++i) {
@@ -2486,7 +2484,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinishRowSetAst(
         .Var("finalized", i64Type)
         .Assign("finalized", Oz::Call("agg_finalize", {
             Oz::Ident("ht"),
-            Oz::Ident("key_column_ptrs"),
+            Oz::Ident("columns"),
             Oz::Ident("agg_buffers"),
             Oz::Ident("agg_masks"),
             Oz::Ident("size"),
