@@ -58,6 +58,8 @@ Physical execution:
 
 Deployment:
 
+- [Building, running, benchmarking](building.md) - build/test commands, the
+  CLI, the web workbench, plan export, and the TPC-H/ClickBench runners.
 - [Rust toolchain](rust_toolchain.md) - toolchain external `CREATE MODULE`
   compilation needs, why the Rust release is pinned to the linked LLVM, and how
   to configure it for the packaged service user.
