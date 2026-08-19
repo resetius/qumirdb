@@ -388,6 +388,11 @@ public:
     TJoinHashKernels CompileJoinHash(
         const NKernel::TOperatorKernelSpec& spec);
 
+    // Same rh_hash generator as CompileAggregate's own table, for shuffling.
+    std::function<bool(TRowSet*, uint64_t*)> CompileAggregateHash(
+        const NQumir::NAst::TStructType& inputType,
+        const std::vector<std::string>& groupKeys);
+
 private:
     // Implementation for the equi-key pairs `keys` (parallel left/right column
     // names) over rows of leftType/rightType. String keys are not supported yet.

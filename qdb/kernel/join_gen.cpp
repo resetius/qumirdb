@@ -53,13 +53,27 @@ TAggregateKeyDescriptor JoinKeyAggregateShim(const TJoinKeyDescriptor &key) {
   shim.StoredType = key.StoredType;
   shim.Size = key.Size;
   shim.Alignment = key.Alignment;
+  shim.Fields.reserve(key.Fields.size());
+  for (const auto &field : key.Fields) {
+    shim.Fields.push_back(TAggregateKeyField{
+        .ColumnName = field.LeftColumnName,
+        .ColumnIndex = field.LeftColumnIndex,
+        .Type = field.Type,
+        .LookupType = field.LookupType,
+        .StoredType = field.StoredType,
+        .IsNullable = field.IsNullable,
+        .Offset = field.Offset,
+        .Size = field.Size,
+        .Alignment = field.Alignment,
+    });
+  }
   return shim;
 }
 
 } // namespace
 
 std::vector<NQumir::NAst::TExprPtr>
-GenJoinKeyTypeDecls(const TJoinKeyDescriptor &key) {
+GenKeyTypeDecls(const TAggregateKeyDescriptor &key) {
   NQumir::TLocation loc{};
   std::vector<NQumir::NAst::TExprPtr> stmts;
   if (!key.LookupTypeName.empty()) {
@@ -71,6 +85,11 @@ GenJoinKeyTypeDecls(const TJoinKeyDescriptor &key) {
     stmts.push_back(std::make_shared<TTypeDeclStmt>(loc, key.KeyType));
   }
   return stmts;
+}
+
+std::vector<NQumir::NAst::TExprPtr>
+GenJoinKeyTypeDecls(const TJoinKeyDescriptor &key) {
+  return GenKeyTypeDecls(JoinKeyAggregateShim(key));
 }
 
 std::vector<NQumir::NAst::TExprPtr>
@@ -970,10 +989,10 @@ GenJoinDispatchAst(int64_t keySize, EJoinType type, bool hasResidual,
 }
 
 NQumir::NAst::TExprPtr
-GenJoinHashBatchAst(const TJoinKeyDescriptor &key, const std::string &funcName,
-                    NQumir::NAst::TTypePtr columnType,
-                    NQumir::NAst::TTypePtr rowSetType,
-                    NQumir::NAst::TTypePtr stringViewType) {
+GenKeyHashBatchAst(const TAggregateKeyDescriptor &key, const std::string &funcName,
+                   NQumir::NAst::TTypePtr columnType,
+                   NQumir::NAst::TTypePtr rowSetType,
+                   NQumir::NAst::TTypePtr stringViewType) {
   NQumir::TLocation loc{};
 
   auto i64Type = std::make_shared<TIntegerType>();
@@ -1107,9 +1126,19 @@ GenJoinHashBatchAst(const TJoinKeyDescriptor &key, const std::string &funcName,
 }
 
 NQumir::NAst::TExprPtr
-GenJoinHashEntrypointAst(const TJoinKeyDescriptor &key,
-                         const std::string &funcName,
-                         NQumir::NAst::TTypePtr rowSetType) {
+GenJoinHashBatchAst(const TJoinKeyDescriptor &key, const std::string &funcName,
+                    NQumir::NAst::TTypePtr columnType,
+                    NQumir::NAst::TTypePtr rowSetType,
+                    NQumir::NAst::TTypePtr stringViewType) {
+  return GenKeyHashBatchAst(JoinKeyAggregateShim(key), funcName, columnType,
+                            rowSetType, stringViewType);
+}
+
+NQumir::NAst::TExprPtr
+GenKeyHashEntrypointAst(const TAggregateKeyDescriptor &key,
+                        const std::string &funcName,
+                        const std::string &batchFuncName,
+                        NQumir::NAst::TTypePtr rowSetType) {
   NQumir::TLocation loc{};
   auto i64Type = std::make_shared<TIntegerType>();
   auto u64Type = std::make_shared<TIntegerType>(TIntegerType::U64);
@@ -1130,7 +1159,7 @@ GenJoinHashEntrypointAst(const TJoinKeyDescriptor &key,
   auto witness =
       std::make_shared<TCastExpr>(loc, std::move(zero), ptrLookupKeyType);
   auto call = std::make_shared<TCallExpr>(
-      loc, std::make_shared<TIdentExpr>(loc, "jt_hash_batch"),
+      loc, std::make_shared<TIdentExpr>(loc, batchFuncName),
       std::vector<TExprPtr>{
           std::make_shared<TIdentExpr>(loc, "batch"),
           std::make_shared<TIdentExpr>(loc, "hashes"),
@@ -1147,6 +1176,14 @@ GenJoinHashEntrypointAst(const TJoinKeyDescriptor &key,
   function->Type = std::make_shared<TFunctionType>(
       std::vector<TTypePtr>{rowSetRefType, ptrU64Type, ptrI64Type}, boolType);
   return function;
+}
+
+NQumir::NAst::TExprPtr
+GenJoinHashEntrypointAst(const TJoinKeyDescriptor &key,
+                         const std::string &funcName,
+                         NQumir::NAst::TTypePtr rowSetType) {
+  return GenKeyHashEntrypointAst(JoinKeyAggregateShim(key), funcName,
+                                 "jt_hash_batch", std::move(rowSetType));
 }
 
 namespace {

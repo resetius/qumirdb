@@ -2128,6 +2128,62 @@ TJoinHashKernels TKernelCompiler::CompileJoinHash(
     };
 }
 
+std::function<bool(TRowSet*, uint64_t*)> TKernelCompiler::CompileAggregateHash(
+    const NQumir::NAst::TStructType& inputType,
+    const std::vector<std::string>& groupKeys)
+{
+    using namespace NQumir::NAst;
+
+    const auto keyDesc = NKernel::BuildAggregateKeyDescriptor(inputType, groupKeys);
+
+    auto columnType = QumirDbNamedType("TColumn");
+    auto rowSetType = QumirDbNamedType("TRowSet");
+    auto stringViewType = QumirDbNamedType("StringView");
+
+    auto buildProgram = [&]() -> std::vector<TExprPtr> {
+        std::vector<TExprPtr> program;
+        for (auto& f : NKernel::GenKeyTypeDecls(keyDesc)) {
+            program.push_back(std::move(f));
+        }
+        if (keyDesc.HasDistinctLookupType()) {
+            auto stringOps = NKernel::ParseFunctionLibrary(
+                NKernel::ReadAggregationKernel("string_ops.oz"));
+            if (!stringOps) {
+                throw NQumir::TError(
+                    "CompileAggregateHash: string_ops.oz: " + stringOps.error().ToString());
+            }
+            for (auto& f : *stringOps) program.push_back(std::move(f));
+        }
+        for (auto& f : NKernel::GenKeyOperationFunDecls(keyDesc)) {
+            program.push_back(std::move(f));
+        }
+        program.push_back(NKernel::GenKeyHashBatchAst(
+            keyDesc, "agg_hash_batch", columnType, rowSetType, stringViewType));
+        program.push_back(NKernel::GenKeyHashEntrypointAst(
+            keyDesc, "agg_hash", "agg_hash_batch", rowSetType));
+        return program;
+    };
+
+    auto program = std::make_shared<TBlockExpr>(NQumir::TLocation{}, buildProgram());
+    PrintKernelAst(Diagnostics_, "aggregate_hash", program);
+
+    auto kernel = EmitKernel("aggregate_hash", {"agg_hash"}, std::move(program));
+    FinishKernelDiagnostics(Diagnostics_);
+
+    auto keyColumns = std::make_shared<std::vector<int64_t>>();
+    keyColumns->reserve(keyDesc.Fields.size());
+    for (const auto& field : keyDesc.Fields) {
+        keyColumns->push_back(field.ColumnIndex);
+    }
+
+    using THashFn = bool(*)(TRowSet*, uint64_t*, const int64_t*);
+    return [slot = kernel.Slot, keyColumns = std::move(keyColumns)](
+               TRowSet* batch, uint64_t* hashes) {
+        return reinterpret_cast<THashFn>(slot->Fns[0])(
+            batch, hashes, keyColumns->data());
+    };
+}
+
 TJoinKernels TKernelCompiler::CompileJoin(
     const NQumir::NAst::TStructType& leftType,
     const NQumir::NAst::TStructType& rightType,

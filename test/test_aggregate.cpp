@@ -1348,6 +1348,63 @@ TEST(AggregateE2E, CompilesNullableReducerArgumentWithUnwrappedAstType) {
         NQdb::TKernelCompiler().CompileAggregate(spec));
 }
 
+// CompileAggregateHash uses the same rh_hash generator as the aggregate's table.
+TEST(AggregateE2E, CompileAggregateHashMatchesEqualCompositeKeys) {
+    TStructType inputType({
+        {"k1", std::make_shared<TIntegerType>()},
+        {"k2", std::make_shared<TIntegerType>()},
+    });
+    auto hash = NQdb::TKernelCompiler().CompileAggregateHash(inputType, {"k1", "k2"});
+
+    std::vector<int64_t> k1 = {1, 2, 1, 1};
+    std::vector<int64_t> k2 = {10, 10, 10, 99};
+    std::vector<TColumn> cols = {
+        TColumn{.Data = reinterpret_cast<char*>(k1.data())},
+        TColumn{.Data = reinterpret_cast<char*>(k2.data())},
+    };
+    TRowSet batch{
+        .Columns = cols.data(),
+        .ColumnCount = 2,
+        .RowCount = static_cast<int64_t>(k1.size()),
+        .RefCount = 1,
+    };
+
+    std::vector<uint64_t> hashes(k1.size(), 0);
+    ASSERT_TRUE(hash(&batch, hashes.data()));
+
+    EXPECT_EQ(hashes[0], hashes[2]) << "identical (k1, k2) must hash equal";
+    EXPECT_NE(hashes[0], hashes[1]) << "different k1 must (almost certainly) hash differently";
+    EXPECT_NE(hashes[0], hashes[3]) << "different k2 must (almost certainly) hash differently";
+}
+
+TEST(AggregateE2E, CompileAggregateHashDistinguishesNullFromValue) {
+    TStructType inputType({
+        {"k", std::make_shared<TIntegerType>()},
+        {"v", std::make_shared<TNullable>(std::make_shared<TIntegerType>())},
+    });
+    auto hash = NQdb::TKernelCompiler().CompileAggregateHash(inputType, {"k", "v"});
+
+    std::vector<int64_t> k = {1, 1};
+    std::vector<int64_t> v = {5, 5};
+    // Row 0 valid, row 1 null (same underlying bit pattern in `v`).
+    uint8_t mask = 0b01;
+    std::vector<TColumn> cols = {
+        TColumn{.Data = reinterpret_cast<char*>(k.data())},
+        TColumn{.Data = reinterpret_cast<char*>(v.data()), .Mask = &mask},
+    };
+    TRowSet batch{
+        .Columns = cols.data(),
+        .ColumnCount = 2,
+        .RowCount = static_cast<int64_t>(k.size()),
+        .RefCount = 1,
+    };
+
+    std::vector<uint64_t> hashes(k.size(), 0);
+    ASSERT_TRUE(hash(&batch, hashes.data()));
+
+    EXPECT_NE(hashes[0], hashes[1]) << "null vs. same-bits-but-valid must hash differently";
+}
+
 TEST(AggregateE2E, RejectsUnsupportedStringReducer) {
     TStructType inputType({
         {"k", std::make_shared<TIntegerType>()},

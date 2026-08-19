@@ -100,6 +100,14 @@ NQumir::NAst::TExprPtr GenJoinProbeMarkAst(
 // Fills hashes[i] for every physical row i in the batch. Selection is not
 // applied here; shuffle/scatter code must skip unselected rows itself. The
 // unused witness makes the physical key type part of automatic cache mangling.
+// Operator-neutral; GenJoinHashBatchAst below shims join keys into it.
+NQumir::NAst::TExprPtr GenKeyHashBatchAst(
+    const TAggregateKeyDescriptor& key,
+    const std::string& funcName,
+    NQumir::NAst::TTypePtr columnType,
+    NQumir::NAst::TTypePtr rowSetType,
+    NQumir::NAst::TTypePtr stringViewType);
+
 NQumir::NAst::TExprPtr GenJoinHashBatchAst(
     const TJoinKeyDescriptor& key,
     const std::string& funcName,
@@ -107,8 +115,14 @@ NQumir::NAst::TExprPtr GenJoinHashBatchAst(
     NQumir::NAst::TTypePtr rowSetType,
     NQumir::NAst::TTypePtr stringViewType);
 
-// Generates a thin query entrypoint forwarding to a typed GenJoinHashBatchAst
-// overload. Its external ABI keeps the type witness internal.
+// Thin entrypoint forwarding to the batch function named `batchFuncName`.
+NQumir::NAst::TExprPtr GenKeyHashEntrypointAst(
+    const TAggregateKeyDescriptor& key,
+    const std::string& funcName,
+    const std::string& batchFuncName,
+    NQumir::NAst::TTypePtr rowSetType);
+
+// Thin wrapper: forwards to "jt_hash_batch" (join's fixed batch func name).
 NQumir::NAst::TExprPtr GenJoinHashEntrypointAst(
     const TJoinKeyDescriptor& key,
     const std::string& funcName,
@@ -125,6 +139,7 @@ std::vector<NQumir::NAst::TExprPtr> GenJoinKeyOwnershipFunDecls(
 
 // Emits the (type ...) declarations that make the named Key type(s) known to
 // the compiler. Must be prepended to the program before any use of the Key.
+std::vector<NQumir::NAst::TExprPtr> GenKeyTypeDecls(const TAggregateKeyDescriptor& key);
 std::vector<NQumir::NAst::TExprPtr> GenJoinKeyTypeDecls(const TJoinKeyDescriptor& key);
 
 // Generates the output materializer entrypoint:
