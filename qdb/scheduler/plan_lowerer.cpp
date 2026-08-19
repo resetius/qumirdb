@@ -1176,7 +1176,8 @@ private:
         TAggregateOperator& aggregate,
         std::string stage,
         TExecStageId execStageId,
-        int64_t initialCapacity = 4)
+        int64_t initialCapacity = 4,
+        bool hasPrecomputedHash = false)
     {
         auto* inputType =
             static_cast<NQumir::NAst::TStructType*>(childType.get());
@@ -1189,6 +1190,7 @@ private:
         }
         auto spec = NKernel::BuildAggregateKernelSpec(
             *inputType, aggregate.GroupKeys(), aggregate.Aggs(), ExternalCatalog_.get());
+        spec.HasPrecomputedHash = hasPrecomputedHash;
         TKernelCompiler compiler(
             KernelOptions(std::move(stage), execStageId));
         auto kernels = std::make_shared<TAggregateKernels>(
@@ -1429,7 +1431,8 @@ private:
             [&]() {
                 TStageDiagnosticsScope diagnosticsScope(Diagnostics_, combineGroup);
                 return BuildAggregateTail(
-                    partialType, *combineAgg, combineGroup, combineStageId);
+                    partialType, *combineAgg, combineGroup, combineStageId,
+                    /*initialCapacity=*/4, /*hasPrecomputedHash=*/true);
             }();
 
         TLoweredOutput result;
@@ -1533,7 +1536,8 @@ private:
                 TStageDiagnosticsScope diagnosticsScope(Diagnostics_, aggregateGroup);
                 return BuildAggregateTail(
                     childType, aggregate, aggregateGroup, execStageId,
-                    EstimateAggregateInitialCapacity(aggregate, parts));
+                    EstimateAggregateInitialCapacity(aggregate, parts),
+                    /*hasPrecomputedHash=*/true);
             }();
 
         auto& shufRef = AddConn<NScheduler::THashShuffleConnection>(
@@ -2037,14 +2041,14 @@ private:
         const auto joinGroup = StageLabel("join", execStageId);
         TKernelCompiler compiler(
             KernelOptions(joinGroup, execStageId));
-        auto joinKernels = std::make_shared<TJoinKernels>(
-            [&]() {
-                TStageDiagnosticsScope diagnosticsScope(Diagnostics_, joinGroup);
-                return compiler.CompileJoin(kernelSpec);
-            }());
         auto joinCode = MakeBinaryJoinCode<TSchedulerInnerJoinState>();
 
         if (leftLanes == 1 && rightLanes == 1 && joinParts == 1) {
+            auto joinKernels = std::make_shared<TJoinKernels>(
+                [&]() {
+                    TStageDiagnosticsScope diagnosticsScope(Diagnostics_, joinGroup);
+                    return compiler.CompileJoin(kernelSpec);
+                }());
             auto task = std::make_unique<NScheduler::TBinaryBlockingTask>(
                 joinCode,
                 std::make_shared<TSchedulerInnerJoinState>(
@@ -2070,6 +2074,12 @@ private:
         }
 
         auto hashKernels = compiler.CompileJoinHash(kernelSpec);
+        kernelSpec.HasPrecomputedHash = true;
+        auto joinKernels = std::make_shared<TJoinKernels>(
+            [&]() {
+                TStageDiagnosticsScope diagnosticsScope(Diagnostics_, joinGroup);
+                return compiler.CompileJoin(kernelSpec);
+            }());
         auto leftShuf = BuildShuffleNodes(
             leftOut,
             leftPipeRef,

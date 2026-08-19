@@ -1527,15 +1527,18 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
     const TAggReducerLayout& layout,
     NQumir::NAst::TTypePtr columnType,
     NQumir::NAst::TTypePtr rowSetType,
-    NQumir::NAst::TTypePtr hashTableType)
+    NQumir::NAst::TTypePtr hashTableType,
+    bool hasPrecomputedHash)
 {
     using namespace NQumir::NAst;
     NQumir::TLocation loc{};
 
     auto i64Type = std::make_shared<TIntegerType>();
     auto u8Type = std::make_shared<TIntegerType>(TIntegerType::U8);
+    auto u64Type = std::make_shared<TIntegerType>(TIntegerType::U64);
     auto boolType = std::make_shared<TBoolType>();
     auto ptrU8Type = std::make_shared<TPointerType>(u8Type);
+    auto ptrU64Type = std::make_shared<TPointerType>(u64Type);
     auto ptrI64Type = std::make_shared<TPointerType>(i64Type);
 
     auto ident = [&](const std::string& name) -> TExprPtr {
@@ -1602,6 +1605,10 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
     update.push_back(assign("selection", field("batch", "Selection")));
     update.push_back(var("cols", ptrColumnType));
     update.push_back(assign("cols", field("batch", "Columns")));
+    if (hasPrecomputedHash) {
+        update.push_back(var("hash_ptr", ptrU64Type));
+        update.push_back(assign("hash_ptr", field("batch", "Hash")));
+    }
     for (size_t fieldIndex = 0; fieldIndex < key.Fields.size(); ++fieldIndex) {
         const auto& keyField = key.Fields[fieldIndex];
         const std::string name = "key_column_" + std::to_string(fieldIndex);
@@ -1716,17 +1723,31 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
     }
     TExprPtr keyValue = std::make_shared<TStructConstructExpr>(
         loc, key.LookupType, std::move(fields));
-    auto u64Type = std::make_shared<TIntegerType>(TIntegerType::U64);
     std::vector<TExprPtr> keyValueSetup = {
         var("key_value", key.LookupType),
         assign("key_value", std::move(keyValue)),
+        var("hash_value", u64Type),
     };
+    if (hasPrecomputedHash) {
+        // hash_ptr is only guaranteed non-null when the shuffle upstream
+        // produced a single-batch (view) output; the rarer multi-batch
+        // gather path leaves it null, so fall back to rh_hash per row.
+        keyValueSetup.push_back(std::make_shared<TIfExpr>(loc,
+            binary("!=", cast(ident("hash_ptr"), i64Type), numI64(0)),
+            block({assign("hash_value",
+                std::make_shared<TIndexExpr>(loc, ident("hash_ptr"), ident("i")))}),
+            block({assign("hash_value",
+                cast(call("rh_hash", {ident("key_value")}), u64Type))})));
+    } else {
+        keyValueSetup.push_back(assign("hash_value",
+            cast(call("rh_hash", {ident("key_value")}), u64Type)));
+    }
     auto upsertCall = call("aht_upsert_dual", {
         ident("ht"),
         ident("key_value"),
         ident("stored_witness"),
         ident("is_new"),
-        cast(call("rh_hash", {ident("key_value")}), u64Type),
+        ident("hash_value"),
     });
     auto ptrPtrI64Type = std::make_shared<TPointerType>(ptrI64Type);
     auto slotIndex = [&](const std::string& buf) -> TExprPtr {

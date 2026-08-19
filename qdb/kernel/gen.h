@@ -157,13 +157,17 @@ NQumir::NAst::TExprPtr GenProjectKernelAst(
 // aht_destroy. Each reducer reads its own argument column (layout's
 // ArgColumnIndex), so different aggregates may aggregate different columns; the
 // reducer applications are inlined per row with per-reducer values.
+// hasPrecomputedHash: read batch.Hash[i] instead of calling rh_hash(key) —
+// set when the caller knows this batch comes straight from a hash shuffle
+// keyed on the same group keys (plan_lowerer.cpp decides this).
 NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
     const NQumir::NAst::TStructType& inputType,
     const TAggregateKeyDescriptor& key,
     const TAggReducerLayout& layout,
     NQumir::NAst::TTypePtr columnType,
     NQumir::NAst::TTypePtr rowSetType,
-    NQumir::NAst::TTypePtr hashTableType);
+    NQumir::NAst::TTypePtr hashTableType,
+    bool hasPrecomputedHash = false);
 
 // Builds the byte-oriented finalize ABI. C++ supplies one opaque u8 destination
 // per logical key field; the generated wrapper casts each destination to its

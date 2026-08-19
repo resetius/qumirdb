@@ -25,13 +25,14 @@
                           (var left_store <ptr TRowSet>)
                           (var right_store <ptr TRowSet>)
                           (var stream_left_batch <ref TRowSet>)
-                          (var stream_right_batch <ref TRowSet>)) -> bool
+                          (var stream_right_batch <ref TRowSet>)
+                          (var hash u64)) -> bool
     (block
       (var build_keys =
         (cast (field build Keys) <ptr StoredKey>))
       (var build_slot = (call rh_lookup_dual build_keys (field build Dist)
                         (field build SlotId) (field build Capacity) key
-                        (cast (call rh_hash key) u64)))
+                        hash))
       (if (!= build_slot (: -1 i64))
         (block
           (var build_aggs = (field build AggBuffers))
@@ -76,17 +77,18 @@
                            (var is_left i64)
                            (var pairs <ref PairBuffer>)
                            (var left_store <ptr TRowSet>)
-                           (var right_store <ptr TRowSet>)) -> bool
+                           (var right_store <ptr TRowSet>)
+                           (var hash u64)) -> bool
     (block
       (if (! (call jt_probe_and_emit opp key stored_witness own_row_id is_left
                     pairs left_store right_store
                     (index left_store (: 0 i64))
-                    (index right_store (: 0 i64))))
+                    (index right_store (: 0 i64))
+                    hash))
         (block (return #f)))
       (var is_new i64)
       (= is_new (: 0 i64))
-      (var own_slot = (call aht_upsert_dual own key stored_witness is_new
-        (cast (call rh_hash key) u64)))
+      (var own_slot = (call aht_upsert_dual own key stored_witness is_new hash))
       (if (== own_slot (: -1 i64)) (block (return #f)))
       (if (! (call jb_append own own_slot own_row_id))
         (block (return #f)))
@@ -98,12 +100,12 @@
   (fun jt_insert_row_only [LookupKey StoredKey] ((var own <ref HashTable>)
                            (var key LookupKey)
                            (var stored_witness StoredKey)
-                           (var own_row_id i64)) -> bool
+                           (var own_row_id i64)
+                           (var hash u64)) -> bool
     (block
       (var is_new i64)
       (= is_new (: 0 i64))
-      (var own_slot = (call aht_upsert_dual own key stored_witness is_new
-        (cast (call rh_hash key) u64)))
+      (var own_slot = (call aht_upsert_dual own key stored_witness is_new hash))
       (if (== own_slot (: -1 i64)) (block (return #f)))
       (if (! (call jb_append own own_slot own_row_id))
         (block (return #f)))
@@ -114,11 +116,11 @@
   ;; the right table is queried for key existence only, not row materialization.
   (fun jt_insert_slot_only [LookupKey StoredKey] ((var own <ref HashTable>)
                             (var key LookupKey)
-                            (var stored_witness StoredKey)) -> bool
+                            (var stored_witness StoredKey)
+                            (var hash u64)) -> bool
     (block
       (var is_new i64)
       (= is_new (: 0 i64))
-      (var own_slot = (call aht_upsert_dual own key stored_witness is_new
-        (cast (call rh_hash key) u64)))
+      (var own_slot = (call aht_upsert_dual own key stored_witness is_new hash))
       (if (== own_slot (: -1 i64)) (block (return #f)))
       (return #t))))

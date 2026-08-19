@@ -117,7 +117,8 @@ BuildGenericAggregateFusedProgramAst(
     const TAggReducerLayout& layout,
     NQumir::NAst::TTypePtr columnType,
     NQumir::NAst::TTypePtr rowSetType,
-    NQumir::NAst::TTypePtr hashTableType);
+    NQumir::NAst::TTypePtr hashTableType,
+    bool hasPrecomputedHash = false);
 
 } // namespace NKernel
 } // namespace NQdb
