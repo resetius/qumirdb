@@ -280,6 +280,8 @@ struct TExportRequest {
     TCatalog Catalog;
     NQdb::NScheduler::TSettings Scheduler;
     bool EmbedWasm = false;
+    // Defaults to 64 so old clients that omit this field keep current behavior.
+    int WasmBits = 64;
 };
 
 struct TParsedSql {
@@ -452,23 +454,26 @@ void WriteResponseArgument(std::ostream& out, std::string_view argument) {
     out << "\"\n";
 }
 
-std::expected<std::monostate, std::string> RunWasm64Ld(
+std::expected<std::monostate, std::string> RunWasmLd(
     const std::vector<std::filesystem::path>& objectPaths,
     const std::filesystem::path& wasmPath,
-    int64_t globalBase)
+    int64_t globalBase,
+    int wasmBits)
 {
     std::vector<std::string> linkArgs{
         "--no-entry",
         "--export-all",
         "--allow-undefined",
         "--import-memory",
-        "-mwasm64",
-        "--global-base=" + std::to_string(globalBase),
-        "-z",
-        "stack-size=" + std::to_string(WasmStackSize),
-        "-o",
-        wasmPath.string(),
     };
+    if (wasmBits == 64) {
+        linkArgs.push_back("-mwasm64");
+    }
+    linkArgs.push_back("--global-base=" + std::to_string(globalBase));
+    linkArgs.push_back("-z");
+    linkArgs.push_back("stack-size=" + std::to_string(WasmStackSize));
+    linkArgs.push_back("-o");
+    linkArgs.push_back(wasmPath.string());
     linkArgs.reserve(linkArgs.size() + objectPaths.size());
     for (const auto& path : objectPaths) {
         linkArgs.push_back(path.string());
@@ -587,21 +592,23 @@ struct TCompiledWasm64Module {
     int64_t HeapBase = 0;
 };
 
-// Compiles a kernel AST to a wasm64 module. It shares the Qumir frontend and
-// fused AST with native JIT finalization, then emits a wasm64 object and links
-// it with wasm-ld -mwasm64. There is no wasm32 export path: the kernel ABI and
-// browser runtime both use 8-byte pointers and WebAssembly Memory64.
-std::expected<TCompiledWasm64Module, std::string> CompileKernelAstToWasm64(
+// Compiles a kernel AST to wasm32 or wasm64 (wasmBits: 32 | 64). wasm64
+// (Memory64) is preferred; wasm32 is a fallback for browsers without
+// Memory64, with linear memory capped at 4GiB.
+std::expected<TCompiledWasm64Module, std::string> CompileKernelAstToWasm(
     NQumir::NAst::TExprPtr ast,
     int64_t globalBase,
     const std::vector<std::string>& entryNames,
     const std::string& cacheDir,
-    const std::shared_ptr<const NQdb::TExternalCatalogSnapshot>& externalCatalog)
+    const std::shared_ptr<const NQdb::TExternalCatalogSnapshot>& externalCatalog,
+    int wasmBits)
 {
+    const std::string targetTriple =
+        wasmBits == 32 ? "wasm32-unknown-unknown" : "wasm64-unknown-unknown";
     auto opts = NQdb::KernelRunnerOptions();
     opts.CoreInput = !(externalCatalog && externalCatalog->HasKumirModules());
     opts.NativeCode = false;
-    opts.TargetTriple = "wasm64-unknown-unknown";
+    opts.TargetTriple = targetTriple;
     NQumir::TLLVMRunner runner(std::move(opts));
 
     const auto wasmPath = TempPath(".wasm");
@@ -613,7 +620,7 @@ std::expected<TCompiledWasm64Module, std::string> CompileKernelAstToWasm64(
     std::optional<NQumir::NFrontend::TComposeResult> externalProgram;
     if (externalCatalog) {
         auto composed = externalCatalog->ComposeReferenced(
-            ast, "wasm64-unknown-unknown", cacheDir);
+            ast, targetTriple, cacheDir);
         if (!composed) {
             return std::unexpected(composed.error().ToString());
         }
@@ -676,7 +683,7 @@ std::expected<TCompiledWasm64Module, std::string> CompileKernelAstToWasm64(
         objectPaths.push_back(objPath);
     }
 
-    if (auto linked = RunWasm64Ld(objectPaths, wasmPath, globalBase); !linked) {
+    if (auto linked = RunWasmLd(objectPaths, wasmPath, globalBase, wasmBits); !linked) {
         cleanup();
         return std::unexpected(linked.error());
     }
@@ -1000,6 +1007,16 @@ bool ParseEmbedWasm(const llvm::json::Object& root) {
     return options->getBoolean("embedWasm").value_or(false);
 }
 
+int ParseWasmBits(const llvm::json::Object& root) {
+    const auto* optionsValue = root.get("options");
+    const auto* options = optionsValue ? optionsValue->getAsObject() : nullptr;
+    if (!options) {
+        return 64;
+    }
+    int64_t bits = options->getInteger("wasmBits").value_or(64);
+    return bits == 32 ? 32 : 64;
+}
+
 std::expected<TExportRequest, std::string> ParseRequest(std::string_view text) {
     auto parsed = llvm::json::parse(text);
     if (!parsed) {
@@ -1022,6 +1039,7 @@ std::expected<TExportRequest, std::string> ParseRequest(std::string_view text) {
             .Catalog = ParseCatalog(*root),
             .Scheduler = ParseSchedulerSettings(*root),
             .EmbedWasm = ParseEmbedWasm(*root),
+            .WasmBits = ParseWasmBits(*root),
         };
     } catch (const std::exception& e) {
         return std::unexpected(std::string(e.what()));
@@ -1711,7 +1729,8 @@ TWasmFinalizeResult WasmFinalizeKernels(
     llvm::json::Array& diagnostics,
     bool embedWasm,
     const std::string& cacheDir,
-    const std::shared_ptr<const NQdb::TExternalCatalogSnapshot>& externalCatalog)
+    const std::shared_ptr<const NQdb::TExternalCatalogSnapshot>& externalCatalog,
+    int wasmBits)
 {
     TWasmFinalizeResult out;
     out.Kernels.reserve(kernels.size());
@@ -1758,8 +1777,8 @@ TWasmFinalizeResult WasmFinalizeKernels(
     }
 
     auto fused = NQdb::BuildFusedProgram(unique);
-    auto wasm = CompileKernelAstToWasm64(
-        fused.Program, WasmSlot0, fused.Entrypoints, cacheDir, externalCatalog);
+    auto wasm = CompileKernelAstToWasm(
+        fused.Program, WasmSlot0, fused.Entrypoints, cacheDir, externalCatalog, wasmBits);
     if (!wasm) {
         out.ErrorStage = "wasm-fusion";
         out.Error = wasm.error();
@@ -1835,52 +1854,93 @@ llvm::json::Object CoreTypeJson(const NQumir::NAst::TTypePtr& type) {
     };
 }
 
-// Kernel ABI layout for the wasm64 target. Both the compiled module and browser
-// runtime use 8-byte pointers, so these offsets also match the native 64-bit
-// layout.
-llvm::json::Object ExecLayoutJson(int64_t heapBase) {
+// Kernel ABI layout for wasm32 or wasm64. wasm64 offsets match the native
+// layout (both use 8-byte pointers, so kHashTableSize/kPairBufferSize stay
+// valid here). wasm32 offsets use real 4-byte-pointer values, checked
+// against qumir's own TTypeTable::FieldOffset/SizeInBytes instead of hand
+// math. For example TRowSet stays 48 bytes even with 4-byte pointers,
+// because its i64 fields still need 8-byte alignment.
+llvm::json::Object ExecLayoutJson(int64_t heapBase, int wasmBits) {
     if (heapBase <= 0) {
         heapBase = WasmSlot0;
     }
     const int64_t initialPages =
         (heapBase + WasmPageSize - 1) / WasmPageSize + WasmInitialSlackPages;
-    llvm::json::Object layout{
-        {"pointerSize", 8},
-        {"column", llvm::json::Object{
-            {"size", 48},
-            {"data", 0},
-            {"mask", 16},
-            {"offsets", 32},
-            {"offsetWidth", 40},
-        }},
-        {"rowset", llvm::json::Object{
-            {"size", 56},
-            {"columns", 0},
-            {"columnCount", 8},
-            {"rowCount", 16},
-            {"selection", 24},
-            // Private holds the owners list for kernel-materialized rowsets
-            // (owners[0] = count, then one qdb_alloc'd pointer per buffer); the
-            // runtime walks it to free join output. See destroyKernelOwnedRowSet.
-            {"private", 40},
-        }},
-        {"stringView", llvm::json::Object{
-            {"size", 16},
-            {"data", 0},
-            {"length", 8},
-        }},
-        // THashTable per modules/qumirdb.cpp; the runtime only reads Size.
-        {"hashTable", llvm::json::Object{
-            {"size", static_cast<int64_t>(NQdb::TKernelCompiler::kHashTableSize)},
-            {"sizeOffset", 72},
-        }},
-        {"pairBuffer", llvm::json::Object{
-            {"size", static_cast<int64_t>(NQdb::TKernelCompiler::kPairBufferSize)},
-            {"count", 0},
-            {"capacity", 8},
-            {"data", 16},
-        }},
-    };
+    llvm::json::Object layout;
+    if (wasmBits == 32) {
+        layout = llvm::json::Object{
+            {"pointerSize", 4},
+            {"column", llvm::json::Object{
+                {"size", 24},
+                {"data", 0},
+                {"mask", 8},
+                {"offsets", 16},
+                {"offsetWidth", 20},
+            }},
+            {"rowset", llvm::json::Object{
+                {"size", 48},
+                {"columns", 0},
+                {"columnCount", 8},
+                {"rowCount", 16},
+                {"selection", 24},
+                {"private", 32},
+            }},
+            {"stringView", llvm::json::Object{
+                {"size", 16},
+                {"data", 0},
+                {"length", 8},
+            }},
+            {"hashTable", llvm::json::Object{
+                {"size", 80},
+                {"sizeOffset", 48},
+            }},
+            {"pairBuffer", llvm::json::Object{
+                {"size", 24},
+                {"count", 0},
+                {"capacity", 8},
+                {"data", 16},
+            }},
+        };
+    } else {
+        layout = llvm::json::Object{
+            {"pointerSize", 8},
+            {"column", llvm::json::Object{
+                {"size", 48},
+                {"data", 0},
+                {"mask", 16},
+                {"offsets", 32},
+                {"offsetWidth", 40},
+            }},
+            {"rowset", llvm::json::Object{
+                {"size", 56},
+                {"columns", 0},
+                {"columnCount", 8},
+                {"rowCount", 16},
+                {"selection", 24},
+                // Private holds the owners list for kernel-materialized rowsets
+                // (owners[0] = count, then one qdb_alloc'd pointer per buffer);
+                // the runtime walks it to free join output. See
+                // destroyKernelOwnedRowSet.
+                {"private", 40},
+            }},
+            {"stringView", llvm::json::Object{
+                {"size", 16},
+                {"data", 0},
+                {"length", 8},
+            }},
+            // THashTable per modules/qumirdb.cpp; the runtime only reads Size.
+            {"hashTable", llvm::json::Object{
+                {"size", static_cast<int64_t>(NQdb::TKernelCompiler::kHashTableSize)},
+                {"sizeOffset", 72},
+            }},
+            {"pairBuffer", llvm::json::Object{
+                {"size", static_cast<int64_t>(NQdb::TKernelCompiler::kPairBufferSize)},
+                {"count", 0},
+                {"capacity", 8},
+                {"data", 16},
+            }},
+        };
+    }
     layout["sharedMemory"] = llvm::json::Object{
         {"heapBase", heapBase},
         {"initialPages", initialPages},
@@ -2631,7 +2691,8 @@ struct TExecPlanCodec {
 
     llvm::json::Object Encode(
         std::string queryWasm,
-        int64_t heapBase)
+        int64_t heapBase,
+        int wasmBits)
     {
         for (size_t i = 0; i < Plan.Nodes.size(); ++i) {
             const auto& node = Plan.Nodes[i];
@@ -2657,7 +2718,7 @@ struct TExecPlanCodec {
         llvm::json::Object out{
             {"supported", true},
             {"embedWasm", EmbedWasm},
-            {"layout", ExecLayoutJson(heapBase)},
+            {"layout", ExecLayoutJson(heapBase, wasmBits)},
             {"nodes", std::move(Nodes)},
             {"edges", std::move(Edges)},
             {"root", static_cast<int64_t>(Plan.Root)},
@@ -2681,7 +2742,8 @@ llvm::json::Object EncodeExecPlan(
     std::span<const TKernelArtifacts> artifacts,
     bool embedWasm,
     std::string queryWasm,
-    int64_t heapBase)
+    int64_t heapBase,
+    int wasmBits)
 {
     if (!plan) {
         return UnsupportedExec("scheduler lowering did not produce an exec plan");
@@ -2692,7 +2754,7 @@ llvm::json::Object EncodeExecPlan(
             .Plan = *plan,
             .Kernels = kernelIndex,
             .EmbedWasm = embedWasm,
-        }.Encode(std::move(queryWasm), heapBase);
+        }.Encode(std::move(queryWasm), heapBase, wasmBits);
     } catch (const NQumir::TError& e) {
         return UnsupportedExec(e.ToString());
     } catch (const std::exception& e) {
@@ -2781,7 +2843,8 @@ llvm::json::Object BuildBundle(
             diagnostics,
             request.EmbedWasm,
             cacheDir,
-            externalCatalog);
+            externalCatalog,
+            request.WasmBits);
         loweredKernels = std::move(lowered.Kernels);
 
         schedulerText << lowerDiagnostics.str();
@@ -2812,7 +2875,8 @@ llvm::json::Object BuildBundle(
             wasmFinalized.Kernels,
             request.EmbedWasm,
             wasmFinalized.QueryWasm,
-            wasmFinalized.HeapBase);
+            wasmFinalized.HeapBase,
+            request.WasmBits);
     } else {
         execPlan = UnsupportedExec(execPlanError.empty()
             ? "scheduler lowering did not produce an exec plan"

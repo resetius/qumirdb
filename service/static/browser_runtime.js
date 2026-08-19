@@ -1,9 +1,9 @@
 // Browser execution runtime for simple one-to-one pipelines.
 //
-// Drives the standalone WASM kernels emitted by `qdb --plan-export` (bundle.exec):
-// marshals a columnar batch into a kernel module's linear memory as
-// TColumn[]/TRowSet per the verified 8-byte-pointer layout, runs the kernel, and
-// reads results back. See PLAN_BROWSER_EXECUTION.md for the ABI/layout facts.
+// Drives the standalone WASM kernels emitted by `qdb --plan-export`
+// (bundle.exec): marshals a columnar batch into TColumn[]/TRowSet using
+// bundle.exec.layout, runs the kernel, and reads results back. layout.
+// pointerSize is 8 for wasm64/Memory64, or 4 for the wasm32 fallback.
 
 import { BucketAllocator } from './wasm_allocator.js';
 
@@ -696,12 +696,18 @@ function createMemory64(initialPages) {
   throw new Error(`memory64 is not available (${errors.join('; ')})`);
 }
 
+function createMemory32(initialPages) {
+  return new WebAssembly.Memory({ initial: Number(initialPages) });
+}
+
 function createSharedMemory(layout, wasm) {
   const spec = layout.sharedMemory;
   if (!spec) {
     throw new Error('exec layout is missing sharedMemory');
   }
-  const memory = createMemory64(Number(spec.initialPages));
+  const memory = layout.pointerSize === 4
+    ? createMemory32(Number(spec.initialPages))
+    : createMemory64(Number(spec.initialPages));
   return {
     memory,
     arena: new Arena(memory, Number(spec.heapBase)),
@@ -1056,12 +1062,36 @@ function freeMarshalledRowSet(arena, layout, rowsetPtr) {
   arena.free(rowsetPtr);
 }
 
+// Pointer width for the current query (4 or 8), set once from
+// exec.layout.pointerSize. Safe as module state because each query runs
+// in its own worker.
+let PointerSize = 8;
+
 function writePointer(dv, offset, address) {
-  dv.setBigUint64(offset, BigInt(Number(address)), true);
+  if (PointerSize === 4) {
+    dv.setUint32(offset, Number(address), true);
+  } else {
+    dv.setBigUint64(offset, BigInt(Number(address)), true);
+  }
 }
 
 function readPointer(dv, offset) {
+  if (PointerSize === 4) {
+    return dv.getUint32(offset, true);
+  }
   return Number(dv.getBigUint64(offset, true));
+}
+
+// Marshals a pointer value for a wasm call: BigInt under wasm64 (every
+// pointer is an i64 there), plain Number under wasm32. Do not use this for
+// values the kernel always declares as i64, like counts or opcodes — pass
+// BigInt(...) directly for those.
+function toWasmPtr(value) {
+  return PointerSize === 4 ? Number(value) : BigInt(value);
+}
+
+function fromWasmPtr(value) {
+  return Number(value);
 }
 
 function decimalToScaledBigInt(value, scale) {
@@ -1319,7 +1349,7 @@ function createQdbEnv(getMemory, holder) {
       if (offset + len > strSize) len = strSize - offset;
     }
     const dv = new DataView(getMemory().buffer);
-    dv.setBigUint64(Number(out), BigInt(data) + BigInt(offset), true);
+    writePointer(dv, Number(out), data + offset);
     dv.setBigInt64(Number(out) + 8, BigInt(len), true);
   };
   const stringConcat = (out, _arena, left, right) => {
@@ -1411,7 +1441,7 @@ function createQdbEnv(getMemory, holder) {
     // malloc family over the query's shared linear memory (segregated
     // free-list; free reclaims). qdb_realloc is not imported: it is implemented
     // in Oz (qumirdb.oz) on top of qdb_alloc/qdb_free.
-    qdb_alloc: (size) => BigInt(alloc(size)),
+    qdb_alloc: (size) => toWasmPtr(alloc(size)),
     qdb_free: (ptr) => holder.arena.free(Number(ptr)),
 
     qdb_filter_string_compare: (ld, ls, rd, rs) =>
@@ -1476,7 +1506,7 @@ function createQdbEnv(getMemory, holder) {
     qdb_lit_to_sv: (out, lit) => {
       const bytes = cstrAt(lit);
       const dv = new DataView(getMemory().buffer);
-      dv.setBigUint64(Number(out), BigInt(lit), true);
+      writePointer(dv, Number(out), lit);
       dv.setBigInt64(Number(out) + 8, BigInt(bytes.length), true);
     },
   };
@@ -1770,11 +1800,10 @@ export function runFilter(kernel, layout, rowSet, writer, options = {}) {
     rowsetPtr = written.rowsetPtr;
     selectionPtr = written.selectionPtr;
   }
-  // memory64 entry: the rowset pointer is an i64 param.
   const releaseStringScratch = beginKernelStringScratch(kernel);
   try {
     kernel.fn(
-      BigInt(rowsetPtr), 0n, BigInt(kernel.regexHandles || 0));
+      toWasmPtr(rowsetPtr), toWasmPtr(0), toWasmPtr(kernel.regexHandles || 0));
   } finally {
     releaseStringScratch();
   }
@@ -1891,7 +1920,10 @@ export function runProject(kernel, layout, rowSet, output, arena) {
 
   try {
     if (computed.length > 0) {
-      outArrayPtr = arena.alloc(computed.length * 16, 8);
+      // `out` on the kernel side is a `ptr ptr u8` array. Each slot's
+      // stride must be the real pointer width, not a fixed 8, or every
+      // column after the first one lands at the wrong offset under wasm32.
+      outArrayPtr = arena.alloc(computed.length * 2 * PointerSize, PointerSize);
       for (let k = 0; k < computed.length; ++k) {
         const width = Number(computed[k].width || 0);
         if (width <= 0) {
@@ -1909,9 +1941,9 @@ export function runProject(kernel, layout, rowSet, output, arena) {
       }
       let dv = arena.view();
       for (let k = 0; k < computedBuffers.length; ++k) {
-        writePointer(dv, outArrayPtr + k * 8, computedBuffers[k]);
+        writePointer(dv, outArrayPtr + k * PointerSize, computedBuffers[k]);
         if (computedMaskBuffers[k]) {
-          writePointer(dv, outArrayPtr + (computed.length + k) * 8, computedMaskBuffers[k]);
+          writePointer(dv, outArrayPtr + (computed.length + k) * PointerSize, computedMaskBuffers[k]);
         }
       }
       if (input.rowsetPtr === undefined || outArrayPtr === undefined) {
@@ -1919,8 +1951,8 @@ export function runProject(kernel, layout, rowSet, output, arena) {
       }
       releaseStringScratch = beginKernelStringScratch(kernel);
       kernel.fn(
-        BigInt(input.rowsetPtr), BigInt(outArrayPtr), 0n,
-        BigInt(kernel.regexHandles || 0));
+        toWasmPtr(input.rowsetPtr), toWasmPtr(outArrayPtr), toWasmPtr(0),
+        toWasmPtr(kernel.regexHandles || 0));
       arena.free(outArrayPtr);
       outArrayPtr = 0;
     }
@@ -2118,18 +2150,18 @@ function drainMaterializedBatch(
     state, maxRows, streamLeftPtr, streamRightPtr, asWasm = false) {
   const { layout, arena } = state;
   const rowsetPtr = arena.alloc(layout.rowset.size, 8);
-  const leftPtr = BigInt(state.leftStore.dataPtr());
-  const rightPtr = BigInt(state.rightStore.dataPtr());
+  const leftPtr = toWasmPtr(state.leftStore.dataPtr());
+  const rightPtr = toWasmPtr(state.rightStore.dataPtr());
   // For streamed pairs (batch index -1 on a side) jt_materialize reads that side
   // from the stream_* rowset rather than the store; buffered pairs ignore them.
-  const streamLeft = streamLeftPtr !== undefined ? BigInt(streamLeftPtr) : leftPtr;
-  const streamRight = streamRightPtr !== undefined ? BigInt(streamRightPtr) : rightPtr;
+  const streamLeft = streamLeftPtr !== undefined ? toWasmPtr(streamLeftPtr) : leftPtr;
+  const streamRight = streamRightPtr !== undefined ? toWasmPtr(streamRightPtr) : rightPtr;
   const produced = Number(state.materialize(
-    BigInt(state.pairBuffer),
+    toWasmPtr(state.pairBuffer),
     leftPtr, rightPtr, streamLeft, streamRight,
     BigInt(state.materializeCursor),
     BigInt(maxRows),
-    BigInt(rowsetPtr)));
+    toWasmPtr(rowsetPtr)));
   if (produced <= 0) {
     arena.free(rowsetPtr);
     throw new Error('join materialize failed');
@@ -2172,7 +2204,7 @@ function createAggregateState(kernel, layout, stage) {
   // init(ht, capacity)
   const ht = arena.alloc(layout.hashTable.size, 8);
   new Uint8Array(arena.memory.buffer, ht, layout.hashTable.size).fill(0);
-  if (dispatch(BigInt(ht), 0n, BigInt(initialCapacity), 0n) === 0n) {
+  if (dispatch(toWasmPtr(ht), toWasmPtr(0), BigInt(initialCapacity), 0n) === 0n) {
     arena.free(ht);
     throw new Error('aggregate initialization failed');
   }
@@ -2206,7 +2238,7 @@ function updateAggregateState(state, rowSet) {
     ? wasm.rowsetPtr
     : state.inputWriter.write(
         batch.columns, batch.rowCount, false, selection).rowsetPtr;
-  if (state.dispatch(BigInt(state.ht), BigInt(rowsetPtr), 0n, 1n) < 0n) {
+  if (state.dispatch(toWasmPtr(state.ht), toWasmPtr(rowsetPtr), 0n, 1n) < 0n) {
     throw new Error('aggregate update failed');
   }
 }
@@ -2309,7 +2341,7 @@ function updateGroupingSetsAggregateState(state, rowSet) {
       const view = makeGroupingSetRowSet(state, baseRowsetPtr, sets[si], si);
       try {
         if (state.dispatch(
-            BigInt(state.ht), BigInt(view.rowsetPtr), 0n, 1n) < 0n) {
+            toWasmPtr(state.ht), toWasmPtr(view.rowsetPtr), 0n, 1n) < 0n) {
           throw new Error('aggregate update failed');
         }
       } finally {
@@ -2340,7 +2372,7 @@ function finishAggregateState(state, asWasm = false) {
     arena.view().getBigInt64(ht + layout.hashTable.sizeOffset, true));
   const rowsetPtr = arena.alloc(layout.rowset.size, 8);
   new Uint8Array(arena.memory.buffer, rowsetPtr, layout.rowset.size).fill(0);
-  const finalized = Number(finishRowSet(BigInt(ht), BigInt(rowsetPtr)));
+  const finalized = Number(finishRowSet(toWasmPtr(ht), toWasmPtr(rowsetPtr)));
   if (finalized !== expectedSize) {
     throw new Error('aggregate finalize returned an unexpected row count');
   }
@@ -2378,15 +2410,15 @@ const CrossJoinOp = Object.freeze({
 
 function dispatchJoin(state, batch, batchIdx, leftStore, rightStore, arg, op) {
   return state.dispatch(
-    BigInt(state.leftTable),
-    BigInt(state.rightTable),
-    BigInt(batch),
+    toWasmPtr(state.leftTable),
+    toWasmPtr(state.rightTable),
+    toWasmPtr(batch),
     BigInt(batchIdx),
-    BigInt(state.pairBuffer),
-    BigInt(leftStore),
-    BigInt(rightStore),
-    BigInt(state.leftKeyColumns),
-    BigInt(state.rightKeyColumns),
+    toWasmPtr(state.pairBuffer),
+    toWasmPtr(leftStore),
+    toWasmPtr(rightStore),
+    toWasmPtr(state.leftKeyColumns),
+    toWasmPtr(state.rightKeyColumns),
     BigInt(arg),
     BigInt(op));
 }
@@ -2677,11 +2709,11 @@ function updateCrossLeftState(state, rowSet) {
   const batchPtr = state.leftStore.dataPtr() + batchIdx * state.layout.rowset.size;
   try {
     const ok = state.dispatch(
-      BigInt(batchPtr),
+      toWasmPtr(batchPtr),
       BigInt(batchIdx),
-      BigInt(state.rightStore.dataPtr()),
+      toWasmPtr(state.rightStore.dataPtr()),
       BigInt(state.rightStore.batches.length),
-      BigInt(state.pairBuffer),
+      toWasmPtr(state.pairBuffer),
       CrossJoinOp.EMIT);
     if (!ok) {
       throw new Error('cross join kernel update failed');
@@ -2716,11 +2748,11 @@ function finishCrossJoinState(state) {
   }
   state.finalized = true;
   state.dispatch(
+    toWasmPtr(0),
     0n,
+    toWasmPtr(0),
     0n,
-    0n,
-    0n,
-    BigInt(state.pairBuffer),
+    toWasmPtr(state.pairBuffer),
     CrossJoinOp.DESTROY);
   state.leftStore.freeMarshalled();
   state.rightStore.freeMarshalled();
@@ -2863,19 +2895,21 @@ function runSortKernelRowSets(
   }
 
   try {
-    // memory64: every pointer/count is an i64 param.
+    // wasm64: every pointer/count is an i64 param. wasm32 narrows pointer
+    // params to i32 (doSort stays a plain i32 bool on both — see
+    // TSortRadixCompositeDispatch in qdb/kernel/compiler.h).
     const out = Number(kernel.fn(
-      BigInt(store.dataPtr()),
-      BigInt(rowIdsPtr),
-      BigInt(workPtr),
-      BigInt(countsPtr),
+      toWasmPtr(store.dataPtr()),
+      toWasmPtr(rowIdsPtr),
+      toWasmPtr(workPtr),
+      toWasmPtr(countsPtr),
       BigInt(n),
-      BigInt(descsPtr),
-      BigInt(nullsFirstsPtr),
+      toWasmPtr(descsPtr),
+      toWasmPtr(nullsFirstsPtr),
       1,
       0n,
       BigInt(keep),
-      BigInt(outRowSetPtr)));
+      toWasmPtr(outRowSetPtr)));
     if (out <= 0) {
       return emptyBatchForOutput(output);
     }
@@ -4038,16 +4072,16 @@ class TopSortWasmState {
 
     try {
       const out = Number(this.kernel.fn(
-        BigInt(stateRowSet.rowsetPtr),
-        BigInt(batchRowSet.rowsetPtr),
-        BigInt(rowIdsPtr),
-        BigInt(workPtr),
-        BigInt(countsPtr),
+        toWasmPtr(stateRowSet.rowsetPtr),
+        toWasmPtr(batchRowSet.rowsetPtr),
+        toWasmPtr(rowIdsPtr),
+        toWasmPtr(workPtr),
+        toWasmPtr(countsPtr),
         BigInt(n),
-        BigInt(pickSrcPtr),
-        BigInt(pickIdxPtr),
+        toWasmPtr(pickSrcPtr),
+        toWasmPtr(pickIdxPtr),
         BigInt(this.limit),
-        BigInt(outRowSetPtr)));
+        toWasmPtr(outRowSetPtr)));
       if (out <= 0) {
         this.stateBatch = emptyBatchForRowSets([rowSet]);
       } else {
@@ -4488,6 +4522,7 @@ export async function executeBrowserPipelineScheduled(exec, readSourceBatches, o
   }
 
   const layout = exec.layout;
+  PointerSize = layout.pointerSize === 4 ? 4 : 8;
   if (!Array.isArray(exec.nodes)) {
     throw new Error('exec plan is missing graph nodes');
   }

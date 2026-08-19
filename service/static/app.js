@@ -19,6 +19,7 @@ import {
 } from './browser_storage.js';
 import { readParquetTable } from './browser_parquet.js';
 import { prettifyType } from './oz_type.js';
+import { detectMemory64Support } from './wasm_capabilities.js';
 
 const $ = selector => document.querySelector(selector);
 
@@ -29,6 +30,7 @@ const ACTIVE_FOLDER_KEY = 'qdb.web.activeQueryFolder';
 const EXPANDED_QUERY_FOLDERS_KEY = 'qdb.web.expandedQueryFolders';
 const ACTIVE_DATASET_KEY = 'qdb.web.activeDataset';
 const LAST_RUN_KEY = 'qdb.web.lastRun';
+const WASM_BITS_PREF_KEY = 'qdb.web.wasmBitsPreference';
 const LOCAL_DATA_DOWNLOAD_CONCURRENCY = 4;
 const MAX_PERSISTED_RESULT_ROWS = 1000;
 const BROWSER_EXPLAIN_PREFETCH_CONCURRENCY = 4;
@@ -78,6 +80,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   initDrawers();
   initTooltips();
   initFooterLinks();
+  initWasmSettings();
   initTabs();
   initGraphControls();
   initDiagnosticCopy();
@@ -202,6 +205,102 @@ function showVersionDialog(info) {
     const dd = document.createElement('dd');
     dd.textContent = value;
     list.append(dt, dd);
+  }
+  dialog.showModal();
+}
+
+function getWasmBitsPreference() {
+  return localStorage.getItem(WASM_BITS_PREF_KEY) === '32' ? 32 : 64;
+}
+
+function setWasmBitsPreference(bits) {
+  localStorage.setItem(WASM_BITS_PREF_KEY, String(bits === 32 ? 32 : 64));
+}
+
+// Value actually sent as options.wasmBits: the user's choice, unless they
+// picked 64 and this engine has no Memory64 support.
+function effectiveWasmBits() {
+  return getWasmBitsPreference() === 64 && detectMemory64Support() ? 64 : 32;
+}
+
+function initWasmSettings() {
+  const button = $('#settings-toggle');
+  if (!button) {
+    return;
+  }
+  button.addEventListener('click', () => showWasmSettingsDialog());
+}
+
+function showWasmSettingsDialog() {
+  const memory64Supported = detectMemory64Support();
+  let dialog = $('#wasm-settings-dialog');
+  if (!dialog) {
+    dialog = document.createElement('dialog');
+    dialog.id = 'wasm-settings-dialog';
+    dialog.className = 'version-dialog wasm-settings-dialog';
+    dialog.innerHTML = '<h3>Settings</h3>'
+      + '<div class="wasm-settings-body"></div>'
+      + '<form method="dialog"><button type="submit">Close</button></form>';
+    document.body.appendChild(dialog);
+    dialog.addEventListener('click', event => {
+      if (event.target === dialog) {
+        dialog.close();
+      }
+    });
+  }
+  const body = dialog.querySelector('.wasm-settings-body');
+  body.textContent = '';
+
+  const label = document.createElement('div');
+  label.className = 'appbar-label';
+  label.style.marginBottom = '8px';
+  label.textContent = 'Browser execution: WebAssembly target';
+  body.appendChild(label);
+
+  const preference = getWasmBitsPreference();
+  const options = [
+    {
+      bits: 64,
+      title: '64-bit (Memory64)',
+      hint: 'Faster, no 4GiB working-set limit.',
+      disabled: !memory64Supported,
+      disabledHint: 'This browser does not support WebAssembly Memory64.'
+    },
+    {
+      bits: 32,
+      title: '32-bit (fallback)',
+      hint: 'Works everywhere; query working set capped at 4GiB.',
+      disabled: false
+    }
+  ];
+  for (const option of options) {
+    const row = document.createElement('label');
+    row.className = 'wasm-settings-option';
+    if (option.disabled) {
+      row.dataset.disabled = 'true';
+    }
+    const input = document.createElement('input');
+    input.type = 'radio';
+    input.name = 'wasm-bits';
+    input.value = String(option.bits);
+    input.checked = option.disabled ? option.bits === 32 : preference === option.bits;
+    input.disabled = option.disabled;
+    input.addEventListener('change', () => {
+      if (input.checked) {
+        setWasmBitsPreference(option.bits);
+      }
+    });
+    const text = document.createElement('span');
+    text.className = 'wasm-settings-option-label';
+    const title = document.createElement('span');
+    title.className = 'wasm-settings-option-title';
+    title.textContent = option.title;
+    const hint = document.createElement('span');
+    hint.className = 'wasm-settings-option-hint';
+    hint.textContent = option.disabled ? option.disabledHint : option.hint;
+    text.append(title, hint);
+    row.append(input, text);
+    body.appendChild(row);
   }
   dialog.showModal();
 }
@@ -1982,6 +2081,7 @@ async function explainCurrent(
       shufflePartitions: 4,
       format: 'runtime-bundle',
       embedWasm: dataset.source?.kind === 'browser',
+      wasmBits: effectiveWasmBits(),
       verboseKernels: true
     }
   };
@@ -2037,7 +2137,8 @@ function browserExplainRequest(job) {
       scanTasks: 1,
       shufflePartitions: 1,
       format: 'runtime-bundle',
-      embedWasm: true
+      embedWasm: true,
+      wasmBits: effectiveWasmBits()
     }
   };
 }

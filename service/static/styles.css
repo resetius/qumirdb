@@ -235,6 +235,68 @@ button:hover {
   }
 }
 
+/* Compact icon button that fits the 26px footer strip (the header's
+   .icon-button is sized for the 48px topbar). */
+.icon-button.appbar-icon {
+  width: 20px;
+  height: 20px;
+  border: none;
+  background: none;
+  color: var(--muted);
+}
+
+.icon-button.appbar-icon svg {
+  width: 14px;
+  height: 14px;
+}
+
+.icon-button.appbar-icon:hover {
+  color: var(--accent);
+}
+
+.wasm-settings-dialog {
+  min-width: 300px;
+}
+
+.wasm-settings-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0 0 10px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.wasm-settings-option:last-of-type {
+  margin-bottom: 4px;
+}
+
+.wasm-settings-option input {
+  margin: 3px 0 0;
+}
+
+.wasm-settings-option[data-disabled="true"] {
+  cursor: not-allowed;
+  color: var(--muted);
+}
+
+.wasm-settings-option-title {
+  display: block;
+}
+
+.wasm-settings-option-hint {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.wasm-settings-dialog form {
+  margin-top: 14px;
+  display: flex;
+  justify-content: flex-end;
+}
+
 .status {
   color: var(--muted);
   font-size: 12px;
