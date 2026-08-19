@@ -6,9 +6,10 @@
         (var dist <ptr i64>)
         (var slot_ids <ptr i64>)
         (var capacity i64)
-        (var key LookupKey)) -> i64
+        (var key LookupKey)
+        (var hash u64)) -> i64
     (block
-      (var slot = (& (call rh_hash key) (- capacity (: 1 i64))))
+      (var slot = (& (cast hash i64) (- capacity (: 1 i64))))
       (var probe_dist i64)
       (= probe_dist (: 0 i64))
       (while (< probe_dist capacity)
@@ -28,13 +29,14 @@
         (var slot_ids <ptr i64>)
         (var capacity i64)
         (var key StoredKey)
-        (var dense_slot i64)) -> bool
+        (var dense_slot i64)
+        (var hash u64)) -> bool
     (block
       (var carried_key = key)
       (var carried_dist i64)
       (= carried_dist (: 0 i64))
       (var carried_slot = dense_slot)
-      (var slot = (& (call rh_hash key) (- capacity (: 1 i64))))
+      (var slot = (& (cast hash i64) (- capacity (: 1 i64))))
       (var probes i64)
       (= probes (: 0 i64))
       (while (< probes capacity)
@@ -65,14 +67,15 @@
        ((var ht <ref HashTable>)
         (var key LookupKey)
         (var stored_witness StoredKey)
-        (var out_is_new <ref i64>)) -> i64
+        (var out_is_new <ref i64>)
+        (var hash u64)) -> i64
     (block
       (= out_is_new (: 0 i64))
       (var capacity = (field ht Capacity))
       (var keys = (cast (field ht Keys)
         <ptr StoredKey>))
       (var dense_slot = (call rh_lookup_dual
-        keys (field ht Dist) (field ht SlotId) capacity key))
+        keys (field ht Dist) (field ht SlotId) capacity key hash))
       (if (>= dense_slot (: 0 i64)) (block (return dense_slot)))
       (= dense_slot (field ht Size))
       (if (> (+ dense_slot (: 1 i64))
@@ -96,7 +99,7 @@
       (var stored_key = (call key_clone_owned key owned_block))
       (if (! (call rh_insert_stored
         keys (field ht Dist) (field ht SlotId) capacity
-        stored_key dense_slot))
+        stored_key dense_slot hash))
         (block
           (if (!= (cast owned_block i64) (: 0 i64))
             (block (call aht_owned_arena_rewind
@@ -142,7 +145,8 @@
             (block
               (if (! (call rh_insert_stored
                 new_keys new_dist new_slot_ids new_capacity
-                (index old_keys index) (index old_slot_ids index)))
+                (index old_keys index) (index old_slot_ids index)
+                (cast (call rh_hash (index old_keys index)) u64)))
                 (block (return #f)))))
           (= index (+ index (: 1 i64)))))
       (return #t)))

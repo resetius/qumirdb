@@ -1716,11 +1716,17 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
     }
     TExprPtr keyValue = std::make_shared<TStructConstructExpr>(
         loc, key.LookupType, std::move(fields));
+    auto u64Type = std::make_shared<TIntegerType>(TIntegerType::U64);
+    std::vector<TExprPtr> keyValueSetup = {
+        var("key_value", key.LookupType),
+        assign("key_value", std::move(keyValue)),
+    };
     auto upsertCall = call("aht_upsert_dual", {
         ident("ht"),
-        std::move(keyValue),
+        ident("key_value"),
         ident("stored_witness"),
         ident("is_new"),
+        cast(call("rh_hash", {ident("key_value")}), u64Type),
     });
     auto ptrPtrI64Type = std::make_shared<TPointerType>(ptrI64Type);
     auto slotIndex = [&](const std::string& buf) -> TExprPtr {
@@ -1733,6 +1739,9 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
             std::make_move_iterator(keyField.Setup.begin()),
             std::make_move_iterator(keyField.Setup.end()));
     }
+    materialize.insert(materialize.end(),
+        std::make_move_iterator(keyValueSetup.begin()),
+        std::make_move_iterator(keyValueSetup.end()));
     // Compute each arg column's value and validity once per row. Scalar
     // integers/floats are carried as i64 bits; BinInt stays typed.
     for (auto& [idx, ac] : argColumns) {
