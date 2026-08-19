@@ -54,6 +54,10 @@ int64_t qdb_filter_string_compare(
     const uint8_t* left, int64_t leftSize,
     const uint8_t* right, int64_t rightSize);
 
+// Same algorithm as arrow::internal::ComputeStringHash<0> (arrow/util/hashing.h):
+// inline multiply-mix for <=16 bytes, XXH3 with a fixed secret above that.
+int64_t qdb_string_hash_bytes(const uint8_t* data, int64_t size);
+
 struct qdb_string_view {
     const uint8_t* Data;
     int64_t Size;

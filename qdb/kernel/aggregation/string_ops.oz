@@ -1,17 +1,8 @@
 (block
   (pragma language overloads)
 
-  (fun qdb_string_hash_bytes ((var data <ptr u8>) (var size i64)) -> i64
-    (block
-      (var hash = (cast (: -3750763034362895579 i64) u64))
-      (var index i64)
-      (= index (: 0 i64))
-      (while (< index size)
-        (block
-          (= hash (^ hash (cast (index data index) u64)))
-          (= hash (* hash (: 1099511628211 u64)))
-          (= index (+ index (: 1 i64)))))
-      (return (cast hash i64))))
+  ;; qdb_string_hash_bytes is declared extern in qumirdb.oz and implemented
+  ;; natively (qumirdb_runtime.cpp), mirroring arrow::internal::ComputeStringHash.
 
   (fun qdb_string_equal_bytes ((var left <ptr u8>)
                                (var left_size i64)

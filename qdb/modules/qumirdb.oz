@@ -130,6 +130,9 @@
         (var right_size i64)) -> i64
        (attrs extern) (block))
 
+  (fun qdb_string_hash_bytes ((var data <ptr u8>) (var size i64)) -> i64
+       (attrs extern) (block))
+
   (fun qdb_string_view_sql_like
        ((var str StringView) (var pattern StringView)) -> i64
        (attrs extern) (block))
