@@ -58,7 +58,8 @@
       (var build_keys =
         (cast (field build Keys) <ptr StoredKey>))
       (var build_slot = (call rh_lookup_dual build_keys (field build Dist)
-                          (field build SlotId) (field build Capacity) key))
+                          (field build SlotId) (field build Capacity) key
+                          (cast (call rh_hash key) u64)))
       (if (!= build_slot (: -1 i64))
         (block
           (var build_aggs = (field build AggBuffers))

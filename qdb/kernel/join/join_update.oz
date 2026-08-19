@@ -30,7 +30,8 @@
       (var build_keys =
         (cast (field build Keys) <ptr StoredKey>))
       (var build_slot = (call rh_lookup_dual build_keys (field build Dist)
-                        (field build SlotId) (field build Capacity) key))
+                        (field build SlotId) (field build Capacity) key
+                        (cast (call rh_hash key) u64)))
       (if (!= build_slot (: -1 i64))
         (block
           (var build_aggs = (field build AggBuffers))
@@ -84,7 +85,8 @@
         (block (return #f)))
       (var is_new i64)
       (= is_new (: 0 i64))
-      (var own_slot = (call aht_upsert_dual own key stored_witness is_new))
+      (var own_slot = (call aht_upsert_dual own key stored_witness is_new
+        (cast (call rh_hash key) u64)))
       (if (== own_slot (: -1 i64)) (block (return #f)))
       (if (! (call jb_append own own_slot own_row_id))
         (block (return #f)))
@@ -100,7 +102,8 @@
     (block
       (var is_new i64)
       (= is_new (: 0 i64))
-      (var own_slot = (call aht_upsert_dual own key stored_witness is_new))
+      (var own_slot = (call aht_upsert_dual own key stored_witness is_new
+        (cast (call rh_hash key) u64)))
       (if (== own_slot (: -1 i64)) (block (return #f)))
       (if (! (call jb_append own own_slot own_row_id))
         (block (return #f)))
@@ -115,6 +118,7 @@
     (block
       (var is_new i64)
       (= is_new (: 0 i64))
-      (var own_slot = (call aht_upsert_dual own key stored_witness is_new))
+      (var own_slot = (call aht_upsert_dual own key stored_witness is_new
+        (cast (call rh_hash key) u64)))
       (if (== own_slot (: -1 i64)) (block (return #f)))
       (return #t))))
