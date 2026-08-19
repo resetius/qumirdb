@@ -29,6 +29,8 @@
 
 namespace NQdb {
 
+static_assert(sizeof(TRowSet) == TKernelCompiler::kRowSetSize);
+
 namespace {
 
 void PrintKernelAst(
@@ -724,7 +726,8 @@ NQumir::NAst::TExprPtr BuildTopSortUpdateAst(
     builder
         .Var("materialize_store", rowSetPtrType)
         .Assign("materialize_store", Oz::Cast(
-            Oz::Call("qdb_alloc", {Oz::Mul(Int64Literal(2), Int64Literal(56))}),
+            Oz::Call("qdb_alloc", {Oz::Mul(Int64Literal(2),
+                Int64Literal(static_cast<int64_t>(TKernelCompiler::kRowSetSize)))}),
             rowSetPtrType))
         .Stmt(Oz::ArrayAssign("materialize_store", Int64Literal(0), Deref(Oz::Ident("state"))))
         .Stmt(Oz::ArrayAssign("materialize_store", Int64Literal(1), Deref(Oz::Ident("batch"))))

@@ -336,6 +336,11 @@ public:
     // the output pair buffer.
     static constexpr size_t kPairBufferSize = 24;
 
+    // sizeof(TRowSet) per io.h / modules/qumirdb.oz — generated kernels that
+    // pack TRowSet values into a byte buffer (e.g. top-sort's materialize
+    // store) size the allocation off this instead of a bare literal.
+    static constexpr size_t kRowSetSize = 64;
+
     // Compiles a filter kernel for the given input struct type and predicate.
     // Returns a dispatch lambda that calls the compiled kernel.
     TFilterDispatch CompileFilter(const NKernel::TOperatorKernelSpec& spec);

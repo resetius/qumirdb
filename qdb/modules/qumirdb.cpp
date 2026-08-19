@@ -72,12 +72,15 @@ std::vector<TExternalType> BuildQumirDbExternalTypes() {
     auto columnNamedType = std::make_shared<TNamedType>("TColumn", columnType);
     auto ptrColumnType = std::make_shared<TPointerType>(columnNamedType);
 
+    auto u64Type = std::make_shared<TIntegerType>(TIntegerType::U64);
+    auto ptrU64Type = std::make_shared<TPointerType>(u64Type);
     auto rowSetType = std::make_shared<TStructType>(
         std::vector<std::pair<std::string, TTypePtr>>{
             {"Columns", ptrColumnType},
             {"ColumnCount", i64Type},
             {"RowCount", i64Type},
             {"Selection", ptrU8Type},
+            {"Hash", ptrU64Type},
             {"Destroy", voidPtrType},
             {"Private", voidPtrType},
             {"RefCount", i64Type},
