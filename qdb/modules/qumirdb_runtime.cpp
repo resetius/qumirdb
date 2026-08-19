@@ -1,6 +1,9 @@
 #include <qdb/modules/qumirdb_runtime.h>
 #include <qdb/utils/regex.h>
 
+#define XXH_INLINE_ALL
+#include <arrow/vendored/xxhash.h>
+
 #include <algorithm>
 #include <bit>
 #include <cmath>
@@ -230,6 +233,58 @@ int64_t qdb_filter_string_compare(
         return 1;
     }
     return (leftSize > rightSize) - (leftSize < rightSize);
+}
+
+// Fixed random secret in place of XXH3_64bits_withSeed's (slow) seed-derived
+// one, exactly as arrow::internal::ComputeStringHash does — bytes copied from
+// its kXxh3Secrets so this gets the same tested distribution.
+alignas(8) constexpr unsigned char kXxh3Secret[XXH3_SECRET_SIZE_MIN + 1] = {
+    0xe7, 0x8b, 0x13, 0xf9, 0xfc, 0xb5, 0x8e, 0xef, 0x81, 0x48, 0x2c, 0xbf, 0xf9, 0x9f,
+    0xc1, 0x1e, 0x43, 0x6d, 0xbf, 0xa6, 0x6d, 0xb5, 0x72, 0xbc, 0x97, 0xd8, 0x61, 0x24,
+    0x0f, 0x12, 0xe3, 0x05, 0x21, 0xf7, 0x5c, 0x66, 0x67, 0xa5, 0x65, 0x03, 0x96, 0x26,
+    0x69, 0xd8, 0x29, 0x20, 0xf8, 0xc7, 0xb0, 0x3d, 0xdd, 0x7d, 0x18, 0xa0, 0x60, 0x75,
+    0x92, 0xa4, 0xce, 0xba, 0xc0, 0x77, 0xf4, 0xac, 0xb7, 0x03, 0x53, 0xf0, 0x98, 0xce,
+    0xe6, 0x2b, 0x20, 0xc7, 0x82, 0x91, 0xab, 0xbf, 0x68, 0x5c, 0x62, 0x4d, 0x33, 0xa3,
+    0xe1, 0xb3, 0xff, 0x97, 0x54, 0x4c, 0x44, 0x34, 0xb5, 0xb9, 0x32, 0x4c, 0x75, 0x42,
+    0x89, 0x53, 0x94, 0xd4, 0x9f, 0x2b, 0x76, 0x4d, 0x4e, 0xe6, 0xfa, 0x15, 0x3e, 0xc1,
+    0xdb, 0x71, 0x4b, 0x2c, 0x94, 0xf5, 0xfc, 0x8c, 0x89, 0x4b, 0xfb, 0xc1, 0x82, 0xa5,
+    0x6a, 0x53, 0xf9, 0x4a, 0xba, 0xce, 0x1f, 0xc0, 0x97, 0x1a, 0x87,
+};
+
+uint64_t MixHash(uint64_t multiplier, uint64_t h) {
+    return std::byteswap(multiplier * h);
+}
+
+int64_t qdb_string_hash_bytes(const uint8_t* data, int64_t size) {
+    static constexpr uint64_t kMul0 = 11400714785074694791ULL;
+    static constexpr uint64_t kMul1 = 14029467366897019727ULL;
+
+    if (size <= 16) {
+        const auto n = static_cast<uint32_t>(size);
+        if (n <= 8) {
+            if (n <= 3) {
+                if (n == 0) {
+                    return static_cast<int64_t>(uint64_t{1});
+                }
+                const uint32_t x = (n << 24) ^ (data[0] << 16) ^
+                    (data[n / 2] << 8) ^ data[n - 1];
+                return static_cast<int64_t>(MixHash(kMul0, x));
+            }
+            uint32_t x, y;
+            std::memcpy(&x, data + n - 4, sizeof(x));
+            std::memcpy(&y, data, sizeof(y));
+            return static_cast<int64_t>(
+                uint64_t{n} ^ MixHash(kMul0, x) ^ MixHash(kMul1, y));
+        }
+        uint64_t x, y;
+        std::memcpy(&x, data + n - 8, sizeof(x));
+        std::memcpy(&y, data, sizeof(y));
+        return static_cast<int64_t>(
+            uint64_t{n} ^ MixHash(kMul0, x) ^ MixHash(kMul1, y));
+    }
+
+    return static_cast<int64_t>(XXH3_64bits_withSecret(
+        data, static_cast<size_t>(size), kXxh3Secret, XXH3_SECRET_SIZE_MIN));
 }
 
 

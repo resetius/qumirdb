@@ -1198,6 +1198,29 @@ function readNumericValue(dv, address, type) {
   }
 }
 
+// qdb_string_hash_bytes is native-only (arrow::internal::ComputeStringHash +
+// XXH3); the browser doesn't need to match it bit-for-bit, only be
+// self-consistent within one execution, so this is a simpler 8-byte-block
+// FNV-1a fold with a murmur-style finalizer.
+function hashBytes(bytes) {
+  let h = 0xcbf29ce484222325n;
+  const mul = 0x100000001b3n;
+  const mask64 = (1n << 64n) - 1n;
+  let i = 0;
+  for (; i + 8 <= bytes.length; i += 8) {
+    let word = 0n;
+    for (let k = 0; k < 8; ++k) word |= BigInt(bytes[i + k]) << BigInt(8 * k);
+    h = ((h ^ word) * mul) & mask64;
+  }
+  for (; i < bytes.length; ++i) {
+    h = ((h ^ BigInt(bytes[i])) * mul) & mask64;
+  }
+  h ^= h >> 33n;
+  h = (h * 0xff51afd7ed558ccdn) & mask64;
+  h ^= h >> 33n;
+  return BigInt.asIntN(64, h);
+}
+
 // memcmp-style byte comparison matching qdb_filter_string_compare: -1/0/1 with
 // length as tiebreak.
 function compareBytes(a, b) {
@@ -1446,6 +1469,7 @@ function createQdbEnv(getMemory, holder) {
 
     qdb_filter_string_compare: (ld, ls, rd, rs) =>
       BigInt(compareBytes(bytesAt(ld, ls), bytesAt(rd, rs))),
+    qdb_string_hash_bytes: (ptr, size) => hashBytes(bytesAt(ptr, size)),
     // Pattern is a StringView (string literals are emitted as StringView).
     qdb_string_view_sql_like: (str, pattern) =>
       BigInt(sqlLikeBytes(svBytes(str), svBytes(pattern))),

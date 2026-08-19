@@ -570,6 +570,7 @@ TEST(StringKeyDescriptor, CompositeOwnershipCloneUsesOneBlock) {
 } // namespace
 
 int main(int argc, char** argv) {
+    NQumir::NRegistry::EnsureQumirDbRuntimeSymbolsLinked();
     testing::InitGoogleTest(&argc, argv);
     NQumir::NCodeGen::TLLVMInitializer initializer;
     return RUN_ALL_TESTS();

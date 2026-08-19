@@ -50,11 +50,12 @@ NQdb::TStringView View(const std::string& value) {
     };
 }
 
-TEST(QumirDbStringOps, HashHasStableByteVectors) {
-    void* entry = nullptr;
-    auto runner = CompileStringOperation("qdb_string_hash_bytes", entry);
-    ASSERT_NE(entry, nullptr);
-    auto hash = reinterpret_cast<int64_t(*)(const uint8_t*, int64_t)>(entry);
+// Hash value is an implementation detail, so check properties, not magic numbers.
+TEST(QumirDbStringOps, HashIsDeterministicAndContentSensitive) {
+    auto hash = qdb_string_hash_bytes;
+    auto hashOf = [&](const std::string& s) {
+        return hash(reinterpret_cast<const uint8_t*>(s.data()), s.size());
+    };
 
     const std::string empty;
     const std::string ascii = "foobar";
@@ -62,24 +63,29 @@ TEST(QumirDbStringOps, HashHasStableByteVectors) {
     const std::string longer = "abcd";
     const std::string utf8 = "\xD0\xBA\xD0\xBB\xD1\x8E\xD1\x87";
     const std::string embeddedZero("a\0b", 3);
-    EXPECT_EQ(static_cast<uint64_t>(hash(
-        reinterpret_cast<const uint8_t*>(empty.data()), empty.size())),
-        UINT64_C(0xcbf29ce484222325));
-    EXPECT_EQ(static_cast<uint64_t>(hash(
-        reinterpret_cast<const uint8_t*>(ascii.data()), ascii.size())),
-        UINT64_C(0x85944171f73967e8));
-    EXPECT_EQ(static_cast<uint64_t>(hash(
-        reinterpret_cast<const uint8_t*>(prefix.data()), prefix.size())),
-        UINT64_C(0xe71fa2190541574b));
-    EXPECT_EQ(static_cast<uint64_t>(hash(
-        reinterpret_cast<const uint8_t*>(longer.data()), longer.size())),
-        UINT64_C(0xfc179f83ee0724dd));
-    EXPECT_EQ(static_cast<uint64_t>(hash(
-        reinterpret_cast<const uint8_t*>(utf8.data()), utf8.size())),
-        UINT64_C(0x296130de6f5b7a81));
-    EXPECT_EQ(static_cast<uint64_t>(hash(
-        reinterpret_cast<const uint8_t*>(embeddedZero.data()), embeddedZero.size())),
-        UINT64_C(0xe5d29919042666b2));
+    const std::string embeddedZeroDifferent("a\0c", 3);
+    // Long enough to exercise the >16-byte XXH3 path.
+    const std::string url = "https://example.com/path/to/resource?query=1";
+
+    EXPECT_EQ(hashOf(empty), hashOf(""));
+    EXPECT_EQ(hashOf(ascii), hashOf(ascii));
+
+    EXPECT_NE(hashOf(empty), hashOf(ascii));
+    EXPECT_NE(hashOf(prefix), hashOf(longer)) << "length must affect the hash";
+    EXPECT_NE(hashOf(embeddedZero), hashOf(embeddedZeroDifferent))
+        << "bytes after an embedded zero must not be dropped";
+    EXPECT_NE(hashOf(prefix), hashOf(utf8));
+    EXPECT_NE(hashOf(url), hashOf(url.substr(0, url.size() - 1)))
+        << "the tail byte must count";
+
+    // Same bytes, different alignment.
+    for (int padding = 0; padding < 8; ++padding) {
+        const std::string padded = std::string(padding, 'x') + url;
+        auto padHash = hash(
+            reinterpret_cast<const uint8_t*>(padded.data()) + padding,
+            static_cast<int64_t>(url.size()));
+        EXPECT_EQ(padHash, hashOf(url)) << "padding=" << padding;
+    }
 }
 
 TEST(QumirDbStringOps, EqualityUsesBytesAndLength) {
