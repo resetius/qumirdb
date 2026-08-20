@@ -282,13 +282,13 @@ TEST(StatsTest, AggregateInitialCapacityUsesNdvAndPartitionCount) {
     input->Stats_ = src.Stats_;
     NQdb::TAggregateOperator aggregate(input, {"x"}, {});
 
-    // ceil(100 / 0.75) rounds up to the next power of two.
-    EXPECT_EQ(NQdb::EstimateAggregateInitialCapacity(aggregate, 1), 256);
+    // ceil(100 / 0.875) rounds up to the next power of two.
+    EXPECT_EQ(NQdb::EstimateAggregateInitialCapacity(aggregate, 1), 128);
     // Four disjoint partition-local tables each expect 25 groups.
-    EXPECT_EQ(NQdb::EstimateAggregateInitialCapacity(aggregate, 4), 64);
+    EXPECT_EQ(NQdb::EstimateAggregateInitialCapacity(aggregate, 4), 32);
 
     NQdb::TAggregateOperator missingStats(input, {"unknown"}, {});
-    EXPECT_EQ(NQdb::EstimateAggregateInitialCapacity(missingStats, 1), 4);
+    EXPECT_EQ(NQdb::EstimateAggregateInitialCapacity(missingStats, 1), 8);
 }
 
 TEST(StatsTest, RowGroupHintCollectsNestedFilterChain) {

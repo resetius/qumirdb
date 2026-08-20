@@ -9,14 +9,9 @@
                                (var right <ptr u8>)
                                (var right_size i64)) -> bool
     (block
-      (var equal = (== left_size right_size))
-      (var index i64)
-      (= index (: 0 i64))
-      (while (&& equal (< index left_size))
-        (block
-          (= equal (== (index left index) (index right index)))
-          (= index (+ index (: 1 i64)))))
-      (return equal)))
+      (if (!= left_size right_size) (block (return #f)))
+      (if (== left_size (: 0 i64)) (block (return #t)))
+      (return (== (call builtin::memcmp left right left_size) (: 0 i32)))))
 
   (fun qdb_string_compare_bytes ((var left <ptr u8>)
                                  (var left_size i64)

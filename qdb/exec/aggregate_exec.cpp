@@ -3,6 +3,7 @@
 #include <qdb/modules/qumirdb_runtime.h>
 
 #include <algorithm>
+#include <bit>
 #include <cstdint>
 #include <stdexcept>
 #include <utility>
@@ -14,7 +15,7 @@ namespace {
 // Mirrors the HashTable C layout from qdb/modules/qumirdb.cpp.
 struct THashTable {
     uint8_t* Keys = nullptr;
-    int64_t* Dist = nullptr;
+    uint8_t* Ctrl = nullptr;
     int64_t* SlotId = nullptr;
     uint8_t* GroupKeys = nullptr;
     int64_t** AggBuffers = nullptr;
@@ -29,7 +30,8 @@ struct THashTable {
 };
 static_assert(sizeof(THashTable) == TKernelCompiler::kHashTableSize);
 
-constexpr int64_t kInitialCapacity = 4;
+// SwissTable groups are 8 slots wide, so capacity starts at 8.
+constexpr int64_t kInitialCapacity = 8;
 constexpr int64_t kOpInit = 0;
 constexpr int64_t kOpUpdate = 1;
 constexpr int64_t kOpDestroy = 2;
@@ -40,7 +42,9 @@ TAggregateProcessor::TAggregateProcessor(
     TAggregateKernels kernels,
     int64_t initialCapacity)
     : Kernels_(std::move(kernels))
-    , InitialCapacity_(std::max(initialCapacity, kInitialCapacity))
+    // aht_init only accepts a power-of-two capacity of at least 8.
+    , InitialCapacity_(std::bit_ceil(static_cast<uint64_t>(
+          std::max(initialCapacity, kInitialCapacity))))
 {
 }
 

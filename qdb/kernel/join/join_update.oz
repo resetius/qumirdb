@@ -30,7 +30,7 @@
     (block
       (var build_keys =
         (cast (field build Keys) <ptr StoredKey>))
-      (var build_slot = (call rh_lookup_dual build_keys (field build Dist)
+      (var build_slot = (call rh_lookup_dual build_keys (field build Ctrl)
                         (field build SlotId) (field build Capacity) key
                         hash))
       (if (!= build_slot (: -1 i64))

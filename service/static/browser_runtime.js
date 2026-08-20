@@ -1467,6 +1467,18 @@ function createQdbEnv(getMemory, holder) {
     qdb_alloc: (size) => toWasmPtr(alloc(size)),
     qdb_free: (ptr) => holder.arena.free(Number(ptr)),
 
+    // builtin::memcmp is declared as an external symbol rather than lowered to
+    // an LLVM intrinsic, so wasm imports it. Returns i32, not i64.
+    memcmp: (a, b, n) => {
+      const len = Number(n);
+      const x = bytesAt(a, len);
+      const y = bytesAt(b, len);
+      for (let i = 0; i < len; ++i) {
+        if (x[i] !== y[i]) return x[i] < y[i] ? -1 : 1;
+      }
+      return 0;
+    },
+
     qdb_filter_string_compare: (ld, ls, rd, rs) =>
       BigInt(compareBytes(bytesAt(ld, ls), bytesAt(rd, rs))),
     qdb_string_hash_bytes: (ptr, size) => hashBytes(bytesAt(ptr, size)),
@@ -2220,10 +2232,14 @@ function createAggregateState(kernel, layout, stage) {
 
   // Browser execution contracts the native physical lanes into one semantic
   // aggregate, so the exported capacity is sized for one complete hash table.
-  const initialCapacity = Number.isSafeInteger(stage.initialCapacity)
-      && stage.initialCapacity >= 4
+  // aht_init requires a power-of-two capacity of at least 8: SwissTable groups
+  // are 8 slots wide. Mirrors TAggregateProcessor on the native side.
+  const requestedCapacity = Number.isSafeInteger(stage.initialCapacity)
+      && stage.initialCapacity >= 8
     ? stage.initialCapacity
-    : 4;
+    : 8;
+  let initialCapacity = 8;
+  while (initialCapacity < requestedCapacity) initialCapacity *= 2;
 
   // init(ht, capacity)
   const ht = arena.alloc(layout.hashTable.size, 8);

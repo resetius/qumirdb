@@ -371,13 +371,13 @@ GenJoinFinalizeSemiAntiAst(const TJoinKeyDescriptor &key, bool isAnti,
     // key = own_gkeys[slot]
     slotBody.push_back(var("key", key.KeyType));
     slotBody.push_back(assign("key", index(ident("own_gkeys"), ident("slot"))));
-    // opp_slot = rh_lookup_slot(opp_keys, opp.Dist, opp.SlotId, opp.Capacity,
+    // opp_slot = rh_lookup_slot(opp_keys, opp.Ctrl, opp.SlotId, opp.Capacity,
     // key)
     slotBody.push_back(var("opp_slot", i64Type));
     slotBody.push_back(
         assign("opp_slot", call("rh_lookup_slot", {
                                                       ident("opp_keys"),
-                                                      field("opp", "Dist"),
+                                                      field("opp", "Ctrl"),
                                                       field("opp", "SlotId"),
                                                       field("opp", "Capacity"),
                                                       ident("key"),

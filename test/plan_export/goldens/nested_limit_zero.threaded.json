@@ -76,7 +76,7 @@
         "__group__"
       ],
       "id": 5,
-      "initialCapacity": 4,
+      "initialCapacity": 8,
       "keyCount": 1,
       "kind": "aggregate",
       "label": "aggregate keys=[__group__] aggs=[count_0=count]",

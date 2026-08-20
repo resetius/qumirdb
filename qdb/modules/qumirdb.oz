@@ -34,7 +34,7 @@
 
   (type HashTable <struct
     (Keys <ptr u8>)
-    (Dist <ptr i64>)
+    (Ctrl <ptr u8>)
     (SlotId <ptr i64>)
     (GroupKeys <ptr u8>)
     (AggBuffers <ptr <ptr i64>>)

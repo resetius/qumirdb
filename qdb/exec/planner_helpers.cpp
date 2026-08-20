@@ -130,7 +130,7 @@ int64_t EstimateAggregateInitialCapacity(
     const TAggregateOperator& aggregate,
     size_t partitionCount)
 {
-    constexpr uint64_t DefaultCapacity = 4;
+    constexpr uint64_t DefaultCapacity = 8;
     const auto inputStats = aggregate.Input()->Stats_;
     if (!inputStats || aggregate.GroupKeys().empty()) {
         return DefaultCapacity;
@@ -159,11 +159,11 @@ int64_t EstimateAggregateInitialCapacity(
     const uint64_t partitions = std::max<uint64_t>(partitionCount, 1);
     const uint64_t groupsPerPartition =
         groups / partitions + (groups % partitions != 0);
-    // The Robin Hood table grows before the next insertion would cross 75%.
+    // The table grows before the next insertion would cross 87.5%.
     uint64_t required = groupsPerPartition >
-            (std::numeric_limits<uint64_t>::max() - 2) / 4
+            (std::numeric_limits<uint64_t>::max() - 6) / 8
         ? std::numeric_limits<uint64_t>::max()
-        : (groupsPerPartition * 4 + 2) / 3;
+        : (groupsPerPartition * 8 + 6) / 7;
 
     // NDV may be a HyperLogLog estimate (TStats::NdvIsExact) and a filter
     // below the aggregate can cut the real group count by orders of magnitude

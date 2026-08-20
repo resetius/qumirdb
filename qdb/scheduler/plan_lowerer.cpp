@@ -1176,7 +1176,7 @@ private:
         TAggregateOperator& aggregate,
         std::string stage,
         TExecStageId execStageId,
-        int64_t initialCapacity = 4,
+        int64_t initialCapacity = 8, // aht_init's minimum
         bool hasPrecomputedHash = false)
     {
         auto* inputType =
@@ -1432,7 +1432,7 @@ private:
                 TStageDiagnosticsScope diagnosticsScope(Diagnostics_, combineGroup);
                 return BuildAggregateTail(
                     partialType, *combineAgg, combineGroup, combineStageId,
-                    /*initialCapacity=*/4, /*hasPrecomputedHash=*/true);
+                    /*initialCapacity=*/8, /*hasPrecomputedHash=*/true);
             }();
 
         TLoweredOutput result;
