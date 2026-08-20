@@ -36,7 +36,7 @@ namespace {
 //   AggBuffers[0][slot] = length, [1] = capacity, [2] = data pointer (as i64).
 struct THashTable {
   uint8_t *Keys = nullptr;
-  int64_t *Dist = nullptr;
+  uint8_t *Ctrl = nullptr;
   int64_t *SlotId = nullptr;
   uint8_t *GroupKeys = nullptr;
   int64_t **AggBuffers = nullptr;
@@ -183,7 +183,7 @@ TEST(JoinKernel, InitReusesHashTableAndDestroyClears) {
   EXPECT_EQ(ht.KeySize, 8);
   ASSERT_NE(ht.AggBuffers, nullptr);
   for (int i = 0; i < 8; ++i) {
-    EXPECT_EQ(ht.Dist[i], -1);
+    EXPECT_EQ(ht.Ctrl[i], 0x80); // empty control byte
     EXPECT_EQ(ht.AggBuffers[0][i], 0); // length
     EXPECT_EQ(ht.AggBuffers[1][i], 0); // capacity
     EXPECT_EQ(ht.AggBuffers[2][i], 0); // data pointer (null)
@@ -695,8 +695,9 @@ TEST(JoinKernelGeneric, Int32KeyTriggersRehash) {
   const int64_t leftKeyColumns[] = {keyDesc.Fields[0].LeftColumnIndex};
   const int64_t rightKeyColumns[] = {keyDesc.Fields[0].RightColumnIndex};
   THashTable left{}, right{};
-  ASSERT_TRUE(jtInit(&left, 4, keySize)); // tiny capacity -> forces rehash
-  ASSERT_TRUE(jtInit(&right, 4, keySize));
+  // Smallest capacity a SwissTable group allows -> still forces a rehash.
+  ASSERT_TRUE(jtInit(&left, 8, keySize));
+  ASSERT_TRUE(jtInit(&right, 8, keySize));
   TPairBuffer pairs{};
   ASSERT_TRUE(procLeft(&left, &right, &lbatch, leftKeyColumns, 0, &pairs,
                        &lbatch, &rbatch));
@@ -1213,7 +1214,7 @@ TEST(JoinStringKey, InnerJoinMatchesAndMaterializes) {
   THashTable left{}, right{};
   TPairBuffer pairs{};
   ASSERT_TRUE(kernels.Dispatch(&left, &right, nullptr, 0, &pairs, nullptr,
-                               nullptr, 4, JoinOpCode(EJoinKernelOp::Init)));
+                               nullptr, 8, JoinOpCode(EJoinKernelOp::Init)));
   ASSERT_TRUE(kernels.Dispatch(&left, &right, &lbatch, 0, &pairs, &lbatch,
                                &rbatch, 0,
                                JoinOpCode(EJoinKernelOp::UpdateLeft)));
@@ -1288,7 +1289,7 @@ TEST(JoinStringKey, SemiAntiClonesRightKeysAndSurvivesRehash) {
   THashTable left{}, right{};
   TPairBuffer pairs{};
   ASSERT_TRUE(kernels.Dispatch(&left, &right, nullptr, 0, &pairs, nullptr,
-                               nullptr, 4, JoinOpCode(EJoinKernelOp::Init)));
+                               nullptr, 8, JoinOpCode(EJoinKernelOp::Init)));
   ASSERT_TRUE(kernels.Dispatch(&left, &right, &lbatch, 0, &pairs, &lbatch,
                                nullptr, 0,
                                JoinOpCode(EJoinKernelOp::UpdateLeft)));

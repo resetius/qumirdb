@@ -94,7 +94,7 @@ std::vector<TExternalType> BuildQumirDbExternalTypes() {
     auto hashTableType = std::make_shared<TStructType>(
         std::vector<std::pair<std::string, TTypePtr>>{
             {"Keys", ptrU8Type},
-            {"Dist", ptrI64Type},
+            {"Ctrl", ptrU8Type},
             {"SlotId", ptrI64Type},
             {"GroupKeys", ptrU8Type},
             {"AggBuffers", ptrPtrI64Type},

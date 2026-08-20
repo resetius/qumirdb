@@ -83,6 +83,10 @@ std::optional<NQumir::TError> AddStringReducerLibrary(
 std::expected<std::vector<NQumir::NAst::TExprPtr>, NQumir::TError>
 BuildJoinLibraryBase() {
     std::vector<NQumir::NAst::TExprPtr> library;
+    if (auto e = AddParsedKernel(library,
+            ReadAggregationKernel("swiss_group.oz"))) {
+        return std::unexpected(*e);
+    }
     if (auto e = AddParsedKernel(library, ReadAggregationKernel("key_ops_i64.oz"))) {
         return std::unexpected(*e);
     }
@@ -294,6 +298,14 @@ BuildGenericAggregateProgramAst(
     stmts.insert(stmts.end(), reducerDecls.begin(), reducerDecls.end());
     stmts.push_back(GenApplyReducersFunDecl(layout));
 
+    auto swissGroup = ParseFunctionLibrary(
+        ReadAggregationKernel("swiss_group.oz"));
+    if (!swissGroup) {
+        return std::unexpected(NQumir::TError(
+            "swiss_group.oz: " + swissGroup.error().ToString()));
+    }
+    stmts.insert(stmts.end(), swissGroup->begin(), swissGroup->end());
+
     auto arenaLifecycle = ParseFunctionLibrary(
         ReadAggregationKernel("owned_arena_lifecycle.oz"));
     if (!arenaLifecycle) {
@@ -424,6 +436,14 @@ BuildGenericAggregateFusedProgramAst(
     auto reducerDecls = GenReducerFunDecls(layout);
     stmts.insert(stmts.end(), reducerDecls.begin(), reducerDecls.end());
     stmts.push_back(GenApplyReducersFunDecl(layout));
+
+    auto swissGroup = ParseFunctionLibrary(
+        ReadAggregationKernel("swiss_group.oz"));
+    if (!swissGroup) {
+        return std::unexpected(NQumir::TError(
+            "swiss_group.oz: " + swissGroup.error().ToString()));
+    }
+    stmts.insert(stmts.end(), swissGroup->begin(), swissGroup->end());
 
     auto arenaLifecycle = ParseFunctionLibrary(
         ReadAggregationKernel("owned_arena_lifecycle.oz"));

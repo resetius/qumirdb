@@ -15,7 +15,7 @@
                             (var left_id i64)) -> bool
     (block
       (var keys = (cast (field matched Keys) <ptr i64>))
-      (var slot = (call rh_lookup_slot keys (field matched Dist)
+      (var slot = (call rh_lookup_slot keys (field matched Ctrl)
                     (field matched SlotId) (field matched Capacity) left_id))
       (return (!= slot (: -1 i64)))))
 
@@ -23,7 +23,7 @@
                         (var left_id i64)) -> bool
     (block
       (var keys = (cast (field matched Keys) <ptr i64>))
-      (var slot = (call rh_lookup_slot keys (field matched Dist)
+      (var slot = (call rh_lookup_slot keys (field matched Ctrl)
                     (field matched SlotId) (field matched Capacity) left_id))
       (if (!= slot (: -1 i64)) (block (return #t)))
       (var capacity = (field matched Capacity))
@@ -35,7 +35,7 @@
             (block (return #f)))
           (= capacity (field matched Capacity))))
       (= keys (cast (field matched Keys) <ptr i64>))
-      (if (! (call rh_insert_displace keys (field matched Dist)
+      (if (! (call rh_insert_displace keys (field matched Ctrl)
                 (field matched SlotId) capacity left_id size))
         (block (return #f)))
       (var group_keys = (cast (field matched GroupKeys) <ptr i64>))
@@ -58,7 +58,7 @@
     (block
       (var build_keys =
         (cast (field build Keys) <ptr StoredKey>))
-      (var build_slot = (call rh_lookup_dual build_keys (field build Dist)
+      (var build_slot = (call rh_lookup_dual build_keys (field build Ctrl)
                           (field build SlotId) (field build Capacity) key
                           hash))
       (if (!= build_slot (: -1 i64))

@@ -2444,10 +2444,12 @@ struct TExecPlanCodec {
                     {"kind", "aggregate"},
                     {"label", AggregatePlanLabel(*aggregate)},
                     {"groupKeys", StringArray(aggregate->GroupKeys())},
+                    // aht_init needs a power-of-two capacity of at least 8;
+                    // grouping sets have no useful estimate, so start there.
                     {"initialCapacity",
                         aggregate->GroupingSets().empty()
                             ? EstimateAggregateInitialCapacity(*aggregate, 1)
-                            : int64_t{4}},
+                            : int64_t{8}},
                     {"entrypoints", EntrypointsJson(*ref)},
                     {"keyCount", static_cast<int64_t>(keyCount)},
                     {"output", std::move(output)},

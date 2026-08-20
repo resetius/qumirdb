@@ -1,65 +1,80 @@
 (block
   (pragma language overloads)
 
+  ;; SwissTable probing (absl flat_hash_map) over the dual lookup/stored key
+  ;; pair. Ctrl holds one byte per slot: 0x80 empty, otherwise H2 = hash & 0x7F.
+  ;; Deletion is unsupported, so there are no tombstones and a probe stops at
+  ;; the first group containing an empty slot. Groups are 8 slots wide and
+  ;; aligned, so a group is one aligned u64 load (swiss_group.oz); capacity is
+  ;; a power of two and at least 8, and probing walks whole groups with
+  ;; triangular steps, which visits every group exactly once.
+
   (fun rh_lookup_dual [StoredKey LookupKey]
        ((var keys <ptr StoredKey>)
-        (var dist <ptr i64>)
+        (var ctrl <ptr u8>)
         (var slot_ids <ptr i64>)
         (var capacity i64)
         (var key LookupKey)
         (var hash u64)) -> i64
     (block
-      (var slot = (& (cast hash i64) (- capacity (: 1 i64))))
-      (var probe_dist i64)
-      (= probe_dist (: 0 i64))
-      (while (< probe_dist capacity)
+      (var words = (cast ctrl <ptr u64>))
+      (var num_groups = (>> capacity (: 3 i64)))
+      (var group_mask = (- num_groups (: 1 i64)))
+      (var h2 = (& hash (: 127 u64)))
+      (var g = (& (cast (>> hash (: 7 u64)) i64) group_mask))
+      (var step i64)
+      (= step (: 0 i64))
+      (var probes i64)
+      (= probes (: 0 i64))
+      (while (< probes num_groups)
         (block
-          (var resident_dist = (index dist slot))
-          (if (|| (== resident_dist (: -1 i64)) (< resident_dist probe_dist))
+          (var word = (index words g))
+          (var m = (call swiss_match word h2))
+          (while (!= m (: 0 u64))
+            (block
+              (var slot = (+ (<< g (: 3 i64)) (call swiss_lowest_index m)))
+              (if (call rh_key_equal (index keys slot) key)
+                (block (return (index slot_ids slot))))
+              (= m (& m (- m (: 1 u64))))))
+          (if (!= (call swiss_match_empty word) (: 0 u64))
             (block (return (: -1 i64))))
-          (if (call rh_key_equal (index keys slot) key)
-            (block (return (index slot_ids slot))))
-          (= slot (& (+ slot (: 1 i64)) (- capacity (: 1 i64))))
-          (= probe_dist (+ probe_dist (: 1 i64)))))
+          (= step (+ step (: 1 i64)))
+          (= g (& (+ g step) group_mask))
+          (= probes (+ probes (: 1 i64)))))
       (return (: -1 i64))))
 
+  ;; Inserts a key known to be absent. Unlike Robin Hood this never moves a
+  ;; resident entry: the first empty slot along the probe sequence wins.
   (fun rh_insert_stored [StoredKey]
        ((var keys <ptr StoredKey>)
-        (var dist <ptr i64>)
+        (var ctrl <ptr u8>)
         (var slot_ids <ptr i64>)
         (var capacity i64)
         (var key StoredKey)
         (var dense_slot i64)
         (var hash u64)) -> bool
     (block
-      (var carried_key = key)
-      (var carried_dist i64)
-      (= carried_dist (: 0 i64))
-      (var carried_slot = dense_slot)
-      (var slot = (& (cast hash i64) (- capacity (: 1 i64))))
+      (var words = (cast ctrl <ptr u64>))
+      (var num_groups = (>> capacity (: 3 i64)))
+      (var group_mask = (- num_groups (: 1 i64)))
+      (var h2 = (& hash (: 127 u64)))
+      (var g = (& (cast (>> hash (: 7 u64)) i64) group_mask))
+      (var step i64)
+      (= step (: 0 i64))
       (var probes i64)
       (= probes (: 0 i64))
-      (while (< probes capacity)
+      (while (< probes num_groups)
         (block
-          (var resident_dist = (index dist slot))
-          (if (== resident_dist (: -1 i64))
+          (var empty = (call swiss_match_empty (index words g)))
+          (if (!= empty (: 0 u64))
             (block
-              (= keys [slot] carried_key)
-              (= dist [slot] carried_dist)
-              (= slot_ids [slot] carried_slot)
+              (var slot = (+ (<< g (: 3 i64)) (call swiss_lowest_index empty)))
+              (= keys [slot] key)
+              (= slot_ids [slot] dense_slot)
+              (= ctrl [slot] (cast h2 u8))
               (return #t)))
-          (if (< resident_dist carried_dist)
-            (block
-              (var resident_key = (index keys slot))
-              (var resident_slot = (index slot_ids slot))
-              (= keys [slot] carried_key)
-              (= dist [slot] carried_dist)
-              (= slot_ids [slot] carried_slot)
-              (= carried_key resident_key)
-              (= carried_dist resident_dist)
-              (= carried_slot resident_slot)))
-          (= slot (& (+ slot (: 1 i64)) (- capacity (: 1 i64))))
-          (= carried_dist (+ carried_dist (: 1 i64)))
+          (= step (+ step (: 1 i64)))
+          (= g (& (+ g step) group_mask))
           (= probes (+ probes (: 1 i64)))))
       (return #f)))
 
@@ -75,11 +90,11 @@
       (var keys = (cast (field ht Keys)
         <ptr StoredKey>))
       (var dense_slot = (call rh_lookup_dual
-        keys (field ht Dist) (field ht SlotId) capacity key hash))
+        keys (field ht Ctrl) (field ht SlotId) capacity key hash))
       (if (>= dense_slot (: 0 i64)) (block (return dense_slot)))
       (= dense_slot (field ht Size))
       (if (> (+ dense_slot (: 1 i64))
-             (- capacity (/ capacity (: 4 i64))))
+             (- capacity (>> capacity (: 3 i64))))
         (block
           (if (> capacity (: 576460752303423487 i64))
             (block (return (: -1 i64))))
@@ -98,7 +113,7 @@
             (block (return (: -1 i64))))))
       (var stored_key = (call key_clone_owned key owned_block))
       (if (! (call rh_insert_stored
-        keys (field ht Dist) (field ht SlotId) capacity
+        keys (field ht Ctrl) (field ht SlotId) capacity
         stored_key dense_slot hash))
         (block
           (if (!= (cast owned_block i64) (: 0 i64))
@@ -122,11 +137,11 @@
 
   (fun rh_rehash_stored [StoredKey]
        ((var old_keys <ptr StoredKey>)
-        (var old_dist <ptr i64>)
+        (var old_ctrl <ptr u8>)
         (var old_slot_ids <ptr i64>)
         (var old_capacity i64)
         (var new_keys <ptr StoredKey>)
-        (var new_dist <ptr i64>)
+        (var new_ctrl <ptr u8>)
         (var new_slot_ids <ptr i64>)
         (var new_capacity i64)
         (var stored_witness StoredKey)) -> bool
@@ -135,16 +150,16 @@
       (= index (: 0 i64))
       (while (< index new_capacity)
         (block
-          (= new_dist [index] (: -1 i64))
+          (= new_ctrl [index] (: 128 u8))
           (= new_slot_ids [index] (: -1 i64))
           (= index (+ index (: 1 i64)))))
       (= index (: 0 i64))
       (while (< index old_capacity)
         (block
-          (if (>= (index old_dist index) (: 0 i64))
+          (if (< (index old_ctrl index) (: 128 u8))
             (block
               (if (! (call rh_insert_stored
-                new_keys new_dist new_slot_ids new_capacity
+                new_keys new_ctrl new_slot_ids new_capacity
                 (index old_keys index) (index old_slot_ids index)
                 (cast (call rh_hash (index old_keys index)) u64)))
                 (block (return #f)))))
@@ -160,7 +175,10 @@
       (var size = (field ht Size))
       (var key_size = (field ht KeySize))
       (var num_aggs = (field ht NumAggs))
-      (if (|| (< new_capacity size) (< new_capacity (: 1 i64)))
+      ;; Groups are 8 slots wide, so capacity must stay a power of two >= 8.
+      (if (|| (< new_capacity size) (< new_capacity (: 8 i64)))
+        (block (return #f)))
+      (if (!= (& new_capacity (- new_capacity (: 1 i64))) (: 0 i64))
         (block (return #f)))
       (if (|| (< key_size (: 1 i64))
               (> new_capacity (/ (: 9223372036854775807 i64) key_size)))
@@ -168,7 +186,7 @@
       (var key_bytes = (* new_capacity key_size))
       (var meta_bytes = (* new_capacity (: 8 i64)))
       (var new_keys = (cast (call qdb_alloc key_bytes) <ptr u8>))
-      (var new_dist = (cast (call qdb_alloc meta_bytes) <ptr i64>))
+      (var new_ctrl = (cast (call qdb_alloc new_capacity) <ptr u8>))
       (var new_slot_ids = (cast (call qdb_alloc meta_bytes) <ptr i64>))
       (var new_group_keys = (cast (call qdb_alloc key_bytes) <ptr u8>))
       (var new_agg_buffers = (cast (: 0 i64) <ptr <ptr i64>>))
@@ -180,7 +198,7 @@
       (= allocation_failed #f)
       (if (== (cast new_keys i64) (: 0 i64))
         (block (= allocation_failed #t)))
-      (if (== (cast new_dist i64) (: 0 i64))
+      (if (== (cast new_ctrl i64) (: 0 i64))
         (block (= allocation_failed #t)))
       (if (== (cast new_slot_ids i64) (: 0 i64))
         (block (= allocation_failed #t)))
@@ -206,8 +224,8 @@
         (block
           (if (!= (cast new_keys i64) (: 0 i64))
             (block (call qdb_free (cast new_keys <ptr i8>))))
-          (if (!= (cast new_dist i64) (: 0 i64))
-            (block (call qdb_free (cast new_dist <ptr i8>))))
+          (if (!= (cast new_ctrl i64) (: 0 i64))
+            (block (call qdb_free (cast new_ctrl <ptr i8>))))
           (if (!= (cast new_slot_ids i64) (: 0 i64))
             (block (call qdb_free (cast new_slot_ids <ptr i8>))))
           (if (!= (cast new_group_keys i64) (: 0 i64))
@@ -227,11 +245,11 @@
       (var new_keys_typed = (cast new_keys
         <ptr StoredKey>))
       (if (! (call rh_rehash_stored
-        old_keys (field ht Dist) (field ht SlotId) old_capacity
-        new_keys_typed new_dist new_slot_ids new_capacity stored_witness))
+        old_keys (field ht Ctrl) (field ht SlotId) old_capacity
+        new_keys_typed new_ctrl new_slot_ids new_capacity stored_witness))
         (block
           (call qdb_free (cast new_keys <ptr i8>))
-          (call qdb_free (cast new_dist <ptr i8>))
+          (call qdb_free (cast new_ctrl <ptr i8>))
           (call qdb_free (cast new_slot_ids <ptr i8>))
           (call qdb_free (cast new_group_keys <ptr i8>))
           (var cleanup_agg i64)
@@ -268,7 +286,7 @@
               (= index (+ index (: 1 i64)))))
           (= agg (+ agg (: 1 i64)))))
       (call qdb_free (cast (field ht Keys) <ptr i8>))
-      (call qdb_free (cast (field ht Dist) <ptr i8>))
+      (call qdb_free (cast (field ht Ctrl) <ptr i8>))
       (call qdb_free (cast (field ht SlotId) <ptr i8>))
       (call qdb_free (cast (field ht GroupKeys) <ptr i8>))
       (= agg (: 0 i64))
@@ -279,7 +297,7 @@
       (if (!= (cast old_agg_buffers i64) (: 0 i64))
         (block (call qdb_free (cast old_agg_buffers <ptr i8>))))
       (field_assign ht Keys new_keys)
-      (field_assign ht Dist new_dist)
+      (field_assign ht Ctrl new_ctrl)
       (field_assign ht SlotId new_slot_ids)
       (field_assign ht GroupKeys new_group_keys)
       (field_assign ht AggBuffers new_agg_buffers)
