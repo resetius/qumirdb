@@ -81,9 +81,11 @@ TColumnValueAst BuildColumnValueAst(
     }
 
     auto zeroBinInt = [&]() -> TExprPtr {
+        auto zero = std::make_shared<TNumberExpr>(loc, int64_t{0});
+        zero->Type = std::make_shared<TIntegerType>(TIntegerType::I128);
         return std::make_shared<TStructConstructExpr>(loc, DecimalStorageType(),
-            std::vector<TExprPtr>{number(0, u64Type), number(0, u64Type)},
-            std::vector<std::string>{"Lo", "Hi"});
+            std::vector<TExprPtr>{std::move(zero)},
+            std::vector<std::string>{"V"});
     };
 
     if (TMaybeType<TIntegerType>(type) || TMaybeType<TFloatType>(type) ||

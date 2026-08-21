@@ -152,7 +152,7 @@
         (call window_init_masked_fixed_output
           n (: 16 i64) out_col out data_owner_idx mask_owner_idx witness))
       (var mask = (field out_col Mask))
-      (var zero = (cast (struct ((Lo (: 0 u64)) (Hi (: 0 u64)))) BinInt))
+      (var zero = (cast (struct ((V (: 0 i128)))) BinInt))
       (var acc = zero)
       (var valid_count = (: 0 i64))
       (var i = (: 0 i64))
@@ -269,7 +269,7 @@
         (call window_init_masked_fixed_output
           n (: 16 i64) out_col out data_owner_idx mask_owner_idx witness))
       (var mask = (field out_col Mask))
-      (var zero = (cast (struct ((Lo (: 0 u64)) (Hi (: 0 u64)))) BinInt))
+      (var zero = (cast (struct ((V (: 0 i128)))) BinInt))
       (var acc = zero)
       (var valid_count = (: 0 i64))
       (var i = (: 0 i64))
@@ -420,7 +420,7 @@
         (call window_init_masked_fixed_output
           n (: 16 i64) out_col out data_owner_idx mask_owner_idx out_witness))
       (var mask = (field out_col Mask))
-      (var zero = (cast (struct ((Lo (: 0 u64)) (Hi (: 0 u64)))) BinInt))
+      (var zero = (cast (struct ((V (: 0 i128)))) BinInt))
       (var arg_witness = (cast (: 0 i64) <ptr BinInt>))
       (var i = (: 0 i64))
       (while (< i n)
@@ -525,7 +525,7 @@
         (call window_init_masked_fixed_output
           n (: 16 i64) out_col out data_owner_idx mask_owner_idx witness))
       (var mask = (field out_col Mask))
-      (var zero = (cast (struct ((Lo (: 0 u64)) (Hi (: 0 u64)))) BinInt))
+      (var zero = (cast (struct ((V (: 0 i128)))) BinInt))
       (var i = (: 0 i64))
       (while (< i n)
         (block

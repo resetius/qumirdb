@@ -241,9 +241,13 @@
     (block
       (var witness = (cast (: 0 i64) <ptr BinInt>))
       (var v = (call sr_load_fixed_key store row_id column_idx witness))
+      ;; BinInt is an i128: take its halves with a shift, and flip the sign bit
+      ;; of the high half so radix ordering matches signed ordering.
+      (var raw = (field v V))
       (if use_hi
-        (block (return (^ (field v Hi) (<< (: 1 u64) (: 63 u64))))))
-      (return (field v Lo))))
+        (block
+          (return (^ (cast (>> raw (: 64 i128)) u64) (<< (: 1 u64) (: 63 u64))))))
+      (return (cast raw u64))))
 
   (fun sort_binint_rowids_count_pass
        ((var store <ptr TRowSet>)

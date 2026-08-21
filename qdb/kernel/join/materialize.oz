@@ -119,7 +119,7 @@
       (field_assign out_col OffsetWidth (: 0 u8))
 
       (var pair_data = (field pairs Data))
-      (var zero = (cast (struct ((Lo (: 0 u64)) (Hi (: 0 u64)))) BinInt))
+      (var zero = (cast (struct ((V (: 0 i128)))) BinInt))
       (var i i64)
       (= i (: 0 i64))
       (while (< i n)
