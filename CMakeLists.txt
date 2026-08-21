@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.30)
-project(qumirdb VERSION 0.3.1)
+project(qumirdb VERSION 0.3.2)
 enable_testing()
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 

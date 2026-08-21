@@ -1144,11 +1144,6 @@ function readBinIntValue(dv, address) {
   return (hi << 64n) + lo;
 }
 
-function writeBinIntRaw(dv, address, value) {
-  const raw = BigInt.asUintN(128, BigInt(value));
-  dv.setBigUint64(Number(address), BigInt.asUintN(64, raw), true);
-  dv.setBigUint64(Number(address) + 8, BigInt.asUintN(64, raw >> 64n), true);
-}
 
 function formatDecimalValue(raw, scale) {
   let value = BigInt(raw);
@@ -1219,6 +1214,58 @@ function hashBytes(bytes) {
   h = (h * 0xff51afd7ed558ccdn) & mask64;
   h ^= h >> 33n;
   return BigInt.asIntN(64, h);
+}
+
+// compiler-rt 128-bit builtins for the wasm kernels: the i64-pair marshalling
+// the wasm ABI requires, wrapped around plain BigInt arithmetic.
+function bit128Builtins(getMemory) {
+  const MASK64 = 0xFFFFFFFFFFFFFFFFn;
+  const wide = (lo, hi) =>
+    (BigInt.asIntN(64, BigInt(hi)) << 64n) | BigInt.asUintN(64, BigInt(lo));
+  const wideU = (lo, hi) =>
+    (BigInt.asUintN(64, BigInt(hi)) << 64n) | BigInt.asUintN(64, BigInt(lo));
+  const store = (ptr, value) => {
+    const bits = BigInt.asUintN(128, value);
+    const dv = new DataView(getMemory().buffer);
+    const at = Number(ptr);
+    dv.setBigUint64(at, bits & MASK64, true);
+    dv.setBigUint64(at + 8, bits >> 64n, true);
+  };
+  const shiftOf = (shift) => BigInt(Number(shift) & 127);
+
+  return {
+    __multi3: (r, aLo, aHi, bLo, bHi) =>
+      store(r, wide(aLo, aHi) * wide(bLo, bHi)),
+    // Division by zero is undefined in C; return zero rather than throwing out
+    // of a wasm call, which would abort the whole query.
+    __divti3: (r, aLo, aHi, bLo, bHi) => {
+      const d = wide(bLo, bHi);
+      store(r, d === 0n ? 0n : wide(aLo, aHi) / d);
+    },
+    __udivti3: (r, aLo, aHi, bLo, bHi) => {
+      const d = wideU(bLo, bHi);
+      store(r, d === 0n ? 0n : wideU(aLo, aHi) / d);
+    },
+    __modti3: (r, aLo, aHi, bLo, bHi) => {
+      const d = wide(bLo, bHi);
+      store(r, d === 0n ? 0n : wide(aLo, aHi) % d);
+    },
+    __umodti3: (r, aLo, aHi, bLo, bHi) => {
+      const d = wideU(bLo, bHi);
+      store(r, d === 0n ? 0n : wideU(aLo, aHi) % d);
+    },
+    __ashlti3: (r, lo, hi, shift) => store(r, wide(lo, hi) << shiftOf(shift)),
+    __ashrti3: (r, lo, hi, shift) => store(r, wide(lo, hi) >> shiftOf(shift)),
+    __lshrti3: (r, lo, hi, shift) => store(r, wideU(lo, hi) >> shiftOf(shift)),
+    __floattidf: (lo, hi) => Number(wide(lo, hi)),
+    __floatuntidf: (lo, hi) => Number(wideU(lo, hi)),
+    __fixdfti: (r, value) =>
+      store(r, Number.isFinite(value) ? BigInt(Math.trunc(value)) : 0n),
+    __fixunsdfti: (r, value) =>
+      store(r, Number.isFinite(value) && value > 0
+        ? BigInt(Math.trunc(value))
+        : 0n),
+  };
 }
 
 // memcmp-style byte comparison matching qdb_filter_string_compare: -1/0/1 with
@@ -1316,12 +1363,6 @@ function createQdbEnv(getMemory, holder) {
     return bytesAt(readPointer(dv, at), dv.getBigInt64(at + 8, true));
   };
   // BinInt{Lo,Hi} is a 128-bit two's-complement value, little-endian.
-  const binIntAt = (ptr) => {
-    const dv = new DataView(getMemory().buffer);
-    const at = Number(ptr);
-    return (BigInt.asIntN(64, dv.getBigInt64(at + 8, true)) << 64n)
-      + dv.getBigUint64(at, true);
-  };
   // Size-aware: CAST(<string column> AS DATE) passes a non-null-terminated StringView.
   const sqlDate = (str) => {
     const bytes = svBytes(str);
@@ -1429,32 +1470,6 @@ function createQdbEnv(getMemory, holder) {
     writePointer(dv, Number(out), ptr);
     dv.setBigInt64(Number(out) + 8, BigInt(encoded.length), true);
   };
-  const writeDecimalResult = (out, value) => {
-    writeBinIntRaw(new DataView(getMemory().buffer), Number(out), value);
-  };
-  const pow10 = (scale) => 10n ** BigInt(Number(scale));
-  const decimalFromI64 = (out, value, scale) =>
-    writeDecimalResult(out, BigInt(value) * pow10(scale));
-  const decimalFromF64 = (out, value, scale) =>
-    writeDecimalResult(out, BigInt(Math.round(Number(value) * Number(pow10(scale)))));
-  const decimalScaleUp = (out, value, delta) =>
-    writeDecimalResult(out, binIntAt(value) * pow10(delta));
-  const decimalBinary = (out, left, right, op) =>
-    writeDecimalResult(out, op(binIntAt(left), binIntAt(right)));
-  const decimalNeg = (out, ptr) => {
-    const value = binIntAt(ptr);
-    if (value === -(1n << 127n)) {
-      throw new Error('decimal negation overflow');
-    }
-    writeDecimalResult(out, -value);
-  };
-  const decimalMulI64 = (out, left, rhs) =>
-    writeDecimalResult(out, binIntAt(left) * BigInt(rhs));
-  const decimalDivI64 = (out, left, rhs) =>
-    writeDecimalResult(out, binIntAt(left) / BigInt(rhs));
-  const decimalCompare = (left, right, op) =>
-    op(binIntAt(left), binIntAt(right)) ? 1 : 0;
-
   return {
     sqrt: Math.sqrt,
     sin: Math.sin,
@@ -1478,6 +1493,14 @@ function createQdbEnv(getMemory, holder) {
       }
       return 0;
     },
+
+    // Decimal is an i128 and wasm has no 128-bit value type, so LLVM lowers
+    // 128-bit arithmetic to compiler-rt calls: the value travels as an i64
+    // pair, and a 128-bit result comes back through an sret pointer. The
+    // signatures were read off the emitted wasm, not guessed. The whole family
+    // is provided so a query shape reaching a different one cannot fail at
+    // load time.
+    ...bit128Builtins(getMemory),
 
     qdb_filter_string_compare: (ld, ls, rd, rs) =>
       BigInt(compareBytes(bytesAt(ld, ls), bytesAt(rd, rs))),
@@ -1512,31 +1535,6 @@ function createQdbEnv(getMemory, holder) {
       return value < 0n ? -value : value;
     },
     qdb_fabs: Math.abs,
-    qdb_decimal_from_i64: decimalFromI64,
-    qdb_decimal_from_f64: decimalFromF64,
-    qdb_decimal_scale_up: decimalScaleUp,
-    qdb_decimal_add: (out, left, right) =>
-      decimalBinary(out, left, right, (l, r) => l + r),
-    qdb_decimal_sub: (out, left, right) =>
-      decimalBinary(out, left, right, (l, r) => l - r),
-    qdb_decimal_neg: decimalNeg,
-    qdb_decimal_mul_i64: decimalMulI64,
-    qdb_decimal_div_i64: decimalDivI64,
-    qdb_decimal_div: (out, left, right) =>
-      decimalBinary(out, left, right, (l, r) => l / r),
-    qdb_decimal_eq: (left, right) =>
-      decimalCompare(left, right, (l, r) => l === r),
-    qdb_decimal_ne: (left, right) =>
-      decimalCompare(left, right, (l, r) => l !== r),
-    qdb_decimal_lt: (left, right) =>
-      decimalCompare(left, right, (l, r) => l < r),
-    qdb_decimal_le: (left, right) =>
-      decimalCompare(left, right, (l, r) => l <= r),
-    qdb_decimal_gt: (left, right) =>
-      decimalCompare(left, right, (l, r) => l > r),
-    qdb_decimal_ge: (left, right) =>
-      decimalCompare(left, right, (l, r) => l >= r),
-
     // Cast a string-literal char* to a StringView {Data = lit, Size = strlen}
     // (sret out pointer). Matches qdb_lit_to_sv in qumirdb_runtime.cpp.
     qdb_lit_to_sv: (out, lit) => {

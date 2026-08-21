@@ -3,7 +3,10 @@
 
   (type StringView <struct (Data <ptr u8>) (Size i64)>)
   (type OwnedString <struct (Data <ptr u8>) (Size i64)>)
-  (type BinInt <struct (Lo u64) (Hi u64)>)
+  ;; A one-field wrapper, not a bare i128: keeping BinInt nominally
+  ;; distinct stops f64 from implicitly converting into it, which would
+  ;; drag the decimal operator overloads into ordinary float arithmetic.
+  (type BinInt <struct (V i128)>)
   (type DATE i32)
   ;; Nullable stores a regular value plus a validity bit. Most operators are
   ;; null-propagating: NULL + 1 -> NULL, NULL < 10 -> NULL, 5 < 10 -> TRUE.
@@ -225,19 +228,56 @@
   ;; Decimal kernel storage. qdb logical Decimal(p,s) is erased to this signed
   ;; 128-bit two's-complement value before qumir compilation; precision/scale
   ;; decisions stay in qdb typing/expansion.
+  (fun qdb_pow10_i128 ((var scale i64)) -> BinInt
+    (block
+      (if (< scale 0)
+        (block (return (cast (struct ((V (: 0 i128)))) BinInt))))
+      (var acc = (: 1 i128))
+      (var base = (: 10 i128))
+      (var n = scale)
+      (while (> n 0)
+        (block
+          (if (!= (& n 1) 0)
+            (block (= acc (* acc base))))
+          (= n (>> n 1))
+          (= base (* base base))))
+      (return (cast (struct ((V acc))) BinInt))))
+
   (fun qdb_decimal_from_i64 ((var value i64) (var scale i64)) -> BinInt
-    (attrs extern) (block))
+    (block
+      (var factor BinInt)
+      (= factor (call qdb_pow10_i128 scale))
+      (return (cast (struct ((V (* (cast value i128) (field factor V))))) BinInt))))
+  ;; Matches roundl(value * 10^scale) in the former C++ helper: half away from
+  ;; zero, since casting to an integer truncates toward zero.
   (fun qdb_decimal_from_f64 ((var value f64) (var scale i64)) -> BinInt
-    (attrs extern) (block))
+    (block
+      (var factor BinInt)
+      (= factor (call qdb_pow10_i128 scale))
+      (var scaled f64)
+      (= scaled (* value (cast (field factor V) f64)))
+      (var rounded i128)
+      (if (< scaled 0.0)
+        (block (= rounded (cast (- scaled 0.5) i128)))
+        (block (= rounded (cast (+ scaled 0.5) i128))))
+      (return (cast (struct ((V rounded))) BinInt))))
   (fun qdb_decimal_scale_up ((var value BinInt) (var delta i64)) -> BinInt
-    (attrs extern) (block))
+    (block
+      (var factor BinInt)
+      (= factor (call qdb_pow10_i128 delta))
+      (return (cast (struct ((V (* (field value V) (field factor V))))) BinInt))))
 
   (fun qdb_decimal_add ((var left BinInt) (var right BinInt)) -> BinInt
-    (attrs extern (operator "+")) (block))
+    (attrs (operator "+"))
+    (block (return (cast (struct ((V (+ (field left V) (field right V))))) BinInt))))
   (fun qdb_decimal_sub ((var left BinInt) (var right BinInt)) -> BinInt
-    (attrs extern (operator "-")) (block))
+    (attrs (operator "-"))
+    (block (return (cast (struct ((V (- (field left V) (field right V))))) BinInt))))
+  ;; The former C++ helper threw on negating I128_MIN; native negation wraps,
+  ;; matching how add/sub/mul already behave here.
   (fun qdb_decimal_neg ((var value BinInt)) -> BinInt
-    (attrs extern (operator "-")) (block))
+    (attrs (operator "-"))
+    (block (return (cast (struct ((V (- (field value V))))) BinInt))))
   (fun qdb_abs_i32 ((var value i32)) -> i32
     (attrs extern) (block))
   (fun qdb_abs_i64 ((var value i64)) -> i64
@@ -255,30 +295,36 @@
     (block (return (call qdb_fabs value))))
   (fun abs ((var value BinInt)) -> BinInt
     (block
-      (var zero = (cast (struct ((Lo (: 0 u64)) (Hi (: 0 u64)))) BinInt))
-      (return (if (< value zero) (call qdb_decimal_neg value) value))))
+      (var raw i128)
+      (= raw (field value V))
+      (if (< raw (: 0 i128))
+        (block (return (cast (struct ((V (- raw)))) BinInt))))
+      (return value)))
   (fun qdb_decimal_mul_i64 ((var left BinInt) (var right i64)) -> BinInt
-    (attrs extern (operator "*")) (block))
+    (attrs (operator "*"))
+    (block (return (cast (struct ((V (* (field left V) (cast right i128))))) BinInt))))
   (fun qdb_decimal_i64_mul ((var left i64) (var right BinInt)) -> BinInt
     (attrs (operator "*"))
-    (block (return (call qdb_decimal_mul_i64 right left))))
+    (block (return (cast (struct ((V (* (cast left i128) (field right V))))) BinInt))))
   (fun qdb_decimal_div_i64 ((var left BinInt) (var right i64)) -> BinInt
-    (attrs extern (operator "/")) (block))
+    (attrs (operator "/"))
+    (block (return (cast (struct ((V (/ (field left V) (cast right i128))))) BinInt))))
   (fun qdb_decimal_div ((var left BinInt) (var right BinInt)) -> BinInt
-    (attrs extern (operator "/")) (block))
+    (attrs (operator "/"))
+    (block (return (cast (struct ((V (/ (field left V) (field right V))))) BinInt))))
 
   (fun qdb_decimal_eq ((var left BinInt) (var right BinInt)) -> bool
-    (attrs extern (operator "==")) (block))
+    (attrs (operator "==")) (block (return (== (field left V) (field right V)))))
   (fun qdb_decimal_ne ((var left BinInt) (var right BinInt)) -> bool
-    (attrs extern (operator "!=")) (block))
+    (attrs (operator "!=")) (block (return (!= (field left V) (field right V)))))
   (fun qdb_decimal_lt ((var left BinInt) (var right BinInt)) -> bool
-    (attrs extern (operator "<")) (block))
+    (attrs (operator "<")) (block (return (< (field left V) (field right V)))))
   (fun qdb_decimal_le ((var left BinInt) (var right BinInt)) -> bool
-    (attrs extern (operator "<=")) (block))
+    (attrs (operator "<=")) (block (return (<= (field left V) (field right V)))))
   (fun qdb_decimal_gt ((var left BinInt) (var right BinInt)) -> bool
-    (attrs extern (operator ">")) (block))
+    (attrs (operator ">")) (block (return (> (field left V) (field right V)))))
   (fun qdb_decimal_ge ((var left BinInt) (var right BinInt)) -> bool
-    (attrs extern (operator ">=")) (block))
+    (attrs (operator ">=")) (block (return (>= (field left V) (field right V)))))
 
   (fun qdb_bitmap_set_valid ((var bitmap <ptr u8>) (var index i64) (var valid bool)) -> void
     (block

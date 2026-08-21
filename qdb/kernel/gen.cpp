@@ -131,6 +131,9 @@ NQumir::NAst::TIntegerType::EKind UnsignedIntegerKind(
         case TIntegerType::I64:
         case TIntegerType::U64:
             return TIntegerType::U64;
+        case TIntegerType::I128:
+        case TIntegerType::U128:
+            return TIntegerType::U128;
     }
     throw std::invalid_argument("unsupported integer kind");
 }
@@ -234,10 +237,18 @@ NQumir::NAst::TExprPtr HashKeyValue(
         body.push_back(std::make_shared<TVarStmt>(loc, loName, u64Type));
         body.push_back(std::make_shared<TVarStmt>(loc, hiName, u64Type));
         body.push_back(std::make_shared<TVarStmt>(loc, name, u64Type));
-        assign(loName, std::make_shared<TFieldAccessExpr>(
-            loc, KeyValueExpr(root, path), "Lo"));
-        assign(hiName, std::make_shared<TFieldAccessExpr>(
-            loc, KeyValueExpr(root, path), "Hi"));
+        auto i128Type = std::make_shared<TIntegerType>(TIntegerType::I128);
+        auto raw = [&]() -> TExprPtr {
+            return std::make_shared<TFieldAccessExpr>(
+                loc, KeyValueExpr(root, path), "V");
+        };
+        auto shift64 = std::make_shared<TNumberExpr>(loc, int64_t{64});
+        shift64->Type = i128Type;
+        assign(loName, std::make_shared<TCastExpr>(loc, raw(), u64Type));
+        assign(hiName, std::make_shared<TCastExpr>(loc,
+            std::make_shared<TBinaryExpr>(loc, TOperator(">>"),
+                raw(), std::move(shift64)),
+            u64Type));
         mixU64(loName);
         mixU64(hiName);
         auto combined = binary("+", ident(hiName), number(-7046029254386353131LL));
@@ -607,14 +618,11 @@ NQumir::NAst::TExprPtr ZeroValueExpr(
     auto zero = std::make_shared<TNumberExpr>(loc, int64_t{0});
     zero->Type = i64Type;
     if (IsBinIntStorageType(originalType)) {
-        auto zeroU64 = [&]() -> TExprPtr {
-            auto value = std::make_shared<TNumberExpr>(loc, int64_t{0});
-            value->Type = u64Type;
-            return value;
-        };
+        auto zeroI128 = std::make_shared<TNumberExpr>(loc, int64_t{0});
+        zeroI128->Type = std::make_shared<TIntegerType>(TIntegerType::I128);
         return std::make_shared<TStructConstructExpr>(loc, originalType,
-            std::vector<TExprPtr>{zeroU64(), zeroU64()},
-            std::vector<std::string>{"Lo", "Hi"});
+            std::vector<TExprPtr>{std::move(zeroI128)},
+            std::vector<std::string>{"V"});
     }
     auto type = UnwrapNamedType(originalType);
     if (TMaybeType<TIntegerType>(type)) {
@@ -2713,19 +2721,28 @@ std::vector<NQumir::NAst::TExprPtr> GenReducerFunDecls(
     auto field = [&](TExprPtr object, const std::string& name) -> TExprPtr {
         return std::make_shared<TFieldAccessExpr>(loc, std::move(object), name);
     };
+    // A BinInt is an i128; aggregate state still lives in two i64 slot words,
+    // so it is split and reassembled here rather than read as struct fields.
+    auto i128Type = std::make_shared<TIntegerType>(TIntegerType::I128);
+    auto shift64 = [&]() -> TExprPtr {
+        auto value = std::make_shared<TNumberExpr>(loc, int64_t{64});
+        value->Type = i128Type;
+        return value;
+    };
     auto binInt = [&](TExprPtr lo, TExprPtr hi) -> TExprPtr {
+        // The low half must not sign-extend, so it goes through u64 first.
+        auto loWide = cast(cast(std::move(lo), u64Type), i128Type);
+        auto hiWide = binary("<<", cast(std::move(hi), i128Type), shift64());
         return std::make_shared<TStructConstructExpr>(loc, binIntType,
-            std::vector<TExprPtr>{
-                cast(std::move(lo), u64Type),
-                cast(std::move(hi), u64Type),
-            },
-            std::vector<std::string>{"Lo", "Hi"});
+            std::vector<TExprPtr>{binary("|", std::move(hiWide), std::move(loWide))},
+            std::vector<std::string>{"V"});
     };
     auto storeBinInt = [&](const std::string& loBuf,
                            const std::string& hiBuf) -> std::vector<TExprPtr> {
+        auto raw = [&]() -> TExprPtr { return field(ident("next"), "V"); };
         return {
-            storeSlot(loBuf, cast(field(ident("next"), "Lo"), i64Type)),
-            storeSlot(hiBuf, cast(field(ident("next"), "Hi"), i64Type)),
+            storeSlot(loBuf, cast(raw(), i64Type)),
+            storeSlot(hiBuf, cast(binary(">>", raw(), shift64()), i64Type)),
         };
     };
     auto binIntAccumulate = [&](const std::string& func,
