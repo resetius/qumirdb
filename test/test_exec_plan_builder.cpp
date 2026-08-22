@@ -19,6 +19,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 
 using namespace NQdb;
 
@@ -39,6 +40,38 @@ public:
             {.RowGroup = 3, .RowCount = 100, .ByteSize = 800},
         };
     }
+};
+
+class TStatsSplitMockSource final
+    : public TMockSource
+    , public NScheduler::IScanMetadataSource
+{
+public:
+    TStatsSplitMockSource(uint64_t rows, uint64_t ndv)
+        : TMockSource({"k"})
+        , Stats_(std::make_shared<TStats>())
+    {
+        Stats_->RowCount = rows;
+        auto column = std::make_shared<TStats::TColumnStats>();
+        column->Ndv = ndv;
+        Stats_->ColumnStats["k"] = std::move(column);
+    }
+
+    const TStatsPtr Stats() const override {
+        return Stats_;
+    }
+
+    std::vector<NScheduler::TScanRowGroup> ScanRowGroups() const override {
+        return {
+            {.RowGroup = 0, .RowCount = 25'000'000, .ByteSize = 200'000'000},
+            {.RowGroup = 1, .RowCount = 25'000'000, .ByteSize = 200'000'000},
+            {.RowGroup = 2, .RowCount = 25'000'000, .ByteSize = 200'000'000},
+            {.RowGroup = 3, .RowCount = 25'000'000, .ByteSize = 200'000'000},
+        };
+    }
+
+private:
+    TStatsPtr Stats_;
 };
 
 TOperatorPtr BuildSqlPlan(
@@ -101,6 +134,12 @@ struct TBuiltPlan {
     TExecPlan Exec;
     std::vector<TGeneratedKernel> Kernels;
     size_t PhysicalTasks = 0;
+    struct TRepartition {
+        std::vector<std::string> Keys;
+        size_t Sources = 0;
+        size_t Destinations = 0;
+    };
+    std::vector<TRepartition> Repartitions;
 };
 
 TBuiltPlan Lower(
@@ -114,11 +153,30 @@ TBuiltPlan Lower(
     if (!exec) {
         throw std::runtime_error(exec.error());
     }
+    std::vector<TBuiltPlan::TRepartition> repartitions;
+    std::unordered_set<const NScheduler::IConnection*> seenConnections;
+    for (const auto& edge : lowered.Graph->Edges()) {
+        const auto* connection = edge->Connection;
+        if (!connection ||
+            connection->Kind() != NScheduler::EConnectionKind::HashShuffle ||
+            !seenConnections.insert(connection).second)
+        {
+            continue;
+        }
+        const auto* exchange = static_cast<
+            const NScheduler::THashShuffleConnection*>(connection);
+        repartitions.push_back({
+            .Keys = exchange->Repartition().Keys,
+            .Sources = exchange->SrcCount(),
+            .Destinations = exchange->DstCount(),
+        });
+    }
     return {
         .Logical = std::move(logical),
         .Exec = std::move(*exec),
         .Kernels = std::move(lowered.Kernels),
         .PhysicalTasks = lowered.Graph->Nodes().size(),
+        .Repartitions = std::move(repartitions),
     };
 }
 
@@ -132,6 +190,7 @@ void ExpectSameSemanticPlan(const TExecPlan& left, const TExecPlan& right) {
         EXPECT_EQ(l.Id, r.Id) << i;
         EXPECT_EQ(l.StageId, r.StageId) << i;
         EXPECT_EQ(l.Kind, r.Kind) << i;
+        EXPECT_EQ(l.AggregatePhase, r.AggregatePhase) << i;
         EXPECT_EQ(l.Inputs, r.Inputs) << i;
         ASSERT_TRUE(l.OutputType) << i;
         ASSERT_TRUE(r.OutputType) << i;
@@ -217,9 +276,58 @@ TEST(ExecPlanBuilder, MultiKeepsRealPartialAndCombineStages) {
 
     EXPECT_EQ(CountKind(single.Exec, EExecPlanNodeKind::Aggregate), 1u);
     EXPECT_EQ(CountKind(multi.Exec, EExecPlanNodeKind::Aggregate), 2u);
+    std::vector<EAggregatePhase> phases;
+    for (const auto& node : multi.Exec.Nodes) {
+        if (node.Kind == EExecPlanNodeKind::Aggregate) {
+            phases.push_back(node.AggregatePhase);
+        }
+    }
+    EXPECT_EQ(phases,
+        (std::vector<EAggregatePhase>{
+            EAggregatePhase::Partial, EAggregatePhase::Final}));
     EXPECT_GT(multi.PhysicalTasks, single.PhysicalTasks);
     ExpectKernelBindings(single);
     ExpectKernelBindings(multi);
+}
+
+TEST(ExecPlanBuilder, GroupedPartialAggregateHasDistributedPhaseBoundary) {
+    TStatsSplitMockSource source(100'000'000, 5'000'000);
+    const std::unordered_map<std::string, ISource*> sources{{"t", &source}};
+    constexpr std::string_view sql =
+        "SELECT k, count(*) AS c FROM t GROUP BY k";
+
+    auto settings = MultiSettings();
+    auto built = Lower(sql, sources, settings);
+
+    std::vector<const TExecPlanNode*> aggregates;
+    for (const auto& node : built.Exec.Nodes) {
+        if (node.Kind == EExecPlanNodeKind::Aggregate) {
+            aggregates.push_back(&node);
+        }
+    }
+    ASSERT_EQ(aggregates.size(), 2u);
+    EXPECT_EQ(aggregates[0]->AggregatePhase, EAggregatePhase::Partial);
+    EXPECT_EQ(aggregates[1]->AggregatePhase, EAggregatePhase::Final);
+    ASSERT_EQ(aggregates[1]->Inputs.size(), 1u);
+    EXPECT_EQ(aggregates[1]->Inputs[0], aggregates[0]->Id);
+
+    ASSERT_EQ(built.Repartitions.size(), 1u);
+    EXPECT_EQ(built.Repartitions[0].Sources, 4u);
+    EXPECT_EQ(built.Repartitions[0].Destinations, 2u);
+    EXPECT_EQ(built.Repartitions[0].Keys,
+        (std::vector<std::string>{"t.k"}));
+    ExpectKernelBindings(built);
+
+    settings.Aggregate.EnablePartial = false;
+    auto disabled = Lower(sql, sources, settings);
+    EXPECT_EQ(CountKind(disabled.Exec, EExecPlanNodeKind::Aggregate), 1u);
+    const auto aggregate = std::ranges::find_if(
+        disabled.Exec.Nodes,
+        [](const auto& node) {
+            return node.Kind == EExecPlanNodeKind::Aggregate;
+        });
+    ASSERT_NE(aggregate, disabled.Exec.Nodes.end());
+    EXPECT_EQ(aggregate->AggregatePhase, EAggregatePhase::Single);
 }
 
 TEST(ExecPlanBuilder, CteConsumersShareTypedMaterialization) {

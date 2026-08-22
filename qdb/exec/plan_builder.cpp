@@ -219,6 +219,9 @@ private:
             .Kind = kind,
             .Operator = stage ? stage->Operator : nullptr,
             .OperatorOwner = stage ? stage->OperatorOwner : TOperatorPtr{},
+            .AggregatePhase = stage
+                ? stage->AggregatePhase
+                : EAggregatePhase::Single,
             .OutputType = std::move(outputType),
             .MaterializationId = materialization,
             .KeptInputColumns = std::move(keptColumns),

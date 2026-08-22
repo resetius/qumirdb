@@ -47,6 +47,12 @@ size_t ChooseAggregatePartitionCount(
     size_t inputLanes,
     const TSettings& settings);
 
+// Whether a grouped aggregate should be split into local partial and final
+// phases around a repartition exchange.
+bool ShouldUsePartialAggregate(
+    const TAggregateOperator& aggregate,
+    const TSettings& settings);
+
 // Lower a logical plan into a scheduler graph (no terminal sink yet).
 // Kernels are generated but not compiled.
 TLoweredPlan LowerPlanToGraph(

@@ -29,6 +29,21 @@ enum class EExecPlanNodeKind {
     UnionAll,
 };
 
+enum class EAggregatePhase {
+    Single,
+    Partial,
+    Final,
+};
+
+inline std::string_view AggregatePhaseName(EAggregatePhase phase) {
+    switch (phase) {
+        case EAggregatePhase::Single: return "single";
+        case EAggregatePhase::Partial: return "partial";
+        case EAggregatePhase::Final: return "final";
+    }
+    return "unknown";
+}
+
 inline std::string_view ExecPlanNodeKindName(EExecPlanNodeKind kind) {
     switch (kind) {
         case EExecPlanNodeKind::Source: return "source";
@@ -57,6 +72,7 @@ struct TLoweredExecStage {
     EExecPlanNodeKind Kind = EExecPlanNodeKind::Source;
     const IOperator* Operator = nullptr;
     TOperatorPtr OperatorOwner;
+    EAggregatePhase AggregatePhase = EAggregatePhase::Single;
 };
 
 using TExecPlanNodeId = size_t;
@@ -69,6 +85,7 @@ struct TExecPlanNode {
     EExecPlanNodeKind Kind = EExecPlanNodeKind::Source;
     const IOperator* Operator = nullptr;
     TOperatorPtr OperatorOwner;
+    EAggregatePhase AggregatePhase = EAggregatePhase::Single;
     std::vector<TExecPlanNodeId> Inputs;
     NQumir::NAst::TTypePtr OutputType;
     std::vector<size_t> KernelIndexes;

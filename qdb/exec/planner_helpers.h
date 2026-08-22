@@ -50,6 +50,13 @@ int64_t EstimateAggregateInitialCapacity(
 std::optional<uint64_t> EstimateAggregateGroupCount(
     const TAggregateOperator& aggregate);
 
+// Build the final-phase operator that merges rows emitted by a partial
+// aggregate. This is scheduler-neutral physical planning shared by local and
+// future distributed lowerers.
+std::shared_ptr<TAggregateOperator> BuildAggregateCombineOperator(
+    const TAggregateOperator& aggregate,
+    std::vector<std::string> groupKeys);
+
 // Compilation-free projection layout: column plan, computed-expression types
 // and the output struct. Shared by the runtime process builder and the plan
 // exporter so output typing has one source.

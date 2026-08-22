@@ -364,6 +364,66 @@ TEST(StatsTest, ExplicitShufflePartitionsOverrideAggregateHeuristic) {
         aggregate, 4, settings), 7);
 }
 
+TEST(StatsTest, PartialAggregateRequiresLargeEstimatedReduction) {
+    NQdb::NScheduler::TSettings settings;
+
+    TStatsSource useful({{"x", 10'000'000}}, 100'000'000);
+    auto usefulInput = std::make_shared<NQdb::TSourceOperator>(useful, "t");
+    usefulInput->Stats_ = useful.Stats_;
+    NQdb::TAggregateOperator usefulAggregate(usefulInput, {"x"}, {});
+    EXPECT_TRUE(NQdb::NScheduler::ShouldUsePartialAggregate(
+        usefulAggregate, settings));
+
+    TStatsSource weak({{"x", 30'000'000}}, 100'000'000);
+    auto weakInput = std::make_shared<NQdb::TSourceOperator>(weak, "t");
+    weakInput->Stats_ = weak.Stats_;
+    NQdb::TAggregateOperator weakAggregate(weakInput, {"x"}, {});
+    EXPECT_FALSE(NQdb::NScheduler::ShouldUsePartialAggregate(
+        weakAggregate, settings));
+
+    TStatsSource small({{"x", 10}}, 1000);
+    auto smallInput = std::make_shared<NQdb::TSourceOperator>(small, "t");
+    smallInput->Stats_ = small.Stats_;
+    NQdb::TAggregateOperator smallAggregate(smallInput, {"x"}, {});
+    EXPECT_FALSE(NQdb::NScheduler::ShouldUsePartialAggregate(
+        smallAggregate, settings));
+
+    settings.Aggregate.EnablePartial = false;
+    EXPECT_FALSE(NQdb::NScheduler::ShouldUsePartialAggregate(
+        usefulAggregate, settings));
+}
+
+TEST(StatsTest, AggregateCombineOperatorMergesPartialStates) {
+    TStatsSource src({{"k", 10}, {"v", 100}}, 1000);
+    auto input = std::make_shared<NQdb::TSourceOperator>(src, "t");
+    std::vector<NQdb::TAggregateSpec> aggregates{
+        {.Name = "c", .Func = "count", .Arg = nullptr},
+        {.Name = "s", .Func = "sum",
+         .Arg = std::make_shared<NQumir::NAst::TIdentExpr>(
+             NQumir::TLocation{}, "v")},
+        {.Name = "mn", .Func = "min",
+         .Arg = std::make_shared<NQumir::NAst::TIdentExpr>(
+             NQumir::TLocation{}, "v")},
+        {.Name = "mx", .Func = "max",
+         .Arg = std::make_shared<NQumir::NAst::TIdentExpr>(
+             NQumir::TLocation{}, "v")},
+    };
+    NQdb::TAggregateOperator partial(input, {"k"}, std::move(aggregates));
+
+    auto combine = NQdb::BuildAggregateCombineOperator(partial, {"k"});
+    ASSERT_EQ(combine->Aggs().size(), 4u);
+    EXPECT_EQ(combine->Aggs()[0].Func, "sum");
+    EXPECT_EQ(combine->Aggs()[1].Func, "sum");
+    EXPECT_EQ(combine->Aggs()[2].Func, "min");
+    EXPECT_EQ(combine->Aggs()[3].Func, "max");
+    for (const auto& aggregate : combine->Aggs()) {
+        auto ident = NQumir::NAst::TMaybeNode<NQumir::NAst::TIdentExpr>(
+            aggregate.Arg);
+        ASSERT_TRUE(ident);
+        EXPECT_EQ(ident.Cast()->Name, aggregate.Name);
+    }
+}
+
 TEST(StatsTest, RowGroupHintCollectsNestedFilterChain) {
     TStatsSource src;
     auto source = std::make_shared<NQdb::TSourceOperator>(src, "t");
