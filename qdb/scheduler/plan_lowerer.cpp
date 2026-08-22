@@ -326,7 +326,9 @@ public:
             if (!IsGlobalAggregate(*n.Cast()) &&
                 !n.Cast()->GroupKeys().empty() && childLanes > 1)
             {
-                return JoinPartitions(childLanes);
+                return n.Cast()->GroupingSets().empty()
+                    ? AggregatePartitions(*n.Cast(), childLanes)
+                    : JoinPartitions(childLanes);
             }
             return 1;
         }
@@ -827,6 +829,14 @@ private:
         return std::max<size_t>(
             std::min(partitions, maxPartitions),
             1);
+    }
+
+    size_t AggregatePartitions(
+        const TAggregateOperator& aggregate,
+        size_t inputLanes) const
+    {
+        return NScheduler::ChooseAggregatePartitionCount(
+            aggregate, inputLanes, Settings_);
     }
 
     size_t ShuffleQueueCapacity() const {
@@ -1514,7 +1524,7 @@ private:
         // Grouped aggregate: hash-shuffle the input by group key into `parts`
         // partition-local aggregates. Matching keys land in one partition, so
         // each computes complete groups; the parent gathers the partitions.
-        const size_t parts = JoinPartitions(childLanes);
+        const size_t parts = AggregatePartitions(aggregate, childLanes);
         auto& childConnRef = AddConn<NScheduler::TOneToOneConnection>(
             childLanes, childLanes, "aggregate-shuffle-input");
         auto childOut = Lower(aggregate.Input(), childConnRef);
@@ -2317,6 +2327,87 @@ private:
 } // namespace
 
 namespace NScheduler {
+
+size_t ChooseAggregatePartitionCount(
+    const TAggregateOperator& aggregate,
+    size_t inputLanes,
+    const TSettings& settings)
+{
+    const size_t workers = std::max<size_t>(settings.Scheduler.WorkerCount, 1);
+    const size_t base = std::min(inputLanes, std::max<size_t>(workers / 2, 1));
+
+    // An explicit --shuffle-partitions is an exact user override, matching the
+    // existing join behavior.
+    if (settings.HashShuffle.PartitionCount != 0) {
+        const size_t maxPartitions = settings.HashShuffle.MaxPartitionCount == 0
+            ? settings.HashShuffle.PartitionCount
+            : settings.HashShuffle.MaxPartitionCount;
+        return std::max<size_t>(
+            std::min(settings.HashShuffle.PartitionCount, maxPartitions),
+            1);
+    }
+
+    auto result = std::max<size_t>(base, 1);
+    const auto inputStats = aggregate.Input()->Stats_;
+    const auto estimatedGroups = EstimateAggregateGroupCount(aggregate);
+    if (!inputStats || !estimatedGroups || *estimatedGroups == 0 ||
+        !aggregate.Input()->Type)
+    {
+        return result;
+    }
+
+    auto maybeInputStruct = NQumir::NAst::TMaybeType<
+        NQumir::NAst::TStructType>(NQumir::NAst::UnwrapNamedType(
+            aggregate.Input()->OutputColumns()));
+    if (!maybeInputStruct) {
+        return result;
+    }
+    const auto inputStruct = maybeInputStruct.Cast().get();
+
+    // String shuffle copies payload bytes and showed mixed results at full
+    // fanout. Start with the statistically predictable fixed-width case.
+    for (const auto& key : aggregate.GroupKeys()) {
+        auto type = FieldType(inputStruct, key);
+        if (!type) {
+            return result;
+        }
+        const bool isDecimal = IsDecimalType(
+            UnwrapNullableType(type));
+        type = NQumir::NAst::UnwrapNamedType(
+            UnwrapNullableType(type));
+        const bool fixedWidth =
+            static_cast<bool>(NQumir::NAst::TMaybeType<
+                NQumir::NAst::TIntegerType>(type)) ||
+            static_cast<bool>(NQumir::NAst::TMaybeType<
+                NQumir::NAst::TFloatType>(type)) ||
+            static_cast<bool>(NQumir::NAst::TMaybeType<
+                NQumir::NAst::TBoolType>(type)) ||
+            isDecimal;
+        if (!fixedWidth) {
+            return result;
+        }
+    }
+
+    constexpr uint64_t TargetGroupsPerPartition = 1ull << 20;
+    // For smaller/filtered inputs the extra scheduler and hash-shuffle fanout
+    // outweighed the added aggregate parallelism in ClickBench. Require at
+    // least two target-sized chunks of input per worker before widening.
+    if (inputStats->RowCount / TargetGroupsPerPartition < 2 * workers) {
+        return result;
+    }
+
+    const uint64_t desiredFromGroups =
+        *estimatedGroups / TargetGroupsPerPartition +
+        (*estimatedGroups % TargetGroupsPerPartition != 0);
+    const size_t maxPartitions = std::min(inputLanes, workers);
+    result = std::min<size_t>(
+        std::max<uint64_t>(desiredFromGroups, result),
+        maxPartitions);
+    if (settings.HashShuffle.MaxPartitionCount != 0) {
+        result = std::min(result, settings.HashShuffle.MaxPartitionCount);
+    }
+    return std::max<size_t>(result, 1);
+}
 
 namespace {
 
