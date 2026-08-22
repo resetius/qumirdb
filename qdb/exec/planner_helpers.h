@@ -45,6 +45,11 @@ int64_t EstimateAggregateInitialCapacity(
     const TAggregateOperator& aggregate,
     size_t partitionCount = 1);
 
+// Estimate the number of output groups from input row count and group-key
+// NDVs. Returns nullopt when any key lacks usable statistics.
+std::optional<uint64_t> EstimateAggregateGroupCount(
+    const TAggregateOperator& aggregate);
+
 // Compilation-free projection layout: column plan, computed-expression types
 // and the output struct. Shared by the runtime process builder and the plan
 // exporter so output typing has one source.

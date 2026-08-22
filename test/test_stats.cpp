@@ -11,6 +11,7 @@
 #include <qdb/plan/pipeline.h>
 #include <qdb/plan/passes/row_group_predicate.h>
 #include <qdb/plan/passes/typing.h>
+#include <qdb/scheduler/plan_lowerer.h>
 
 #include <qumir/parser/core/printer.h>
 #include <qumir/parser/type.h>
@@ -289,6 +290,78 @@ TEST(StatsTest, AggregateInitialCapacityUsesNdvAndPartitionCount) {
 
     NQdb::TAggregateOperator missingStats(input, {"unknown"}, {});
     EXPECT_EQ(NQdb::EstimateAggregateInitialCapacity(missingStats, 1), 8);
+}
+
+TEST(StatsTest, AggregateGroupCountUsesNdvProductAndRowCountCap) {
+    TStatsSource src({{"x", 100}, {"y", 20}}, 1000);
+    auto input = std::make_shared<NQdb::TSourceOperator>(src, "t");
+    input->Stats_ = src.Stats_;
+
+    NQdb::TAggregateOperator product(input, {"x", "y"}, {});
+    EXPECT_EQ(NQdb::EstimateAggregateGroupCount(product), 1000);
+
+    NQdb::TAggregateOperator oneKey(input, {"x"}, {});
+    EXPECT_EQ(NQdb::EstimateAggregateGroupCount(oneKey), 100);
+
+    NQdb::TAggregateOperator missingStats(input, {"unknown"}, {});
+    EXPECT_FALSE(NQdb::EstimateAggregateGroupCount(missingStats).has_value());
+}
+
+TEST(StatsTest, AggregatePartitionsExpandForLargeFixedWidthCardinality) {
+    TStatsSource src({{"x", 100'000'000}}, 100'000'000);
+    auto input = std::make_shared<NQdb::TSourceOperator>(src, "t");
+    input->Stats_ = src.Stats_;
+    NQdb::TAggregateOperator aggregate(input, {"x"}, {});
+
+    NQdb::NScheduler::TSettings settings;
+    settings.Scheduler.WorkerCount = 18;
+    EXPECT_EQ(NQdb::NScheduler::ChooseAggregatePartitionCount(
+        aggregate, 32, settings), 18);
+
+    settings.HashShuffle.MaxPartitionCount = 12;
+    EXPECT_EQ(NQdb::NScheduler::ChooseAggregatePartitionCount(
+        aggregate, 32, settings), 12);
+}
+
+TEST(StatsTest, AggregatePartitionsKeepBaseForUncertainOrCheapCases) {
+    NQdb::NScheduler::TSettings settings;
+    settings.Scheduler.WorkerCount = 18;
+
+    TStatsSource lowGroups({{"x", 1000}}, 100'000'000);
+    auto lowInput = std::make_shared<NQdb::TSourceOperator>(lowGroups, "t");
+    lowInput->Stats_ = lowGroups.Stats_;
+    NQdb::TAggregateOperator lowAggregate(lowInput, {"x"}, {});
+    EXPECT_EQ(NQdb::NScheduler::ChooseAggregatePartitionCount(
+        lowAggregate, 32, settings), 9);
+
+    TStatsSource filtered({{"x", 30'000'000}}, 30'000'000);
+    auto filteredInput = std::make_shared<NQdb::TSourceOperator>(filtered, "t");
+    filteredInput->Stats_ = filtered.Stats_;
+    NQdb::TAggregateOperator filteredAggregate(filteredInput, {"x"}, {});
+    EXPECT_EQ(NQdb::NScheduler::ChooseAggregatePartitionCount(
+        filteredAggregate, 32, settings), 9);
+
+    TStatsSource strings({{"x", 100'000'000}}, 100'000'000);
+    strings.Cols[0].Type = std::make_shared<NQumir::NAst::TStringType>();
+    auto stringInput = std::make_shared<NQdb::TSourceOperator>(strings, "t");
+    stringInput->Stats_ = strings.Stats_;
+    NQdb::TAggregateOperator stringAggregate(stringInput, {"x"}, {});
+    EXPECT_EQ(NQdb::NScheduler::ChooseAggregatePartitionCount(
+        stringAggregate, 32, settings), 9);
+}
+
+TEST(StatsTest, ExplicitShufflePartitionsOverrideAggregateHeuristic) {
+    TStatsSource src({{"x", 100'000'000}}, 100'000'000);
+    auto input = std::make_shared<NQdb::TSourceOperator>(src, "t");
+    input->Stats_ = src.Stats_;
+    NQdb::TAggregateOperator aggregate(input, {"x"}, {});
+
+    NQdb::NScheduler::TSettings settings;
+    settings.Scheduler.WorkerCount = 18;
+    settings.HashShuffle.PartitionCount = 7;
+    settings.HashShuffle.MaxPartitionCount = 7;
+    EXPECT_EQ(NQdb::NScheduler::ChooseAggregatePartitionCount(
+        aggregate, 4, settings), 7);
 }
 
 TEST(StatsTest, RowGroupHintCollectsNestedFilterChain) {

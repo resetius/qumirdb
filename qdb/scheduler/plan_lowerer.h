@@ -15,6 +15,7 @@
 
 namespace NQdb {
 class TExternalCatalogSnapshot;
+class TAggregateOperator;
 namespace NScheduler {
 
 // A plan lowered into a scheduler task graph, without a terminal sink attached.
@@ -37,6 +38,14 @@ struct TLoweredPlan {
     // that creates Graph. Debug labels are deliberately not identities.
     std::vector<TLoweredExecStage> ExecStages;
 };
+
+// Choose hash-shuffle fanout for a plain grouped aggregate. Explicit shuffle
+// settings win; auto mode may use aggregate statistics to exceed the
+// conservative join/default fanout.
+size_t ChooseAggregatePartitionCount(
+    const TAggregateOperator& aggregate,
+    size_t inputLanes,
+    const TSettings& settings);
 
 // Lower a logical plan into a scheduler graph (no terminal sink yet).
 // Kernels are generated but not compiled.

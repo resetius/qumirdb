@@ -126,14 +126,12 @@ void PrintKernelSpec(std::ostream* out, const NKernel::TOperatorKernelSpec& spec
 
 } // namespace
 
-int64_t EstimateAggregateInitialCapacity(
-    const TAggregateOperator& aggregate,
-    size_t partitionCount)
+std::optional<uint64_t> EstimateAggregateGroupCount(
+    const TAggregateOperator& aggregate)
 {
-    constexpr uint64_t DefaultCapacity = 8;
     const auto inputStats = aggregate.Input()->Stats_;
     if (!inputStats || aggregate.GroupKeys().empty()) {
-        return DefaultCapacity;
+        return std::nullopt;
     }
 
     uint64_t groups = 1;
@@ -142,11 +140,11 @@ int64_t EstimateAggregateInitialCapacity(
         if (it == inputStats->ColumnStats.end() ||
             !it->second || !it->second->Ndv)
         {
-            return DefaultCapacity;
+            return std::nullopt;
         }
         const uint64_t ndv = *it->second->Ndv;
         if (ndv == 0) {
-            return DefaultCapacity;
+            return std::nullopt;
         }
         if (groups > inputStats->RowCount / ndv) {
             groups = inputStats->RowCount;
@@ -154,7 +152,19 @@ int64_t EstimateAggregateInitialCapacity(
             groups *= ndv;
         }
     }
-    groups = std::min(groups, inputStats->RowCount);
+    return std::min(groups, inputStats->RowCount);
+}
+
+int64_t EstimateAggregateInitialCapacity(
+    const TAggregateOperator& aggregate,
+    size_t partitionCount)
+{
+    constexpr uint64_t DefaultCapacity = 8;
+    const auto estimatedGroups = EstimateAggregateGroupCount(aggregate);
+    if (!estimatedGroups || *estimatedGroups == 0) {
+        return DefaultCapacity;
+    }
+    const uint64_t groups = *estimatedGroups;
 
     const uint64_t partitions = std::max<uint64_t>(partitionCount, 1);
     const uint64_t groupsPerPartition =
