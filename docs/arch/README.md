@@ -60,6 +60,10 @@ Deployment:
 
 - [Building, running, benchmarking](building.md) - build/test commands, the
   CLI, the web workbench, plan export, and the TPC-H/ClickBench runners.
+- [Benchmark results](benchmark_results.md) - measured ClickBench, TPC-H and
+  TPC-DS numbers for qdb, DuckDB and YQL, per query and per scale, with what
+  each engine's metric does and does not include. A dated snapshot: qumirdb is
+  under development and the numbers are expected to move.
 - [Rust toolchain](rust_toolchain.md) - toolchain external `CREATE MODULE`
   compilation needs, why the Rust release is pinned to the linked LLVM, and how
   to configure it for the packaged service user.
