@@ -44,7 +44,7 @@ and reschedules their neighbors when a task returns `OK`, `NEED_DATA`,
 | `TBlockingTask` | one lane | one lane | `Aggregate`, `Limit`, `Sort`, `TopSort` | operator-specific processor state | Drains input until enough state exists to emit output. |
 | `TBinaryBlockingTask` | two lanes | one lane | equi-join, cross join | `TInnerJoinProcessor` or `TCrossJoinProcessor` | Coordinates two input streams and emits joined rowsets. |
 | `TMergeTask` | N lanes | one lane | partitioned `Sort`, partitioned `TopSort` | `TMergeProcessor` | Merges already sorted runs from local sort tasks. |
-| `THashShuffleTask` | one lane | many lanes through `THashShuffleConnection` | grouped aggregate shuffle, equi-join shuffle | per-task hash scratch and output buffers | Computes row hashes and routes rows to partition lanes. |
+| `THashShuffleTask` | one lane | many lanes through `THashShuffleConnection` | grouped aggregate, window, and equi-join repartition | per-task hash scratch and output buffers | Computes row hashes and routes rows to partition lanes. |
 | `TSinkTask` | one lane | none | final sink | caller-owned `ISink` alias | Writes final rowsets and releases them. |
 
 ## Task State Machines
@@ -121,12 +121,16 @@ expose each processor as a WASM node adapter with `push/finish/next/destroy`.
 |---|---:|---|---|---|
 | `TOneToOneConnection` | N -> N | destination `i` reads source `i` | normal streaming edges, single-lane blocking input, single-lane final output | Cheapest connection; preserves partitioning. |
 | `TGatherConnection` | N -> 1 | one destination round-robins over source lanes until all finish | global blocking operators, final output with multiple lanes, scalar side gather | Serializes lanes; useful only when semantics require one consumer. |
-| `THashShuffleConnection` | N -> M | destination `j` reads from every source lane routed to partition `j` | grouped aggregate and equi-join partitioning | Expensive boundary: hash kernel, routing, buffering/materialization. |
+| `THashShuffleConnection` | N -> M | destination `j` reads from every source lane routed to partition `j` | grouped aggregate, window, and equi-join partitioning | Expensive boundary: hash kernel, routing, buffering/materialization. Carries the repartition key contract; `DstCount()` is the partition count. |
 | `TBroadcastConnection` | 1 -> N | every destination receives a shared copy | cross join scalar side | Replicates small scalar-side batches to each vector lane. |
 
 Every connection is made of bounded rowset queues plus finish state. The graph
 stores edges with `(connection, srcLane, dstLane)` so diagnostics can print the
 same logical connection between multiple task pairs.
+
+`THashShuffleConnection::Repartition()` returns the physical
+`TRepartitionSpec`. The spec has the column names for the hash kernel. A task
+routes each row. The connection states which partition rule the task uses.
 
 ## Compiled Kernels
 
@@ -158,7 +162,7 @@ The important ownership split is:
 | `Project` | child lanes -> `TUnaryTask` per lane | `one-to-one` child input | optional project kernel | Identity columns are references; computed columns are materialized into owned buffers. |
 | `Limit` | child -> one `TBlockingTask` | `one-to-one` if one child lane, otherwise `gather` | `TLimitProcessor` | Global limit/offset is intentionally single-lane. |
 | `Aggregate`, ungrouped/global | child -> one aggregate task, or optional cascade | `one-to-one` or `gather`; cascade uses partial tasks -> `gather` -> combine task | aggregate kernels | Cascade is off by default for cheap aggregates. |
-| `Aggregate`, grouped | child lanes -> shuffle tasks -> partition-local aggregate tasks | `one-to-one` into shuffle, `hash-shuffle` into aggregates | group hash + aggregate kernels | Complete groups are routed to one partition. Parent usually gathers partitions later if needed. |
+| `Aggregate`, grouped | either child lanes -> repartition -> complete aggregate, or statistics-selected local partial aggregate -> repartition -> final aggregate | `one-to-one` into each local phase, `hash-shuffle` at the repartition boundary | group hash + partial/final aggregate kernels | Partial and final are distinct executable stages. Parent usually gathers final partitions later if needed. |
 | `Sort`, one input lane | child -> one sort task | `one-to-one` | sort processor + optional radix kernel | Full blocking sort. |
 | `Sort`, many input lanes | local sort per lane -> merge task | `one-to-one` run connections | local sort + merge processor | Produces one globally sorted stream. |
 | `TopSort`, one input lane | child -> one top-sort task | `one-to-one` | top-sort processor + optional radix kernel | Keeps local top-K only. |
@@ -185,7 +189,7 @@ The scheduler dispatches tasks, but filter/project semantics live in
 `TUnaryCode`. A JS runtime would need to implement this task and connection
 protocol; the filter/project computation can stay in WASM kernels.
 
-### Grouped aggregate
+### Grouped aggregate without local reduction
 
 ```mermaid
 flowchart LR
@@ -205,6 +209,30 @@ The shuffle computes hashes first, then either emits selection-view rowsets or
 materializes accumulated rows when batching crosses the configured thresholds.
 Aggregate tasks own separate hash table state; compiled aggregate kernels are
 shared.
+
+### Grouped aggregate with local reduction
+
+```mermaid
+flowchart LR
+    I0[Input lane 0] --> P0[Partial aggregate 0]
+    I1[Input lane 1] --> P1[Partial aggregate 1]
+    P0 --> HS[repartition by group keys]
+    P1 --> HS
+    HS --> F0[Final aggregate partition 0]
+    HS --> F1[Final aggregate partition 1]
+    F0 --> Parent[parent connection]
+    F1 --> Parent
+```
+
+The scheduler selects this plan only when the input has at least 1,048,576
+rows. Statistics must also show at least 8x fewer groups than rows. Each partial
+lane builds local groups before it sends rows to the exchange. The final phase
+merges partial states. It changes `count` to `sum`. It keeps `sum`, `min`, and
+`max` as they are. All lanes in one phase use the same compiled code object.
+
+The executable plan marks the stages as `partial` and `final`. The hash-shuffle
+connection between them stores the group keys in `TRepartitionSpec`. The plan
+does not hide this fact in task names.
 
 ### Partitioned equi-join
 
@@ -249,6 +277,26 @@ kernel accelerates local sorting when all keys are supported.
 The current graph is already close to a portable dispatcher model: graph
 topology, task kind, connection kind, lane ids, and kernel handles are explicit.
 The remaining C++ coupling is mostly in task state and rowset lifetime helpers.
+
+### Border for a distributed scheduler
+
+The task graph is the physical plan for worker placement. The browser exec plan
+hides route tasks, so it is not the worker placement plan. A distributed
+scheduler can use these steps:
+
+1. Put source, unary, and partial aggregate task groups on workers.
+2. Read the keys from `TRepartitionSpec`.
+3. Read the partition count from the destination lane count.
+4. Assign destination lanes to workers.
+5. Send `TRowSet` batches over a network connection with the same
+   push/fetch/finish rules.
+6. Run final aggregate task groups. Each partition has its own state.
+
+`BuildAggregateCombineOperator` creates the final aggregate. This rule does not
+belong to a scheduler. The exec plan also has `Single`, `Partial`, and `Final`
+aggregate phases. A distributed scheduler still needs a wire format, flow
+control, error recovery, and a placement policy. It does not need to find the
+aggregate keys again or change a single aggregate after worker placement.
 
 | Runtime piece | JS can own today in principle | Requires C++/WASM adapter | Why |
 |---|---|---|---|

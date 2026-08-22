@@ -38,6 +38,13 @@ struct TConnectionStats {
     uint64_t FinishedFetch = 0;
 };
 
+// Physical contract of a hash repartition exchange. The local scheduler uses
+// an in-process many-to-many connection; a distributed scheduler can replace
+// that transport while preserving the key and destination-partition contract.
+struct TRepartitionSpec {
+    std::vector<std::string> Keys;
+};
+
 class IConnection {
 public:
     virtual ~IConnection() = default;
@@ -131,7 +138,9 @@ private:
 
 class THashShuffleConnection : public IConnection {
 public:
-    explicit THashShuffleConnection(size_t capacity = 1);
+    explicit THashShuffleConnection(
+        size_t capacity = 1,
+        TRepartitionSpec repartition = {});
     ~THashShuffleConnection() override;
 
     EConnectionKind Kind() const override;
@@ -148,6 +157,8 @@ public:
 
     EFetchResult Fetch(size_t dstId, TRowSet& rowSet) override;
 
+    const TRepartitionSpec& Repartition() const;
+
 private:
     size_t LaneIndex(size_t srcId, size_t dstId) const;
 
@@ -159,6 +170,7 @@ private:
     std::vector<std::unique_ptr<std::atomic<bool>>> Finished_;
     std::atomic<size_t> FinishedCount_ = 0;
     std::vector<size_t> FetchIds_;
+    TRepartitionSpec Repartition_;
 };
 
 // One producer, N consumers: every pushed rowset is replicated (shared) to all

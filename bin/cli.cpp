@@ -672,6 +672,7 @@ void PrintHelp() {
         "  --scan-tasks <n>             Maximum parquet scan tasks for scheduler mode\n"
         "  --scheduler-counters         Print scheduler and connection counters with --verbose\n"
         "  --cascade-aggregates         Parallelize global aggregates (partial->gather->combine)\n"
+        "  --no-partial-aggregates      Disable statistics-selected local grouped aggregation\n"
         "  --shuffle-partitions <n>     Hash shuffle partition count\n"
         "  --queue-depth <n>            Rowset queue capacity per connection lane\n"
         "  --shuffle-queue <n>          Rowset queue capacity per shuffle lane\n"
@@ -787,6 +788,8 @@ int main(int argc, char** argv) {
             config.Scheduler.Queue.EnableDebugCounters = true;
         } else if (!std::strcmp(argv[i], "--cascade-aggregates")) {
             config.Scheduler.Aggregate.CascadeGlobal = true;
+        } else if (!std::strcmp(argv[i], "--no-partial-aggregates")) {
+            config.Scheduler.Aggregate.EnablePartial = false;
         } else if (!std::strcmp(argv[i], "--shuffle-partitions")) {
             if (i + 1 >= argc) {
                 std::cerr << "--shuffle-partitions requires an argument\n";

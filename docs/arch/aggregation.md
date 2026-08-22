@@ -295,6 +295,61 @@ smaller than `HashTable.Size`.
 
 The node then reports end-of-stream on subsequent `Next` calls.
 
+## Partial aggregate plan
+
+The threaded scheduler has two plans for a grouped aggregate. The first plan
+sends raw rows to partitions. Each partition then builds complete groups:
+
+```text
+input[N] -> repartition(group keys, N -> P) -> aggregate(single)[P]
+```
+
+The second plan uses a local aggregate before the exchange. The scheduler uses
+this plan when table statistics show a large drop in the row count:
+
+```text
+input[N]
+  -> one-to-one
+  -> aggregate(partial)[N]
+  -> repartition(group keys, N -> P)
+  -> aggregate(final)[P]
+```
+
+Each input lane owns one hash table. Each destination partition also owns one
+hash table. All lanes in one phase use the same compiled kernel. The final
+phase reads rows from the partial phase. `BuildAggregateCombineOperator` builds
+the final aggregate. It changes `count` to `sum`. It keeps `sum`, `min`, and
+`max` as they are. Each function reads its own partial output column.
+
+The automatic rule is conservative. It needs all of these facts:
+
+- a parallel input and a normal `GROUP BY`;
+- estimates for the input row count and group NDV;
+- at least 1,048,576 estimated input rows;
+- at least 8x fewer groups than input rows.
+
+If there are no statistics, the scheduler keeps the first plan. It also keeps
+the first plan when the estimate does not pass the rule. The option
+`--no-partial-aggregates` turns off the rule for tests and diagnostics. A global
+aggregate uses its `partial -> gather -> final` plan only with
+`--cascade-aggregates`. SQL grouping sets always use their special two-phase
+plan.
+
+Partial and final aggregates have distinct executable stage ids and explicit
+`EAggregatePhase::Partial` and `EAggregatePhase::Final` values. The
+`THashShuffleConnection` between them has a `TRepartitionSpec`. This spec has
+the group keys. The connection also has source and destination lane counts.
+
+This connection is the border for a distributed scheduler. Such a scheduler
+can put the two phases on different workers. It can replace the local
+many-to-many connection with a network connection. It does not need to change
+the aggregate rules or read keys from debug names. The common planner helper
+owns the combine rule, so both local and distributed schedulers can use it.
+
+A two-phase `f64` sum changes the addition order. Its result is valid, but its
+last bits can differ from the result of the first plan. Integer functions and
+`min`/`max` do not have this effect.
+
 ## Production and staged Oz files
 
 Only these files are currently composed by `CompileAggregate`:

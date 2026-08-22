@@ -155,6 +155,25 @@ std::optional<uint64_t> EstimateAggregateGroupCount(
     return std::min(groups, inputStats->RowCount);
 }
 
+std::shared_ptr<TAggregateOperator> BuildAggregateCombineOperator(
+    const TAggregateOperator& aggregate,
+    std::vector<std::string> groupKeys)
+{
+    std::vector<TAggregateSpec> combineAggs;
+    combineAggs.reserve(aggregate.Aggs().size());
+    for (const auto& agg : aggregate.Aggs()) {
+        std::string func = agg.Func == "count" ? "sum" : agg.Func;
+        combineAggs.push_back(TAggregateSpec{
+            .Name = agg.Name,
+            .Func = std::move(func),
+            .Arg = std::make_shared<NQumir::NAst::TIdentExpr>(
+                NQumir::TLocation{}, agg.Name),
+        });
+    }
+    return std::make_shared<TAggregateOperator>(
+        aggregate.Input(), std::move(groupKeys), std::move(combineAggs));
+}
+
 int64_t EstimateAggregateInitialCapacity(
     const TAggregateOperator& aggregate,
     size_t partitionCount)

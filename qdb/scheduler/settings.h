@@ -54,6 +54,13 @@ struct TAggregateSettings {
     // cascade only pays off when the serial aggregate is the bottleneck (very
     // large inputs).
     bool CascadeGlobal = false;
+
+    // Insert a partition-local partial aggregate before a repartition exchange
+    // when statistics predict enough row reduction. Partial and final stages
+    // are explicit so the same plan can later be placed on different workers.
+    bool EnablePartial = true;
+    size_t PartialMinInputRows = 1024 * 1024;
+    size_t PartialMinReductionFactor = 8;
 };
 
 struct TDiagnosticsSettings {

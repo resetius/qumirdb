@@ -280,8 +280,11 @@ EFetchResult TGatherConnection::Fetch(size_t dstId, TRowSet& rowSet) {
     return EFetchResult::FINISHED;
 }
 
-THashShuffleConnection::THashShuffleConnection(size_t capacity)
+THashShuffleConnection::THashShuffleConnection(
+    size_t capacity,
+    TRepartitionSpec repartition)
     : Capacity_(capacity)
+    , Repartition_(std::move(repartition))
 {
     Resize(1, 1);
 }
@@ -390,6 +393,10 @@ EFetchResult THashShuffleConnection::Fetch(size_t dstId, TRowSet& rowSet) {
     }
     CountFinishedFetch();
     return EFetchResult::FINISHED;
+}
+
+const TRepartitionSpec& THashShuffleConnection::Repartition() const {
+    return Repartition_;
 }
 
 size_t THashShuffleConnection::LaneIndex(size_t srcId, size_t dstId) const {

@@ -139,6 +139,18 @@ TEST(SchedulerConnection, HashShuffleRoutesRowsToDestinationLanes) {
     EXPECT_EQ(conn.Fetch(2, out), EFetchResult::FINISHED);
 }
 
+TEST(SchedulerConnection, HashShuffleCarriesRepartitionContract) {
+    THashShuffleConnection conn(
+        1, {.Keys = {"customer_id", "order_date"}});
+    conn.Resize(3, 7);
+
+    EXPECT_EQ(conn.Kind(), EConnectionKind::HashShuffle);
+    EXPECT_EQ(conn.SrcCount(), 3u);
+    EXPECT_EQ(conn.DstCount(), 7u);
+    EXPECT_EQ(conn.Repartition().Keys,
+        (std::vector<std::string>{"customer_id", "order_date"}));
+}
+
 TEST(SchedulerConnection, HashShufflePreservesInputWhenDestinationLaneIsFull) {
     THashShuffleConnection conn(1);
     conn.Resize(2, 2);

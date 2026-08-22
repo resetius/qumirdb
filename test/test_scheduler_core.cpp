@@ -50,6 +50,9 @@ TEST(SchedulerCore, SettingsDefaultsAreConservative) {
     EXPECT_EQ(settings.HashShuffle.TargetOutputBatchRows, 16u * 1024u);
     EXPECT_EQ(settings.HashShuffle.MaxOutputBatchRows, 64u * 1024u);
     EXPECT_EQ(settings.HashShuffle.TargetOutputBatchBytes, 1024u * 1024u);
+    EXPECT_TRUE(settings.Aggregate.EnablePartial);
+    EXPECT_EQ(settings.Aggregate.PartialMinInputRows, 1024u * 1024u);
+    EXPECT_EQ(settings.Aggregate.PartialMinReductionFactor, 8u);
     EXPECT_FALSE(settings.Aggregate.CascadeGlobal);
 }
 

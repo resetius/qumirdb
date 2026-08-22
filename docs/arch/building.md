@@ -56,8 +56,15 @@ Common options:
 --scheduler-workers 8
 --scan-tasks 8
 --scheduler-counters
+--no-partial-aggregates
 --verbose
 ```
+
+The scheduler can add a local grouped aggregate before hash repartition. It
+does this when row-count and NDV statistics show a large drop in rows. Use
+`--no-partial-aggregates` to keep the raw-row plan for an A/B test. See
+[Aggregation](aggregation.md#partial-aggregate-plan) for the rule and the two
+physical plans.
 
 Example:
 
