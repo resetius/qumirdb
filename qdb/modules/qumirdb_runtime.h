@@ -70,6 +70,11 @@ struct qdb_bin_int {
 
 int64_t qdb_string_view_sql_like(qdb_string_view str, qdb_string_view pattern);
 
+int64_t qdb_like_equals(qdb_string_view str, qdb_string_view lit);
+int64_t qdb_like_prefix(qdb_string_view str, qdb_string_view lit);
+int64_t qdb_like_suffix(qdb_string_view str, qdb_string_view lit);
+int64_t qdb_like_contains(qdb_string_view str, qdb_string_view lit);
+
 // TODO: needs qumir changes — temporary cast so string literals reach nullable
 // StringView operators without str_from_lit (not linked in JIT kernels).
 qdb_string_view qdb_lit_to_sv(const char* lit);

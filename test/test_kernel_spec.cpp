@@ -1,8 +1,11 @@
 #include <gtest/gtest.h>
 
+#include <qdb/kernel/annotate_type.h>
 #include <qdb/kernel/builder.h>
 #include <qdb/kernel/spec.h>
 
+#include <qumir/parser/ast.h>
+#include <qumir/parser/core/printer.h>
 #include <qumir/parser/type.h>
 
 #include <sstream>
@@ -10,6 +13,27 @@
 #include <utility>
 
 using namespace NQdb;
+
+TEST(KernelSpec, LikeConstantPatternPicksFastPath) {
+    using namespace NQumir::NAst;
+    TStructType input({{"url", std::make_shared<TStringType>()}});
+    auto lowered = [&](const std::string& pattern) {
+        auto call = std::make_shared<TCallExpr>(NQumir::TLocation{},
+            std::make_shared<TIdentExpr>(NQumir::TLocation{}, "qdb_string_view_sql_like"),
+            std::vector<TExprPtr>{
+                std::make_shared<TIdentExpr>(NQumir::TLocation{}, "url"),
+                std::make_shared<TStringLiteralExpr>(NQumir::TLocation{}, pattern),
+            });
+        return NCore::PrintAst(
+            NKernel::ExpandKernelExpr(call, input, nullptr).first);
+    };
+    EXPECT_NE(lowered("%google%").find("qdb_like_contains"), std::string::npos);
+    EXPECT_NE(lowered("google%").find("qdb_like_prefix"), std::string::npos);
+    EXPECT_NE(lowered("%google").find("qdb_like_suffix"), std::string::npos);
+    EXPECT_NE(lowered("google").find("qdb_like_equals"), std::string::npos);
+    EXPECT_NE(lowered("%goo_le%").find("qdb_string_view_sql_like"), std::string::npos);
+    EXPECT_NE(lowered("a%b").find("qdb_string_view_sql_like"), std::string::npos);
+}
 
 TEST(KernelSpec, PrintsStableDebugDescription) {
     using namespace NQumir::NAst;

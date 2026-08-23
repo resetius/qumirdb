@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <string_view>
 
 namespace {
 
@@ -48,6 +49,31 @@ NQdb::TStringView View(const std::string& value) {
         .Data = reinterpret_cast<uint8_t*>(const_cast<char*>(value.data())),
         .Size = static_cast<int64_t>(value.size()),
     };
+}
+
+TEST(QumirDbStringOps, LikeFastPathsMatchByteSemantics) {
+    auto sv = [](std::string_view s) {
+        return qdb_string_view{
+            reinterpret_cast<const uint8_t*>(s.data()),
+            static_cast<int64_t>(s.size())};
+    };
+    EXPECT_EQ(qdb_like_equals(sv("google"), sv("google")), 1);
+    EXPECT_EQ(qdb_like_equals(sv("google"), sv("googl")), 0);
+    EXPECT_EQ(qdb_like_equals(sv(""), sv("")), 1);
+
+    EXPECT_EQ(qdb_like_prefix(sv("google.com"), sv("google")), 1);
+    EXPECT_EQ(qdb_like_prefix(sv("a.google"), sv("google")), 0);
+    EXPECT_EQ(qdb_like_prefix(sv("x"), sv("")), 1);
+    EXPECT_EQ(qdb_like_prefix(sv(""), sv("g")), 0);
+
+    EXPECT_EQ(qdb_like_suffix(sv("a.google"), sv("google")), 1);
+    EXPECT_EQ(qdb_like_suffix(sv("google.com"), sv("google")), 0);
+    EXPECT_EQ(qdb_like_suffix(sv("x"), sv("")), 1);
+
+    EXPECT_EQ(qdb_like_contains(sv("a.google.com"), sv("google")), 1);
+    EXPECT_EQ(qdb_like_contains(sv("a.bing.com"), sv("google")), 0);
+    EXPECT_EQ(qdb_like_contains(sv("goog"), sv("google")), 0);
+    EXPECT_EQ(qdb_like_contains(sv("anything"), sv("")), 1);
 }
 
 // Hash value is an implementation detail, so check properties, not magic numbers.
