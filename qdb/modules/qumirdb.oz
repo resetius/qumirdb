@@ -140,6 +140,15 @@
        ((var str StringView) (var pattern StringView)) -> i64
        (attrs extern) (block))
 
+  (fun qdb_like_equals ((var str StringView) (var lit StringView)) -> i64
+       (attrs extern) (block))
+  (fun qdb_like_prefix ((var str StringView) (var lit StringView)) -> i64
+       (attrs extern) (block))
+  (fun qdb_like_suffix ((var str StringView) (var lit StringView)) -> i64
+       (attrs extern) (block))
+  (fun qdb_like_contains ((var str StringView) (var lit StringView)) -> i64
+       (attrs extern) (block))
+
   (fun qdb_sv_sv_eq ((var left StringView) (var right StringView)) -> bool (attrs (operator "=="))
     (block (return (== (call qdb_filter_string_compare (field left Data) (field left Size) (field right Data) (field right Size)) (: 0 i64)))))
   (fun qdb_sv_sv_ne ((var left StringView) (var right StringView)) -> bool (attrs (operator "!="))

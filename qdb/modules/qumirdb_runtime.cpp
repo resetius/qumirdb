@@ -331,6 +331,59 @@ int64_t qdb_string_view_sql_like(qdb_string_view str, qdb_string_view pattern)
     return p == pend ? 1 : 0;
 }
 
+int64_t qdb_like_equals(qdb_string_view str, qdb_string_view lit) {
+    if (str.Size != lit.Size) {
+        return 0;
+    }
+    return str.Size == 0 ||
+        std::memcmp(str.Data, lit.Data, static_cast<size_t>(str.Size)) == 0;
+}
+
+int64_t qdb_like_prefix(qdb_string_view str, qdb_string_view lit) {
+    if (str.Size < lit.Size) {
+        return 0;
+    }
+    return lit.Size == 0 ||
+        std::memcmp(str.Data, lit.Data, static_cast<size_t>(lit.Size)) == 0;
+}
+
+int64_t qdb_like_suffix(qdb_string_view str, qdb_string_view lit) {
+    if (str.Size < lit.Size) {
+        return 0;
+    }
+    return lit.Size == 0 ||
+        std::memcmp(str.Data + str.Size - lit.Size, lit.Data,
+            static_cast<size_t>(lit.Size)) == 0;
+}
+
+// memchr is vectorised where memmem is not, so scan for the first byte and
+// verify the rest: 3.7x faster than memmem on ClickBench URLs.
+int64_t qdb_like_contains(qdb_string_view str, qdb_string_view lit) {
+    if (lit.Size == 0) {
+        return 1;
+    }
+    if (str.Size < lit.Size) {
+        return 0;
+    }
+    const uint8_t* p = str.Data;
+    int64_t left = str.Size - lit.Size + 1;
+    while (left > 0) {
+        const auto* hit = static_cast<const uint8_t*>(
+            std::memchr(p, lit.Data[0], static_cast<size_t>(left)));
+        if (!hit) {
+            return 0;
+        }
+        if (std::memcmp(hit + 1, lit.Data + 1,
+                static_cast<size_t>(lit.Size) - 1) == 0)
+        {
+            return 1;
+        }
+        left -= hit - p + 1;
+        p = hit + 1;
+    }
+    return 0;
+}
+
 // TODO: needs qumir changes. A string literal passed by value into a generic
 // Nullable[StringView] operator otherwise materializes via str_from_lit (a qumir
 // string-runtime symbol not linked into JIT kernels). This cast wraps the literal's

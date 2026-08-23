@@ -1033,6 +1033,48 @@ std::pair<TExprPtr, TTypePtr> ExpandCoalesce(const TCallExpr& node,
         resultNullable ? std::static_pointer_cast<TType>(std::make_shared<TNullable>(T)) : T};
 }
 
+struct TLikeFastPath {
+    const char* Func;
+    std::string Literal;
+};
+
+TStringLiteralExpr* MutableStringLiteral(const TExprPtr& expr) {
+    TExprPtr current = expr;
+    while (auto cast = TMaybeNode<TCastExpr>(current)) {
+        current = cast.Cast()->Operand;
+    }
+    auto literal = TMaybeNode<TStringLiteralExpr>(current);
+    return literal ? literal.Cast().get() : nullptr;
+}
+
+std::optional<TLikeFastPath> ClassifyLikePattern(const std::string& pattern) {
+    if (pattern.find('_') != std::string::npos) {
+        return std::nullopt;
+    }
+    if (pattern.find('%') == std::string::npos) {
+        return TLikeFastPath{"qdb_like_equals", pattern};
+    }
+    size_t begin = 0;
+    while (begin < pattern.size() && pattern[begin] == '%') {
+        ++begin;
+    }
+    size_t end = pattern.size();
+    while (end > begin && pattern[end - 1] == '%') {
+        --end;
+    }
+    std::string middle = pattern.substr(begin, end - begin);
+    if (middle.find('%') != std::string::npos) {
+        return std::nullopt;
+    }
+    const bool leading = begin > 0;
+    const bool trailing = end < pattern.size();
+    if (leading && trailing) {
+        return TLikeFastPath{"qdb_like_contains", std::move(middle)};
+    }
+    return TLikeFastPath{trailing ? "qdb_like_prefix" : "qdb_like_suffix",
+        std::move(middle)};
+}
+
 // Bottom-up rewrite. Mutates `e` in place, returns its planner type (`TNullable`-aware),
 // or nullptr for a bare NULL leaf (the enclosing `if`/op supplies the type).
 TTypePtr Expand(TExprPtr& e, const TStructType& inputType, uint64_t& counter) {
@@ -1161,6 +1203,16 @@ TTypePtr Expand(TExprPtr& e, const TStructType& inputType, uint64_t& counter) {
         std::string name;
         if (auto id = TMaybeNode<TIdentExpr>(node->Callee)) {
             name = id.Cast()->Name;
+        }
+        if (name == "qdb_string_view_sql_like" && node->Args.size() == 2) {
+            if (auto* literal = MutableStringLiteral(node->Args[1])) {
+                if (auto fast = ClassifyLikePattern(literal->Value)) {
+                    literal->Value = std::move(fast->Literal);
+                    node->Callee = std::make_shared<TIdentExpr>(
+                        node->Location, fast->Func);
+                    name = fast->Func;
+                }
+            }
         }
         if (name == "coalesce") {
             auto [expr, type] = ExpandCoalesce(*node, inputType, counter);
@@ -1715,15 +1767,16 @@ bool ContainsNull(const TExprPtr& e) {
 }
 
 // Constructs Expand always rewrites regardless of nullability — the fast path must not
-// skip Expand when one is present: coalesce → if-chain, qdb_in_list → typed
-// comparisons, strcat → qdb_string_concat, and a cast to a nullable target →
-// nullable_from_value (the raw planner TNullable won't compile).
+// skip Expand when one is present: coalesce -> if-chain, qdb_in_list -> typed
+// comparisons, strcat -> qdb_string_concat, qdb_string_view_sql_like -> a constant-pattern
+// fast path, and a cast to a nullable target -> nullable_from_value (the raw planner
+// TNullable won't compile).
 bool ContainsMustExpandCall(const TExprPtr& e) {
     if (!e) return false;
     if (auto call = TMaybeNode<TCallExpr>(e)) {
         if (auto id = TMaybeNode<TIdentExpr>(call.Cast()->Callee)) {
             const std::string& name = id.Cast()->Name;
-            if (name == "coalesce" || name == "qdb_in_list" || name == "strcat") {
+            if (name == "coalesce" || name == "qdb_in_list" || name == "strcat" || name == "qdb_string_view_sql_like") {
                 return true;
             }
         }

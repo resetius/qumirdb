@@ -1294,6 +1294,39 @@ function sqlLikeBytes(value, pattern) {
   return new RegExp(re, 's').test(s) ? 1 : 0;
 }
 
+// Fast paths for constant LIKE patterns; mirror qdb_like_* in the native runtime.
+function likeEquals(str, lit) {
+  if (str.length !== lit.length) return 0;
+  for (let i = 0; i < lit.length; ++i) if (str[i] !== lit[i]) return 0;
+  return 1;
+}
+
+function likePrefix(str, lit) {
+  if (str.length < lit.length) return 0;
+  for (let i = 0; i < lit.length; ++i) if (str[i] !== lit[i]) return 0;
+  return 1;
+}
+
+function likeSuffix(str, lit) {
+  if (str.length < lit.length) return 0;
+  const off = str.length - lit.length;
+  for (let i = 0; i < lit.length; ++i) if (str[off + i] !== lit[i]) return 0;
+  return 1;
+}
+
+// TypedArray.indexOf is native, so scan for the first byte and verify the rest.
+function likeContains(str, lit) {
+  if (lit.length === 0) return 1;
+  if (str.length < lit.length) return 0;
+  const last = str.length - lit.length;
+  for (let i = str.indexOf(lit[0]); i >= 0 && i <= last; i = str.indexOf(lit[0], i + 1)) {
+    let hit = 1;
+    for (let j = 1; j < lit.length; ++j) if (str[i + j] !== lit[j]) { hit = 0; break; }
+    if (hit) return 1;
+  }
+  return 0;
+}
+
 function divTrunc(n, d) {
   return Math.trunc(n / d);
 }
@@ -1508,6 +1541,14 @@ function createQdbEnv(getMemory, holder) {
     // Pattern is a StringView (string literals are emitted as StringView).
     qdb_string_view_sql_like: (str, pattern) =>
       BigInt(sqlLikeBytes(svBytes(str), svBytes(pattern))),
+    qdb_like_equals: (str, lit) =>
+      BigInt(likeEquals(svBytes(str), svBytes(lit))),
+    qdb_like_prefix: (str, lit) =>
+      BigInt(likePrefix(svBytes(str), svBytes(lit))),
+    qdb_like_suffix: (str, lit) =>
+      BigInt(likeSuffix(svBytes(str), svBytes(lit))),
+    qdb_like_contains: (str, lit) =>
+      BigInt(likeContains(svBytes(str), svBytes(lit))),
     qdb_substring: substring,
     qdb_string_concat: stringConcat,
     qdb_regexp_replace: regexpReplace,
