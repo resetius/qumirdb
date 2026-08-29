@@ -1,5 +1,6 @@
 #include <qdb/scheduler/single_threaded_scheduler.h>
 
+#include <exception>
 #include <utility>
 
 namespace NQdb {
@@ -40,7 +41,16 @@ bool TSingleThreadedScheduler::Run(std::string* error) {
         Scheduled_.erase(node);
         ++Stats_.Popped;
 
-        auto state = node->Task->Execute();
+        ETaskResult state;
+        try {
+            state = node->Task->Execute();
+        } catch (const std::exception& e) {
+            SetError(error, e.what());
+            return false;
+        } catch (...) {
+            SetError(error, "scheduler task failed with an unknown exception");
+            return false;
+        }
         ++Stats_.Executed;
         if (state == ETaskResult::NEED_DATA) {
             ++Stats_.NeedData;

@@ -247,7 +247,11 @@ void TTaskGraph::Print(std::ostream& out) const {
         const auto& node = Nodes_[i];
         out << "node n" << i
             << " in=" << node->Inbound.size()
-            << " out=" << node->Outbound.size() << "\n";
+            << " out=" << node->Outbound.size();
+        if (!node->DebugKind.empty()) {
+            out << " kind=" << node->DebugKind;
+        }
+        out << "\n";
     }
 
     for (size_t i = 0; i < Edges_.size(); ++i) {

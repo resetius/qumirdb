@@ -7,6 +7,7 @@
 
 #include <atomic>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -126,6 +127,13 @@ class TFinishTask : public ITaskNode {
 public:
     ETaskResult Execute() override {
         return ETaskResult::FINISHED;
+    }
+};
+
+class TThrowTask : public ITaskNode {
+public:
+    ETaskResult Execute() override {
+        throw std::runtime_error("expected task failure");
     }
 };
 
@@ -296,6 +304,23 @@ TEST(SchedulerThreaded, CannotRunTwice) {
     ASSERT_TRUE(scheduler.Run(&error)) << error;
     EXPECT_FALSE(scheduler.Run(&error));
     EXPECT_NE(error.find("cannot run twice"), std::string::npos);
+}
+
+TEST(SchedulerThreaded, ReportsTaskExceptions) {
+    auto run = [](bool threaded) {
+        TTaskGraph graph;
+        graph.AddOwnedNode(std::make_unique<TThrowTask>());
+        graph.Build();
+        std::string error;
+        const bool ok = threaded
+            ? TThreadedScheduler(graph, 2).Run(&error)
+            : TSingleThreadedScheduler(graph).Run(&error);
+        EXPECT_FALSE(ok);
+        EXPECT_EQ(error, "expected task failure");
+    };
+
+    run(false);
+    run(true);
 }
 
 } // namespace

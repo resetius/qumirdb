@@ -6,6 +6,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
 #include <semaphore>
 #include <string>
 
@@ -38,6 +39,9 @@ private:
     // it (after a short spin) instead of busy-yielding until work arrives.
     std::counting_semaphore<> WorkAvailable_{0};
     std::atomic<size_t> FinishedCount_ = 0;
+    std::atomic<bool> Failed_ = false;
+    mutable std::mutex ErrorMutex_;
+    std::string Error_;
     std::atomic<uint64_t> Scheduled_ = 0;
     std::atomic<uint64_t> Popped_ = 0;
     std::atomic<uint64_t> Executed_ = 0;
