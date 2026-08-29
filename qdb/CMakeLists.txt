@@ -14,6 +14,7 @@ add_library(qumirdb
     modules/qumirdb.cpp
     modules/qumirdb_runtime.cpp
     io/parquet/source.cpp
+    io/parquet/row_reader.cpp
     io/parquet/row_group_predicate.cpp
     io/text/sink.cpp
     plan/ops/source.cpp
