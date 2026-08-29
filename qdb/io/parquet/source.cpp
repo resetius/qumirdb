@@ -1,5 +1,6 @@
 #include <qdb/io/parquet/source.h>
 #include <qdb/io/parquet/row_reader.h>
+#include <qdb/io/parquet/row_id.h>
 #include <qdb/io/parquet/row_group_predicate.h>
 #include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
@@ -18,6 +19,7 @@
 
 #include <llvm/Support/JSON.h>
 
+#include <algorithm>
 #include <bit>
 #include <cmath>
 #include <numeric>
@@ -277,6 +279,8 @@ void TParquetFileData::Open()
 
     parquet::ArrowReaderProperties arrowProps;
     arrowProps.set_batch_size(1 << 18);
+    // Row locators assume batches arrive in row-group order.
+    arrowProps.set_use_threads(false);
     // QDB schedules reads itself; Arrow pre-buffering would perform data I/O
     // while constructing the logical source, before scan pruning.
     arrowProps.set_pre_buffer(false);
@@ -300,6 +304,10 @@ void TParquetFileData::Open()
     }
     FileNames.reserve(FileSchema->num_fields());
     for (const auto& field : FileSchema->fields()) {
+        if (field->name() == InternalRowIdColumnName) {
+            throw std::runtime_error(
+                "parquet column name '" + field->name() + "' is reserved");
+        }
         FileNames.push_back(field->name());
     }
     FileColumns.reserve(FileSchema->num_fields());
@@ -318,6 +326,13 @@ void TParquetFileData::Open()
     RowGroups.reserve(static_cast<size_t>(metadata->num_row_groups()));
     for (int i = 0; i < metadata->num_row_groups(); ++i) {
         auto rowGroup = metadata->RowGroup(i);
+        if (rowGroup->num_rows() < 0 ||
+            static_cast<uint64_t>(rowGroup->num_rows()) >
+                ParquetRowOffsetMask + 1)
+        {
+            throw std::runtime_error(
+                "parquet row group is too large for a physical row locator");
+        }
         RowGroups.push_back({
             .RowGroup = static_cast<size_t>(i),
             .RowCount = rowGroup->num_rows(),
@@ -526,8 +541,16 @@ void TParquetSource::ResetReader()
         throw std::runtime_error(batchReaderResult.status().ToString());
     }
     Reader_ = std::move(*batchReaderResult);
+    ReaderRowGroups_ = std::move(rowGroups);
+    ReaderRowGroupIndex_ = 0;
+    ReaderRowOffset_ = 0;
 
     RefreshSchema();
+}
+
+bool TParquetSource::RowIdRequested() const {
+    return RestrictedColumns_ && RestrictedColumns_->contains(
+        std::string(InternalRowIdColumnName));
 }
 
 std::vector<int> TParquetSource::EffectiveFileColumnIndexes() const
@@ -559,6 +582,13 @@ void TParquetSource::RefreshSchema()
         Columns_.push_back({
             .Name = Names_.back(),
             .Type = ArrowFieldToQumir(field),
+        });
+    }
+    if (RowIdRequested()) {
+        Names_.emplace_back(InternalRowIdColumnName);
+        Columns_.push_back({
+            .Name = Names_.back(),
+            .Type = std::make_shared<TIntegerType>(TIntegerType::U64),
         });
     }
     Schema_ = TSchema{std::span<const TColumnSchema>(Columns_)};
@@ -874,6 +904,51 @@ bool TParquetSource::Next(TRowSet& rowSet) {
     std::shared_ptr<arrow::RecordBatch> batch;
     if (!Reader_->ReadNext(&batch).ok() || !batch) {
         return false;
+    }
+    if (RowIdRequested()) {
+        arrow::UInt64Builder rowIds(GetMemoryPool());
+        if (auto status = rowIds.Reserve(batch->num_rows()); !status.ok()) {
+            throw std::runtime_error(status.ToString());
+        }
+        int64_t remaining = batch->num_rows();
+        while (remaining > 0 && ReaderRowGroupIndex_ < ReaderRowGroups_.size()) {
+            const int rg = ReaderRowGroups_[ReaderRowGroupIndex_];
+            const int64_t rowGroupRows =
+                File_->RowGroups[static_cast<size_t>(rg)].RowCount;
+            const int64_t count = std::min(
+                remaining, rowGroupRows - ReaderRowOffset_);
+            for (int64_t i = 0; i < count; ++i) {
+                // The file metadata check in TParquetFileData proves that the
+                // row-group id and row offset fit in the locator fields.
+                rowIds.UnsafeAppend(MakeParquetRowIdUnchecked(
+                    static_cast<uint32_t>(rg),
+                    static_cast<uint32_t>(ReaderRowOffset_ + i)));
+            }
+            remaining -= count;
+            ReaderRowOffset_ += count;
+            if (ReaderRowOffset_ == rowGroupRows) {
+                ++ReaderRowGroupIndex_;
+                ReaderRowOffset_ = 0;
+            }
+        }
+        if (remaining != 0) {
+            return false;
+        }
+        auto rowIdArray = rowIds.Finish();
+        if (!rowIdArray.ok()) {
+            throw std::runtime_error(rowIdArray.status().ToString());
+        }
+        auto withRowIds = batch->AddColumn(
+            batch->num_columns(),
+            arrow::field(
+                std::string(InternalRowIdColumnName),
+                arrow::uint64(),
+                false),
+            *rowIdArray);
+        if (!withRowIds.ok()) {
+            throw std::runtime_error(withRowIds.status().ToString());
+        }
+        batch = std::move(*withRowIds);
     }
     RecordBatchToRowSet(std::move(batch), rowSet);
     return true;

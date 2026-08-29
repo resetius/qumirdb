@@ -68,12 +68,16 @@ private:
     std::vector<int> EffectiveRowGroups() const;
     std::vector<int> EffectiveFileColumnIndexes() const;
     void RefreshSchema();
+    bool RowIdRequested() const;
 
     std::shared_ptr<TParquetFileData> File_;
     // nullopt means the full file; an engaged empty vector is an empty scan.
     std::optional<std::vector<int>> RowGroups_;
     std::optional<std::unordered_set<std::string>> RestrictedColumns_;
     std::shared_ptr<arrow::RecordBatchReader> Reader_;
+    std::vector<int> ReaderRowGroups_;
+    size_t ReaderRowGroupIndex_ = 0;
+    int64_t ReaderRowOffset_ = 0;
     std::vector<std::string> Names_;
     std::vector<TColumnSchema> Columns_;
     TSchema Schema_;
