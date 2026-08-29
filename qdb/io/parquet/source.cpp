@@ -1,4 +1,5 @@
 #include <qdb/io/parquet/source.h>
+#include <qdb/io/parquet/row_reader.h>
 #include <qdb/io/parquet/row_group_predicate.h>
 #include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
@@ -87,6 +88,125 @@ char* FixedByteWidthData(const std::shared_ptr<arrow::Array>& arr, int32_t byteW
     const uint8_t* raw = arr->data()->buffers[1]->data();
     return const_cast<char*>(reinterpret_cast<const char*>(raw)) + arr->offset() * byteWidth;
 }
+
+void RecordBatchToRowSet(
+    std::shared_ptr<arrow::RecordBatch> batch,
+    TRowSet& rowSet)
+{
+    int32_t numCols = static_cast<int32_t>(batch->num_columns());
+    int64_t len = batch->num_rows();
+
+    auto* data = new TBatchData;
+    data->Batch = std::move(batch);
+    data->Columns.resize(numCols);
+
+    for (int32_t i = 0; i < numCols; ++i) {
+        auto arr = data->Batch->column(i);
+        TColumn& col = data->Columns[i];
+        col.Offsets = nullptr;
+        col.OffsetWidth = 0;
+        col.DataBitOffset = 0;
+        col.Mask = nullptr;
+        col.MaskBitOffset = 0;
+
+        if (arr->null_count() > 0) {
+            col.Mask = arr->null_bitmap_data();
+            col.MaskBitOffset = static_cast<int32_t>(arr->offset());
+        }
+
+        switch (arr->type_id()) {
+            case arrow::Type::INT8:
+            case arrow::Type::INT16:
+            case arrow::Type::INT32:
+            case arrow::Type::INT64:
+            case arrow::Type::UINT8:
+            case arrow::Type::UINT16:
+            case arrow::Type::UINT32:
+            case arrow::Type::UINT64:
+            case arrow::Type::DOUBLE:
+            case arrow::Type::DATE32:
+            case arrow::Type::DATE64: {
+                col.Data = NumericData(arr);
+                break;
+            }
+            case arrow::Type::DECIMAL128: {
+                col.Data = FixedByteWidthData(arr, 16);
+                break;
+            }
+            case arrow::Type::FLOAT: {
+                col.Data = NumericData(arr);
+                break;
+            }
+            case arrow::Type::BOOL: {
+                auto bitmap = arr->data()->buffers[1];
+                col.Data = const_cast<char*>(reinterpret_cast<const char*>(bitmap->data()));
+                col.DataBitOffset = static_cast<int32_t>(arr->offset());
+                break;
+            }
+            case arrow::Type::STRING: {
+                auto typed = std::static_pointer_cast<arrow::StringArray>(arr);
+                const int32_t* src = typed->raw_value_offsets() + arr->offset();
+                int32_t base = src[0];
+                col.Offsets = const_cast<int32_t*>(src);
+                col.OffsetWidth = 4;
+                col.Data = const_cast<char*>(reinterpret_cast<const char*>(typed->raw_data()) + base);
+                break;
+            }
+            case arrow::Type::LARGE_STRING: {
+                auto typed = std::static_pointer_cast<arrow::LargeStringArray>(arr);
+                const int64_t* src = typed->raw_value_offsets() + arr->offset();
+                int64_t base = src[0];
+                col.Offsets = const_cast<int64_t*>(src);
+                col.OffsetWidth = 8;
+                col.Data = const_cast<char*>(reinterpret_cast<const char*>(typed->raw_data()) + base);
+                break;
+            }
+            default: {
+                col.Data = nullptr;
+                break;
+            }
+        }
+    }
+
+    rowSet = {
+        .Columns = data->Columns.data(),
+        .ColumnCount = numCols,
+        .RowCount = len,
+        .Selection = nullptr,
+        .Destroy = DestroyBatch,
+        .Private = data,
+        .RefCount = 1,
+    };
+}
+
+class TParquetPhysicalRowReader final : public IPhysicalRowReader {
+public:
+    TParquetPhysicalRowReader(
+        std::shared_ptr<parquet::arrow::FileReader> reader,
+        std::span<const std::string> columnNames,
+        arrow::MemoryPool* memoryPool)
+        : Reader_(std::move(reader), columnNames, memoryPool)
+    {}
+
+    bool ReadRows(
+        std::span<const TPhysicalRowId> rowIds,
+        TRowSet& output,
+        std::string* error) const override
+    {
+        auto batch = Reader_.ReadRows(rowIds);
+        if (!batch.ok()) {
+            if (error) {
+                *error = batch.status().ToString();
+            }
+            return false;
+        }
+        RecordBatchToRowSet(std::move(*batch), output);
+        return true;
+    }
+
+private:
+    TParquetRowReader Reader_;
+};
 
 arrow::MemoryPool* GetMemoryPool() {
     static arrow::MemoryPool* pool = []() -> arrow::MemoryPool* {
@@ -397,10 +517,11 @@ std::vector<int> TParquetSource::EffectiveRowGroups() const
 void TParquetSource::ResetReader()
 {
     auto rowGroups = EffectiveRowGroups();
-    auto indices = EffectiveColumnIndices();
+    auto fileColumnIndexes = EffectiveFileColumnIndexes();
     auto batchReaderResult = !RestrictedColumns_
         ? File_->FileReader->GetRecordBatchReader(rowGroups)
-        : File_->FileReader->GetRecordBatchReader(rowGroups, indices);
+        : File_->FileReader->GetRecordBatchReader(
+            rowGroups, fileColumnIndexes);
     if (!batchReaderResult.ok()) {
         throw std::runtime_error(batchReaderResult.status().ToString());
     }
@@ -409,7 +530,7 @@ void TParquetSource::ResetReader()
     RefreshSchema();
 }
 
-std::vector<int> TParquetSource::EffectiveColumnIndices() const
+std::vector<int> TParquetSource::EffectiveFileColumnIndexes() const
 {
     if (!RestrictedColumns_) {
         return {};
@@ -738,6 +859,13 @@ std::unique_ptr<TParquetSource> TParquetSource::MakeRowGroupsSource(
         RestrictedColumns_));
 }
 
+std::shared_ptr<const IPhysicalRowReader> TParquetSource::CompileReader(
+    std::span<const std::string> columnNames) const
+{
+    return std::make_shared<TParquetPhysicalRowReader>(
+        File_->FileReader, columnNames, GetMemoryPool());
+}
+
 const TSchema& TParquetSource::Schema() const {
     return Schema_;
 }
@@ -747,92 +875,7 @@ bool TParquetSource::Next(TRowSet& rowSet) {
     if (!Reader_->ReadNext(&batch).ok() || !batch) {
         return false;
     }
-
-    int32_t numCols = static_cast<int32_t>(batch->num_columns());
-    int64_t len = batch->num_rows();
-
-    auto* data = new TBatchData;
-    data->Batch = batch;
-    data->Columns.resize(numCols);
-
-    for (int32_t i = 0; i < numCols; ++i) {
-        auto arr = batch->column(i);
-        TColumn& col = data->Columns[i];
-        col.Offsets = nullptr;
-        col.OffsetWidth = 0;
-        col.DataBitOffset = 0;
-        col.Mask = nullptr;
-        col.MaskBitOffset = 0;
-
-        if (arr->null_count() > 0) {
-            col.Mask = arr->null_bitmap_data();
-            col.MaskBitOffset = static_cast<int32_t>(arr->offset());
-        }
-
-        switch (arr->type_id()) {
-            case arrow::Type::INT8:
-            case arrow::Type::INT16:
-            case arrow::Type::INT32:
-            case arrow::Type::INT64:
-            case arrow::Type::UINT8:
-            case arrow::Type::UINT16:
-            case arrow::Type::UINT32:
-            case arrow::Type::UINT64:
-            case arrow::Type::DOUBLE:
-            case arrow::Type::DATE32:
-            case arrow::Type::DATE64: {
-                col.Data = NumericData(arr);
-                break;
-            }
-            case arrow::Type::DECIMAL128: {
-                col.Data = FixedByteWidthData(arr, 16);
-                break;
-            }
-            case arrow::Type::FLOAT: {
-                col.Data = NumericData(arr);
-                break;
-            }
-            case arrow::Type::BOOL: {
-                auto bitmap = arr->data()->buffers[1];
-                col.Data = const_cast<char*>(reinterpret_cast<const char*>(bitmap->data()));
-                col.DataBitOffset = static_cast<int32_t>(arr->offset());
-                break;
-            }
-            case arrow::Type::STRING: {
-                auto typed = std::static_pointer_cast<arrow::StringArray>(arr);
-                const int32_t* src = typed->raw_value_offsets() + arr->offset();
-                int32_t base = src[0];
-                col.Offsets = const_cast<int32_t*>(src);
-                col.OffsetWidth = 4;
-                col.Data = const_cast<char*>(reinterpret_cast<const char*>(typed->raw_data()) + base);
-                break;
-            }
-            case arrow::Type::LARGE_STRING: {
-                auto typed = std::static_pointer_cast<arrow::LargeStringArray>(arr);
-                const int64_t* src = typed->raw_value_offsets() + arr->offset();
-                int64_t base = src[0];
-                col.Offsets = const_cast<int64_t*>(src);
-                col.OffsetWidth = 8;
-                col.Data = const_cast<char*>(reinterpret_cast<const char*>(typed->raw_data()) + base);
-                break;
-            }
-            default: {
-                col.Data = nullptr;
-                break;
-            }
-        }
-    }
-
-    rowSet = {
-        .Columns = data->Columns.data(),
-        .ColumnCount = numCols,
-        .RowCount = static_cast<int32_t>(len),
-        .Selection = nullptr,
-        .Destroy = DestroyBatch,
-        .Private = data,
-        .RefCount = 1,
-    };
-
+    RecordBatchToRowSet(std::move(batch), rowSet);
     return true;
 }
 

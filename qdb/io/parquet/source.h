@@ -34,7 +34,10 @@ private:
     std::shared_ptr<TParquetFileData> Data_;
 };
 
-class TParquetSource : public ISource, public NScheduler::IScanMetadataSource {
+class TParquetSource :
+    public ISource,
+    public NScheduler::IScanMetadataSource
+{
 public:
     explicit TParquetSource(const std::string& path);
     ~TParquetSource();
@@ -49,6 +52,8 @@ public:
         std::ostream* diagnostics = nullptr) const;
     std::unique_ptr<TParquetSource> MakeRowGroupsSource(
         const std::vector<size_t>& rowGroups) const;
+    std::shared_ptr<const IPhysicalRowReader> CompileReader(
+        std::span<const std::string> columnNames) const;
 
     const TStatsPtr Stats() const override;
 
@@ -61,7 +66,7 @@ private:
 
     void ResetReader();
     std::vector<int> EffectiveRowGroups() const;
-    std::vector<int> EffectiveColumnIndices() const;
+    std::vector<int> EffectiveFileColumnIndexes() const;
     void RefreshSchema();
 
     std::shared_ptr<TParquetFileData> File_;

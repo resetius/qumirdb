@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <qdb/io/parquet/row_id.h>
 #include <qdb/io/parquet/source.h>
 #include <qdb/io/text/sink.h>
 #include <qdb/plan/ops/source.h>
@@ -160,6 +161,37 @@ TEST(IOTest, ParquetRowGroupRangeSource) {
     EXPECT_EQ(rowGroups[2].RowCount, 1);
 
     source->RestrictColumns({"id"});
+    ASSERT_EQ(source->Schema().Columns.size(), 1u);
+    const std::vector<std::string> columnNames{
+        "payload",
+        "id",
+        "payload",
+    };
+    auto reader = source->CompileReader(columnNames);
+    const std::vector<TPhysicalRowId> rowIds{
+        MakeParquetRowId(2, 0),
+        MakeParquetRowId(0, 1),
+        MakeParquetRowId(1, 0),
+    };
+    TRowSet lookupRows{};
+    std::string error;
+    ASSERT_TRUE(reader->ReadRows(rowIds, lookupRows, &error)) << error;
+    ASSERT_EQ(lookupRows.RowCount, 3);
+    ASSERT_EQ(lookupRows.ColumnCount, 3);
+    const auto* outPayload =
+        reinterpret_cast<const int64_t*>(lookupRows.Columns[0].Data);
+    const auto* outIds =
+        reinterpret_cast<const int64_t*>(lookupRows.Columns[1].Data);
+    const auto* outPayloadAgain =
+        reinterpret_cast<const int64_t*>(lookupRows.Columns[2].Data);
+    EXPECT_EQ(std::vector<int64_t>(outPayload, outPayload + 3),
+        (std::vector<int64_t>{50, 20, 30}));
+    EXPECT_EQ(std::vector<int64_t>(outIds, outIds + 3),
+        (std::vector<int64_t>{5, 2, 3}));
+    EXPECT_EQ(std::vector<int64_t>(outPayloadAgain, outPayloadAgain + 3),
+        (std::vector<int64_t>{50, 20, 30}));
+    Release(&lookupRows);
+
     auto split = source->MakeRowGroupsSource({1});
     EXPECT_EQ(split->Stats().get(), source->Stats().get());
     TRowSet rowSet = {};
