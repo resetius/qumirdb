@@ -5,6 +5,7 @@
 #include <qdb/plan/ops/cte_consumer.h>
 #include <qdb/plan/ops/filter.h>
 #include <qdb/plan/ops/join.h>
+#include <qdb/plan/ops/late_materialize.h>
 #include <qdb/plan/ops/limit.h>
 #include <qdb/plan/ops/project.h>
 #include <qdb/plan/ops/sort.h>
@@ -185,6 +186,32 @@ TEST(SexpParser, Project) {
     ASSERT_EQ(proj.Projections().size(), 2u);
     EXPECT_EQ(proj.Projections()[0].Name, "a");
     EXPECT_EQ(proj.Projections()[1].Name, "b");
+}
+
+TEST(SexpParser, LateMaterializePrintRoundtrip) {
+    NQdb::TMockSource src({"x"});
+    TRelParserOptions opts;
+    opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr
+    {
+        return std::make_shared<TSourceOperator>(src, std::string(path));
+    };
+    auto parser = MakeParser(std::move(opts));
+    const std::string input = R"((rel late-materialize (rel source "data.parquet") (locator __row_id__) (column url URL string) (column event_time EventTime i64)))";
+
+    auto expr = Parse(parser, input);
+    ASSERT_NE(expr, nullptr);
+    auto late = TMaybeOp<TLateMaterializeOperator>(std::static_pointer_cast<IOperator>(expr));
+    ASSERT_TRUE(late);
+    EXPECT_EQ(late.Cast()->LocatorColumn(), "__row_id__");
+    ASSERT_EQ(late.Cast()->Columns().size(), 2u);
+    EXPECT_EQ(late.Cast()->Columns()[0].OutputName, "url");
+    EXPECT_EQ(late.Cast()->Columns()[0].PhysicalName, "URL");
+    EXPECT_EQ(NQumir::NAst::NCore::PrintType(late.Cast()->Columns()[0].Type), "string");
+    EXPECT_EQ(late.Cast()->RequiredColumnsForChild(0, {}), (std::unordered_set<std::string>{"__row_id__"}));
+    ASSERT_EQ(late.Cast()->OutputColumns()->Fields.size(), 2u);
+    EXPECT_EQ(late.Cast()->OutputColumns()->Fields[0].first, "url");
+    EXPECT_EQ(late.Cast()->OutputColumns()->Fields[1].first, "event_time");
+    EXPECT_EQ(PrintAst(expr, MakePrintOpts()), input);
 }
 
 TEST(SexpParser, FilterPrintRoundtrip) {

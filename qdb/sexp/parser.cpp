@@ -3,6 +3,7 @@
 #include <qdb/plan/ops/aggregate.h>
 #include <qdb/plan/ops/filter.h>
 #include <qdb/plan/ops/join.h>
+#include <qdb/plan/ops/late_materialize.h>
 #include <qdb/plan/ops/limit.h>
 #include <qdb/plan/ops/project.h>
 #include <qdb/plan/ops/union.h>
@@ -178,6 +179,63 @@ TNodeParserMap MakeRelParsers(TRelParserOptions options) {
                 specs.push_back({projName.Name, std::move(projExpr)});
             }
             co_return std::make_shared<TProjectOperator>(std::move(input), std::move(specs));
+        }
+
+        if (*relName == TLateMaterializeOperator::OpId) {
+            auto inputExpr = co_await h.Expr();
+            auto input = std::static_pointer_cast<IOperator>(inputExpr);
+
+            co_await h.Take('(');
+            auto locatorTagTok = h.Next();
+            auto locatorTag = ReadIdentifier(h, locatorTagTok);
+            if (!locatorTag || *locatorTag != "locator") {
+                co_return IParseHandle::MakeError(locatorTagTok, "expected '(locator <column>)'");
+            }
+            auto locatorTok = h.Next();
+            auto locator = ReadIdentifier(h, locatorTok);
+            if (!locator) {
+                co_return IParseHandle::MakeError(locatorTok, "expected locator column name");
+            }
+            co_await h.Take(')');
+
+            std::vector<TLateMaterializeColumn> columns;
+            while (true) {
+                auto tok = h.Next();
+                if (IParseHandle::IsOp(tok, ')')) {
+                    break;
+                }
+                if (!IParseHandle::IsOp(tok, '(')) {
+                    co_return IParseHandle::MakeError(tok, "expected '(column <output> <physical> <type>)'");
+                }
+                auto columnTagTok = h.Next();
+                auto columnTag = ReadIdentifier(h, columnTagTok);
+                if (!columnTag || *columnTag != "column") {
+                    co_return IParseHandle::MakeError(columnTagTok, "expected 'column'");
+                }
+                auto outputTok = h.Next();
+                auto output = ReadIdentifier(h, outputTok);
+                if (!output) {
+                    co_return IParseHandle::MakeError(outputTok, "expected output column name");
+                }
+                auto physicalTok = h.Next();
+                auto physical = ReadIdentifier(h, physicalTok);
+                if (!physical) {
+                    co_return IParseHandle::MakeError(physicalTok, "expected physical column name");
+                }
+                auto type = co_await h.Type();
+                co_await h.Take(')');
+                columns.push_back({
+                    .PhysicalName = std::move(*physical),
+                    .OutputName = std::move(*output),
+                    .Type = std::move(type),
+                });
+            }
+            if (columns.empty()) {
+                co_return TError(
+                    loc, "(rel late-materialize) requires at least one column");
+            }
+            co_return std::make_shared<TLateMaterializeOperator>(
+                std::move(input), std::move(*locator), std::move(columns));
         }
 
         if (*relName == TUnionAllOperator::OpId) {
