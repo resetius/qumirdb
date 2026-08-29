@@ -5,6 +5,7 @@
 #include <qdb/plan/passes/estimate_stats.h>
 #include <qdb/plan/passes/flatten_joins.h>
 #include <qdb/plan/passes/join_order.h>
+#include <qdb/plan/passes/late_materialization.h>
 #include <qdb/plan/passes/qualify_columns.h>
 #include <qdb/plan/passes/cte_reuse.h>
 #include <qdb/plan/passes/top_sort.h>
@@ -31,6 +32,7 @@ void OptimizeOne(TOperatorPtr& plan, TPlanPassOptions& options) {
     };
     if (dump) { std::cerr << "\n===== initial =====\n"; PrintPlanTree(std::cerr, plan); }
 
+    BindLateMaterializationSources(plan);
     AssignSourceAliases(plan); stage("AssignSourceAliases");
     QualifyColumns(plan); stage("QualifyColumns");
     AnnotateTypes(plan, options.Annotation);
@@ -83,12 +85,48 @@ void ApplyPlanPasses(TOperatorPtr& plan, TPlanPassOptions options) {
     });
     PushConsumerPredicatesIntoDefinitions(plan, options.Annotation);
     auto usage = PropagateCteDemands(plan);
-    // PropagateCteDemands narrowed definition schemas; refresh their cost
-    // (dependency-first, so nested definitions are estimated before their users)
-    // for the cost-based reuse decision.
-    ForEachPlan(plan, [](TOperatorPtr& current, TCteDefinition*) {
+
+    // CTE output demand is only known after PropagateCteDemands. Apply the
+    // width-sensitive rewrite now so it costs and fetches the pruned schema.
+    TLateMaterializationDiagnostics lateDiagnostics;
+    int lateDiagnosticsRank = -1;
+    ForEachPlan(plan, [&](TOperatorPtr& current, TCteDefinition* def) {
+        TLateMaterializationDiagnostics local;
+        current = ApplyLateMaterialization(
+            current, options.LateMaterialization, &local);
+        AnnotateTypes(current, options.Annotation);
+
+        // Re-annotation restores schema-preserving operators (notably filters)
+        // to their full input schema. Re-apply the already-computed demand so
+        // predicate-only columns stay out of the output and a newly-added row
+        // locator reaches the physical source restriction.
+        const TColumnSet* rootDemand = nullptr;
+        if (def) {
+            auto it = usage.find(def);
+            if (it == usage.end()) {
+                throw std::runtime_error(
+                    "cte demand: optimized definition has no usage record");
+            }
+            rootDemand = &it->second.RequiredOutputs;
+        }
+        ApplyColumnPruning(current, rootDemand, nullptr);
+        if (def) {
+            def->OutputType = current->OutputColumns();
+        }
         EstimateStats(current);
-    }, false);
+
+        const int rank = local.Applied ? 3
+            : local.Considered ? 2
+            : !local.Reason.empty() ? 1
+            : 0;
+        if (rank > lateDiagnosticsRank) {
+            lateDiagnostics = std::move(local);
+            lateDiagnosticsRank = rank;
+        }
+    });
+    if (options.Diagnostics) {
+        options.Diagnostics->LateMaterialization = std::move(lateDiagnostics);
+    }
     auto decisions = ChooseCteReuse(usage);
     plan = ApplyCteReuse(std::move(plan), decisions);
     ForEachPlan(plan, [](TOperatorPtr& current, TCteDefinition*) {

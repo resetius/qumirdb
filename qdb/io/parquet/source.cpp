@@ -896,6 +896,89 @@ std::shared_ptr<const IPhysicalRowReader> TParquetSource::CompileReader(
         File_->FileReader, columnNames, GetMemoryPool());
 }
 
+std::optional<TLateMaterializationCost> TParquetSource::EstimateLookup(
+    std::span<const std::string> earlyColumns,
+    std::span<const std::string> fetchColumns,
+    uint64_t maxRows) const
+{
+    auto metadata = File_->FileReader->parquet_reader()->metadata();
+    std::unordered_map<std::string, int> columnIndexes;
+    for (int i = 0; i < static_cast<int>(File_->FileNames.size()); ++i) {
+        columnIndexes.emplace(File_->FileNames[static_cast<size_t>(i)], i);
+    }
+
+    auto normalize = [&](std::span<const std::string> columns)
+        -> std::optional<std::vector<int>>
+    {
+        std::vector<int> result;
+        std::unordered_set<int> seen;
+        for (const auto& column : columns) {
+            if (column == InternalRowIdColumnName) {
+                continue;
+            }
+            auto it = columnIndexes.find(column);
+            if (it == columnIndexes.end()) {
+                return std::nullopt;
+            }
+            if (seen.insert(it->second).second) {
+                result.push_back(it->second);
+            }
+        }
+        return result;
+    };
+
+    auto early = normalize(earlyColumns);
+    auto fetch = normalize(fetchColumns);
+    if (!early || !fetch || fetch->empty() || maxRows == 0) {
+        return std::nullopt;
+    }
+
+    std::vector<int> eager = *early;
+    std::unordered_set<int> eagerSet(eager.begin(), eager.end());
+    for (int column : *fetch) {
+        if (eagerSet.insert(column).second) {
+            eager.push_back(column);
+        }
+    }
+
+    auto bytesFor = [&](int rowGroup, const std::vector<int>& columns)
+        -> std::optional<uint64_t>
+    {
+        uint64_t total = 0;
+        for (int column : columns) {
+            const int64_t bytes = metadata->RowGroup(rowGroup)
+                ->ColumnChunk(column)->total_compressed_size();
+            if (bytes < 0) {
+                return std::nullopt;
+            }
+            total += static_cast<uint64_t>(bytes);
+        }
+        return total;
+    };
+
+    TLateMaterializationCost cost;
+    std::vector<uint64_t> lookupByRowGroup;
+    lookupByRowGroup.reserve(static_cast<size_t>(metadata->num_row_groups()));
+    for (int rg = 0; rg < metadata->num_row_groups(); ++rg) {
+        auto eagerBytes = bytesFor(rg, eager);
+        auto narrowBytes = bytesFor(rg, *early);
+        auto lookupBytes = bytesFor(rg, *fetch);
+        if (!eagerBytes || !narrowBytes || !lookupBytes) {
+            return std::nullopt;
+        }
+        cost.EagerBytes += *eagerBytes;
+        cost.NarrowBytes += *narrowBytes;
+        lookupByRowGroup.push_back(*lookupBytes);
+    }
+    std::ranges::sort(lookupByRowGroup, std::greater<>());
+    const size_t touched = std::min<size_t>(
+        static_cast<size_t>(maxRows), lookupByRowGroup.size());
+    cost.LookupBytes = std::accumulate(
+        lookupByRowGroup.begin(), lookupByRowGroup.begin() + touched,
+        uint64_t{0});
+    return cost;
+}
+
 const TSchema& TParquetSource::Schema() const {
     return Schema_;
 }

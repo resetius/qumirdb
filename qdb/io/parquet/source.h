@@ -36,6 +36,7 @@ private:
 
 class TParquetSource :
     public ISource,
+    public IRowLookupSource,
     public NScheduler::IScanMetadataSource
 {
 public:
@@ -53,8 +54,12 @@ public:
     std::unique_ptr<TParquetSource> MakeRowGroupsSource(
         const std::vector<size_t>& rowGroups) const;
     std::shared_ptr<const IPhysicalRowReader> CompileReader(
-        std::span<const std::string> columnNames) const;
+        std::span<const std::string> columnNames) const override;
 
+    std::optional<TLateMaterializationCost> EstimateLookup(
+        std::span<const std::string> earlyColumns,
+        std::span<const std::string> fetchColumns,
+        uint64_t maxRows) const override;
     const TStatsPtr Stats() const override;
 
 private:

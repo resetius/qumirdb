@@ -3,6 +3,7 @@
 #include <qdb/plan/ops/cte_consumer.h>
 #include <qdb/plan/ops/cte_ref.h>
 #include <qdb/plan/ops/filter.h>
+#include <qdb/plan/ops/late_materialize.h>
 #include <qdb/plan/ops/project.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/ops/window.h>
@@ -181,6 +182,10 @@ std::string PlanLabel(const TOperatorPtr& op) {
     }
     if (auto sort = TMaybeOp<TTopSortOperator>(op)) {
         return SortPlanLabel("top-sort", sort.Cast()->Keys(), sort.Cast()->Limit());
+    }
+    if (auto late = TMaybeOp<TLateMaterializeOperator>(op)) {
+        return "late-materialize [" +
+            std::to_string(late.Cast()->Columns().size()) + " columns]";
     }
     if (auto window = TMaybeOp<TWindowOperator>(op)) {
         return WindowPlanLabel(*window.Cast());
