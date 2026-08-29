@@ -163,7 +163,7 @@ std::unordered_set<std::string> TWindowOperator::ComputeReferencedColumns() cons
 std::unordered_set<std::string> TWindowOperator::RequiredColumnsForChild(
     size_t /*childIdx*/, const std::unordered_set<std::string>& needed) const
 {
-    auto* inputStruct = static_cast<TStructType*>(Input_->OutputColumns().get());
+    auto&& inputStruct = Input_->OutputColumns();
     std::unordered_set<std::string> inputCols;
     if (inputStruct) {
         for (const auto& [name, _] : inputStruct->Fields) {

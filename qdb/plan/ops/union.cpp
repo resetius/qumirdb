@@ -20,7 +20,7 @@ std::unordered_set<std::string> TUnionAllOperator::RequiredColumnsForChild(
     size_t childIdx, const std::unordered_set<std::string>& needed) const
 {
     std::unordered_set<std::string> required;
-    auto* schema = static_cast<TStructType*>(Inputs_[childIdx]->OutputColumns().get());
+    auto&& schema = Inputs_[childIdx]->OutputColumns();
     if (!schema) {
         return needed;
     }

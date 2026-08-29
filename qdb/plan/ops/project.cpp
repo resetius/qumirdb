@@ -29,7 +29,7 @@ TProjectOperator::TProjectOperator(TOperatorPtr input, std::vector<TProjectionSp
     : Input_(std::move(input))
     , Projections_(std::move(projections))
 {
-    auto* inputStruct = static_cast<NQumir::NAst::TStructType*>(Input_->OutputColumns().get());
+    auto&& inputStruct = Input_->OutputColumns();
     std::vector<std::pair<std::string, NQumir::NAst::TTypePtr>> outFields;
     if (inputStruct) {
         for (const auto& proj : Projections_) {

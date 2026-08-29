@@ -227,7 +227,7 @@ TOperatorPtr BuildChain(
     // Map every output column to the leaf that produces it.
     std::unordered_map<std::string, size_t> owner;
     for (size_t i = 0; i < n; ++i) {
-        auto* schema = static_cast<TStructType*>(leaves[i]->OutputColumns().get());
+        auto&& schema = leaves[i]->OutputColumns();
         if (!schema) {
             continue;
         }

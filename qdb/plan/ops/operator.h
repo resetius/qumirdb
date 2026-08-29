@@ -13,6 +13,8 @@
 namespace NQdb {
 
 struct IOperator : NQumir::NAst::TExpr {
+    // Type of Source: TFunctionType : () -> TStructType
+    // Type: TFunctionType : (TStructType) -> TStructType
     static constexpr const char* NodeId = "Rel";
     TStatsPtr Stats_;
 
@@ -38,15 +40,16 @@ struct IOperator : NQumir::NAst::TExpr {
     }
 
     // Output schema: TFunctionType::ReturnType.
-    NQumir::NAst::TTypePtr OutputColumns() const {
-        return static_cast<NQumir::NAst::TFunctionType*>(Type.get())->ReturnType;
+    NQumir::NAst::TConcreteTypePtr<NQumir::NAst::TStructType> OutputColumns() const {
+        auto* functionType = static_cast<NQumir::NAst::TFunctionType*>(Type.get());
+        return NQumir::NAst::TMaybeType<NQumir::NAst::TStructType>(functionType->ReturnType).Cast();
     }
 
     // Required input schema: TFunctionType::ParamTypes[0].
     // Null for source (no upstream operator) and before typing pass.
-    NQumir::NAst::TTypePtr RequiredColumns() const {
+    NQumir::NAst::TConcreteTypePtr<NQumir::NAst::TStructType> RequiredColumns() const {
         auto* fun = static_cast<NQumir::NAst::TFunctionType*>(Type.get());
-        return fun->ParamTypes.empty() ? nullptr : fun->ParamTypes[0];
+        return fun->ParamTypes.empty() ? nullptr : NQumir::NAst::TMaybeType<NQumir::NAst::TStructType>(fun->ParamTypes[0]).Cast();
     }
 };
 

@@ -53,7 +53,7 @@ TOperatorPtr ResolveInline(const TCteDefinitionPtr& def, TResolveState& state) {
 // producer's own field order.
 TOperatorPtr WrapBoundaryProjection(
     TOperatorPtr plan, const std::unordered_set<std::string>& required) {
-    auto* schema = static_cast<TStructType*>(plan->OutputColumns().get());
+    auto&& schema = plan->OutputColumns();
     if (!schema) {
         throw std::runtime_error(
             "cte boundary projection: producer output is not a struct");
@@ -173,7 +173,7 @@ double OutputBytes(const TCteDefinition& def, const std::unordered_set<std::stri
     const double rows = stats ? static_cast<double>(stats->RowCount) : 0.0;
     const bool keepFullSchema = required.empty();
     double width = 0.0;
-    auto* schema = static_cast<TStructType*>(def.Plan->OutputColumns().get());
+    auto&& schema = def.Plan->OutputColumns();
     assert(schema); // a null schema would silently zero the spool cost
     if (schema) {
         for (const auto& [name, type] : schema->Fields) {

@@ -148,7 +148,7 @@ std::unordered_set<std::string> TJoinOperator::RequiredColumnsForChild(
     size_t childIdx, const std::unordered_set<std::string>& needed) const
 {
     const auto& side = (childIdx == 0) ? Left_ : Right_;
-    auto* sideStruct = static_cast<TStructType*>(side->OutputColumns().get());
+    auto&& sideStruct = side->OutputColumns();
     std::unordered_set<std::string> sideCols;
     if (sideStruct) {
         for (const auto& [name, _] : sideStruct->Fields) {
