@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <exception>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -56,7 +57,11 @@ bool TThreadedScheduler::Run(std::string* error) {
     for (auto& worker : workers) {
         worker.join();
     }
-
+    if (Failed_.load(std::memory_order_acquire)) {
+        std::lock_guard lock(ErrorMutex_);
+        SetError(error, Error_);
+        return false;
+    }
     return true;
 }
 
@@ -145,7 +150,8 @@ void TThreadedScheduler::Work() {
     auto* root = Graph_.Root();
     assert(root);
     auto done = [&] {
-        return root->State.load(std::memory_order_acquire) == ETaskState::Finished;
+        return Failed_.load(std::memory_order_acquire) ||
+            root->State.load(std::memory_order_acquire) == ETaskState::Finished;
     };
     // Brief spin on the work permit before blocking, so bursts of scheduling
     // are picked up without an OS wakeup; then park on the semaphore.
@@ -196,7 +202,30 @@ void TThreadedScheduler::Work() {
             continue;
         }
 
-        auto result = node->Task->Execute();
+        ETaskResult result;
+        try {
+            result = node->Task->Execute();
+        } catch (const std::exception& e) {
+            bool expected = false;
+            if (Failed_.compare_exchange_strong(
+                    expected, true, std::memory_order_acq_rel))
+            {
+                std::lock_guard lock(ErrorMutex_);
+                Error_ = e.what();
+            }
+            WorkAvailable_.release(static_cast<ptrdiff_t>(WorkerCount_));
+            return;
+        } catch (...) {
+            bool expected = false;
+            if (Failed_.compare_exchange_strong(
+                    expected, true, std::memory_order_acq_rel))
+            {
+                std::lock_guard lock(ErrorMutex_);
+                Error_ = "scheduler task failed with an unknown exception";
+            }
+            WorkAvailable_.release(static_cast<ptrdiff_t>(WorkerCount_));
+            return;
+        }
         Executed_.fetch_add(1, std::memory_order_relaxed);
         if (result == ETaskResult::NEED_DATA) {
             NeedData_.fetch_add(1, std::memory_order_relaxed);
