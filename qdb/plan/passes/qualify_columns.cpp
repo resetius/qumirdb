@@ -123,9 +123,15 @@ std::shared_ptr<TStructType> QualifyColumnsImpl(const TOperatorPtr& op) {
         const auto& schema = src->GetSource().Schema();
 
         std::vector<std::pair<std::string, TTypePtr>> newFields;
-        newFields.reserve(schema.Columns.size());
+        newFields.reserve(
+            schema.Columns.size() + (src->EmitsRowId() ? 1 : 0));
         for (const auto& col : schema.Columns) {
             newFields.emplace_back(alias + "." + std::string(col.Name), col.Type);
+        }
+        if (src->EmitsRowId()) {
+            newFields.emplace_back(
+                src->RowIdColumn(),
+                std::make_shared<TIntegerType>(TIntegerType::U64));
         }
         auto qStruct = std::make_shared<TStructType>(std::move(newFields));
 

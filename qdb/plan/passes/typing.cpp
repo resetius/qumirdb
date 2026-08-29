@@ -3,6 +3,7 @@
 #include <qdb/plan/ops/aggregate.h>
 #include <qdb/plan/ops/filter.h>
 #include <qdb/plan/ops/join.h>
+#include <qdb/plan/ops/late_materialize.h>
 #include <qdb/plan/ops/limit.h>
 #include <qdb/plan/ops/project.h>
 #include <qdb/plan/ops/sort.h>
@@ -98,10 +99,16 @@ void AnnotateTypes(
     if (auto maybe = TMaybeOp<TSourceOperator>(root)) {
         auto src = maybe.Cast();
         // If QualifyColumns has already set a qualified schema, keep it.
-        if (!src->GetAlias().empty()) return;
+        if (!src->GetAlias().empty()) {
+            // EnableRowId updates the already-qualified source type eagerly.
+            return;
+        }
         root->Type = std::make_shared<TFunctionType>(
             std::vector<TTypePtr>{},
             StructTypeFromSchema(src->GetSource().Schema()));
+        if (src->EmitsRowId()) {
+            src->EnableRowId();
+        }
         return;
     }
 
@@ -146,6 +153,19 @@ void AnnotateTypes(
         root->Type = std::make_shared<TFunctionType>(
             std::vector<TTypePtr>{schema},
             schema);
+        return;
+    }
+
+    if (auto maybe = TMaybeOp<TLateMaterializeOperator>(root)) {
+        auto late = maybe.Cast();
+        std::vector<std::pair<std::string, TTypePtr>> fields;
+        fields.reserve(late->Columns().size());
+        for (const auto& column : late->Columns()) {
+            fields.emplace_back(column.OutputName, column.Type);
+        }
+        root->Type = std::make_shared<TFunctionType>(
+            std::vector<TTypePtr>{late->Input()->OutputColumns()},
+            std::make_shared<TStructType>(std::move(fields)));
         return;
     }
 

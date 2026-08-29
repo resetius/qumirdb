@@ -9,6 +9,7 @@
 #include <qdb/plan/passes/typing.h>
 #include <qdb/plan/ops/filter.h>
 #include <qdb/plan/ops/join.h>
+#include <qdb/plan/ops/late_materialize.h>
 #include <qdb/plan/ops/limit.h>
 #include <qdb/plan/ops/project.h>
 #include <qdb/plan/ops/sort.h>
@@ -140,6 +141,9 @@ TOperatorPtr Resolve(const TOperatorPtr& op, TResolveState& state) {
     } else if (auto maybeLimit = TMaybeOp<TLimitOperator>(op)) {
         auto limit = maybeLimit.Cast();
         limit->MutableInput() = Resolve(limit->Input(), state);
+    } else if (auto maybeLate = TMaybeOp<TLateMaterializeOperator>(op)) {
+        auto late = maybeLate.Cast();
+        late->MutableInput() = Resolve(late->Input(), state);
     } else if (auto maybeWindow = TMaybeOp<TWindowOperator>(op)) {
         auto window = maybeWindow.Cast();
         window->MutableInput() = Resolve(window->Input(), state);

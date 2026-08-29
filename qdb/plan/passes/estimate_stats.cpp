@@ -7,6 +7,7 @@
 #include <qdb/plan/ops/filter.h>
 #include <qdb/plan/ops/project.h>
 #include <qdb/plan/ops/join.h>
+#include <qdb/plan/ops/late_materialize.h>
 #include <qdb/plan/ops/union.h>
 #include <qdb/plan/types/nullable.h>
 
@@ -572,6 +573,14 @@ TStatsPtr ComputeStatsFor(TOperatorPtr op) {
     }
     if (auto maybeJoin = TMaybeOp<TJoinOperator>(op)) {
         return ComputeJoinStats(maybeJoin.Cast());
+    }
+    if (auto maybeLate = TMaybeOp<TLateMaterializeOperator>(op)) {
+        auto result = std::make_shared<TStats>();
+        if (maybeLate.Cast()->Input()->Stats_) {
+            result->RowCount = maybeLate.Cast()->Input()->Stats_->RowCount;
+            result->Cost = maybeLate.Cast()->Input()->Stats_->Cost;
+        }
+        return result;
     }
 
     return nullptr; // TODO: aggregate / sort / limit

@@ -29,6 +29,9 @@ public:
     // schemas (e.g. a join between two aliases of the same table) don't collide
     // before the QualifyColumns pass runs.
     void SetAlias(std::string alias);
+    void EnableRowId();
+    bool EmitsRowId() const { return EmitRowId_; }
+    std::string RowIdColumn() const;
 
     const std::string ToString() const override;
 
@@ -39,6 +42,7 @@ private:
     // Optional, conservative scan hint. The physical filter remains in the
     // operator tree and is always responsible for exact SQL semantics.
     NQumir::NAst::TExprPtr RowGroupPredicate_;
+    bool EmitRowId_ = false;
 };
 
 NQumir::NAst::TTypePtr StructTypeFromSchema(const TSchema& schema);

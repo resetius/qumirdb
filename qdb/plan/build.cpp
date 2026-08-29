@@ -45,6 +45,22 @@ namespace NSql = NQdb::NSql;
 using NQumir::TError;
 using NQumir::TLocation;
 
+bool IsReservedOutputColumnName(std::string_view name) {
+    return name == InternalRowIdColumnName;
+}
+
+std::expected<void, TError> ValidateOutputColumnName(
+    std::string_view name,
+    const TLocation& location = {})
+{
+    if (IsReservedOutputColumnName(name)) {
+        return std::unexpected(TError(
+            location,
+            "output column name '" + std::string(name) + "' is reserved"));
+    }
+    return {};
+}
+
 std::string ToLower(std::string s) {
     for (char& c : s) {
         c = std::tolower(static_cast<unsigned char>(c));
@@ -1497,6 +1513,9 @@ std::expected<TOperatorPtr, TError> ApplyColumnAliases(
     // the renamed columns (mutating Projections in place would leave it stale).
     std::vector<TProjectionSpec> renamed = project.Cast()->Projections();
     for (size_t i = 0; i < renamed.size(); ++i) {
+        if (auto valid = ValidateOutputColumnName(aliases[i]); !valid) {
+            return std::unexpected(valid.error());
+        }
         renamed[i].Name = aliases[i];
         renamed[i].ImplicitName = false;
     }
@@ -2296,6 +2315,23 @@ std::expected<TOperatorPtr, TError> BuildSelect(
                 projections.push_back({ .Name = bare, .Expression = Ident({}, colName) });
             }
             continue;
+        }
+        const auto outputLocation = item->Expr
+            ? item->Expr->Location
+            : TLocation{};
+        if (item->Alias) {
+            if (auto valid = ValidateOutputColumnName(
+                    *item->Alias, outputLocation); !valid)
+            {
+                return std::unexpected(valid.error());
+            }
+        }
+        for (const auto& alias : item->ColumnAliases) {
+            if (auto valid = ValidateOutputColumnName(
+                    alias, outputLocation); !valid)
+            {
+                return std::unexpected(valid.error());
+            }
         }
         std::string name = ItemName(*item, i);
         auto expr = collector.Rewrite(item->Expr);

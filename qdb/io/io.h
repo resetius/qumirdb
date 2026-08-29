@@ -3,6 +3,8 @@
 #include <qdb/io/physical_row_id.h>
 
 #include <cstdint>
+#include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -63,6 +65,28 @@ public:
 };
 
 inline constexpr std::string_view InternalRowIdColumnName = "__row_id__";
+
+// Conservative byte estimates used by the logical late-materialization rule.
+// Sources that cannot provide stable physical row locators simply do not
+// implement IRowLookupSource.
+struct TLateMaterializationCost {
+    uint64_t EagerBytes = 0;
+    uint64_t NarrowBytes = 0;
+    uint64_t LookupBytes = 0;
+};
+
+class IRowLookupSource {
+public:
+    virtual ~IRowLookupSource() = default;
+
+    virtual std::optional<TLateMaterializationCost> EstimateLookup(
+        std::span<const std::string> earlyColumns,
+        std::span<const std::string> fetchColumns,
+        uint64_t maxRows) const = 0;
+
+    virtual std::shared_ptr<const IPhysicalRowReader> CompileReader(
+        std::span<const std::string> columnNames) const = 0;
+};
 
 struct ISink {
     virtual ~ISink() = default;

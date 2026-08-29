@@ -6,6 +6,7 @@
 #include <qdb/plan/ops/cte_consumer.h>
 #include <qdb/plan/ops/filter.h>
 #include <qdb/plan/ops/join.h>
+#include <qdb/plan/ops/late_materialize.h>
 #include <qdb/plan/ops/limit.h>
 #include <qdb/plan/ops/project.h>
 #include <qdb/plan/ops/sort.h>
@@ -82,6 +83,9 @@ TOperatorPtr Reconstruct(const TOperatorPtr& op) {
     if (auto n = TMaybeOp<TSourceOperator>(op)) {
         auto src = std::make_shared<TSourceOperator>(
             n.Cast()->GetSource(), n.Cast()->SourcePath());
+        if (n.Cast()->EmitsRowId()) {
+            src->EnableRowId();
+        }
         if (!n.Cast()->GetAlias().empty()) {
             src->SetAlias(n.Cast()->GetAlias());
         }
@@ -135,6 +139,12 @@ TOperatorPtr Reconstruct(const TOperatorPtr& op) {
     if (auto n = TMaybeOp<TLimitOperator>(op)) {
         return std::make_shared<TLimitOperator>(
             StructuralClone(n.Cast()->Input()), n.Cast()->Limit(), n.Cast()->Offset());
+    }
+    if (auto n = TMaybeOp<TLateMaterializeOperator>(op)) {
+        return std::make_shared<TLateMaterializeOperator>(
+            StructuralClone(n.Cast()->Input()),
+            n.Cast()->LocatorColumn(),
+            n.Cast()->Columns());
     }
     if (auto n = TMaybeOp<TWindowOperator>(op)) {
         return std::make_shared<TWindowOperator>(
