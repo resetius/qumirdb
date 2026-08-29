@@ -76,6 +76,7 @@ add_library(qumirdb
     exec/project_exec.cpp
     exec/aggregate_exec.cpp
     exec/join_exec.cpp
+    exec/late_materialize_exec.cpp
     exec/sort_exec.cpp
     exec/sort_key_ops.cpp
     exec/window_exec.cpp
