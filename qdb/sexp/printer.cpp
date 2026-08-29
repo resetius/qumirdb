@@ -3,6 +3,7 @@
 #include <qdb/plan/ops/aggregate.h>
 #include <qdb/plan/ops/filter.h>
 #include <qdb/plan/ops/join.h>
+#include <qdb/plan/ops/late_materialize.h>
 #include <qdb/plan/ops/limit.h>
 #include <qdb/plan/ops/operator.h>
 #include <qdb/plan/ops/project.h>
@@ -20,7 +21,9 @@ namespace NSexp {
 
 using namespace NQumir::NAst::NCore;
 
-static void PrintRel(NQumir::NAst::TExpr& expr, TPrinter& printer, TPrintFrame frame) {
+namespace {
+
+void PrintRel(NQumir::NAst::TExpr& expr, TPrinter& printer, TPrintFrame frame) {
     auto& op = static_cast<IOperator&>(expr);
     auto& out = printer.GetOut();
     const auto rel = op.RelName();
@@ -136,6 +139,29 @@ static void PrintRel(NQumir::NAst::TExpr& expr, TPrinter& printer, TPrintFrame f
         if (limit.Offset() != 0) {
             printer.Separator(frame.Level + 1);
             out << "(offset " << limit.Offset() << ')';
+        }
+        out << ')';
+        return;
+    }
+
+    if (rel == TLateMaterializeOperator::OpId) {
+        auto& late = static_cast<TLateMaterializeOperator&>(op);
+        out << "(rel late-materialize";
+        printer.Separator(frame.Level + 1);
+        printer.PrintExpr(late.Input(), frame.AllowTypeWrap, frame.Level + 1);
+        printer.Separator(frame.Level + 1);
+        out << "(locator ";
+        printer.PrintIdentifier(late.LocatorColumn());
+        out << ')';
+        for (const auto& column : late.Columns()) {
+            printer.Separator(frame.Level + 1);
+            out << "(column ";
+            printer.PrintIdentifier(column.OutputName);
+            printer.Space();
+            printer.PrintIdentifier(column.PhysicalName);
+            printer.Space();
+            printer.PrintType(column.Type, frame.Level + 2);
+            out << ')';
         }
         out << ')';
         return;
@@ -287,6 +313,8 @@ static void PrintRel(NQumir::NAst::TExpr& expr, TPrinter& printer, TPrintFrame f
 
     throw std::runtime_error("PrintRel: unknown rel operator: " + std::string(rel));
 }
+
+} // namespace
 
 TPrintExprFactory MakeRelPrinters() {
     return {{IOperator::NodeId, PrintRel}};
