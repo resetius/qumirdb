@@ -19,7 +19,7 @@ using namespace NQumir::NAst;
 namespace {
 
 bool HasOutputColumn(const TOperatorPtr& op, const std::string& name) {
-    if (auto* st = static_cast<TStructType*>(op->OutputColumns().get())) {
+    if (auto&& st = op->OutputColumns()) {
         for (auto& [field, _] : st->Fields) {
             if (field == name) {
                 return true;
@@ -33,7 +33,7 @@ void Prune(const TOperatorPtr& root, const TColumnSet* explicitRootDemand, TCteU
     TColumnSet initial;
     if (explicitRootDemand) {
         initial = *explicitRootDemand;
-    } else if (auto* st = static_cast<TStructType*>(root->OutputColumns().get())) {
+    } else if (auto&& st = root->OutputColumns()) {
         for (auto& [name, _] : st->Fields) {
             initial.insert(name);
         }

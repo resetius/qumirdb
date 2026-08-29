@@ -498,7 +498,7 @@ TStatsPtr ComputeSourceStats(const std::shared_ptr<TSourceOperator>& source) {
 }
 
 TStatsPtr ComputeUnionStats(const std::shared_ptr<TUnionAllOperator>& un) {
-    auto* outStruct = static_cast<TStructType*>(un->OutputColumns().get());
+    auto&& outStruct = un->OutputColumns();
     if (!outStruct) {
         return nullptr;
     }
@@ -515,7 +515,7 @@ TStatsPtr ComputeUnionStats(const std::shared_ptr<TUnionAllOperator>& un) {
 
     for (const auto& branch : un->Inputs()) {
         auto bs = branch->Stats_;
-        auto* bStruct = static_cast<TStructType*>(branch->OutputColumns().get());
+        auto&& bStruct = branch->OutputColumns();
         if (!bs || !bStruct || bStruct->Fields.size() != numCols) {
             return nullptr;
         }

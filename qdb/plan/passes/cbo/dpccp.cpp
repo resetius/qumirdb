@@ -114,7 +114,7 @@ private:
     void BuildGraph(const std::vector<TJoinEdge>& edges) {
         std::unordered_map<std::string, size_t> owner;
         for (size_t i = 0; i < N_; ++i) {
-            auto* schema = static_cast<NQumir::NAst::TStructType*>(Leaves_[i]->OutputColumns().get());
+            auto&& schema = Leaves_[i]->OutputColumns();
             if (!schema) {
                 continue;
             }

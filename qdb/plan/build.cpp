@@ -836,7 +836,7 @@ public:
 
         TOperatorPtr node = std::move(input);
         if (!computed.empty()) {
-            auto* schema = static_cast<NAst::TStructType*>(node->OutputColumns().get());
+            auto&& schema = node->OutputColumns();
             std::vector<TProjectionSpec> projs;
             if (schema) {
                 for (const auto& [name, _] : schema->Fields) {
@@ -1507,7 +1507,7 @@ std::expected<TOperatorPtr, TError> ApplyColumnAliases(
 // AssignSourceAliases, but subqueries/CTEs used with an alias need it here so the
 // outer query can reference `alias.col` (and equi-join keys on them are extracted).
 TOperatorPtr AliasSubplan(TOperatorPtr plan, const std::string& alias) {
-    auto* schema = static_cast<NAst::TStructType*>(plan->OutputColumns().get());
+    auto&& schema = plan->OutputColumns();
     if (!schema) {
         return plan;
     }
@@ -1539,7 +1539,7 @@ std::expected<std::vector<std::string>, TError> OutputColumnNames(
     const TOperatorPtr& op,
     const std::string& context)
 {
-    auto* output = static_cast<NAst::TStructType*>(op->OutputColumns().get());
+    auto&& output = op->OutputColumns();
     if (!output) {
         return std::unexpected(TError(context + " output schema must be a struct"));
     }
@@ -1783,8 +1783,7 @@ void CollectLocalColumns(
                     out.insert(std::string(col.Name));
                     out.insert(prefix + "." + std::string(col.Name));
                 }
-            } else if (auto* schema =
-                           static_cast<NAst::TStructType*>((*src)->OutputColumns().get())) {
+            } else if (auto&& schema = (*src)->OutputColumns()) {
                 // CTE / subquery table inlined as a subplan: its columns are the
                 // subplan's output (projection) names; qualify them by the reference
                 // alias exactly as AliasSubplan does, so a correlated `ctr2.ctr_state`
@@ -2280,7 +2279,7 @@ std::expected<TOperatorPtr, TError> BuildSelect(
     for (size_t i = 0; i < select.SelectList->Items.size(); ++i) {
         const auto& item = select.SelectList->Items[i];
         if (item->Star) {
-            auto* schema = static_cast<NAst::TStructType*>(node->OutputColumns().get());
+            auto&& schema = node->OutputColumns();
             if (!schema) {
                 return std::unexpected(TError("'*' over an unresolved input"));
             }
@@ -2639,7 +2638,7 @@ std::expected<TOperatorPtr, TError> BuildSelect(
 
 
 bool HasOutputColumn(const TOperatorPtr& op, const std::string& name) {
-    auto* output = static_cast<NAst::TStructType*>(op->OutputColumns().get());
+    auto&& output = op->OutputColumns();
     if (!output) {
         return false;
     }

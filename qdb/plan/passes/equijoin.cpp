@@ -117,7 +117,7 @@ std::unordered_set<std::string> JoinColumns(int side, const std::shared_ptr<TJoi
     auto sideInput = side == 0
         ? join->Left()
         : join->Right();
-    auto* schema = static_cast<TStructType*>(sideInput->OutputColumns().get());
+    auto&& schema = sideInput->OutputColumns();
     if (!schema) {
         return ret;
     }

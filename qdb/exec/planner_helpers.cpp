@@ -213,20 +213,17 @@ int64_t EstimateAggregateInitialCapacity(
 
 NQumir::NAst::TTypePtr BuildSourceRuntimeType(TSourceOperator& src)
 {
-    if (auto required = src.RequiredColumns()) {
-        auto* st = static_cast<NQumir::NAst::TStructType*>(required.get());
+    if (auto requiredColumns = src.RequiredColumns()) {
         std::unordered_set<std::string> cols;
-        for (auto& [name, _] : st->Fields) {
+        for (auto& [name, _] : requiredColumns->Fields) {
             auto dot = name.rfind('.');
             cols.insert(dot != std::string::npos ? name.substr(dot + 1) : name);
         }
         src.GetSource().RestrictColumns(cols);
     }
 
-    auto* qualSt = static_cast<NQumir::NAst::TStructType*>(
-        src.OutputColumns().get());
-    std::unordered_map<std::string,
-        std::pair<std::string, NQumir::NAst::TTypePtr>> bareToQual;
+    auto&& qualSt = src.OutputColumns();
+    std::unordered_map<std::string, std::pair<std::string, NQumir::NAst::TTypePtr>> bareToQual;
     if (qualSt) {
         for (const auto& [qname, ftype] : qualSt->Fields) {
             auto dot = qname.rfind('.');
@@ -374,8 +371,7 @@ TProjectColumnPlan BuildProjectColumnPlan(
 {
     TProjectColumnPlan plan;
     std::vector<std::pair<std::string, NQumir::NAst::TTypePtr>> outFields;
-    auto* annotatedOutput = static_cast<NQumir::NAst::TStructType*>(
-        project.OutputColumns().get());
+    auto&& annotatedOutput = project.OutputColumns();
     size_t annotatedFieldIndex = 0;
     for (size_t projectionIndex = 0;
          projectionIndex < project.Projections().size();

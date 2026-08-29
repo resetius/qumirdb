@@ -58,7 +58,7 @@ void ResolveProjectionSortKeys(
     const TOperatorPtr& input)
 {
     auto project = TMaybeOp<TProjectOperator>(input);
-    auto* output = static_cast<TStructType*>(input->OutputColumns().get());
+    auto&& output = input->OutputColumns();
     if (!project || !output) {
         return;
     }
@@ -151,7 +151,7 @@ void AnnotateTypes(
 
     if (auto maybe = TMaybeOp<TProjectOperator>(root)) {
         auto proj = maybe.Cast();
-        auto* inputStruct = static_cast<TStructType*>(proj->Input()->OutputColumns().get());
+        auto&& inputStruct = proj->Input()->OutputColumns();
         std::vector<std::pair<std::string, TTypePtr>> outFields;
         if (inputStruct) {
             for (auto& spec : proj->MutableProjections()) {
