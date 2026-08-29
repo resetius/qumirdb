@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <span>
 #include <string>
+#include <string_view>
 #include <unordered_set>
 
 #include <qdb/io/schema.h>
@@ -60,6 +61,8 @@ public:
         TRowSet& output,
         std::string* error) const = 0;
 };
+
+inline constexpr std::string_view InternalRowIdColumnName = "__row_id__";
 
 struct ISink {
     virtual ~ISink() = default;
