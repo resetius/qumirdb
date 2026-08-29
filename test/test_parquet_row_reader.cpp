@@ -73,6 +73,7 @@ TEST(ParquetRowReaderTest, ReadsSelectedPagesInLocatorOrder) {
     arrow::Int64Builder integers;
     arrow::StringBuilder strings;
     arrow::BooleanBuilder booleans;
+    arrow::BinaryBuilder binary;
     for (int64_t row = 0; row < rowCount; ++row) {
         if (row % 7 == 0) {
             ASSERT_TRUE(integers.AppendNull().ok());
@@ -89,17 +90,20 @@ TEST(ParquetRowReaderTest, ReadsSelectedPagesInLocatorOrder) {
         } else {
             ASSERT_TRUE(booleans.Append((row & 1) != 0).ok());
         }
+        ASSERT_TRUE(binary.Append("raw").ok());
     }
 
     auto schema = arrow::schema({
         arrow::field("i", arrow::int64(), true),
         arrow::field("s", arrow::utf8(), true),
         arrow::field("b", arrow::boolean(), true),
+        arrow::field("raw", arrow::binary(), false),
     });
     auto batch = arrow::RecordBatch::Make(schema, rowCount, {
         integers.Finish().ValueOrDie(),
         strings.Finish().ValueOrDie(),
         booleans.Finish().ValueOrDie(),
+        binary.Finish().ValueOrDie(),
     });
     WriteParquet(path, batch, rowGroupSize);
 
@@ -112,9 +116,9 @@ TEST(ParquetRowReaderTest, ReadsSelectedPagesInLocatorOrder) {
         MakeParquetRowId(0, 3),
         MakeParquetRowId(0, 127),
     };
-    const std::vector<int> columnIndexes{1, 0, 2};
+    const std::vector<std::string> columnNames{"s", "i", "b"};
     auto fileReader = OpenParquet(path);
-    TParquetRowReader reader(fileReader, columnIndexes);
+    TParquetRowReader reader(fileReader, columnNames);
     auto result = reader.ReadRows(locators);
     ASSERT_TRUE(result.ok()) << result.status().ToString();
 
@@ -154,7 +158,44 @@ TEST(ParquetRowReaderTest, ReadsSelectedPagesInLocatorOrder) {
         std::vector<TPhysicalRowId>{MakeParquetRowId(2, 0)});
     EXPECT_FALSE(badLocator.ok());
 
-    EXPECT_THROW(TParquetRowReader(fileReader, {3}), std::out_of_range);
+    const std::vector<std::string> fallbackColumnNames{"i", "raw", "i"};
+    TParquetRowReader fallbackReader(fileReader, fallbackColumnNames);
+    auto fallbackResult = fallbackReader.ReadRows(locators);
+    ASSERT_TRUE(fallbackResult.ok()) << fallbackResult.status().ToString();
+    const auto& fallbackOutput = *fallbackResult;
+    ASSERT_EQ(fallbackOutput->num_rows(),
+        static_cast<int64_t>(locators.size()));
+    ASSERT_EQ(fallbackOutput->num_columns(), 3);
+    EXPECT_EQ(fallbackOutput->schema()->field(0)->name(), "i");
+    EXPECT_EQ(fallbackOutput->schema()->field(1)->name(), "raw");
+    EXPECT_EQ(fallbackOutput->schema()->field(2)->name(), "i");
+    EXPECT_TRUE(fallbackOutput->column(0)->Equals(
+        fallbackOutput->column(2)));
+
+    EXPECT_THROW(
+        TParquetRowReader(fileReader, std::vector<std::string>{"missing"}),
+        std::invalid_argument);
+}
+
+TEST(ParquetRowReaderTest, RejectsNestedFileSchema) {
+    const std::string path = "/tmp/test_parquet_row_reader_nested_qdb.parquet";
+
+    arrow::Int64Builder values;
+    ASSERT_TRUE(values.AppendValues({10, 20}).ok());
+    auto valueArray = values.Finish().ValueOrDie();
+    auto valueField = arrow::field("value", arrow::int64(), false);
+    auto nested = arrow::StructArray::Make(
+        {valueArray}, {valueField}).ValueOrDie();
+    auto batch = arrow::RecordBatch::Make(
+        arrow::schema({arrow::field("nested", nested->type(), false)}),
+        2,
+        {nested});
+    WriteParquet(path, batch, 2);
+
+    EXPECT_THROW(
+        TParquetRowReader(
+            OpenParquet(path), std::vector<std::string>{"nested"}),
+        std::invalid_argument);
 }
 
 int main(int argc, char** argv) {

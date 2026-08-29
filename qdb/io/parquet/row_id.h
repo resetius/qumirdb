@@ -1,11 +1,11 @@
 #pragma once
 
+#include <qdb/io/physical_row_id.h>
+
 #include <cstdint>
 #include <stdexcept>
 
 namespace NQdb {
-
-using TPhysicalRowId = uint64_t;
 
 inline constexpr uint64_t ParquetRowOffsetBits = 32;
 inline constexpr uint64_t ParquetRowOffsetMask = (uint64_t{1} << ParquetRowOffsetBits) - 1;

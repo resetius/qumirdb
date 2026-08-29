@@ -4,6 +4,7 @@
 #include <arrow/array/concatenate.h>
 #include <arrow/compute/api.h>
 #include <parquet/arrow/reader.h>
+#include <parquet/arrow/schema.h>
 #include <parquet/column_reader.h>
 #include <parquet/file_reader.h>
 #include <parquet/level_conversion.h>
@@ -12,6 +13,7 @@
 
 #include <algorithm>
 #include <stdexcept>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -32,7 +34,7 @@ enum class EColumnRead {
 };
 
 struct TCompiledColumn {
-    int Index;
+    int FileIndex;
     std::shared_ptr<arrow::Field> Field;
     const parquet::ColumnDescriptor* Descriptor = nullptr;
     parquet::internal::LevelInfo Levels;
@@ -47,12 +49,12 @@ arrow::MemoryPool* MemoryPoolOrDefault(arrow::MemoryPool* memoryPool) {
 }
 
 TCompiledColumn CompileColumn(
-    int index,
+    int fileIndex,
     const std::shared_ptr<arrow::Field>& field,
     const parquet::ColumnDescriptor* descriptor)
 {
     TCompiledColumn column{
-        .Index = index,
+        .FileIndex = fileIndex,
         .Field = field,
         .Descriptor = descriptor,
     };
@@ -178,7 +180,7 @@ arrow::Result<std::shared_ptr<arrow::Array>> ReadPageSelectedColumn(
     std::span<const int64_t> rows,
     arrow::MemoryPool* memoryPool)
 {
-    auto pageReader = rowGroup.GetColumnPageReader(column.Index);
+    auto pageReader = rowGroup.GetColumnPageReader(column.FileIndex);
     if (!pageReader) {
         return arrow::Status::Invalid(
             "parquet page lookup: cannot create page reader");
@@ -279,6 +281,7 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> ReadPageSelectedRows(
     parquet::arrow::FileReader& reader,
     std::span<const TLocator> locators,
     std::span<const TCompiledColumn> columns,
+    std::span<const size_t> outputToReadColumn,
     const std::shared_ptr<arrow::Schema>& outputSchema,
     arrow::MemoryPool* memoryPool)
 {
@@ -363,17 +366,30 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> ReadPageSelectedRows(
         }
     }
 
+    if (outputToReadColumn.empty()) {
+        return arrow::RecordBatch::Make(
+            outputSchema,
+            static_cast<int64_t>(locators.size()),
+            std::move(arrays));
+    }
+    std::vector<std::shared_ptr<arrow::Array>> outputArrays;
+    outputArrays.reserve(outputToReadColumn.size());
+    for (size_t readColumn : outputToReadColumn) {
+        outputArrays.push_back(arrays[readColumn]);
+    }
     return arrow::RecordBatch::Make(
         outputSchema,
         static_cast<int64_t>(locators.size()),
-        std::move(arrays));
+        std::move(outputArrays));
 }
 
 arrow::Result<std::shared_ptr<arrow::RecordBatch>> ReadWholeRowGroups(
     parquet::arrow::FileReader& reader,
     const parquet::FileMetaData& metadata,
     std::span<const TLocator> locators,
-    const std::vector<int>& columnIndexes,
+    const std::vector<int>& fileColumnIndexes,
+    std::span<const size_t> outputToReadColumn,
+    const std::shared_ptr<arrow::Schema>& outputSchema,
     arrow::MemoryPool* memoryPool)
 {
     std::vector<int> rowGroups;
@@ -399,7 +415,8 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> ReadWholeRowGroups(
         groupBegin = groupEnd;
     }
 
-    auto readerResult = reader.GetRecordBatchReader(rowGroups, columnIndexes);
+    auto readerResult = reader.GetRecordBatchReader(
+        rowGroups, fileColumnIndexes);
     if (!readerResult.ok()) {
         return readerResult.status();
     }
@@ -415,7 +432,22 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> ReadWholeRowGroups(
         auto taken,
         arrow::compute::Take(
             arrow::Datum(table), arrow::Datum(takeIndexes)));
-    return taken.table()->CombineChunksToBatch(memoryPool);
+    ARROW_ASSIGN_OR_RAISE(
+        auto uniqueBatch,
+        taken.table()->CombineChunksToBatch(memoryPool));
+    if (outputToReadColumn.empty()) {
+        return uniqueBatch;
+    }
+    std::vector<std::shared_ptr<arrow::Array>> outputArrays;
+    outputArrays.reserve(outputToReadColumn.size());
+    for (size_t readColumn : outputToReadColumn) {
+        outputArrays.push_back(uniqueBatch->column(
+            static_cast<int>(readColumn)));
+    }
+    return arrow::RecordBatch::Make(
+        outputSchema,
+        uniqueBatch->num_rows(),
+        std::move(outputArrays));
 }
 
 } // namespace
@@ -423,44 +455,81 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> ReadWholeRowGroups(
 struct TParquetRowReader::TImpl {
     TImpl(
         std::shared_ptr<parquet::arrow::FileReader> reader,
-        std::vector<int> columnIndexes,
+        std::span<const std::string> columnNames,
         arrow::MemoryPool* memoryPool)
         : MemoryPool(memoryPool)
         , Reader(std::move(reader))
-        , ColumnIndexes(std::move(columnIndexes))
     {
         if (!Reader) {
             throw std::invalid_argument("parquet row reader is null");
         }
-        std::shared_ptr<arrow::Schema> schema;
-        auto status = Reader->GetSchema(&schema);
-        if (!status.ok()) {
-            throw std::runtime_error(status.ToString());
-        }
-        if (ColumnIndexes.empty()) {
+        if (columnNames.empty()) {
             throw std::invalid_argument(
-                "parquet row reader requires at least one column index");
+                "parquet row reader requires at least one column name");
         }
 
         Metadata = Reader->parquet_reader()->metadata();
-        const bool flatSchema =
-            Metadata->num_columns() == schema->num_fields();
-        Columns.reserve(ColumnIndexes.size());
-        std::vector<std::shared_ptr<arrow::Field>> outputFields;
-        outputFields.reserve(ColumnIndexes.size());
-        SupportsPageLookup = flatSchema;
-        for (int index : ColumnIndexes) {
-            if (index < 0 || index >= schema->num_fields()) {
-                throw std::out_of_range(
-                    "parquet column index is outside the file schema");
+        const auto& manifest = Reader->manifest();
+        if (manifest.schema_fields.size() !=
+            static_cast<size_t>(Metadata->num_columns()))
+        {
+            throw std::invalid_argument(
+                "parquet row reader requires a flat file schema");
+        }
+
+        std::unordered_map<
+            std::string_view,
+            const parquet::arrow::SchemaField*> fieldsByName;
+        fieldsByName.reserve(manifest.schema_fields.size());
+        for (const auto& field : manifest.schema_fields) {
+            if (!field.is_leaf()) {
+                throw std::invalid_argument(
+                    "parquet row reader requires a flat file schema");
             }
-            const parquet::ColumnDescriptor* descriptor = flatSchema
-                ? Metadata->schema()->Column(index)
-                : nullptr;
-            auto column = CompileColumn(index, schema->field(index), descriptor);
-            SupportsPageLookup &= column.Read != EColumnRead::Unsupported;
-            outputFields.push_back(column.Field);
-            Columns.push_back(std::move(column));
+            if (!fieldsByName.emplace(field.field->name(), &field).second) {
+                throw std::invalid_argument(
+                    "parquet row reader requires unique column names");
+            }
+        }
+
+        FileColumnIndexes.reserve(columnNames.size());
+        Columns.reserve(columnNames.size());
+        OutputToReadColumn.reserve(columnNames.size());
+        std::unordered_map<int, size_t> uniqueColumns;
+        uniqueColumns.reserve(columnNames.size());
+        std::vector<std::shared_ptr<arrow::Field>> outputFields;
+        outputFields.reserve(columnNames.size());
+        SupportsPageLookup = true;
+        for (const auto& columnName : columnNames) {
+            auto found = fieldsByName.find(columnName);
+            if (found == fieldsByName.end()) {
+                throw std::invalid_argument(
+                    "parquet row reader: unknown column '" +
+                    columnName + "'");
+            }
+            const auto* schemaField = found->second;
+            const int fileIndex = schemaField->column_index;
+            if (fileIndex < 0 || fileIndex >= Metadata->num_columns()) {
+                throw std::runtime_error(
+                    "parquet schema manifest has an invalid column index");
+            }
+            auto [uniqueColumn, inserted] = uniqueColumns.emplace(
+                fileIndex, FileColumnIndexes.size());
+            if (inserted) {
+                FileColumnIndexes.push_back(fileIndex);
+                const parquet::ColumnDescriptor* descriptor =
+                    Metadata->schema()->Column(fileIndex);
+                auto column = CompileColumn(
+                    fileIndex, schemaField->field, descriptor);
+                SupportsPageLookup &=
+                    column.Read != EColumnRead::Unsupported;
+                Columns.push_back(std::move(column));
+            }
+            OutputToReadColumn.push_back(uniqueColumn->second);
+            outputFields.push_back(schemaField->field);
+        }
+        if (uniqueColumns.size() == columnNames.size()) {
+            OutputToReadColumn.clear();
         }
         OutputSchema = arrow::schema(std::move(outputFields));
     }
@@ -468,19 +537,20 @@ struct TParquetRowReader::TImpl {
     arrow::MemoryPool* MemoryPool;
     std::shared_ptr<parquet::arrow::FileReader> Reader;
     std::shared_ptr<parquet::FileMetaData> Metadata;
-    std::vector<int> ColumnIndexes;
+    std::vector<int> FileColumnIndexes;
     std::vector<TCompiledColumn> Columns;
+    std::vector<size_t> OutputToReadColumn;
     std::shared_ptr<arrow::Schema> OutputSchema;
     bool SupportsPageLookup = false;
 };
 
 TParquetRowReader::TParquetRowReader(
     std::shared_ptr<parquet::arrow::FileReader> reader,
-    std::vector<int> columnIndexes,
+    std::span<const std::string> columnNames,
     arrow::MemoryPool* memoryPool)
     : Impl_(std::make_unique<TImpl>(
         std::move(reader),
-        std::move(columnIndexes),
+        columnNames,
         MemoryPoolOrDefault(memoryPool)))
 {}
 
@@ -540,6 +610,7 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> TParquetRowReader::ReadRows(s
             *Impl_->Reader,
             locators,
             Impl_->Columns,
+            Impl_->OutputToReadColumn,
             Impl_->OutputSchema,
             Impl_->MemoryPool);
         if (selected.ok()) {
@@ -555,7 +626,9 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> TParquetRowReader::ReadRows(s
         *Impl_->Reader,
         *metadata,
         locators,
-        Impl_->ColumnIndexes,
+        Impl_->FileColumnIndexes,
+        Impl_->OutputToReadColumn,
+        Impl_->OutputSchema,
         Impl_->MemoryPool);
 }
 

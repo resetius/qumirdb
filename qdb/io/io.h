@@ -1,8 +1,11 @@
 #pragma once
 
+#include <qdb/io/physical_row_id.h>
+
 #include <cstdint>
-#include <unordered_set>
+#include <span>
 #include <string>
+#include <unordered_set>
 
 #include <qdb/io/schema.h>
 #include <qdb/plan/ops/stats.h>
@@ -46,6 +49,16 @@ struct ISource {
     virtual const TStatsPtr Stats() const = 0;
     virtual bool Next(TRowSet& rowSet) = 0;
     virtual void RestrictColumns(const std::unordered_set<std::string>& names) {}
+};
+
+class IPhysicalRowReader {
+public:
+    virtual ~IPhysicalRowReader() = default;
+
+    virtual bool ReadRows(
+        std::span<const TPhysicalRowId> rowIds,
+        TRowSet& output,
+        std::string* error) const = 0;
 };
 
 struct ISink {

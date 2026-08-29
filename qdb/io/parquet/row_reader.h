@@ -6,7 +6,7 @@
 
 #include <memory>
 #include <span>
-#include <vector>
+#include <string>
 
 namespace arrow {
 class MemoryPool;
@@ -21,9 +21,10 @@ namespace NQdb {
 
 class TParquetRowReader {
 public:
+    // Column names are resolved once against the full file schema.
     explicit TParquetRowReader(
         std::shared_ptr<parquet::arrow::FileReader> reader,
-        std::vector<int> columnIndexes,
+        std::span<const std::string> columnNames,
         arrow::MemoryPool* memoryPool = nullptr);
     ~TParquetRowReader();
 
