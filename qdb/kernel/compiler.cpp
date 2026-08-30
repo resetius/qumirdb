@@ -103,7 +103,7 @@ std::unordered_map<std::string, void*> CompileKernelAst(
 namespace {
 constexpr const char* CacheSchemaVersion = "v1";
 // Bump when the generated key helpers or the .oz kernel libraries change.
-constexpr const char* KernelLibVersion = "15";
+constexpr const char* KernelLibVersion = "16";
 } // namespace
 
 NQumir::NCodeGen::TLlvmRunner::TLinkedModule CompileKernelAstCached(
@@ -1286,6 +1286,28 @@ NQumir::NAst::TExprPtr BuildWindowKeyComparatorAst(
     return std::move(builder).Build();
 }
 
+NQumir::NAst::TExprPtr BuildHeapTopKEntryAst()
+{
+    using namespace NQumir::NAst;
+    namespace Oz = NKernel::NOz;
+
+    auto i64Type = std::make_shared<TIntegerType>();
+    Oz::TFunBuilder builder("qdb_top_k_select");
+    builder
+        .Param("store", Ptr(QumirDbNamedType("TRowSet")))
+        .Param("row_ids", Ptr(i64Type))
+        .Param("size", i64Type)
+        .Param("limit", i64Type)
+        .Return(i64Type)
+        .Stmt(Oz::Return(Oz::Call("heap_top_k", {
+            Oz::Ident("row_ids"),
+            Oz::Ident("size"),
+            Oz::Ident("limit"),
+            Oz::Ident("store"),
+        })));
+    return std::move(builder).Build();
+}
+
 } // namespace
 
 NQumir::NAst::TExprPtr BuildSortRowIdLessAst(
@@ -1337,6 +1359,32 @@ NQumir::NAst::TExprPtr BuildSortRowIdLessAst(
         Oz::Bin(TOperator("<"), Oz::Ident("left_id"), Oz::Ident("right_id")));
 
     return std::move(builder).Build();
+}
+
+NQumir::NAst::TExprPtr BuildHeapTopKProgramAst(
+    const std::vector<TSortRadixKeyInput>& keys)
+{
+    using namespace NQumir::NAst;
+
+    if (keys.empty()) {
+        throw NQumir::TError("BuildHeapTopKProgramAst: empty key list");
+    }
+
+    auto library = NKernel::ParseFunctionLibrary(
+        NKernel::ReadSortKernel("heap.oz"));
+    if (!library) {
+        throw NQumir::TError(
+            "BuildHeapTopKProgramAst: " + library.error().ToString());
+    }
+
+    std::vector<TExprPtr> programStmts;
+    for (auto& stmt : *library) {
+        programStmts.push_back(std::move(stmt));
+    }
+    programStmts.push_back(BuildSortRowIdLessAst(keys));
+    programStmts.push_back(BuildHeapTopKEntryAst());
+    return std::make_shared<TBlockExpr>(
+        NQumir::TLocation{}, std::move(programStmts));
 }
 
 NQumir::NAst::TExprPtr BuildWindowProgramAst(
@@ -1732,6 +1780,30 @@ TKernelCompiler::TTopSortDispatch TKernelCompiler::CompileTopSort(
         TRowSet* output) {
         return reinterpret_cast<TTopSortFn>(slot->Fns[0])(
             state, batch, rowIds, work, counts, n, pickSrc, pickIdx, limit, output);
+    };
+}
+
+TKernelCompiler::THeapTopKDispatch TKernelCompiler::CompileHeapTopK(
+    const std::vector<TSortRadixKeyInput>& keys)
+{
+    auto program = BuildHeapTopKProgramAst(keys);
+    PrintKernelAst(Diagnostics_, "top-k.heap", program);
+
+    auto kernel = EmitKernel(
+        "top-k.heap",
+        {"qdb_top_k_select"},
+        std::move(program));
+    FinishKernelDiagnostics(Diagnostics_);
+
+    using THeapTopKFn = int64_t(*)(
+        TRowSet*, int64_t*, int64_t, int64_t);
+    return [slot = kernel.Slot](
+        TRowSet* store,
+        int64_t* rowIds,
+        int64_t size,
+        int64_t limit) {
+        return reinterpret_cast<THeapTopKFn>(slot->Fns[0])(
+            store, rowIds, size, limit);
     };
 }
 

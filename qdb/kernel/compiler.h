@@ -103,6 +103,12 @@ struct TSortRadixKeyInput {
 NQumir::NAst::TExprPtr BuildSortRowIdLessAst(
     const std::vector<TSortRadixKeyInput>& keys);
 
+// Heap Top-K program (entry qdb_top_k_select). It keeps the first K packed row
+// ids in SQL sort order and returns their count. The tail holds unspecified
+// values, not the remaining row ids.
+NQumir::NAst::TExprPtr BuildHeapTopKProgramAst(
+    const std::vector<TSortRadixKeyInput>& keys);
+
 // Radix composite sort program. With a materialize schema it exports one
 // stage-level entry qdb_sort_run: optionally sorts packed TRowId values
 // in-place, then materializes a requested slice into a kernel-owned TRowSet.
@@ -332,6 +338,12 @@ public:
         int64_t limit,
         TRowSet* output)>;
 
+    using THeapTopKDispatch = std::function<int64_t(
+        TRowSet* store,
+        int64_t* rowIds,
+        int64_t size,
+        int64_t limit)>;
+
     // sizeof(HashTable) per modules/qumirdb.cpp's layout — callers of
     // CompileAggregate must allocate a zero-initialized buffer this large
     // for `ht`.
@@ -367,6 +379,8 @@ public:
     TTopSortDispatch CompileTopSort(
         const std::vector<TSortRadixKeyInput>& keys,
         const NQumir::NAst::TStructType* materializeType = nullptr);
+    THeapTopKDispatch CompileHeapTopK(
+        const std::vector<TSortRadixKeyInput>& keys);
 
     // Window kernel (entry qdb_window_run, reuses the sort dispatch ABI): sorts
     // by `keys` (partition ++ order), then materializes input columns followed

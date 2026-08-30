@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <memory>
 #include <numeric>
+#include <random>
 #include <string>
 #include <utility>
 #include <vector>
@@ -78,6 +79,11 @@ CompileRowIdSort(const std::vector<NQdb::TSortRadixKeyInput>& keys) {
         .Runner = std::move(runner),
         .Sort = reinterpret_cast<TCompiledRowIdSort::TSort>(entry->second),
     };
+}
+
+NQdb::TKernelCompiler::THeapTopKDispatch
+CompileHeapTopK(const std::vector<NQdb::TSortRadixKeyInput>& keys) {
+    return NQdb::TKernelCompiler().CompileHeapTopK(keys);
 }
 
 std::vector<int64_t> MakeRowIds(std::array<NQdb::TRowSet, 2>& store) {
@@ -219,6 +225,119 @@ TEST(SortRowId, SortsNullableStringsWithSqlNullOrder) {
                                 NQdb::MakeRowId(0, 1),
                                 NQdb::MakeRowId(0, 4),
                             }));
+}
+
+TEST(HeapTopK, SelectsSortedPrefixFromRandomRows) {
+    using namespace NQumir::NAst;
+
+    auto i64 = std::make_shared<TIntegerType>();
+    auto i32 = std::make_shared<TIntegerType>(TIntegerType::I32);
+    auto select = CompileHeapTopK({
+        {.ColumnIndex = 0, .Type = i64, .Desc = true},
+        {.ColumnIndex = 1, .Type = i32},
+    });
+    ASSERT_TRUE(select);
+
+    constexpr int32_t batchRows = 2048;
+    constexpr int32_t rowCount = batchRows * 2;
+    std::mt19937 random(42);
+    std::uniform_int_distribution<int64_t> primaryDistribution(-20, 20);
+    std::uniform_int_distribution<int32_t> secondaryDistribution(-10, 10);
+    std::vector<int64_t> primary(rowCount);
+    std::vector<int32_t> secondary(rowCount);
+    for (int32_t row = 0; row < rowCount; ++row) {
+        primary[row] = primaryDistribution(random);
+        secondary[row] = secondaryDistribution(random);
+    }
+
+    std::array<NQdb::TColumn, 2> columns0 = {
+        NQdb::TColumn{.Data = reinterpret_cast<char*>(primary.data())},
+        NQdb::TColumn{.Data = reinterpret_cast<char*>(secondary.data())},
+    };
+    std::array<NQdb::TColumn, 2> columns1 = {
+        NQdb::TColumn{.Data = reinterpret_cast<char*>(
+            primary.data() + batchRows)},
+        NQdb::TColumn{.Data = reinterpret_cast<char*>(
+            secondary.data() + batchRows)},
+    };
+    std::array<NQdb::TRowSet, 2> store = {
+        NQdb::TRowSet{
+            .Columns = columns0.data(),
+            .ColumnCount = static_cast<int64_t>(columns0.size()),
+            .RowCount = batchRows,
+        },
+        NQdb::TRowSet{
+            .Columns = columns1.data(),
+            .ColumnCount = static_cast<int64_t>(columns1.size()),
+            .RowCount = batchRows,
+        },
+    };
+
+    auto input = MakeRowIds(store);
+    std::shuffle(input.begin(), input.end(), random);
+    auto expected = input;
+    std::sort(expected.begin(), expected.end(), [&](int64_t left, int64_t right) {
+        const int32_t leftRow =
+            NQdb::BatchIndex(left) * batchRows + NQdb::RowIndex(left);
+        const int32_t rightRow =
+            NQdb::BatchIndex(right) * batchRows + NQdb::RowIndex(right);
+        if (primary[leftRow] != primary[rightRow]) {
+            return primary[leftRow] > primary[rightRow];
+        }
+        if (secondary[leftRow] != secondary[rightRow]) {
+            return secondary[leftRow] < secondary[rightRow];
+        }
+        return left < right;
+    });
+
+    const std::array<int64_t, 6> limits = {
+        0, 1, 7, 37, rowCount, rowCount + 100,
+    };
+    for (int64_t limit : limits) {
+        auto rows = input;
+        const int64_t kept = select(
+            store.data(), rows.data(), static_cast<int64_t>(rows.size()), limit);
+        const int64_t expectedCount = std::min<int64_t>(rowCount, limit);
+        EXPECT_EQ(kept, expectedCount);
+        EXPECT_TRUE(std::equal(
+            rows.begin(), rows.begin() + kept, expected.begin()));
+    }
+
+    EXPECT_EQ(select(nullptr, nullptr, 0, 10), 0);
+}
+
+TEST(HeapTopK, AppliesNullableStringOrder) {
+    using namespace NQumir::NAst;
+
+    TStringColumn strings({"12345678beta", "unused", "12345678alpha",
+                           "12345678beta", "unused", "12345678alpha"},
+                          {0b00101101});
+    NQdb::TRowSet batch = {
+        .Columns = &strings.Column,
+        .ColumnCount = 1,
+        .RowCount = 6,
+    };
+    auto stringType =
+        std::make_shared<NQdb::TNullable>(std::make_shared<TStringType>());
+    auto select = CompileHeapTopK({{
+        .ColumnIndex = 0,
+        .Type = stringType,
+        .NullsFirst = true,
+    }});
+    ASSERT_TRUE(select);
+
+    auto rows = MakeSingleBatchRowIds(batch);
+    std::reverse(rows.begin(), rows.end());
+    ASSERT_EQ(select(
+        &batch, rows.data(), static_cast<int64_t>(rows.size()), 4), 4);
+    const std::vector<int64_t> expected = {
+        NQdb::MakeRowId(0, 1),
+        NQdb::MakeRowId(0, 4),
+        NQdb::MakeRowId(0, 2),
+        NQdb::MakeRowId(0, 5),
+    };
+    EXPECT_TRUE(std::equal(
+        rows.begin(), rows.begin() + 4, expected.begin()));
 }
 
 } // namespace
