@@ -5,6 +5,7 @@
 #include <qdb/plan/ops/cte_consumer.h>
 #include <qdb/plan/ops/filter.h>
 #include <qdb/plan/ops/join.h>
+#include <qdb/plan/ops/late_materialize.h>
 #include <qdb/plan/ops/limit.h>
 #include <qdb/plan/ops/project.h>
 #include <qdb/plan/ops/sort.h>
@@ -389,6 +390,11 @@ private:
                 }
                 // A nested limit is a real streaming node applied in place.
                 outputType = inputs[0].OutputType;
+                break;
+            }
+            case EExecPlanNodeKind::LateMaterialize: {
+                auto* late = static_cast<const TLateMaterializeOperator*>(stage.Operator);
+                outputType = late->OutputColumns();
                 break;
             }
             case EExecPlanNodeKind::UnionAll:

@@ -2688,6 +2688,11 @@ struct TExecPlanCodec {
                 });
                 return;
             }
+            case NQdb::EExecPlanNodeKind::LateMaterialize: {
+                Unsupported = UnsupportedExec(
+                    "late-materialize is only supported by the native runtime");
+                return;
+            }
             case NQdb::EExecPlanNodeKind::UnionAll:
                 return;
         }

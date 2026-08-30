@@ -7,6 +7,9 @@
 
 namespace NQdb {
 
+class IRowLookupSource;
+class TSourceOperator;
+
 struct TLateMaterializeColumn {
     std::string PhysicalName;
     std::string OutputName;
@@ -44,5 +47,13 @@ private:
     std::string LocatorColumn_;
     std::vector<TLateMaterializeColumn> Columns_;
 };
+
+struct TLateMaterializationSourceBinding {
+    TSourceOperator& Source;
+    IRowLookupSource& Lookup;
+};
+
+TLateMaterializationSourceBinding ResolveLateMaterializationSource(
+    const TLateMaterializeOperator& late);
 
 } // namespace NQdb

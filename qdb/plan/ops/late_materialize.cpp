@@ -1,11 +1,34 @@
 #include <qdb/plan/ops/late_materialize.h>
 
+#include <qdb/io/io.h>
+#include <qdb/plan/ops/source.h>
+
 #include <qumir/parser/core/printer.h>
 #include <qumir/parser/type.h>
 
+#include <stdexcept>
 #include <utility>
+#include <vector>
 
 namespace NQdb {
+namespace {
+
+void CollectInputSources(
+    const TOperatorPtr& root,
+    std::vector<TSourceOperator*>& sources)
+{
+    if (auto source = TMaybeOp<TSourceOperator>(root)) {
+        sources.push_back(source.Cast().get());
+        return;
+    }
+    for (const auto& child : root->Children()) {
+        if (auto childOp = NQumir::NAst::TMaybeNode<IOperator>(child)) {
+            CollectInputSources(childOp.Cast(), sources);
+        }
+    }
+}
+
+} // namespace
 
 TLateMaterializeOperator::TLateMaterializeOperator(
     TOperatorPtr input,
@@ -48,6 +71,27 @@ const std::string TLateMaterializeOperator::ToString() const {
             column.PhysicalName + " " + PrintType(column.Type) + ")";
     }
     return result + ")";
+}
+
+TLateMaterializationSourceBinding ResolveLateMaterializationSource(
+    const TLateMaterializeOperator& late)
+{
+    std::vector<TSourceOperator*> sources;
+    CollectInputSources(late.Input(), sources);
+    if (sources.size() != 1) {
+        throw std::runtime_error(
+            "late materialize requires exactly one input source");
+    }
+    auto* lookup = dynamic_cast<IRowLookupSource*>(
+        &sources.front()->GetSource());
+    if (!lookup) {
+        throw std::runtime_error(
+            "late materialize source does not support physical row lookup");
+    }
+    return {
+        .Source = *sources.front(),
+        .Lookup = *lookup,
+    };
 }
 
 } // namespace NQdb

@@ -26,6 +26,7 @@ enum class EExecPlanNodeKind {
     Sort,
     TopSort,
     Limit,
+    LateMaterialize,
     UnionAll,
 };
 
@@ -60,6 +61,7 @@ inline std::string_view ExecPlanNodeKindName(EExecPlanNodeKind kind) {
         case EExecPlanNodeKind::Sort: return "sort";
         case EExecPlanNodeKind::TopSort: return "top-sort";
         case EExecPlanNodeKind::Limit: return "limit";
+        case EExecPlanNodeKind::LateMaterialize: return "late-materialize";
         case EExecPlanNodeKind::UnionAll: return "union-all";
     }
     return "unknown";

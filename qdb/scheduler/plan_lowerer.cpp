@@ -1,6 +1,7 @@
 #include <qdb/scheduler/plan_lowerer.h>
 #include <qdb/exec/aggregate_exec.h>
 #include <qdb/exec/join_exec.h>
+#include <qdb/exec/late_materialize_exec.h>
 #include <qdb/exec/planner_helpers.h>
 #include <qdb/exec/runtime_context.h>
 #include <qdb/exec/sort_exec.h>
@@ -12,6 +13,7 @@
 #include <qdb/plan/ops/aggregate.h>
 #include <qdb/plan/ops/filter.h>
 #include <qdb/plan/ops/join.h>
+#include <qdb/plan/ops/late_materialize.h>
 #include <qdb/plan/ops/limit.h>
 #include <qdb/plan/ops/project.h>
 #include <qdb/plan/ops/sort.h>
@@ -30,6 +32,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <optional>
 #include <ostream>
 #include <stdexcept>
@@ -151,6 +154,38 @@ struct TTopSortBlockingState {
 
     TTopSortProcessor Processor;
     bool InputFinished = false;
+};
+
+struct TLateMaterializeBlockingState {
+    TLateMaterializeBlockingState(
+        std::shared_ptr<const IPhysicalRowReader> reader,
+        int32_t locatorColumn)
+        : Processor(std::move(reader), locatorColumn)
+    {}
+
+    TLateMaterializeProcessor Processor;
+    bool InputFinished = false;
+};
+
+struct TLateMaterializeMergeState {
+    explicit TLateMaterializeMergeState(size_t partitionCount)
+        : Partitions(partitionCount)
+        , Received(partitionCount, false)
+        , Finished(partitionCount, false)
+    {}
+
+    ~TLateMaterializeMergeState() {
+        for (size_t i = 0; i < Partitions.size(); ++i) {
+            if (Received[i]) {
+                Release(&Partitions[i]);
+            }
+        }
+    }
+
+    std::vector<TRowSet> Partitions;
+    std::vector<bool> Received;
+    std::vector<bool> Finished;
+    bool Emitted = false;
 };
 
 struct TSchedulerInnerJoinState {
@@ -344,7 +379,8 @@ public:
         }
         if (TMaybeOp<TLimitOperator>(op) ||
             TMaybeOp<TSortOperator>(op) ||
-            TMaybeOp<TTopSortOperator>(op))
+            TMaybeOp<TTopSortOperator>(op) ||
+            TMaybeOp<TLateMaterializeOperator>(op))
         {
             return SupportedChild(op) ? 1 : 0;
         }
@@ -485,6 +521,9 @@ public:
         if (auto n = TMaybeOp<TTopSortOperator>(op)) {
             return LowerTopSort(*n.Cast(), outConn, outLaneOffset);
         }
+        if (auto n = TMaybeOp<TLateMaterializeOperator>(op)) {
+            return LowerLateMaterialize(*n.Cast(), outConn, outLaneOffset);
+        }
         if (auto n = TMaybeOp<TJoinOperator>(op)) {
             if (n.Cast()->Keys().empty()) {
                 return LowerCrossJoin(*n.Cast(), outConn, outLaneOffset);
@@ -621,11 +660,10 @@ private:
         std::vector<NScheduler::TTaskNode*> Nodes;
     };
 
-    // Blocking code for a local (top-)sort: drain the input into the processor,
-    // then stream its sorted output. Works for both TSortBlockingState and
-    // TTopSortBlockingState (same Add/Next/InputFinished interface).
+    // Blocking code for a processor with Add/Next/InputFinished methods. It
+    // drains the input first, then emits processor output.
     template <class TState>
-    std::shared_ptr<const NScheduler::TBlockingCode> MakeSortBlockingCode() {
+    std::shared_ptr<const NScheduler::TBlockingCode> MakeDrainBlockingCode() {
         return std::make_shared<NScheduler::TBlockingCode>(
             [](void* state, NScheduler::TInputPort& input, TRowSet& output) {
                 auto* s = static_cast<TState*>(state);
@@ -662,7 +700,7 @@ private:
         if (topLimit) {
             const int64_t limit = *topLimit;
             return TBlockingTail{
-                .Code = MakeSortBlockingCode<TTopSortBlockingState>(),
+                .Code = MakeDrainBlockingCode<TTopSortBlockingState>(),
                 .MakeState = [childType, keys, keyColumns, radixKernel, limit]()
                     -> std::shared_ptr<void>
                 {
@@ -673,7 +711,7 @@ private:
             };
         }
         return TBlockingTail{
-            .Code = MakeSortBlockingCode<TSortBlockingState>(),
+            .Code = MakeDrainBlockingCode<TSortBlockingState>(),
             .MakeState = [childType, keys, keyColumns, radixKernel]()
                 -> std::shared_ptr<void>
             {
@@ -757,6 +795,9 @@ private:
             return OutputLanes(n.Cast()->Input()) != 0;
         }
         if (auto n = TMaybeOp<TTopSortOperator>(op)) {
+            return OutputLanes(n.Cast()->Input()) != 0;
+        }
+        if (auto n = TMaybeOp<TLateMaterializeOperator>(op)) {
             return OutputLanes(n.Cast()->Input()) != 0;
         }
         if (auto n = TMaybeOp<TWindowOperator>(op)) {
@@ -1722,6 +1763,254 @@ private:
             outLaneOffset);
     }
 
+    TLoweredOutput LowerLateMaterialize(
+        TLateMaterializeOperator& late,
+        NScheduler::IConnection& outConn,
+        size_t outLaneOffset)
+    {
+        const auto execStageId = NewExecStage(
+            &late, EExecPlanNodeKind::LateMaterialize);
+        auto columns = late.Columns();
+        auto source = ResolveLateMaterializationSource(late);
+        if (!source.Source.EmitsRowId()) {
+            throw std::runtime_error(
+                "late materialize source has not been bound to emit locators");
+        }
+        auto* lookup = &source.Lookup;
+        const auto locator = late.LocatorColumn();
+        const auto outputType = late.OutputColumns();
+        const size_t childLanes = OutputLanes(late.Input());
+        NScheduler::IConnection* childConnection = nullptr;
+        if (childLanes == 1) {
+            childConnection = &AddConn<NScheduler::TOneToOneConnection>(
+                1, 1, "late-lookup-input");
+        } else {
+            childConnection = &AddConn<NScheduler::TGatherConnection>(
+                childLanes, 1, "late-lookup-input-gather");
+        }
+        auto childOut = Lower(late.Input(), *childConnection);
+
+        auto* input = static_cast<NQumir::NAst::TStructType*>(
+            childOut.OutputType.get());
+        if (!input) {
+            throw std::runtime_error(
+                "late materialize input must have TStructType");
+        }
+        int32_t locatorColumn = -1;
+        for (size_t i = 0; i < input->Fields.size(); ++i) {
+            if (input->Fields[i].first == locator) {
+                locatorColumn = static_cast<int32_t>(i);
+                break;
+            }
+        }
+        if (locatorColumn < 0) {
+            throw std::runtime_error(
+                "late materialize input is missing locator column '" +
+                locator + "'");
+        }
+
+        std::vector<std::string> physicalColumns;
+        physicalColumns.reserve(columns.size());
+        for (const auto& column : columns) {
+            physicalColumns.push_back(column.PhysicalName);
+        }
+        if (physicalColumns.empty()) {
+            throw std::runtime_error(
+                "late materialize requires at least one output column");
+        }
+        // Column decode costs can differ substantially. Four runnable ranges
+        // per worker let work stealing smooth that skew while keeping all I/O
+        // in the scheduler pool. With one worker oversubscription cannot help.
+        constexpr size_t lookupTasksPerWorker = 4;
+        const size_t workers = std::max<size_t>(
+            Settings_.Scheduler.WorkerCount, 1);
+        size_t maxThreadedLookupTasks = 1;
+        if (workers > 1) {
+            maxThreadedLookupTasks = workers >
+                    std::numeric_limits<size_t>::max() / lookupTasksPerWorker
+                ? std::numeric_limits<size_t>::max()
+                : workers * lookupTasksPerWorker;
+        }
+        const size_t maxLookupTasks =
+            Settings_.Scheduler.Mode ==
+                    NScheduler::EExecutionMode::ThreadedScheduler
+                ? maxThreadedLookupTasks
+                : 1;
+        const size_t lookupTaskCount = std::min(
+            physicalColumns.size(), maxLookupTasks);
+
+        NScheduler::IConnection* requests = childConnection;
+        NScheduler::TTaskNode* broadcastNode = nullptr;
+        if (lookupTaskCount > 1) {
+            auto& broadcast = AddConn<NScheduler::TBroadcastConnection>(
+                1, lookupTaskCount, "late-lookup-requests");
+            // TBroadcastConnection requires one producer. This bridge turns
+            // the already gathered locator stream into that producer.
+            auto forwardCode = std::make_shared<NScheduler::TUnaryCode>(
+                [](void*, TRowSet&) {});
+            auto forward = std::make_unique<NScheduler::TUnaryTask>(
+                forwardCode,
+                std::shared_ptr<void>{},
+                NScheduler::TInputPort{
+                    .Connection = childConnection, .Lane = 0},
+                NScheduler::TOutputPort{
+                    .Connection = &broadcast, .Lane = 0});
+            auto& forwardNode = Graph_.AddOwnedNode(std::move(forward));
+            MarkNode(
+                forwardNode,
+                "late-lookup-broadcast",
+                NewTaskGroup(),
+                "late-lookup-broadcast");
+            for (size_t lane = 0; lane < childLanes; ++lane) {
+                Graph_.AddEdge(
+                    *childOut.Producers[lane],
+                    forwardNode,
+                    *childConnection,
+                    lane,
+                    0);
+            }
+            requests = &broadcast;
+            broadcastNode = &forwardNode;
+        }
+
+        auto& results = AddConn<NScheduler::TOneToOneConnection>(
+            lookupTaskCount, lookupTaskCount, "late-lookup-results");
+        auto lookupCode = MakeDrainBlockingCode<TLateMaterializeBlockingState>();
+        std::vector<NScheduler::TTaskNode*> lookupNodes;
+        lookupNodes.reserve(lookupTaskCount);
+        for (size_t taskIndex = 0; taskIndex < lookupTaskCount; ++taskIndex) {
+            // The lookup API exposes no per-column byte estimate, so divide
+            // adjacent output columns by count. Oversubscription above limits
+            // the impact of uneven ranges without coupling lowering to Parquet.
+            const size_t begin =
+                physicalColumns.size() * taskIndex / lookupTaskCount;
+            const size_t end =
+                physicalColumns.size() * (taskIndex + 1) / lookupTaskCount;
+            const std::span<const std::string> taskColumns(
+                physicalColumns.data() + begin, end - begin);
+            auto reader = lookup->CompileReader(taskColumns);
+            if (!reader) {
+                throw std::runtime_error(
+                    "late materialize source failed to compile row reader");
+            }
+            auto task = std::make_unique<NScheduler::TBlockingTask>(
+                lookupCode,
+                std::make_shared<TLateMaterializeBlockingState>(
+                    std::move(reader), locatorColumn),
+                NScheduler::TInputPort{
+                    .Connection = requests, .Lane = taskIndex},
+                NScheduler::TOutputPort{
+                    .Connection = &results, .Lane = taskIndex});
+            auto& node = Graph_.AddOwnedNode(std::move(task));
+            MarkNode(
+                node,
+                "late-lookup",
+                execStageId,
+                "late-lookup",
+                execStageId);
+            if (broadcastNode) {
+                Graph_.AddEdge(
+                    *broadcastNode, node, *requests, 0, taskIndex);
+            } else {
+                for (size_t lane = 0; lane < childLanes; ++lane) {
+                    Graph_.AddEdge(
+                        *childOut.Producers[lane],
+                        node,
+                        *childConnection,
+                        lane,
+                        0);
+                }
+            }
+            lookupNodes.push_back(&node);
+        }
+
+        auto mergeCode = std::make_shared<NScheduler::TMergeCode>(
+            [](void* state,
+               std::vector<NScheduler::TInputPort>& inputs,
+               TRowSet& output)
+            {
+                auto* merge = static_cast<TLateMaterializeMergeState*>(state);
+                if (merge->Emitted) {
+                    return NScheduler::ETaskResult::FINISHED;
+                }
+
+                for (size_t i = 0; i < inputs.size(); ++i) {
+                    if (merge->Received[i] || merge->Finished[i]) {
+                        continue;
+                    }
+                    TRowSet partition{};
+                    switch (inputs[i].Fetch(partition)) {
+                        case NScheduler::EFetchResult::OK:
+                            merge->Partitions[i] = partition;
+                            merge->Received[i] = true;
+                            break;
+                        case NScheduler::EFetchResult::NO_DATA:
+                            break;
+                        case NScheduler::EFetchResult::FINISHED:
+                            merge->Finished[i] = true;
+                            break;
+                    }
+                }
+
+                const bool allReceived = std::ranges::all_of(
+                    merge->Received, [](bool value) { return value; });
+                if (allReceived) {
+                    MergeLateMaterializedColumns(merge->Partitions, output);
+                    std::ranges::fill(merge->Received, false);
+                    merge->Emitted = true;
+                    return NScheduler::ETaskResult::OK;
+                }
+
+                const bool allFinished = std::ranges::all_of(
+                    merge->Finished, [](bool value) { return value; });
+                const bool anyReceived = std::ranges::any_of(
+                    merge->Received, [](bool value) { return value; });
+                const bool anyFinished = std::ranges::any_of(
+                    merge->Finished, [](bool value) { return value; });
+                if (allFinished && !anyReceived) {
+                    return NScheduler::ETaskResult::FINISHED;
+                }
+                if (anyReceived && anyFinished) {
+                    throw std::runtime_error(
+                        "late materialize: lookup partitions returned "
+                        "different result counts");
+                }
+                return NScheduler::ETaskResult::NEED_DATA;
+            });
+        std::vector<NScheduler::TInputPort> mergeInputs;
+        mergeInputs.reserve(lookupTaskCount);
+        for (size_t taskIndex = 0; taskIndex < lookupTaskCount; ++taskIndex) {
+            mergeInputs.push_back(NScheduler::TInputPort{
+                .Connection = &results, .Lane = taskIndex});
+        }
+        auto mergeTask = std::make_unique<NScheduler::TMergeTask>(
+            mergeCode,
+            std::make_shared<TLateMaterializeMergeState>(lookupTaskCount),
+            std::move(mergeInputs),
+            NScheduler::TOutputPort{
+                .Connection = &outConn, .Lane = outLaneOffset});
+        auto& mergeNode = Graph_.AddOwnedNode(std::move(mergeTask));
+        MarkNode(
+            mergeNode,
+            "late-materialize",
+            execStageId,
+            "late-materialize",
+            execStageId);
+        for (size_t taskIndex = 0; taskIndex < lookupTaskCount; ++taskIndex) {
+            Graph_.AddEdge(
+                *lookupNodes[taskIndex],
+                mergeNode,
+                results,
+                taskIndex,
+                taskIndex);
+        }
+
+        return TLoweredOutput{
+            .Producers = {&mergeNode},
+            .OutputType = outputType,
+        };
+    }
+
     TLoweredOutput LowerSortLike(
         const TOperatorPtr& input,
         const std::vector<TSortKey>& sortKeys,
@@ -2251,7 +2540,7 @@ private:
             KernelOptions(std::move(stage), execStageId);
         auto runtime = BuildWindowRuntimeProcess(window, childType, std::move(options));
         return TBlockingTail{
-            .Code = MakeSortBlockingCode<TWindowBlockingState>(),
+            .Code = MakeDrainBlockingCode<TWindowBlockingState>(),
             .MakeState = [runtime]() -> std::shared_ptr<void> {
                 return std::make_shared<TWindowBlockingState>(
                     runtime.OutputType,

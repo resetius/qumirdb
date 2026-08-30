@@ -12,7 +12,6 @@
 
 #include <cmath>
 #include <optional>
-#include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -30,21 +29,6 @@ struct TRowChain {
     std::shared_ptr<TSourceOperator> Source;
     std::unordered_set<std::string> EarlyColumns;
 };
-
-void CollectInputSources(
-    const TOperatorPtr& root,
-    std::vector<std::shared_ptr<TSourceOperator>>& sources)
-{
-    if (auto source = TMaybeOp<TSourceOperator>(root)) {
-        sources.push_back(source.Cast());
-        return;
-    }
-    for (const auto& child : root->Children()) {
-        if (auto childOp = TMaybeNode<IOperator>(child)) {
-            CollectInputSources(childOp.Cast(), sources);
-        }
-    }
-}
 
 std::optional<TRowChain> MatchRowChain(const TOperatorPtr& root) {
     TRowChain result;
@@ -236,17 +220,7 @@ void BindLateMaterializationSources(const TOperatorPtr& root) {
         return;
     }
     if (auto late = TMaybeOp<TLateMaterializeOperator>(root)) {
-        std::vector<std::shared_ptr<TSourceOperator>> sources;
-        CollectInputSources(late.Cast()->Input(), sources);
-        if (sources.size() != 1) {
-            throw std::runtime_error(
-                "late materialize requires exactly one input source");
-        }
-        if (!dynamic_cast<IRowLookupSource*>(&sources.front()->GetSource())) {
-            throw std::runtime_error(
-                "late materialize source does not support physical row lookup");
-        }
-        sources.front()->EnableRowId();
+        ResolveLateMaterializationSource(*late.Cast()).Source.EnableRowId();
     }
     for (const auto& child : root->Children()) {
         if (auto childOp = TMaybeNode<IOperator>(child)) {
