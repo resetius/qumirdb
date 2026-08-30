@@ -5,6 +5,9 @@ with every engine set to 18 threads. For every query the **best** of the
 available runs is reported. Benchmarks are re-run independently, so each section
 below carries its own run date.
 
+Engine builds: DuckDB v1.5.5 (Variegata) `d8cdaa33fd`; ClickHouse
+`clickhouse-local` 26.9.1.347 (official build); qdb built from this repository.
+
 > **qumirdb is under active development.** These numbers are a snapshot taken
 > on the dates below, not a fixed characterisation of the engine. Query
 > execution, the hash table and Parquet scanning are all being worked on, so
@@ -20,6 +23,7 @@ The engines log different quantities, which matters when reading the tables:
 |---|---|---|
 | qdb | `exec` | execution only — planning, kernel build and JIT compilation are **excluded** |
 | DuckDB | `real` | full wall-clock time |
+| ClickHouse | wall clock | full wall-clock time of `clickhouse-local` per query |
 | YQL | `proc` | processing time, without the fixed per-query startup cost (~0.6–0.8 s for YQL) |
 
 So qdb is shown in its most favourable light: its JIT compilation is left out.
@@ -28,7 +32,8 @@ if that cost needs to be added back.
 
 ## Coverage
 
-- **ClickBench** — 43 queries over `hits.parquet`. YQL was not run.
+- **ClickBench** — 43 queries over `hits.parquet`. Run by qdb, DuckDB and
+  `clickhouse-local`; YQL was not run.
 - **TPC-H** — 22 queries at scale factors 1, 10 and 100.
 - **TPC-DS** — 99 queries. qdb runs 14, 23, 24 and 39 as two parts each; the parts
   are summed within a run here so the query set matches DuckDB and YQL.
@@ -46,70 +51,73 @@ its results may differ from what is shown here.
 
 ## Summary
 
-| Benchmark | Scale | qdb (s) | DuckDB (s) | YQL (s) | qdb ÷ DuckDB | Notes |
-|---|---|---|---|---|---|---|
-| ClickBench | — | 15.31 | 14.44 | — | 1.06× | — |
-| TPC-H | 1 | 0.93 | 1.17 | 4.17 | 0.80× | — |
-| TPC-H | 10 | 7.54 | 4.03 | 29.21 | 1.87× | — |
-| TPC-H | 100 | 96.81 | 32.10 | 338.38 | 3.02× | — |
-| TPC-DS | 1 | 7.08 | 5.13 | 55.27 | 1.38× | YQL: 7 failed |
-| TPC-DS | 10 | 51.90 | 15.89 | 420.05 | 3.27× | YQL: 10 failed |
-| TPC-DS | 100 | 465.22 | 117.86 | — | 3.95× | qdb: 2 missing |
+| Benchmark | Scale | qdb (s) | DuckDB (s) | ClickHouse (s) | YQL (s) | qdb ÷ DuckDB | Notes |
+|---|---|---|---|---|---|---|---|
+| ClickBench | — | 15.31 | 14.44 | 14.95 | — | 1.06× | — |
+| TPC-H | 1 | 0.93 | 1.17 | — | 4.17 | 0.80× | — |
+| TPC-H | 10 | 7.54 | 4.03 | — | 29.21 | 1.87× | — |
+| TPC-H | 100 | 96.81 | 32.10 | — | 338.38 | 3.02× | — |
+| TPC-DS | 1 | 7.08 | 5.13 | — | 55.27 | 1.38× | YQL: 7 failed |
+| TPC-DS | 10 | 51.90 | 15.89 | — | 420.05 | 3.27× | YQL: 10 failed |
+| TPC-DS | 100 | 465.22 | 117.86 | — | — | 3.95× | qdb: 2 missing |
 
 Totals cover the queries each engine completed, so rows with failures compare
 different subsets — flagged in the Notes column.
 
 ## ClickBench
 
-Run 2026-08-30, qdb options:
+qdb and ClickHouse run 2026-08-30, the DuckDB column is still the 2026-08-22
+run. qdb options:
 `--scheduler threaded --scan-tasks 32 --scheduler-workers 18 --cascade-aggregates`.
+ClickHouse was given one run per query, so its column is a single measurement
+where qdb and DuckDB report the best of several.
 
-| Query | qdb (s) | DuckDB (s) | qdb ÷ DuckDB |
-|---|---|---|---|
-| q0 | 0.045 | 0.040 | 1.12× |
-| q1 | 0.015 | 0.050 | 0.30× |
-| q2 | 0.062 | 0.070 | 0.88× |
-| q3 | 0.058 | 0.070 | 0.82× |
-| q4 | 0.245 | 0.160 | 1.53× |
-| q5 | 0.296 | 0.230 | 1.28× |
-| q6 | 0.043 | 0.090 | 0.47× |
-| q7 | 0.011 | 0.050 | 0.23× |
-| q8 | 0.381 | 0.200 | 1.90× |
-| q9 | 0.530 | 0.270 | 1.96× |
-| q10 | 0.138 | 0.100 | 1.38× |
-| q11 | 0.166 | 0.110 | 1.51× |
-| q12 | 0.283 | 0.230 | 1.23× |
-| q13 | 0.479 | 0.360 | 1.33× |
-| q14 | 0.300 | 0.260 | 1.15× |
-| q15 | 0.266 | 0.190 | 1.40× |
-| q16 | 0.626 | 0.430 | 1.46× |
-| q17 | 0.665 | 0.350 | 1.90× |
-| q18 | 1.235 | 0.680 | 1.82× |
-| q19 | 0.081 | 0.050 | 1.61× |
-| q20 | 0.438 | 0.410 | 1.07× |
-| q21 | 0.532 | 0.350 | 1.52× |
-| q22 | 0.873 | 0.620 | 1.41× |
-| q23 | 0.551 | 0.530 | 1.04× |
-| q24 | 0.150 | 0.200 | 0.75× |
-| q25 | 0.117 | 0.170 | 0.69× |
-| q26 | 0.147 | 0.210 | 0.70× |
-| q27 | 0.393 | 0.340 | 1.16× |
-| q28 | 1.254 | 3.560 | 0.35× |
-| q29 | 0.053 | 0.060 | 0.88× |
-| q30 | 0.354 | 0.280 | 1.27× |
-| q31 | 0.407 | 0.310 | 1.31× |
-| q32 | 1.070 | 0.780 | 1.37× |
-| q33 | 1.235 | 0.880 | 1.40× |
-| q34 | 1.177 | 0.920 | 1.28× |
-| q35 | 0.310 | 0.250 | 1.24× |
-| q36 | 0.034 | 0.100 | 0.34× |
-| q37 | 0.022 | 0.090 | 0.25× |
-| q38 | 0.033 | 0.070 | 0.47× |
-| q39 | 0.201 | 0.140 | 1.44× |
-| q40 | 0.019 | 0.060 | 0.32× |
-| q41 | 0.011 | 0.060 | 0.19× |
-| q42 | 0.007 | 0.060 | 0.11× |
-| **total** | **15.31** | **14.44** | **1.06×** |
+| Query | qdb (s) | DuckDB (s) | ClickHouse (s) | qdb ÷ DuckDB | qdb ÷ ClickHouse |
+|---|---|---|---|---|---|
+| q0 | 0.045 | 0.040 | 0.130 | 1.12× | 0.34× |
+| q1 | 0.015 | 0.050 | 0.120 | 0.30× | 0.13× |
+| q2 | 0.062 | 0.070 | 0.130 | 0.88× | 0.47× |
+| q3 | 0.058 | 0.070 | 0.130 | 0.82× | 0.44× |
+| q4 | 0.245 | 0.160 | 0.200 | 1.53× | 1.23× |
+| q5 | 0.296 | 0.230 | 0.250 | 1.28× | 1.18× |
+| q6 | 0.043 | 0.090 | 0.120 | 0.47× | 0.36× |
+| q7 | 0.011 | 0.050 | 0.120 | 0.23× | 0.09× |
+| q8 | 0.381 | 0.200 | 0.280 | 1.90× | 1.36× |
+| q9 | 0.530 | 0.270 | 0.330 | 1.96× | 1.61× |
+| q10 | 0.138 | 0.100 | 0.200 | 1.38× | 0.69× |
+| q11 | 0.166 | 0.110 | 0.210 | 1.51× | 0.79× |
+| q12 | 0.283 | 0.230 | 0.270 | 1.23× | 1.05× |
+| q13 | 0.479 | 0.360 | 0.370 | 1.33× | 1.29× |
+| q14 | 0.300 | 0.260 | 0.340 | 1.15× | 0.88× |
+| q15 | 0.266 | 0.190 | 0.200 | 1.40× | 1.33× |
+| q16 | 0.626 | 0.430 | 0.500 | 1.46× | 1.25× |
+| q17 | 0.665 | 0.350 | 0.290 | 1.90× | 2.29× |
+| q18 | 1.235 | 0.680 | 0.850 | 1.82× | 1.45× |
+| q19 | 0.081 | 0.050 | 0.120 | 1.61× | 0.67× |
+| q20 | 0.438 | 0.410 | 0.580 | 1.07× | 0.75× |
+| q21 | 0.532 | 0.350 | 0.650 | 1.52× | 0.82× |
+| q22 | 0.873 | 0.620 | 0.960 | 1.41× | 0.91× |
+| q23 | 0.551 | 0.530 | 0.680 | 1.04× | 0.81× |
+| q24 | 0.150 | 0.200 | 0.320 | 0.75× | 0.47× |
+| q25 | 0.117 | 0.170 | 0.230 | 0.69× | 0.51× |
+| q26 | 0.147 | 0.210 | 0.330 | 0.70× | 0.44× |
+| q27 | 0.393 | 0.340 | 0.630 | 1.16× | 0.62× |
+| q28 | 1.254 | 3.560 | 0.680 | 0.35× | 1.84× |
+| q29 | 0.053 | 0.060 | 0.130 | 0.88× | 0.41× |
+| q30 | 0.354 | 0.280 | 0.430 | 1.27× | 0.82× |
+| q31 | 0.407 | 0.310 | 0.470 | 1.31× | 0.87× |
+| q32 | 1.070 | 0.780 | 0.870 | 1.37× | 1.23× |
+| q33 | 1.235 | 0.880 | 0.900 | 1.40× | 1.37× |
+| q34 | 1.177 | 0.920 | 0.900 | 1.28× | 1.31× |
+| q35 | 0.310 | 0.250 | 0.180 | 1.24× | 1.72× |
+| q36 | 0.034 | 0.100 | 0.130 | 0.34× | 0.26× |
+| q37 | 0.022 | 0.090 | 0.120 | 0.25× | 0.19× |
+| q38 | 0.033 | 0.070 | 0.110 | 0.47× | 0.30× |
+| q39 | 0.201 | 0.140 | 0.150 | 1.44× | 1.34× |
+| q40 | 0.019 | 0.060 | 0.120 | 0.32× | 0.16× |
+| q41 | 0.011 | 0.060 | 0.120 | 0.19× | 0.09× |
+| q42 | 0.007 | 0.060 | 0.100 | 0.11× | 0.07× |
+| **total** | **15.31** | **14.44** | **14.95** | **1.06×** | **1.02×** |
 
 ## TPC-H, scale 1
 
