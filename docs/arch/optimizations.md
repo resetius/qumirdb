@@ -388,7 +388,15 @@ Runs once after every plan (main plus each definition) has been optimized —
 A predicate that every consumer applies is pushed into the definition, and the
 definition's output schema is narrowed to the union of what consumers demand.
 
-### 3.2 ChooseCteReuse / ApplyCteReuse — `plan/passes/cte_reuse.cpp`
+### 3.2 ApplyLateMaterialization — `plan/passes/late_materialization.cpp`
+
+After CTE demand is known, QDB knows the final columns for each plan. For a
+wide query with a small limit, QDB can read only the filter and sort columns
+first. It fetches the other columns after the limit. The default limit
+threshold is 100 rows. The eager scan estimate must be at least 2x the late
+estimate. See [late_materialization.md](late_materialization.md).
+
+### 3.3 ChooseCteReuse / ApplyCteReuse — `plan/passes/cte_reuse.cpp`
 
 Cost-based: a definition used once (or cheap enough to recompute) is inlined,
 otherwise it stays a materialized `cte-ref` shared by consumers.

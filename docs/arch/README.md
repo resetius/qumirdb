@@ -17,7 +17,10 @@ SQL → logical plan → idempotent rewrite passes → physical plan. Entry poin
 6. **ExtractEquiJoins** — lift equi-keys (equivalence classes), push predicates
    per side, leave residuals. [predicate_pushdown.md](predicate_pushdown.md).
 7. **ApplyColumnPruning** — narrow each op's required input columns.
-8. **AttachRowGroupPredicates** — attach a conservative Parquet row-group
+8. **ApplyLateMaterialization** — after CTE output demand is known, move wide
+   output columns after a small limit when the cost is lower.
+   [late_materialization.md](late_materialization.md).
+9. **AttachRowGroupPredicates** — attach a conservative Parquet row-group
    pruning hint without removing the row-level filter.
    [predicate_pushdown.md](predicate_pushdown.md#parquet-row-group-pruning).
 
@@ -49,6 +52,8 @@ Physical execution:
 - [Scheduler runtime](scheduler_runtime.md) - scheduled physical graph, task
   nodes, connections, compiled kernels, lowering patterns, and JS/WASM runtime
   boundary.
+- [Late materialization](late_materialization.md) - narrow Parquet scans, row
+  locators, lookup tasks, and safety rules.
 - [Dispatch](dispatch.md) - runtime shell dispatch model, node kinds, and
   kernel/dispatcher ownership split.
 - [String values](string_values.md) - proposed borrowed/owned string ABI for
