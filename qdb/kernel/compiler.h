@@ -96,6 +96,13 @@ struct TSortRadixKeyInput {
     bool NullsFirst = false;
 };
 
+// Generates a heap_less overload taking the row store as its context, so heap
+// items stay bare packed row ids. It reads the given sort columns from each
+// row and compares them in lexicographic SQL order. Equal keys use packed row
+// id order as a stable tie break.
+NQumir::NAst::TExprPtr BuildSortRowIdLessAst(
+    const std::vector<TSortRadixKeyInput>& keys);
+
 // Radix composite sort program. With a materialize schema it exports one
 // stage-level entry qdb_sort_run: optionally sorts packed TRowId values
 // in-place, then materializes a requested slice into a kernel-owned TRowSet.
