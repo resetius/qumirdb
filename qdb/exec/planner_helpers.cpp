@@ -578,10 +578,12 @@ TSortRuntimeProcess BuildSortRuntimeProcess(
             TKernelCompiler topSortCompiler(std::move(options));
             radixKernel.TopSortDispatch =
                 topSortCompiler.CompileTopSort(sortInputs.RadixKeys, &inputType);
+            radixKernel.HeapTopKDispatch =
+                topSortCompiler.CompileHeapTopK(sortInputs.RadixKeys);
         }
         if (sink) {
-            // Resolved key metadata for the exec exporter, on both emitted
-            // sort kernels.
+            // Resolved key metadata for the exec exporter, on all emitted sort
+            // kernels.
             std::vector<TGeneratedKernel::TSortKeyMeta> meta;
             meta.reserve(keys.size());
             for (size_t k = 0; k < sortInputs.KeyColumns.size(); ++k) {

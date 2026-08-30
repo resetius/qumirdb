@@ -1867,7 +1867,7 @@ llvm::json::Object CoreTypeJson(const NQumir::NAst::TTypePtr& type) {
 }
 
 // Kernel ABI layout for wasm32 or wasm64. wasm64 offsets match the native
-// layout (both use 8-byte pointers, so kHashTableSize/kPairBufferSize stay
+// layout (both use 8-byte pointers, so HashTableSize/PairBufferSize stay
 // valid here). wasm32 offsets use real 4-byte-pointer values, checked
 // against qumir's own TTypeTable::FieldOffset/SizeInBytes instead of hand
 // math. For example TRowSet stays 48 bytes even with 4-byte pointers,
@@ -1944,11 +1944,11 @@ llvm::json::Object ExecLayoutJson(int64_t heapBase, int wasmBits) {
             }},
             // THashTable per modules/qumirdb.cpp; the runtime only reads Size.
             {"hashTable", llvm::json::Object{
-                {"size", static_cast<int64_t>(NQdb::TKernelCompiler::kHashTableSize)},
+                {"size", static_cast<int64_t>(NQdb::TKernelCompiler::HashTableSize)},
                 {"sizeOffset", 72},
             }},
             {"pairBuffer", llvm::json::Object{
-                {"size", static_cast<int64_t>(NQdb::TKernelCompiler::kPairBufferSize)},
+                {"size", static_cast<int64_t>(NQdb::TKernelCompiler::PairBufferSize)},
                 {"count", 0},
                 {"capacity", 8},
                 {"data", 16},

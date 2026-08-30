@@ -49,14 +49,14 @@ struct THashTable {
   int64_t NumKeys = 0;
   int64_t KeySize = 0;
 };
-static_assert(sizeof(THashTable) == TKernelCompiler::kHashTableSize);
+static_assert(sizeof(THashTable) == TKernelCompiler::HashTableSize);
 
 struct TPairBuffer {
   int64_t Count = 0;
   int64_t Capacity = 0;
   int64_t *Data = nullptr;
 };
-static_assert(sizeof(TPairBuffer) == TKernelCompiler::kPairBufferSize);
+static_assert(sizeof(TPairBuffer) == TKernelCompiler::PairBufferSize);
 
 constexpr int64_t JoinOpCode(EJoinKernelOp op) {
   return static_cast<int64_t>(op);

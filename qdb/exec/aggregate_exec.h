@@ -28,7 +28,7 @@ private:
 private:
     TAggregateKernels Kernels_;
     int64_t InitialCapacity_ = 4;
-    std::array<uint8_t, TKernelCompiler::kHashTableSize> HashTable_ = {};
+    std::array<uint8_t, TKernelCompiler::HashTableSize> HashTable_ = {};
     bool Initialized_ = false;
     bool Finished_ = false;
     bool Destroyed_ = false;

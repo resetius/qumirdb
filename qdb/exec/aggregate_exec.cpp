@@ -28,13 +28,13 @@ struct THashTable {
     int64_t NumKeys = 0;
     int64_t KeySize = 0;
 };
-static_assert(sizeof(THashTable) == TKernelCompiler::kHashTableSize);
+static_assert(sizeof(THashTable) == TKernelCompiler::HashTableSize);
 
 // SwissTable groups are 8 slots wide, so capacity starts at 8.
-constexpr int64_t kInitialCapacity = 8;
-constexpr int64_t kOpInit = 0;
-constexpr int64_t kOpUpdate = 1;
-constexpr int64_t kOpDestroy = 2;
+constexpr int64_t InitialCapacity = 8;
+constexpr int64_t OpInit = 0;
+constexpr int64_t OpUpdate = 1;
+constexpr int64_t OpDestroy = 2;
 
 } // namespace
 
@@ -44,7 +44,7 @@ TAggregateProcessor::TAggregateProcessor(
     : Kernels_(std::move(kernels))
     // aht_init only accepts a power-of-two capacity of at least 8.
     , InitialCapacity_(std::bit_ceil(static_cast<uint64_t>(
-          std::max(initialCapacity, kInitialCapacity))))
+          std::max(initialCapacity, InitialCapacity))))
 {
 }
 
@@ -61,7 +61,7 @@ void TAggregateProcessor::EnsureInit()
     }
     Initialized_ = true;
     if (Kernels_.Dispatch(
-            HashTable_.data(), nullptr, InitialCapacity_, kOpInit) == 0)
+            HashTable_.data(), nullptr, InitialCapacity_, OpInit) == 0)
     {
         Destroyed_ = true;
         throw std::runtime_error("aggregate initialization failed");
@@ -74,7 +74,7 @@ void TAggregateProcessor::Add(TRowSet& rowSet)
         throw std::runtime_error("aggregate processor is already finished");
     }
     EnsureInit();
-    if (Kernels_.Dispatch(HashTable_.data(), &rowSet, 0, kOpUpdate) < 0) {
+    if (Kernels_.Dispatch(HashTable_.data(), &rowSet, 0, OpUpdate) < 0) {
         throw std::runtime_error("aggregate update failed");
     }
 }
@@ -101,7 +101,7 @@ bool TAggregateProcessor::Finish(TRowSet& rowSet)
 void TAggregateProcessor::Destroy()
 {
     if (Initialized_ && !Destroyed_) {
-        Kernels_.Dispatch(HashTable_.data(), nullptr, 0, kOpDestroy);
+        Kernels_.Dispatch(HashTable_.data(), nullptr, 0, OpDestroy);
         Destroyed_ = true;
     }
 }

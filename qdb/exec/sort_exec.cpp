@@ -39,6 +39,17 @@ struct TTopSortScratch {
 
 namespace {
 
+constexpr size_t HeapTopKMaxRows = 1024;
+constexpr size_t HeapTopKMinReduction = 4;
+
+bool ShouldUseHeapTopK(size_t rows, size_t limit)
+{
+    // Keep heap repair at ten levels or less, and require the heap to discard
+    // at least 75% of the batch. Radix remains the safer path for a large K.
+    return limit > 0 && limit <= HeapTopKMaxRows &&
+        limit <= rows / HeapTopKMinReduction;
+}
+
 struct TSortedRowSetData {
     std::vector<TGatheredColumn> Gathered;
     std::vector<TColumn> Columns;
@@ -625,11 +636,28 @@ void TTopSortProcessor::Add(TRowSet& batch)
             scratch.TempRowIds.push_back(MakeRowId(0, row));
         }
     }
-    const size_t selectedRows = scratch.TempRowIds.size();
+    size_t selectedRows = scratch.TempRowIds.size();
     if (selectedRows == 0) {
         Release(&batch);
         batch = {};
         return;
+    }
+
+    bool sortInput = true;
+    if (RadixKernel_.HeapTopKDispatch &&
+        ShouldUseHeapTopK(selectedRows, static_cast<size_t>(Limit_))) {
+        const int64_t kept = RadixKernel_.HeapTopKDispatch(
+            &batch,
+            scratch.TempRowIds.data(),
+            static_cast<int64_t>(selectedRows),
+            Limit_);
+        if (kept <= 0 || static_cast<size_t>(kept) > selectedRows) {
+            Release(&batch);
+            batch = {};
+            throw std::runtime_error("heap top-K kernel failed");
+        }
+        selectedRows = static_cast<size_t>(kept);
+        sortInput = false;
     }
 
     const bool useNullable = static_cast<bool>(RadixKernel_.NullableDispatch);
@@ -637,8 +665,13 @@ void TTopSortProcessor::Add(TRowSet& batch)
     const size_t limit = static_cast<size_t>(Limit_);
     const size_t pickCapacity = std::min(limit, stateRows + selectedRows);
     scratch.TempRowIds.resize(std::max(selectedRows, pickCapacity));
-    scratch.Work.resize(selectedRows * RadixWorkStride(KeyColumns_));
-    scratch.Counts.assign(useNullable ? 257 : 256, 0);
+    if (sortInput) {
+        scratch.Work.resize(selectedRows * RadixWorkStride(KeyColumns_));
+        scratch.Counts.assign(useNullable ? 257 : 256, 0);
+    } else {
+        scratch.Work.clear();
+        scratch.Counts.clear();
+    }
     scratch.PickSrc.resize(pickCapacity);
     scratch.PickIdx.resize(pickCapacity);
 
@@ -650,6 +683,7 @@ void TTopSortProcessor::Add(TRowSet& batch)
         scratch.Work.data(),
         scratch.Counts.data(),
         static_cast<int64_t>(selectedRows),
+        sortInput,
         scratch.PickSrc.data(),
         scratch.PickIdx.data(),
         Limit_,

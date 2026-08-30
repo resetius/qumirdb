@@ -9,7 +9,7 @@ namespace NQdb {
 
 namespace {
 
-constexpr int64_t kJoinInitialCapacity = 256;
+constexpr int64_t JoinInitialCapacity = 256;
 
 constexpr int64_t JoinOp(EJoinKernelOp op) {
     return static_cast<int64_t>(op);
@@ -73,7 +73,7 @@ void TInnerJoinProcessor::EnsureInit() {
             &PairBuffer_,
             nullptr,
             nullptr,
-            kJoinInitialCapacity,
+            JoinInitialCapacity,
             JoinOp(EJoinKernelOp::Init))) {
         throw std::runtime_error("join hash table initialization failed");
     }
@@ -100,7 +100,7 @@ bool TInnerJoinProcessor::DrainMaterialized(TRowSet& rowSet) {
     TRowSet out{};
     const int64_t produced = Kernels_.Materialize(
         &PairBuffer_, leftStore, rightStore, leftStore, rightStore,
-        MaterializeCursor_, kJoinOutputBatchRows, &out);
+        MaterializeCursor_, JoinOutputBatchRows, &out);
     if (produced <= 0) {
         throw std::runtime_error("join materialize failed");
     }
@@ -131,7 +131,7 @@ void TInnerJoinProcessor::DrainStreamingPairs(
         TRowSet out{};
         const int64_t produced = Kernels_.Materialize(
             &PairBuffer_, leftStore, rightStore, streamLeft, streamRight,
-            MaterializeCursor_, kJoinOutputBatchRows, &out);
+            MaterializeCursor_, JoinOutputBatchRows, &out);
         if (produced <= 0) {
             throw std::runtime_error("join materialize failed");
         }
@@ -545,7 +545,7 @@ bool TCrossJoinProcessor::DrainMaterialized(TRowSet& rowSet) {
     TRowSet out{};
     const int64_t produced = Kernels_.Materialize(
         &PairBuffer_, leftStore, rightStore, leftStore, rightStore,
-        MaterializeCursor_, kJoinOutputBatchRows, &out);
+        MaterializeCursor_, JoinOutputBatchRows, &out);
     if (produced <= 0) {
         throw std::runtime_error("cross join materialize failed");
     }

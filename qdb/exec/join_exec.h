@@ -82,7 +82,7 @@ private:
 };
 
 // Default target rows per output batch (drain granularity).
-inline constexpr int64_t kJoinOutputBatchRows = 1024;
+inline constexpr int64_t JoinOutputBatchRows = 1024;
 
 enum class EJoinSide { Left, Right };
 
@@ -140,7 +140,7 @@ private:
         int64_t Capacity = 0;
         int64_t* Data = nullptr;
     };
-    static_assert(sizeof(TPairBufferState) == TKernelCompiler::kPairBufferSize);
+    static_assert(sizeof(TPairBufferState) == TKernelCompiler::PairBufferSize);
 
     bool IsOuter() const;
     bool IsSemiAnti() const;
@@ -164,8 +164,8 @@ private:
     bool SemiAntiFinalized_ = false;
     TRowStore LeftRows_;
     TRowStore RightRows_;
-    std::array<uint8_t, TKernelCompiler::kHashTableSize> LeftTable_{};
-    std::array<uint8_t, TKernelCompiler::kHashTableSize> RightTable_{};
+    std::array<uint8_t, TKernelCompiler::HashTableSize> LeftTable_{};
+    std::array<uint8_t, TKernelCompiler::HashTableSize> RightTable_{};
     TPairBufferState PairBuffer_;
     // Next undrained pair in PairBuffer_ (kernel jt_materialize cursor). The
     // buffer is reset once the cursor catches up, so Finalize ops (whose RIGHT
@@ -207,7 +207,7 @@ private:
         int64_t Capacity = 0;
         int64_t* Data = nullptr;
     };
-    static_assert(sizeof(TPairBufferState) == TKernelCompiler::kPairBufferSize);
+    static_assert(sizeof(TPairBufferState) == TKernelCompiler::PairBufferSize);
 
     bool DrainMaterialized(TRowSet& rowSet);
 

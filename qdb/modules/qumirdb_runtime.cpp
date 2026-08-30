@@ -186,11 +186,11 @@ char* TStringArena::Alloc(int64_t size) {
         return nullptr;
     }
     // 64 KiB blocks; a single request larger than that gets its own exact block.
-    constexpr int64_t kBlockSize = int64_t{1} << 16;
+    constexpr int64_t BlockSize = int64_t{1} << 16;
     if (Blocks_.empty() ||
         Used_ + size > static_cast<int64_t>(Blocks_.back().size()))
     {
-        Blocks_.emplace_back(static_cast<size_t>(std::max(size, kBlockSize)));
+        Blocks_.emplace_back(static_cast<size_t>(std::max(size, BlockSize)));
         Used_ = 0;
     }
     char* ptr = Blocks_.back().data() + Used_;
@@ -238,7 +238,7 @@ int64_t qdb_filter_string_compare(
 // Fixed random secret in place of XXH3_64bits_withSeed's (slow) seed-derived
 // one, exactly as arrow::internal::ComputeStringHash does — bytes copied from
 // its kXxh3Secrets so this gets the same tested distribution.
-alignas(8) constexpr unsigned char kXxh3Secret[XXH3_SECRET_SIZE_MIN + 1] = {
+alignas(8) constexpr unsigned char Xxh3Secret[XXH3_SECRET_SIZE_MIN + 1] = {
     0xe7, 0x8b, 0x13, 0xf9, 0xfc, 0xb5, 0x8e, 0xef, 0x81, 0x48, 0x2c, 0xbf, 0xf9, 0x9f,
     0xc1, 0x1e, 0x43, 0x6d, 0xbf, 0xa6, 0x6d, 0xb5, 0x72, 0xbc, 0x97, 0xd8, 0x61, 0x24,
     0x0f, 0x12, 0xe3, 0x05, 0x21, 0xf7, 0x5c, 0x66, 0x67, 0xa5, 0x65, 0x03, 0x96, 0x26,
@@ -256,8 +256,8 @@ uint64_t MixHash(uint64_t multiplier, uint64_t h) {
 }
 
 int64_t qdb_string_hash_bytes(const uint8_t* data, int64_t size) {
-    static constexpr uint64_t kMul0 = 11400714785074694791ULL;
-    static constexpr uint64_t kMul1 = 14029467366897019727ULL;
+    static constexpr uint64_t Mul0 = 11400714785074694791ULL;
+    static constexpr uint64_t Mul1 = 14029467366897019727ULL;
 
     if (size <= 16) {
         const auto n = static_cast<uint32_t>(size);
@@ -268,23 +268,23 @@ int64_t qdb_string_hash_bytes(const uint8_t* data, int64_t size) {
                 }
                 const uint32_t x = (n << 24) ^ (data[0] << 16) ^
                     (data[n / 2] << 8) ^ data[n - 1];
-                return static_cast<int64_t>(MixHash(kMul0, x));
+                return static_cast<int64_t>(MixHash(Mul0, x));
             }
             uint32_t x, y;
             std::memcpy(&x, data + n - 4, sizeof(x));
             std::memcpy(&y, data, sizeof(y));
             return static_cast<int64_t>(
-                uint64_t{n} ^ MixHash(kMul0, x) ^ MixHash(kMul1, y));
+                uint64_t{n} ^ MixHash(Mul0, x) ^ MixHash(Mul1, y));
         }
         uint64_t x, y;
         std::memcpy(&x, data + n - 8, sizeof(x));
         std::memcpy(&y, data, sizeof(y));
         return static_cast<int64_t>(
-            uint64_t{n} ^ MixHash(kMul0, x) ^ MixHash(kMul1, y));
+            uint64_t{n} ^ MixHash(Mul0, x) ^ MixHash(Mul1, y));
     }
 
     return static_cast<int64_t>(XXH3_64bits_withSecret(
-        data, static_cast<size_t>(size), kXxh3Secret, XXH3_SECRET_SIZE_MIN));
+        data, static_cast<size_t>(size), Xxh3Secret, XXH3_SECRET_SIZE_MIN));
 }
 
 

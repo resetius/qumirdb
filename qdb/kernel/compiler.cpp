@@ -29,7 +29,7 @@
 
 namespace NQdb {
 
-static_assert(sizeof(TRowSet) == TKernelCompiler::kRowSetSize);
+static_assert(sizeof(TRowSet) == TKernelCompiler::RowSetSize);
 
 namespace {
 
@@ -695,6 +695,7 @@ NQumir::NAst::TExprPtr BuildTopSortUpdateAst(
     auto ptrI64Type = Ptr(i64Type);
     auto ptrU32Type = Ptr(u32Type);
     auto ptrU8Type = Ptr(u8Type);
+    auto boolType = std::make_shared<TBoolType>();
 
     bool anyNullableKey = false;
     for (const auto& key : keys) {
@@ -709,6 +710,7 @@ NQumir::NAst::TExprPtr BuildTopSortUpdateAst(
         .Param("work", ptrI64Type)
         .Param("counts", ptrU32Type)
         .Param("n", i64Type)
+        .Param("sort_input", boolType)
         .Param("pick_src", ptrU8Type)
         .Param("pick_idx", ptrU32Type)
         .Param("limit", i64Type)
@@ -717,15 +719,18 @@ NQumir::NAst::TExprPtr BuildTopSortUpdateAst(
         builder.Param("out_rowset", rowSetRefType);
     }
 
+    std::vector<TExprPtr> sortStmts;
     for (size_t k = keys.size(); k > 0; --k) {
         const size_t keyIdx = k - 1;
-        builder.Stmt(BuildRowIdSortCall(
+        sortStmts.push_back(BuildRowIdSortCall(
             keys[keyIdx],
             anyNullableKey,
             BoolConst(keys[keyIdx].Desc),
             BoolConst(keys[keyIdx].NullsFirst),
             "batch"));
     }
+    builder.Stmt(Oz::If(
+        Oz::Ident("sort_input"), Oz::Block(std::move(sortStmts))));
     builder
         .Var("out_count", i64Type)
         .Assign("out_count", Oz::Call("qdb_top_sort_merge_picks", {
@@ -749,7 +754,7 @@ NQumir::NAst::TExprPtr BuildTopSortUpdateAst(
         .Var("materialize_store", rowSetPtrType)
         .Assign("materialize_store", Oz::Cast(
             Oz::Call("qdb_alloc", {Oz::Mul(Int64Literal(2),
-                Int64Literal(static_cast<int64_t>(TKernelCompiler::kRowSetSize)))}),
+                Int64Literal(static_cast<int64_t>(TKernelCompiler::RowSetSize)))}),
             rowSetPtrType))
         .Stmt(Oz::ArrayAssign("materialize_store", Int64Literal(0), Deref(Oz::Ident("state"))))
         .Stmt(Oz::ArrayAssign("materialize_store", Int64Literal(1), Deref(Oz::Ident("batch"))))
@@ -1766,7 +1771,7 @@ TKernelCompiler::TTopSortDispatch TKernelCompiler::CompileTopSort(
 
     using TTopSortFn = int64_t(*)(
         TRowSet*, TRowSet*, int64_t*, int64_t*, uint32_t*,
-        int64_t, uint8_t*, uint32_t*, int64_t, TRowSet*);
+        int64_t, bool, uint8_t*, uint32_t*, int64_t, TRowSet*);
     return [slot = kernel.Slot](
         TRowSet* state,
         TRowSet* batch,
@@ -1774,12 +1779,14 @@ TKernelCompiler::TTopSortDispatch TKernelCompiler::CompileTopSort(
         int64_t* work,
         uint32_t* counts,
         int64_t n,
+        bool sortInput,
         uint8_t* pickSrc,
         uint32_t* pickIdx,
         int64_t limit,
         TRowSet* output) {
         return reinterpret_cast<TTopSortFn>(slot->Fns[0])(
-            state, batch, rowIds, work, counts, n, pickSrc, pickIdx, limit, output);
+            state, batch, rowIds, work, counts, n, sortInput,
+            pickSrc, pickIdx, limit, output);
     };
 }
 

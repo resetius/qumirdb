@@ -655,7 +655,7 @@ namespace {
 
 // Left outer oracle: for each left row (lk[i], lv[i]), find all right rows with
 // matching key. If none found, emit (lk[i], lv[i], nullKey, nullVal) where null
-// values are represented as -1 (kNullRowId rows → mask bit 0 → zeroed data, but
+// values are represented as -1 (NullRowId rows → mask bit 0 → zeroed data, but
 // we use -1 sentinel for comparison in the oracle).
 struct TOuterRow {
     int64_t Lk, Lv;

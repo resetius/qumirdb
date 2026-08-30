@@ -128,7 +128,7 @@ std::unordered_map<int64_t, TGroupStats> ComputeReference(
     return reference;
 }
 
-constexpr const char* kPlanSexp =
+constexpr const char* PlanSexp =
     "(rel aggregate (rel source \"data.parquet\") (keys k) "
     "(agg c count) (agg s sum v) (agg mn min v) (agg mx max v))";
 
@@ -332,7 +332,7 @@ TEST(AggregateE2E, MultipleGroups) {
     }
 
     NQdb::TMockSource source({"k", "v"}, std::move(batches));
-    auto root = ParsePlan(kPlanSexp, source);
+    auto root = ParsePlan(PlanSexp, source);
 
     auto runtime = RunPlan(root);
 
@@ -388,7 +388,7 @@ TEST(AggregateE2E, SingleGroup) {
     }};
 
     NQdb::TMockSource source({"k", "v"}, std::move(batches));
-    auto root = ParsePlan(kPlanSexp, source);
+    auto root = ParsePlan(PlanSexp, source);
 
     auto runtime = RunPlan(root);
 
@@ -1542,12 +1542,12 @@ TEST(AggregateE2E, NullableReducerArgumentHonoursSelectionMask) {
 // Valid-count buffers must accumulate across multiple update batches, including
 // through a hash-table grow triggered by exceeding the initial capacity.
 TEST(AggregateE2E, NullableReducerArgumentAccumulatesAcrossBatchesAndGrow) {
-    constexpr int64_t kBatches = 3;
-    constexpr int64_t kPerBatch = 8;
-    std::vector<std::vector<int64_t>> keyStore(kBatches);
-    std::vector<std::vector<int64_t>> valStore(kBatches);
-    std::vector<std::vector<uint8_t>> maskStore(kBatches);
-    std::vector<std::vector<TColumn>> columnStore(kBatches);
+    constexpr int64_t Batches = 3;
+    constexpr int64_t PerBatch = 8;
+    std::vector<std::vector<int64_t>> keyStore(Batches);
+    std::vector<std::vector<int64_t>> valStore(Batches);
+    std::vector<std::vector<uint8_t>> maskStore(Batches);
+    std::vector<std::vector<TColumn>> columnStore(Batches);
     std::vector<TRowSet> batches;
 
     struct TRef {
@@ -1560,12 +1560,12 @@ TEST(AggregateE2E, NullableReducerArgumentAccumulatesAcrossBatchesAndGrow) {
     };
     std::map<int64_t, TRef> reference;
 
-    for (int64_t b = 0; b < kBatches; ++b) {
-        keyStore[b].resize(kPerBatch);
-        valStore[b].resize(kPerBatch);
-        maskStore[b].assign((kPerBatch + 7) / 8, 0);
-        for (int64_t i = 0; i < kPerBatch; ++i) {
-            const int64_t row = b * kPerBatch + i;
+    for (int64_t b = 0; b < Batches; ++b) {
+        keyStore[b].resize(PerBatch);
+        valStore[b].resize(PerBatch);
+        maskStore[b].assign((PerBatch + 7) / 8, 0);
+        for (int64_t i = 0; i < PerBatch; ++i) {
+            const int64_t row = b * PerBatch + i;
             const int64_t key = row % 10; // 10 distinct keys forces a grow
             const int64_t value = row + 1;
             const bool valid = (row % 3 != 0);
@@ -1596,7 +1596,7 @@ TEST(AggregateE2E, NullableReducerArgumentAccumulatesAcrossBatchesAndGrow) {
         };
         batches.push_back(TRowSet{
             .Columns = columnStore[b].data(), .ColumnCount = 2,
-            .RowCount = kPerBatch, .Selection = nullptr, .RefCount = 1});
+            .RowCount = PerBatch, .Selection = nullptr, .RefCount = 1});
     }
 
     NQdb::TMockSource source(
