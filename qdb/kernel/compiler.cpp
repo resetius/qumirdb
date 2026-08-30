@@ -487,6 +487,73 @@ NQumir::NAst::TExprPtr ComparableValue(
     return value.Value;
 }
 
+void AppendSortLessBody(
+    NKernel::NOz::TFunBuilder& builder,
+    const std::vector<TSortRadixKeyInput>& keys,
+    const std::string& leftColumns,
+    const std::string& leftRow,
+    const std::string& rightColumns,
+    const std::string& rightRow,
+    NQumir::NAst::TExprPtr equalResult)
+{
+    using namespace NQumir::NAst;
+    namespace Oz = NKernel::NOz;
+
+    auto i64Type = std::make_shared<TIntegerType>();
+    auto columnType = QumirDbNamedType("TColumn");
+    auto stringViewType = QumirDbNamedType("StringView");
+
+    for (size_t k = 0; k < keys.size(); ++k) {
+        const auto& key = keys[k];
+        const std::string suffix = std::to_string(k);
+        const std::string leftCol = "left_col_" + suffix;
+        const std::string rightCol = "right_col_" + suffix;
+
+        builder
+            .Var(leftCol, columnType)
+            .Assign(leftCol,
+                Oz::Index(leftColumns, Int64Literal(key.ColumnIndex)))
+            .Var(rightCol, columnType)
+            .Assign(rightCol,
+                Oz::Index(rightColumns, Int64Literal(key.ColumnIndex)));
+
+        auto leftValue = NKernel::BuildColumnValueAst(
+            leftCol, leftRow, "left_key_" + suffix,
+            key.Type, stringViewType);
+        auto rightValue = NKernel::BuildColumnValueAst(
+            rightCol, rightRow, "right_key_" + suffix,
+            key.Type, stringViewType);
+        AppendSetup(builder, leftValue.Setup);
+        AppendSetup(builder, rightValue.Setup);
+
+        auto anyInvalid = Oz::Bin(TOperator("||"),
+            Unary("!", leftValue.IsValid),
+            Unary("!", rightValue.IsValid));
+        auto validityDiffers = Oz::Bin(TOperator("!="),
+            leftValue.IsValid, rightValue.IsValid);
+        auto leftBeforeByNull = key.NullsFirst
+            ? Unary("!", leftValue.IsValid)
+            : leftValue.IsValid;
+        builder.Stmt(Oz::If(
+            std::move(anyInvalid),
+            Oz::Block({
+                Oz::If(std::move(validityDiffers),
+                    Oz::Block({Oz::Return(std::move(leftBeforeByNull))}))
+            })));
+
+        auto leftComparable = ComparableValue(leftValue, i64Type);
+        auto rightComparable = ComparableValue(rightValue, i64Type);
+        builder.Stmt(Oz::If(
+            Oz::Bin(TOperator("<"), leftComparable, rightComparable),
+            Oz::Block({Oz::Return(BoolConst(!key.Desc))})));
+        builder.Stmt(Oz::If(
+            Oz::Bin(TOperator("<"), rightComparable, leftComparable),
+            Oz::Block({Oz::Return(BoolConst(key.Desc))})));
+    }
+
+    builder.Stmt(Oz::Return(std::move(equalResult)));
+}
+
 NQumir::NAst::TExprPtr BuildTopSortTempBeforeStateAst(
     const std::vector<TSortRadixKeyInput>& keys)
 {
@@ -498,7 +565,6 @@ NQumir::NAst::TExprPtr BuildTopSortTempBeforeStateAst(
     auto rowSetPtrType = Ptr(rowSetType);
     auto columnType = QumirDbNamedType("TColumn");
     auto columnPtrType = Ptr(columnType);
-    auto stringViewType = QumirDbNamedType("StringView");
 
     Oz::TFunBuilder builder("qdb_top_sort_temp_before_state");
     builder
@@ -516,55 +582,11 @@ NQumir::NAst::TExprPtr BuildTopSortTempBeforeStateAst(
         .Var("batch_cols", columnPtrType)
         .Assign("batch_cols", Field(Oz::Ident("batch_rs"), "Columns"));
 
-    for (size_t k = 0; k < keys.size(); ++k) {
-        const auto& key = keys[k];
-        const std::string suffix = std::to_string(k);
-        const std::string stateCol = "state_col_" + suffix;
-        const std::string tempCol = "temp_col_" + suffix;
-
-        builder
-            .Var(stateCol, columnType)
-            .Assign(stateCol,
-                Oz::Index("state_cols", Int64Literal(key.ColumnIndex)))
-            .Var(tempCol, columnType)
-            .Assign(tempCol,
-                Oz::Index("batch_cols", Int64Literal(key.ColumnIndex)));
-
-        auto stateValue = NKernel::BuildColumnValueAst(
-            stateCol, "state_row", "state_key_" + suffix,
-            key.Type, stringViewType);
-        auto tempValue = NKernel::BuildColumnValueAst(
-            tempCol, "temp_row", "temp_key_" + suffix,
-            key.Type, stringViewType);
-        AppendSetup(builder, stateValue.Setup);
-        AppendSetup(builder, tempValue.Setup);
-
-        auto anyInvalid = Oz::Bin(TOperator("||"),
-            Unary("!", stateValue.IsValid),
-            Unary("!", tempValue.IsValid));
-        auto validityDiffers = Oz::Bin(TOperator("!="),
-            stateValue.IsValid, tempValue.IsValid);
-        auto tempBeforeByNull = key.NullsFirst
-            ? Unary("!", tempValue.IsValid)
-            : tempValue.IsValid;
-        builder.Stmt(Oz::If(
-            std::move(anyInvalid),
-            Oz::Block({
-                Oz::If(std::move(validityDiffers),
-                    Oz::Block({Oz::Return(std::move(tempBeforeByNull))}))
-            })));
-
-        auto tempComparable = ComparableValue(tempValue, i64Type);
-        auto stateComparable = ComparableValue(stateValue, i64Type);
-        builder.Stmt(Oz::If(
-            Oz::Bin(TOperator("<"), tempComparable, stateComparable),
-            Oz::Block({Oz::Return(BoolConst(!key.Desc))})));
-        builder.Stmt(Oz::If(
-            Oz::Bin(TOperator("<"), stateComparable, tempComparable),
-            Oz::Block({Oz::Return(BoolConst(key.Desc))})));
-    }
-
-    builder.Stmt(Oz::Return(BoolConst(false)));
+    AppendSortLessBody(
+        builder, keys,
+        "batch_cols", "temp_row",
+        "state_cols", "state_row",
+        BoolConst(false));
     return std::move(builder).Build();
 }
 
@@ -1265,6 +1287,57 @@ NQumir::NAst::TExprPtr BuildWindowKeyComparatorAst(
 }
 
 } // namespace
+
+NQumir::NAst::TExprPtr BuildSortRowIdLessAst(
+    const std::vector<TSortRadixKeyInput>& keys)
+{
+    using namespace NQumir::NAst;
+    namespace Oz = NKernel::NOz;
+
+    if (keys.empty()) {
+        throw NQumir::TError("BuildSortRowIdLessAst: empty key list");
+    }
+
+    auto i64Type = std::make_shared<TIntegerType>();
+    auto rowSetType = QumirDbNamedType("TRowSet");
+    auto rowSetPtrType = Ptr(rowSetType);
+    auto columnPtrType = Ptr(QumirDbNamedType("TColumn"));
+
+    // Overloads heap_less on the store pointer, so the heap items stay bare
+    // packed row ids instead of carrying the store in every element.
+    Oz::TFunBuilder builder("heap_less");
+    builder
+        .Param("store", rowSetPtrType)
+        .Param("left_id", i64Type)
+        .Param("right_id", i64Type)
+        .Return(std::make_shared<TBoolType>())
+        .Var("left_batch", i64Type)
+        .Assign("left_batch", Oz::Bin(
+            TOperator(">>"), Oz::Ident("left_id"), Int64Literal(32)))
+        .Var("right_batch", i64Type)
+        .Assign("right_batch", Oz::Bin(
+            TOperator(">>"), Oz::Ident("right_id"), Int64Literal(32)))
+        .Var("left_row", i64Type)
+        .Assign("left_row", Low32(Oz::Ident("left_id")))
+        .Var("right_row", i64Type)
+        .Assign("right_row", Low32(Oz::Ident("right_id")))
+        .Var("left_row_set", rowSetType)
+        .Assign("left_row_set", Oz::Index("store", Oz::Ident("left_batch")))
+        .Var("right_row_set", rowSetType)
+        .Assign("right_row_set", Oz::Index("store", Oz::Ident("right_batch")))
+        .Var("left_cols", columnPtrType)
+        .Assign("left_cols", Field(Oz::Ident("left_row_set"), "Columns"))
+        .Var("right_cols", columnPtrType)
+        .Assign("right_cols", Field(Oz::Ident("right_row_set"), "Columns"));
+
+    AppendSortLessBody(
+        builder, keys,
+        "left_cols", "left_row",
+        "right_cols", "right_row",
+        Oz::Bin(TOperator("<"), Oz::Ident("left_id"), Oz::Ident("right_id")));
+
+    return std::move(builder).Build();
+}
 
 NQumir::NAst::TExprPtr BuildWindowProgramAst(
     const std::vector<TSortRadixKeyInput>& keys,
