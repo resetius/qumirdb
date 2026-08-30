@@ -25,8 +25,10 @@
 #include <qumir/parser/core/printer.h>
 #include <qumir/parser/type.h>
 
+#include <algorithm>
 #include <expected>
 #include <memory>
+#include <numeric>
 #include <sstream>
 #include <string_view>
 #include <vector>
@@ -694,6 +696,66 @@ TEST(SortExec, TopSortMergesBatchesStably) {
         (std::vector<int64_t>{0, 1, 1, 2, 2}));
     EXPECT_EQ(std::vector<int64_t>(outPayload, outPayload + out.RowCount),
         (std::vector<int64_t>{0, 10, 11, 20, 21}));
+    Release(&out);
+}
+
+TEST(SortExec, HeapTopSortMergesReducedBatchesStably) {
+    using namespace NQumir::NAst;
+
+    constexpr int64_t batchRows = 128;
+    constexpr int64_t limit = 7;
+    std::vector<int64_t> keys1(batchRows);
+    std::vector<int64_t> payload1(batchRows);
+    std::vector<int64_t> keys2(batchRows);
+    std::vector<int64_t> payload2(batchRows);
+    for (int64_t row = 0; row < batchRows; ++row) {
+        keys1[row] = (row * 37) % 23;
+        payload1[row] = row;
+        keys2[row] = ((row + 11) * 29) % 23;
+        payload2[row] = batchRows + row;
+    }
+
+    std::vector<TColumn> columns1;
+    TRowSet batch1 = MakeI64I64Batch(
+        keys1.data(), payload1.data(), batchRows, columns1);
+    std::vector<TColumn> columns2;
+    TRowSet batch2 = MakeI64I64Batch(
+        keys2.data(), payload2.data(), batchRows, columns2);
+
+    auto i64 = std::make_shared<TIntegerType>();
+    NQdb::TMockSource source(
+        TMockColumns{},
+        {{"k", i64}, {"payload", i64}},
+        {batch1, batch2});
+    auto sourceOp = std::make_shared<TSourceOperator>(source, "t");
+    auto root = std::make_shared<TTopSortOperator>(
+        sourceOp,
+        std::vector<TSortKey>{
+            {.Column = "k", .Direction = ESortDirection::Asc},
+        },
+        limit);
+
+    auto runtime = RunPlan(root);
+
+    std::vector<int64_t> expected(batchRows * 2);
+    std::iota(expected.begin(), expected.end(), 0);
+    auto keyAt = [&](int64_t row) {
+        return row < batchRows
+            ? keys1[row]
+            : keys2[row - batchRows];
+    };
+    std::stable_sort(expected.begin(), expected.end(),
+        [&](int64_t left, int64_t right) {
+            return keyAt(left) < keyAt(right);
+        });
+    expected.resize(limit);
+
+    TRowSet out{};
+    ASSERT_TRUE(runtime->Next(out));
+    ASSERT_EQ(out.RowCount, limit);
+    auto* outPayload = reinterpret_cast<int64_t*>(out.Columns[1].Data);
+    EXPECT_EQ(
+        std::vector<int64_t>(outPayload, outPayload + out.RowCount), expected);
     Release(&out);
 }
 

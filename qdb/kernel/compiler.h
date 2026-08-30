@@ -122,10 +122,11 @@ NQumir::NAst::TExprPtr BuildRadixSortNullableProgramAst(
     const std::vector<TSortRadixKeyInput>& keys,
     const NQumir::NAst::TStructType* materializeType = nullptr);
 
-// Top-sort program (entry qdb_top_sort_update): sorts incoming batch row ids
-// with the same radix cascade as full sort, merges the current top-K state with
-// that sorted batch, and with a materialize schema writes the new state into a
-// kernel-owned TRowSet. pick_src/pick_idx are scratch buffers, not host output.
+// Top-sort program (entry qdb_top_sort_update): optionally sorts incoming batch
+// row ids with the same radix cascade as full sort, merges the current top-K
+// state with that sorted batch, and with a materialize schema writes the new
+// state into a kernel-owned TRowSet. pick_src/pick_idx are scratch buffers, not
+// host output.
 NQumir::NAst::TExprPtr BuildTopSortMergeProgramAst(
     const std::vector<TSortRadixKeyInput>& keys,
     const NQumir::NAst::TStructType* materializeType = nullptr);
@@ -158,7 +159,7 @@ NQumir::NAst::TExprPtr BuildWindowProgramAst(
 //   op == 1: update ht from *batch (arg ignored)
 //   otherwise: destroy(ht)
 // `ht` must point to a caller-owned, zero-initialized buffer of
-// TKernelCompiler::kHashTableSize bytes (the HashTable layout from
+// TKernelCompiler::HashTableSize bytes (the HashTable layout from
 // modules/qumirdb.cpp).
 using TAggregateDispatch = std::function<int64_t(void* ht, TRowSet* batch, int64_t arg, int64_t op)>;
 
@@ -232,8 +233,8 @@ using TJoinMaterialize = std::function<int64_t(
     TRowSet* out)>;
 
 // The compiled kernels for one symmetric hash join. Each side's hash map is a
-// caller-owned, zero-initialized HashTable buffer (kHashTableSize); the output
-// pair buffer is a zero-initialized buffer of kPairBufferSize. Key-column
+// caller-owned, zero-initialized HashTable buffer (HashTableSize); the output
+// pair buffer is a zero-initialized buffer of PairBufferSize. Key-column
 // indices are supplied by the bound dispatch closure; join-kind dispatch stays
 // baked into the generated jt_dispatch function.
 struct TJoinKernels {
@@ -333,6 +334,7 @@ public:
         int64_t* work,
         uint32_t* counts,
         int64_t n,
+        bool sortInput,
         uint8_t* pickSrc,
         uint32_t* pickIdx,
         int64_t limit,
@@ -347,18 +349,18 @@ public:
     // sizeof(HashTable) per modules/qumirdb.cpp's layout — callers of
     // CompileAggregate must allocate a zero-initialized buffer this large
     // for `ht`.
-    static constexpr size_t kHashTableSize = 104;
+    static constexpr size_t HashTableSize = 104;
 
-    // The symmetric hash join reuses the aggregation HashTable (kHashTableSize)
+    // The symmetric hash join reuses the aggregation HashTable (HashTableSize)
     // as each side's hash map. sizeof(PairBuffer) per modules/qumirdb.cpp —
     // callers of CompileJoin allocate a zero-initialized buffer this large for
     // the output pair buffer.
-    static constexpr size_t kPairBufferSize = 24;
+    static constexpr size_t PairBufferSize = 24;
 
     // sizeof(TRowSet) per io.h / modules/qumirdb.oz — generated kernels that
     // pack TRowSet values into a byte buffer (e.g. top-sort's materialize
     // store) size the allocation off this instead of a bare literal.
-    static constexpr size_t kRowSetSize = 64;
+    static constexpr size_t RowSetSize = 64;
 
     // Compiles a filter kernel for the given input struct type and predicate.
     // Returns a dispatch lambda that calls the compiled kernel.

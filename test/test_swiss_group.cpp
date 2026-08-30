@@ -15,8 +15,8 @@
 
 namespace {
 
-constexpr uint64_t kMsbs = 0x8080808080808080ULL;
-constexpr uint8_t kEmpty = 0x80;
+constexpr uint64_t Msbs = 0x8080808080808080ULL;
+constexpr uint8_t Empty = 0x80;
 
 std::unique_ptr<NQumir::TLLVMRunner> CompileSwissGroup(
     const std::string& entryName,
@@ -73,7 +73,7 @@ TEST(SwissGroup, LowestIndexRecoversSlotWithinGroup) {
         }
     }
 
-    EXPECT_EQ(lowestIndex(kMsbs), 0) << "all slots set";
+    EXPECT_EQ(lowestIndex(Msbs), 0) << "all slots set";
 }
 
 TEST(SwissGroup, MatchEmptyFindsExactlyTheEmptySlots) {
@@ -89,7 +89,7 @@ TEST(SwissGroup, MatchEmptyFindsExactlyTheEmptySlots) {
         uint64_t expected = 0;
         for (int k = 0; k < 8; ++k) {
             const bool empty = (rng() & 1) != 0;
-            bytes[k] = empty ? kEmpty : static_cast<uint8_t>(h2Dist(rng));
+            bytes[k] = empty ? Empty : static_cast<uint8_t>(h2Dist(rng));
             if (empty) {
                 expected |= uint64_t{0x80} << (8 * k);
             }
@@ -113,21 +113,21 @@ TEST(SwissGroup, MatchNeverMissesAndNeverHitsEmptySlots) {
         uint8_t bytes[8];
         for (int k = 0; k < 8; ++k) {
             bytes[k] = (rng() & 3) == 0
-                ? kEmpty
+                ? Empty
                 : static_cast<uint8_t>(h2Dist(rng));
         }
         const uint64_t word = PackBytes(bytes);
         const auto h2 = static_cast<uint64_t>(h2Dist(rng));
         const uint64_t mask = match(word, h2);
 
-        EXPECT_EQ(mask & ~kMsbs, 0u) << "mask must only carry bits at 8k+7";
+        EXPECT_EQ(mask & ~Msbs, 0u) << "mask must only carry bits at 8k+7";
         for (int k = 0; k < 8; ++k) {
             const bool reported = (mask & (uint64_t{0x80} << (8 * k))) != 0;
             if (bytes[k] == h2) {
                 EXPECT_TRUE(reported)
                     << "false negative at slot " << k << ", h2=" << h2;
             }
-            if (bytes[k] == kEmpty) {
+            if (bytes[k] == Empty) {
                 EXPECT_FALSE(reported)
                     << "empty slot " << k << " must never match";
             }
@@ -145,7 +145,7 @@ TEST(SwissGroup, MatchFindsEveryH2Value) {
     for (uint64_t h2 = 0; h2 <= 0x7F; ++h2) {
         for (int k = 0; k < 8; ++k) {
             uint8_t bytes[8];
-            for (auto& b : bytes) b = kEmpty;
+            for (auto& b : bytes) b = Empty;
             bytes[k] = static_cast<uint8_t>(h2);
             const uint64_t mask = match(PackBytes(bytes), h2);
             EXPECT_NE(mask & (uint64_t{0x80} << (8 * k)), 0u)

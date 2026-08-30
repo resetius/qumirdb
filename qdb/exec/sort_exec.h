@@ -22,6 +22,7 @@ struct TSortRadixKernel {
     TKernelCompiler::TSortRadixCompositeDispatch Dispatch;
     TKernelCompiler::TSortRadixCompositeNullableDispatch NullableDispatch;
     TKernelCompiler::TTopSortDispatch TopSortDispatch;
+    TKernelCompiler::THeapTopKDispatch HeapTopKDispatch;
 };
 
 class TSortProcessor {
@@ -31,7 +32,7 @@ public:
         std::vector<TSortKey> keys,
         std::vector<TSortColumnRef> keyColumns,
         TSortRadixKernel radixKernel,
-        int64_t batchRows = kJoinOutputBatchRows);
+        int64_t batchRows = JoinOutputBatchRows);
 
     void Add(TRowSet& rowSet);
     void Finish();
@@ -44,7 +45,7 @@ private:
     std::vector<TSortKey> Keys_;
     std::vector<TSortColumnRef> KeyColumns_;
     TSortRadixKernel RadixKernel_;
-    int64_t BatchRows_ = kJoinOutputBatchRows;
+    int64_t BatchRows_ = JoinOutputBatchRows;
 
     bool Materialized_ = false;
     TRowStore Store_;
@@ -63,7 +64,7 @@ public:
         std::vector<TSortKey> keys,
         std::vector<TSortColumnRef> keyColumns,
         size_t runCount,
-        int64_t batchRows = kJoinOutputBatchRows);
+        int64_t batchRows = JoinOutputBatchRows);
 
     void Add(TRowSet& rowSet, size_t run);
     void Finish();
@@ -73,7 +74,7 @@ private:
     NQumir::NAst::TTypePtr OutputType_;
     std::vector<TSortKey> Keys_;
     std::vector<TSortColumnRef> KeyColumns_;
-    int64_t BatchRows_ = kJoinOutputBatchRows;
+    int64_t BatchRows_ = JoinOutputBatchRows;
 
     bool Materialized_ = false;
     TRowStore Store_;
@@ -90,7 +91,7 @@ public:
         std::vector<TSortColumnRef> keyColumns,
         TSortRadixKernel radixKernel,
         int64_t limit,
-        int64_t batchRows = kJoinOutputBatchRows);
+        int64_t batchRows = JoinOutputBatchRows);
     ~TTopSortProcessor();
 
     void Add(TRowSet& rowSet);
@@ -103,7 +104,7 @@ private:
     std::vector<TSortColumnRef> KeyColumns_;
     TSortRadixKernel RadixKernel_;
     int64_t Limit_ = 0;
-    int64_t BatchRows_ = kJoinOutputBatchRows;
+    int64_t BatchRows_ = JoinOutputBatchRows;
 
     bool Materialized_ = false;
     std::unique_ptr<TTopSortScratch> Scratch_;

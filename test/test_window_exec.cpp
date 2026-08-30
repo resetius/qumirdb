@@ -1393,12 +1393,12 @@ TEST(WindowExec, PrefixSumGroupsNullPartitionKey) {
     // them by raw bytes and split the NULL partition / misorder it. The nullable
     // radix must segregate NULLs into one contiguous partition.
     std::array<int64_t, 4> k = {5, 1, 2, 1};
-    std::array<uint8_t, 1> kMask = {0x0A}; // rows 1,3 valid; rows 0,2 NULL
+    std::array<uint8_t, 1> Mask = {0x0A}; // rows 1,3 valid; rows 0,2 NULL
     std::array<int64_t, 4> o = {1, 1, 2, 2};
     std::array<int64_t, 4> v = {10, 20, 30, 40};
 
     std::vector<TColumn> columns = {
-        TColumn{.Data = reinterpret_cast<char*>(k.data()), .Mask = kMask.data()},
+        TColumn{.Data = reinterpret_cast<char*>(k.data()), .Mask = Mask.data()},
         TColumn{.Data = reinterpret_cast<char*>(o.data())},
         TColumn{.Data = reinterpret_cast<char*>(v.data())},
     };
