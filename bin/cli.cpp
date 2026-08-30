@@ -36,6 +36,7 @@
 
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <expected>
@@ -167,6 +168,7 @@ struct TConfig {
     bool EnableCbo = true;
     bool Timing = false;
     EExplainMode ExplainMode = EExplainMode::Text;
+    NQdb::TLateMaterializationSettings LateMaterialization;
     NQdb::NScheduler::TSettings Scheduler;
 };
 
@@ -277,15 +279,32 @@ int ExecutePlan(
     bool explain,
     std::chrono::steady_clock::time_point planStart)
 {
+    NQdb::TPlanPassDiagnostics planDiagnostics;
     NQdb::ApplyPlanPasses(plan, {
         .EnableCbo = config.EnableCbo,
+        .LateMaterialization = config.LateMaterialization,
+        .Diagnostics = &planDiagnostics,
         .Annotation = {.ExternalCatalog = externalCatalog},
     });
     auto planElapsed = std::chrono::steady_clock::now() - planStart;
+    const bool sexprAvailable = NQdb::CollectMaterializations(plan).empty();
 
     if (config.Verbose) {
+        const auto& late = planDiagnostics.LateMaterialization;
+        if (!late.Reason.empty()) {
+            std::cerr << "late-materialization: " << late.Reason;
+            if (late.Considered) {
+                std::cerr << " (limit=" << late.Limit
+                    << ", early-columns=" << late.EarlyColumnCount
+                    << ", fetch-columns=" << late.FetchColumnCount
+                    << ", eager-bytes=" << late.Cost.EagerBytes
+                    << ", narrow-bytes=" << late.Cost.NarrowBytes
+                    << ", lookup-bytes=" << late.Cost.LookupBytes << ")";
+            }
+            std::cerr << '\n';
+        }
         std::cerr << "========== LOGICAL PLAN ==========\n";
-        if (NQdb::CollectMaterializations(plan).empty()) {
+        if (sexprAvailable) {
             NQdb::NSexp::PrintRelPlan(std::cerr, plan);
         } else {
             NQdb::PrintPlanTreeWithCtes(std::cerr, plan);
@@ -294,7 +313,6 @@ int ExecutePlan(
     }
 
     if (explain) {
-        const bool sexprAvailable = NQdb::CollectMaterializations(plan).empty();
         const bool wantSexpr =
             config.ExplainMode != EExplainMode::Text && sexprAvailable;
         const bool wantText =
@@ -675,6 +693,12 @@ void PrintHelp() {
         "  --no-partial-aggregates      Disable statistics-selected local grouped aggregation\n"
         "  --shuffle-partitions <n>     Hash shuffle partition count\n"
         "  --queue-depth <n>            Rowset queue capacity per connection lane\n"
+        "  --late-materialization=auto|off\n"
+        "                                Enable/disable cost-based late materialization\n"
+        "  --late-materialization-max-rows <n>\n"
+        "                                Maximum statically known output rows (default: 100)\n"
+        "  --late-materialization-min-savings <factor>\n"
+        "                                Required byte saving factor (default: 2.0)\n"
         "  --shuffle-queue <n>          Rowset queue capacity per shuffle lane\n"
         "  --shuffle-target-rows <n>    Target rows per materialized shuffle batch\n"
         "  --shuffle-max-rows <n>       Maximum rows per materialized shuffle batch\n"
@@ -828,6 +852,39 @@ int main(int argc, char** argv) {
             }
             config.Scheduler.Queue.RowsetCapacityPerLane =
                 static_cast<size_t>(capacity);
+        } else if (!std::strncmp(
+                       argv[i], "--late-materialization=", 23)) {
+            const std::string_view mode(argv[i] + 23);
+            if (mode == "auto") {
+                config.LateMaterialization.Enabled = true;
+            } else if (mode == "off") {
+                config.LateMaterialization.Enabled = false;
+            } else {
+                std::cerr << "--late-materialization expects auto or off\n";
+                return 1;
+            }
+        } else if (!std::strcmp(argv[i], "--late-materialization-max-rows")) {
+            if (i + 1 >= argc) {
+                std::cerr << "--late-materialization-max-rows requires an argument\n";
+                return 1;
+            }
+            auto rows = std::atoll(argv[++i]);
+            if (rows <= 0) {
+                std::cerr << "--late-materialization-max-rows requires a positive integer\n";
+                return 1;
+            }
+            config.LateMaterialization.MaxOutputRows = static_cast<uint64_t>(rows);
+        } else if (!std::strcmp(argv[i], "--late-materialization-min-savings")) {
+            if (i + 1 >= argc) {
+                std::cerr << "--late-materialization-min-savings requires an argument\n";
+                return 1;
+            }
+            const double factor = std::atof(argv[++i]);
+            if (!std::isfinite(factor) || factor < 1.0) {
+                std::cerr << "--late-materialization-min-savings requires a number >= 1\n";
+                return 1;
+            }
+            config.LateMaterialization.MinSavingsFactor = factor;
         } else if (!std::strcmp(argv[i], "--shuffle-target-rows")) {
             if (i + 1 >= argc) {
                 std::cerr << "--shuffle-target-rows requires an argument\n";

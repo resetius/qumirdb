@@ -2,6 +2,7 @@
 
 #include <qdb/io/parquet/row_id.h>
 #include <qdb/io/parquet/source.h>
+#include <qdb/io/parquet/row_id.h>
 #include <qdb/io/text/sink.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/types/nullable.h>
@@ -405,4 +406,75 @@ TEST(IOTest, RejectsFileWithReservedRowIdColumnName) {
     WriteParquet(path, batch);
 
     EXPECT_THROW(NQdb::TParquetFile{path}, std::runtime_error);
+}
+
+TEST(IOTest, EstimateLookupChargesPagesNotWholeChunks) {
+    const std::string path = "/tmp/test_io_qdb_estimate.parquet";
+    constexpr int64_t rowCount = 30000;
+
+    arrow::Int64Builder ids;
+    arrow::StringBuilder payload;
+    for (int64_t row = 0; row < rowCount; ++row) {
+        (void)ids.Append(row);
+        // Unique so the writer cannot shrink the chunk with a dictionary, but
+        // compressible, so the fixture stays small on disk.
+        (void)payload.Append(std::string(110, 'z') + std::to_string(row));
+    }
+    auto batch = arrow::RecordBatch::Make(
+        arrow::schema({
+            arrow::field("id", arrow::int64(), false),
+            arrow::field("payload", arrow::utf8(), false),
+        }),
+        rowCount,
+        {ids.Finish().ValueOrDie(), payload.Finish().ValueOrDie()});
+
+    const std::vector<std::string> early{"id"};
+    const std::vector<std::string> fetch{"payload"};
+
+    // One row group whose fetch chunk spans several pages.
+    WriteParquet(path, batch, rowCount);
+    NQdb::TParquetFile file(path);
+    auto source = file.MakeSource();
+
+    auto few = source->EstimateLookup(early, fetch, 2);
+    auto many = source->EstimateLookup(early, fetch, 1000);
+    ASSERT_TRUE(few);
+    ASSERT_TRUE(many);
+    EXPECT_GT(few->LookupBytes, 0u);
+    // The whole-chunk bound cannot tell these apart -- one row group is touched
+    // either way. Charging pages can.
+    EXPECT_LT(few->LookupBytes, many->LookupBytes);
+
+    // Past the page count the estimate saturates at the whole chunk, and then
+    // the eager cost is exactly the narrow scan plus the fetched columns.
+    auto saturated = source->EstimateLookup(early, fetch, 1000000);
+    ASSERT_TRUE(saturated);
+    EXPECT_EQ(saturated->LookupBytes, many->LookupBytes);
+    EXPECT_EQ(saturated->EagerBytes,
+        saturated->NarrowBytes + saturated->LookupBytes);
+    EXPECT_GT(saturated->EagerBytes, saturated->NarrowBytes);
+
+    // The synthetic locator is not a file column and costs nothing.
+    const std::vector<std::string> earlyWithLocator{
+        "id", std::string(InternalRowIdColumnName)};
+    auto withLocator = source->EstimateLookup(earlyWithLocator, fetch, 2);
+    ASSERT_TRUE(withLocator);
+    EXPECT_EQ(withLocator->NarrowBytes, few->NarrowBytes);
+    EXPECT_EQ(withLocator->LookupBytes, few->LookupBytes);
+
+    EXPECT_FALSE(source->EstimateLookup(early, fetch, 0));
+    EXPECT_FALSE(source->EstimateLookup(early, std::vector<std::string>{}, 2));
+    EXPECT_FALSE(source->EstimateLookup(
+        early, std::vector<std::string>{"nosuch"}, 2));
+
+    // Small row groups hold a single page each, so the page estimate falls back
+    // to the whole-chunk bound.
+    const std::string smallPath = "/tmp/test_io_qdb_estimate_small.parquet";
+    WriteParquet(smallPath, batch, 500);
+    NQdb::TParquetFile smallFile(smallPath);
+    auto smallSource = smallFile.MakeSource();
+    auto everyGroup = smallSource->EstimateLookup(early, fetch, rowCount);
+    ASSERT_TRUE(everyGroup);
+    EXPECT_EQ(everyGroup->EagerBytes,
+        everyGroup->NarrowBytes + everyGroup->LookupBytes);
 }

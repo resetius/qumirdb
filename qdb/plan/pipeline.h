@@ -18,8 +18,7 @@ struct TPlanPassDiagnostics {
 
 struct TPlanPassOptions {
     bool EnableCbo = true;
-    // Keep the rewrite opt-in until scheduler lowering is available.
-    TLateMaterializationSettings LateMaterialization = {.Enabled = false};
+    TLateMaterializationSettings LateMaterialization;
     TPlanPassDiagnostics* Diagnostics = nullptr;
     NKernel::TAnnotationContext Annotation;
 };

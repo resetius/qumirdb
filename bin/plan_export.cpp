@@ -1161,8 +1161,20 @@ llvm::json::Object JoinReorderDiagnosticsJson(
 llvm::json::Object PlanPassDiagnosticsJson(
     const NQdb::TPlanPassDiagnostics& diagnostics)
 {
+    const auto& late = diagnostics.LateMaterialization;
     return llvm::json::Object{
         {"joinReorder", JoinReorderDiagnosticsJson(diagnostics.JoinReorder)},
+        {"lateMaterialization", llvm::json::Object{
+            {"considered", late.Considered},
+            {"applied", late.Applied},
+            {"reason", late.Reason},
+            {"limit", static_cast<int64_t>(late.Limit)},
+            {"earlyColumnCount", static_cast<int64_t>(late.EarlyColumnCount)},
+            {"fetchColumnCount", static_cast<int64_t>(late.FetchColumnCount)},
+            {"eagerBytes", static_cast<int64_t>(late.Cost.EagerBytes)},
+            {"narrowBytes", static_cast<int64_t>(late.Cost.NarrowBytes)},
+            {"lookupBytes", static_cast<int64_t>(late.Cost.LookupBytes)},
+        }},
     };
 }
 
@@ -2785,6 +2797,9 @@ llvm::json::Object BuildBundle(
     NQdb::TPlanPassDiagnostics planDiagnostics;
     try {
         NQdb::ApplyPlanPasses(logicalPlan, {
+            // The browser runtime has no data-source lookup task yet. Keep its
+            // plan on the eager path until it can bind a lookup-capable source.
+            .LateMaterialization = {.Enabled = false},
             .Diagnostics = &planDiagnostics,
             .Annotation = {.ExternalCatalog = externalCatalog},
         });
