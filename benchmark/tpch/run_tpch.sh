@@ -61,27 +61,37 @@ query_enabled() {
     return 1
 }
 
-# Run qdb with the given args; append full output to LOG_FILE, return
-# "<seconds_float> <rc>" on stdout.
+# Run qdb with the given args; result rows go to RESULT_FILE, diagnostics to
+# LOG_FILE. Echoes "<exec> <cpu> <plan> <kernel-build> <llvm> <return-code>".
 run_query() {
     local label="$1"; shift
-    local out_file rc seconds
+    local out_file err_file rc seconds cpu plan build llvm
     out_file="$(mktemp "$tmpdir/qdb_output.XXXXXX")"
+    err_file="$(mktemp "$tmpdir/qdb_stderr.XXXXXX")"
     set +e
-    "$QDB_BIN" "$@" > "$out_file" 2>&1
+    "$QDB_BIN" --timing "$@" > "$out_file" 2> "$err_file"
     rc=$?
     set -e
+    printf '\n=== %s (rc=%s) ===\n' "$label" "$rc" >> "$RESULT_FILE"
+    cat "$out_file" >> "$RESULT_FILE"
     printf '\n=== %s (rc=%s) ===\n' "$label" "$rc" >> "$LOG_FILE"
-    cat "$out_file" >> "$LOG_FILE"
+    cat "$err_file" >> "$LOG_FILE"
     printf '\n' >> "$LOG_FILE"
+    # Execution total (processing only) — the metric the tables report.
     seconds=$(
         sed -nE \
             -e 's/.*Returned [0-9]+ rows in ([0-9]+([.][0-9]+)?) seconds.*/\1/p' \
             -e 's/.*Processed [0-9]+ rowsets in ([0-9]+([.][0-9]+)?).*/\1/p' \
-            "$out_file" | tail -n 1
+            "$err_file" | tail -n 1
     )
-    seconds="${seconds:-0}"
-    echo "$seconds $rc"
+    cpu=$(sed -nE 's/.*Cpu: ([0-9]+([.][0-9]+)?) seconds.*/\1/p' "$err_file" | tail -n 1)
+    # Per-phase compile timings (--timing), excluded from the processing total.
+    plan=$(sed -nE 's/.*Planning: ([0-9]+([.][0-9]+)?) seconds.*/\1/p' "$err_file" | tail -n 1)
+    build=$(sed -nE 's/.*KernelBuild: ([0-9]+([.][0-9]+)?) seconds.*/\1/p' "$err_file" | tail -n 1)
+    llvm=$(sed -nE 's/.*JitLLVM: ([0-9]+([.][0-9]+)?) seconds.*/\1/p' "$err_file" | tail -n 1)
+    seconds="${seconds:-0}"; cpu="${cpu:-0}"
+    plan="${plan:-0}"; build="${build:-0}"; llvm="${llvm:-0}"
+    echo "$seconds $cpu $plan $build $llvm $rc"
 }
 
 # Substitute scale params (and, for sexpr, table paths) into a template (stdout).
@@ -176,14 +186,20 @@ for scale in "${SCALES[@]}"; do
     source "$params_file"
 
     LOG_FILE="$OUT_DIR/tpch_${MODE}_sf${sf_num}.log"
+    RESULT_FILE="$OUT_DIR/tpch_${MODE}_sf${sf_num}.results" # query result rows
     : > "$LOG_FILE"
+    : > "$RESULT_FILE"
 
     echo "[qdb] mode=$MODE scale=$sf_num parquet=$data_dir" | tee -a "$LOG_FILE" >&2
 
-    printf "%-6s  %-12s  %s\n" "Query" "Time(s)" "Status"
-    printf "%-6s  %-12s  %s\n" "------" "------------" "------"
+    printf "%-8s  %-9s  %-9s  %-9s  %-9s  %-9s  %s\n" "Query" "Plan(s)" "KBuild(s)" "LLVM(s)" "Exec(s)" "Cpu(s)" "Status"
+    printf "%-8s  %-9s  %-9s  %-9s  %-9s  %-9s  %s\n" "------" "-------" "---------" "-------" "-------" "------" "------"
 
     total_s="0"
+    cpu_s="0"
+    plan_s="0"
+    build_s="0"
+    llvm_s="0"
     failed=0
 
     for q_num in $(seq 1 22); do
@@ -194,27 +210,28 @@ for scale in "${SCALES[@]}"; do
             [[ -f "$template" ]] || continue
             tmp_sql="$tmpdir/q${q_num}_sf${sf_num}.sql"
             render "$template" "$data_dir" > "$tmp_sql"
-            read -r seconds rc <<< "$(run_query "Q${q_num} sf${sf_num}" ${EXTRA_QDB_ARGS[@]+"${EXTRA_QDB_ARGS[@]}"} --sql -i "$tmp_sql" --data "$data_dir")"
+            read -r seconds cpu plan build llvm rc <<< "$(run_query "Q${q_num} sf${sf_num}" ${EXTRA_QDB_ARGS[@]+"${EXTRA_QDB_ARGS[@]}"} --sql -i "$tmp_sql" --data "$data_dir")"
         else
             template="$SEXPR_DIR/q${q_num}.sexp"
             [[ -f "$template" ]] || continue
             tmp_sexp="$tmpdir/q${q_num}_sf${sf_num}.sexp"
             render "$template" "$data_dir" > "$tmp_sexp"
-            read -r seconds rc <<< "$(run_query "Q${q_num} sf${sf_num}" ${EXTRA_QDB_ARGS[@]+"${EXTRA_QDB_ARGS[@]}"} -i "$tmp_sexp")"
+            read -r seconds cpu plan build llvm rc <<< "$(run_query "Q${q_num} sf${sf_num}" ${EXTRA_QDB_ARGS[@]+"${EXTRA_QDB_ARGS[@]}"} -i "$tmp_sexp")"
         fi
 
         total_s=$(python3 -c "print(round($total_s + $seconds, 3))")
+        cpu_s=$(python3 -c "print(round($cpu_s + $cpu, 3))")
+        plan_s=$(python3 -c "print(round($plan_s + $plan, 3))")
+        build_s=$(python3 -c "print(round($build_s + $build, 3))")
+        llvm_s=$(python3 -c "print(round($llvm_s + $llvm, 3))")
 
-        if [[ $rc -eq 0 ]]; then
-            printf "Q%-5s  %-12s  OK\n" "$q_num" "${seconds}s"
-            echo "[qdb] q${q_num} ${seconds}s OK" >> "$LOG_FILE"
-        else
-            printf "Q%-5s  %-12s  FAILED\n" "$q_num" "${seconds}s"
-            echo "[qdb] q${q_num} FAILED" >> "$LOG_FILE"
-            (( failed++ )) || true
-        fi
+        if [[ $rc -eq 0 ]]; then status="OK"; else status="FAILED"; (( failed++ )) || true; fi
+        printf "%-8s  %-9s  %-9s  %-9s  %-9s  %-9s  %s\n" \
+            "Q$q_num" "$plan" "$build" "$llvm" "$seconds" "$cpu" "$status"
+        echo "[qdb] q${q_num} plan=${plan}s kbuild=${build}s llvm=${llvm}s exec=${seconds}s cpu=${cpu}s ${status}" >> "$LOG_FILE"
     done
 
-    printf "Total: %ss,  Failed: %s\n" "$total_s" "$failed"
-    echo "[qdb] log: $LOG_FILE" >&2
+    printf "Total (processing): %ss,  Cpu: %ss,  Failed: %s\n" "$total_s" "$cpu_s" "$failed"
+    printf "Compile (excluded from processing): plan=%ss  kbuild=%ss  llvm=%ss\n" "$plan_s" "$build_s" "$llvm_s"
+    echo "[qdb] log: $LOG_FILE  results: $RESULT_FILE" >&2
 done
