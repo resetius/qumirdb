@@ -4157,6 +4157,9 @@ class TopSortWasmState {
         toWasmPtr(workPtr),
         toWasmPtr(countsPtr),
         BigInt(n),
+        // sortInput: the browser has no heap Top-K path, so the kernel always
+        // radix-sorts the batch. Plain i32 bool, like doSort above.
+        1,
         toWasmPtr(pickSrcPtr),
         toWasmPtr(pickIdxPtr),
         BigInt(this.limit),

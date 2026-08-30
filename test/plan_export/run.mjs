@@ -131,6 +131,21 @@ const fixtures = {
     },
     browserBatchSizes: { t: [4, 4, 4] },
   },
+  // Several batches and a limit below the row count, so the top-sort kernel
+  // really merges a running top-K instead of sorting once.
+  top_sort: {
+    sql: 'SELECT k AS k, v AS v FROM t ORDER BY v DESC, k ASC LIMIT 3',
+    tables: {
+      t: {
+        k: [1, 2, 3, 4, 5, 6, 7, 8],
+        v: [30, 10, 30, 40, 20, 40, 10, 20],
+      },
+    },
+    browserBatchSizes: { t: [3, 3, 2] },
+    // The exporter refuses a sort stage without an embedded wasm kernel, so the
+    // snapshot has to be taken from the wasm bundle too.
+    needsWasm: true,
+  },
 };
 
 function datasetFor(fixture) {
@@ -661,7 +676,8 @@ async function runWasmCacheContract() {
 }
 
 async function runFixture(name, mode) {
-  const snapshotBundle = exportBundle(name, mode, false);
+  const snapshotBundle = exportBundle(
+    name, mode, fixtures[name].needsWasm === true);
   assertStablePhysicalGroups(name, mode, snapshotBundle);
   const snapshot = normalizedExec(snapshotBundle.exec);
   if (printGoldens) {
