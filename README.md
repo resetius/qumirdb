@@ -179,6 +179,8 @@ Design notes live in [docs/arch/](docs/arch/README.md).
 - [Scheduler runtime](docs/arch/scheduler_runtime.md) and
   [dispatch](docs/arch/dispatch.md): the physical graph, tasks and
   connections.
+- [Late materialization](docs/arch/late_materialization.md): a narrow Parquet
+  scan and late column fetches after a small `LIMIT`.
 - [Kernel compilation phases](docs/arch/kernel-compilation-phases.md): how a
   plan becomes Qumir code, LLVM IR, and finally machine code or wasm.
 

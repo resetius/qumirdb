@@ -41,9 +41,9 @@ and reschedules their neighbors when a task returns `OK`, `NEED_DATA`,
 |---|---|---|---|---|---|
 | `TSourceTask` | none | one lane | `Source` | `TSchedulerSourceState` | Pulls rowsets from `ISource`; parquet scans can be split into independent row-group range sources. |
 | `TUnaryTask` | one lane | one lane | `Filter`, `Project`, cross residual filter, cross scalar forwarding | `TUnaryStreamingKernelState` or trivial state | Streaming one-rowset-in/one-rowset-out stage. Keeps partitioning unchanged. |
-| `TBlockingTask` | one lane | one lane | `Aggregate`, `Limit`, `Sort`, `TopSort` | operator-specific processor state | Drains input until enough state exists to emit output. |
+| `TBlockingTask` | one lane | one lane | `Aggregate`, `Limit`, `Sort`, `TopSort`, late lookup | operator-specific processor state | Drains input until enough state exists to emit output. |
 | `TBinaryBlockingTask` | two lanes | one lane | equi-join, cross join | `TInnerJoinProcessor` or `TCrossJoinProcessor` | Coordinates two input streams and emits joined rowsets. |
-| `TMergeTask` | N lanes | one lane | partitioned `Sort`, partitioned `TopSort` | `TMergeProcessor` | Merges already sorted runs from local sort tasks. |
+| `TMergeTask` | N lanes | one lane | partitioned `Sort`, partitioned `TopSort`, late materialization | `TMergeProcessor` or operator-specific state | Reads several input lanes and emits one output stream. |
 | `THashShuffleTask` | one lane | many lanes through `THashShuffleConnection` | grouped aggregate, window, and equi-join repartition | per-task hash scratch and output buffers | Computes row hashes and routes rows to partition lanes. |
 | `TSinkTask` | one lane | none | final sink | caller-owned `ISink` alias | Writes final rowsets and releases them. |
 
@@ -122,7 +122,7 @@ expose each processor as a WASM node adapter with `push/finish/next/destroy`.
 | `TOneToOneConnection` | N -> N | destination `i` reads source `i` | normal streaming edges, single-lane blocking input, single-lane final output | Cheapest connection; preserves partitioning. |
 | `TGatherConnection` | N -> 1 | one destination round-robins over source lanes until all finish | global blocking operators, final output with multiple lanes, scalar side gather | Serializes lanes; useful only when semantics require one consumer. |
 | `THashShuffleConnection` | N -> M | destination `j` reads from every source lane routed to partition `j` | grouped aggregate, window, and equi-join partitioning | Expensive boundary: hash kernel, routing, buffering/materialization. Carries the repartition key contract; `DstCount()` is the partition count. |
-| `TBroadcastConnection` | 1 -> N | every destination receives a shared copy | cross join scalar side | Replicates small scalar-side batches to each vector lane. |
+| `TBroadcastConnection` | 1 -> N | every destination receives a shared copy | cross join scalar side, late lookup locators | Sends a shared copy to each destination lane. |
 
 Every connection is made of bounded rowset queues plus finish state. The graph
 stores edges with `(connection, srcLane, dstLane)` so diagnostics can print the
@@ -167,6 +167,7 @@ The important ownership split is:
 | `Sort`, many input lanes | local sort per lane -> merge task | `one-to-one` run connections | local sort + merge processor | Produces one globally sorted stream. |
 | `TopSort`, one input lane | child -> one top-sort task | `one-to-one` | top-sort processor + optional radix kernel | Keeps local top-K only. |
 | `TopSort`, many input lanes | local top-sort per lane -> merge -> limit | `one-to-one` run connections | top-sort + merge + limit | Implements `top-sort over partitions -> merge -> limit`. |
+| Late materialization | rows after `LIMIT` -> optional broadcast -> lookup tasks by column range -> merge | `gather` or `one-to-one`, optional `broadcast`, then one result lane per lookup task | Parquet row lookup | Lookup tasks stay in the scheduler pool. They share the open Parquet file reader. |
 | Equi-join, single partition | left/right -> one binary join task | two `one-to-one` inputs | join kernels | Fast path skips hash-shuffle and join-hash kernels. |
 | Equi-join, partitioned | left/right -> shuffle tasks -> join task per partition | two `one-to-one` inputs, two `hash-shuffle` connections | join hash + join kernels | Both sides use the same partition count, so matching keys land in the same join lane. |
 | Keyless inner join | vector side + scalar side -> cross tasks | vector `one-to-one`; scalar `one-to-one` or `gather -> broadcast` | `TCrossJoinProcessor`; residual uses filter kernel | Scalar side is buffered, then paired with each vector lane. |
