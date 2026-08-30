@@ -1,14 +1,16 @@
 # Benchmark results: qdb, DuckDB, YQL
 
-All runs on one machine on 2026-08-22: an Apple M5 Pro with 18 cores and 64 GB
-of memory, with every engine set to 18 threads. For every query the **best** of
-the available runs is reported.
+All runs on one machine: an Apple M5 Pro with 18 cores and 64 GB of memory,
+with every engine set to 18 threads. For every query the **best** of the
+available runs is reported. Benchmarks are re-run independently, so each section
+below carries its own run date.
 
-> **qumirdb is under active development.** These numbers are a snapshot of one
-> day, not a fixed characterisation of the engine. Query execution, the hash
-> table and Parquet scanning are all being worked on, so the qdb column is
-> expected to move — treat it as a baseline to measure the next change against,
-> and re-run the benchmarks rather than citing these figures later.
+> **qumirdb is under active development.** These numbers are a snapshot taken
+> on the dates below, not a fixed characterisation of the engine. Query
+> execution, the hash table and Parquet scanning are all being worked on, so
+> the qdb column is expected to move — treat it as a baseline to measure the
+> next change against, and re-run the benchmarks rather than citing these
+> figures later.
 
 ## What each number measures
 
@@ -46,7 +48,7 @@ its results may differ from what is shown here.
 
 | Benchmark | Scale | qdb (s) | DuckDB (s) | YQL (s) | qdb ÷ DuckDB | Notes |
 |---|---|---|---|---|---|---|
-| ClickBench | — | 19.45 | 14.44 | — | 1.35× | — |
+| ClickBench | — | 15.31 | 14.44 | — | 1.06× | — |
 | TPC-H | 1 | 0.93 | 1.17 | 4.17 | 0.80× | — |
 | TPC-H | 10 | 7.54 | 4.03 | 29.21 | 1.87× | — |
 | TPC-H | 100 | 96.81 | 32.10 | 338.38 | 3.02× | — |
@@ -59,54 +61,59 @@ different subsets — flagged in the Notes column.
 
 ## ClickBench
 
+Run 2026-08-30, qdb options:
+`--scheduler threaded --scan-tasks 32 --scheduler-workers 18 --cascade-aggregates`.
+
 | Query | qdb (s) | DuckDB (s) | qdb ÷ DuckDB |
 |---|---|---|---|
-| q0 | 0.035 | 0.040 | 0.89× |
-| q1 | 0.015 | 0.050 | 0.31× |
-| q2 | 0.061 | 0.070 | 0.87× |
-| q3 | 0.055 | 0.070 | 0.79× |
-| q4 | 0.240 | 0.160 | 1.50× |
-| q5 | 0.353 | 0.230 | 1.53× |
-| q6 | 0.042 | 0.090 | 0.47× |
-| q7 | 0.011 | 0.050 | 0.21× |
-| q8 | 0.376 | 0.200 | 1.88× |
-| q9 | 0.543 | 0.270 | 2.01× |
-| q10 | 0.144 | 0.100 | 1.44× |
-| q11 | 0.164 | 0.110 | 1.50× |
-| q12 | 0.334 | 0.230 | 1.45× |
-| q13 | 0.521 | 0.360 | 1.45× |
-| q14 | 0.341 | 0.260 | 1.31× |
-| q15 | 0.392 | 0.190 | 2.06× |
-| q16 | 0.881 | 0.430 | 2.05× |
-| q17 | 0.615 | 0.350 | 1.76× |
-| q18 | 1.710 | 0.680 | 2.51× |
-| q19 | 0.079 | 0.050 | 1.58× |
-| q20 | 0.752 | 0.410 | 1.83× |
-| q21 | 0.882 | 0.350 | 2.52× |
-| q22 | 1.147 | 0.620 | 1.85× |
-| q23 | 0.894 | 0.530 | 1.69× |
-| q24 | 0.233 | 0.200 | 1.16× |
-| q25 | 0.592 | 0.170 | 3.48× |
-| q26 | 0.729 | 0.210 | 3.47× |
-| q27 | 0.395 | 0.340 | 1.16× |
-| q28 | 1.122 | 3.560 | 0.32× |
-| q29 | 0.051 | 0.060 | 0.85× |
-| q30 | 0.377 | 0.280 | 1.34× |
-| q31 | 0.449 | 0.310 | 1.45× |
-| q32 | 1.433 | 0.780 | 1.84× |
-| q33 | 1.354 | 0.880 | 1.54× |
-| q34 | 1.367 | 0.920 | 1.49× |
-| q35 | 0.425 | 0.250 | 1.70× |
-| q36 | 0.039 | 0.100 | 0.39× |
-| q37 | 0.023 | 0.090 | 0.25× |
-| q38 | 0.031 | 0.070 | 0.44× |
-| q39 | 0.201 | 0.140 | 1.43× |
+| q0 | 0.045 | 0.040 | 1.12× |
+| q1 | 0.015 | 0.050 | 0.30× |
+| q2 | 0.062 | 0.070 | 0.88× |
+| q3 | 0.058 | 0.070 | 0.82× |
+| q4 | 0.245 | 0.160 | 1.53× |
+| q5 | 0.296 | 0.230 | 1.28× |
+| q6 | 0.043 | 0.090 | 0.47× |
+| q7 | 0.011 | 0.050 | 0.23× |
+| q8 | 0.381 | 0.200 | 1.90× |
+| q9 | 0.530 | 0.270 | 1.96× |
+| q10 | 0.138 | 0.100 | 1.38× |
+| q11 | 0.166 | 0.110 | 1.51× |
+| q12 | 0.283 | 0.230 | 1.23× |
+| q13 | 0.479 | 0.360 | 1.33× |
+| q14 | 0.300 | 0.260 | 1.15× |
+| q15 | 0.266 | 0.190 | 1.40× |
+| q16 | 0.626 | 0.430 | 1.46× |
+| q17 | 0.665 | 0.350 | 1.90× |
+| q18 | 1.235 | 0.680 | 1.82× |
+| q19 | 0.081 | 0.050 | 1.61× |
+| q20 | 0.438 | 0.410 | 1.07× |
+| q21 | 0.532 | 0.350 | 1.52× |
+| q22 | 0.873 | 0.620 | 1.41× |
+| q23 | 0.551 | 0.530 | 1.04× |
+| q24 | 0.150 | 0.200 | 0.75× |
+| q25 | 0.117 | 0.170 | 0.69× |
+| q26 | 0.147 | 0.210 | 0.70× |
+| q27 | 0.393 | 0.340 | 1.16× |
+| q28 | 1.254 | 3.560 | 0.35× |
+| q29 | 0.053 | 0.060 | 0.88× |
+| q30 | 0.354 | 0.280 | 1.27× |
+| q31 | 0.407 | 0.310 | 1.31× |
+| q32 | 1.070 | 0.780 | 1.37× |
+| q33 | 1.235 | 0.880 | 1.40× |
+| q34 | 1.177 | 0.920 | 1.28× |
+| q35 | 0.310 | 0.250 | 1.24× |
+| q36 | 0.034 | 0.100 | 0.34× |
+| q37 | 0.022 | 0.090 | 0.25× |
+| q38 | 0.033 | 0.070 | 0.47× |
+| q39 | 0.201 | 0.140 | 1.44× |
 | q40 | 0.019 | 0.060 | 0.32× |
 | q41 | 0.011 | 0.060 | 0.19× |
 | q42 | 0.007 | 0.060 | 0.11× |
-| **total** | **19.45** | **14.44** | **1.35×** |
+| **total** | **15.31** | **14.44** | **1.06×** |
 
 ## TPC-H, scale 1
+
+Run 2026-08-22.
 
 | Query | qdb (s) | DuckDB (s) | YQL (s) | qdb ÷ DuckDB |
 |---|---|---|---|---|
@@ -136,6 +143,8 @@ different subsets — flagged in the Notes column.
 
 ## TPC-H, scale 10
 
+Run 2026-08-22.
+
 | Query | qdb (s) | DuckDB (s) | YQL (s) | qdb ÷ DuckDB |
 |---|---|---|---|---|
 | q1 | 0.203 | 0.260 | 0.772 | 0.78× |
@@ -164,6 +173,8 @@ different subsets — flagged in the Notes column.
 
 ## TPC-H, scale 100
 
+Run 2026-08-22.
+
 | Query | qdb (s) | DuckDB (s) | YQL (s) | qdb ÷ DuckDB |
 |---|---|---|---|---|
 | q1 | 1.825 | 2.200 | 7.695 | 0.83× |
@@ -191,6 +202,8 @@ different subsets — flagged in the Notes column.
 | **total** | **96.81** | **32.10** | **338.38** | **3.02×** |
 
 ## TPC-DS, scale 1
+
+Run 2026-08-22.
 
 | Query | qdb (s) | DuckDB (s) | YQL (s) | qdb ÷ DuckDB |
 |---|---|---|---|---|
@@ -297,6 +310,8 @@ different subsets — flagged in the Notes column.
 
 ## TPC-DS, scale 10
 
+Run 2026-08-22.
+
 | Query | qdb (s) | DuckDB (s) | YQL (s) | qdb ÷ DuckDB |
 |---|---|---|---|---|
 | q1 | 0.066 | 0.070 | 0.302 | 0.94× |
@@ -401,6 +416,8 @@ different subsets — flagged in the Notes column.
 | **total** | **51.90** | **15.89** | **420.05** | **3.27×** |
 
 ## TPC-DS, scale 100
+
+Run 2026-08-22.
 
 | Query | qdb (s) | DuckDB (s) | qdb ÷ DuckDB |
 |---|---|---|---|
