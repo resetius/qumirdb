@@ -86,6 +86,13 @@ const char* TestHeapWrapperSource = R"(
     (block
       (call heap_sort items size)))
 
+  (fun test_heap_top_k_i64
+       ((var items <ptr i64>)
+        (var size i64)
+        (var limit i64)) -> i64
+    (block
+      (return (call heap_top_k items size limit))))
+
   (fun test_heap_sort_columns
        ((var rows <ptr <named TestHeapRow>>)
         (var size i64))
@@ -106,6 +113,7 @@ struct THeapFunctions {
     using TReplaceTop = int64_t (*)(int64_t*, int64_t, int64_t);
     using TPop = int64_t (*)(int64_t*, int64_t);
     using TSort = void (*)(int64_t*, int64_t);
+    using TTopK = int64_t (*)(int64_t*, int64_t, int64_t);
     using TSortColumns = void (*)(THeapRow*, int64_t);
 
     std::unique_ptr<NQumir::TLLVMRunner> Runner;
@@ -114,6 +122,7 @@ struct THeapFunctions {
     TReplaceTop ReplaceTop = nullptr;
     TPop Pop = nullptr;
     TSort Sort = nullptr;
+    TTopK TopK = nullptr;
     TSortColumns SortColumns = nullptr;
 };
 
@@ -153,6 +162,7 @@ THeapFunctions CompileHeapFunctions() {
                                                 "test_heap_replace_top_i64",
                                                 "test_heap_pop_i64",
                                                 "test_heap_sort_i64",
+                                                "test_heap_top_k_i64",
                                                 "test_heap_sort_columns",
                                             },
                                             &error);
@@ -170,6 +180,8 @@ THeapFunctions CompileHeapFunctions() {
         reinterpret_cast<THeapFunctions::TPop>(entries["test_heap_pop_i64"]);
     result.Sort =
         reinterpret_cast<THeapFunctions::TSort>(entries["test_heap_sort_i64"]);
+    result.TopK = reinterpret_cast<THeapFunctions::TTopK>(
+        entries["test_heap_top_k_i64"]);
     result.SortColumns = reinterpret_cast<THeapFunctions::TSortColumns>(
         entries["test_heap_sort_columns"]);
     return result;
@@ -247,6 +259,20 @@ TEST(Heap, SortHandlesEdgeCasesAndRandomValues) {
     std::sort(expected.begin(), expected.end());
     heap.Sort(values.data(), values.size());
     EXPECT_EQ(values, expected);
+}
+
+TEST(Heap, TopKKeepsSortedPrefix) {
+    auto heap = CompileHeapFunctions();
+    ASSERT_NE(heap.TopK, nullptr);
+
+    std::vector<int64_t> values = {12, -4, 7, 3, 19, 0, 7, -8, 5};
+    auto expected = values;
+    std::sort(expected.begin(), expected.end());
+
+    const int64_t kept = heap.TopK(values.data(), values.size(), 4);
+    ASSERT_EQ(kept, 4);
+    EXPECT_TRUE(std::equal(
+        values.begin(), values.begin() + kept, expected.begin()));
 }
 
 TEST(Heap, SortsColumnarDataThroughRowIds) {

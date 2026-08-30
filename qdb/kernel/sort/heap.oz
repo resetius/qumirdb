@@ -151,6 +151,41 @@
         (block
           (= heap_size (call heap_pop items heap_size ctx))))))
 
+  ;; Keeps the first limit items of the order and sorts that prefix. The tail
+  ;; holds unspecified values, not the remaining items.
+  (fun heap_top_k [Ctx Item]
+       ((var items <ptr Item>)
+        (var size i64)
+        (var limit i64)
+        (var ctx Ctx)) -> i64
+    (block
+      (if (|| (<= size 0) (<= limit 0))
+        (block
+          (return 0)))
+
+      (var kept = limit)
+      (if (> kept size)
+        (block
+          (= kept size)))
+      (call heapify items kept ctx)
+
+      (var current = kept)
+      (while (< current size)
+        (block
+          (var item = (index items current))
+          (if (call heap_less ctx item (index items 0))
+            (block
+              (= kept (call heap_replace_top items kept item ctx))))
+          (= current (+ current 1))))
+
+      ;; The prefix is already a heap. Pop it directly to avoid heapifying it
+      ;; for a second time in heap_sort.
+      (var heap_size = kept)
+      (while (> heap_size 1)
+        (block
+          (= heap_size (call heap_pop items heap_size ctx))))
+      (return kept)))
+
   ;; Short forms for items that compare with their own operator <.
   (fun heap_sift_down [Item]
        ((var items <ptr Item>)
@@ -196,4 +231,11 @@
         (var size i64))
     (block
       (call heap_sort items size 0)))
+
+  (fun heap_top_k [Item]
+       ((var items <ptr Item>)
+        (var size i64)
+        (var limit i64)) -> i64
+    (block
+      (return (call heap_top_k items size limit 0))))
 )
