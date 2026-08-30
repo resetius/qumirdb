@@ -271,6 +271,10 @@ struct TParquetFileData {
 
 void TParquetFileData::Open()
 {
+    // Compiled physical readers share this FileReader across scheduler tasks.
+    // That concurrency contract relies on a ReadableFile, disabled Arrow
+    // pre-buffering, and lookup code that uses neither page-index nor bloom-
+    // filter readers. Revisit sharing if any of those conditions changes.
     auto infileResult = arrow::io::ReadableFile::Open(Path);
     if (!infileResult.ok()) {
         throw std::runtime_error(infileResult.status().ToString());
@@ -896,6 +900,11 @@ std::shared_ptr<const IPhysicalRowReader> TParquetSource::CompileReader(
         File_->FileReader, columnNames, GetMemoryPool());
 }
 
+// Parquet page sizes are not in the metadata. Writers cap a data page at 1 MiB
+// uncompressed by default, so this yields a lower bound on the page count: a
+// writer using smaller pages only makes the real lookup cheaper.
+inline constexpr uint64_t ParquetPageSizeGuess = uint64_t{1} << 20;
+
 std::optional<TLateMaterializationCost> TParquetSource::EstimateLookup(
     std::span<const std::string> earlyColumns,
     std::span<const std::string> fetchColumns,
@@ -959,6 +968,8 @@ std::optional<TLateMaterializationCost> TParquetSource::EstimateLookup(
     TLateMaterializationCost cost;
     std::vector<uint64_t> lookupByRowGroup;
     lookupByRowGroup.reserve(static_cast<size_t>(metadata->num_row_groups()));
+    std::unordered_map<int, uint64_t> fetchBytes;
+    std::unordered_map<int, uint64_t> fetchPages;
     for (int rg = 0; rg < metadata->num_row_groups(); ++rg) {
         auto eagerBytes = bytesFor(rg, eager);
         auto narrowBytes = bytesFor(rg, *early);
@@ -969,13 +980,38 @@ std::optional<TLateMaterializationCost> TParquetSource::EstimateLookup(
         cost.EagerBytes += *eagerBytes;
         cost.NarrowBytes += *narrowBytes;
         lookupByRowGroup.push_back(*lookupBytes);
+        for (int column : *fetch) {
+            const auto chunk = metadata->RowGroup(rg)->ColumnChunk(column);
+            const int64_t compressed = chunk->total_compressed_size();
+            const int64_t uncompressed = chunk->total_uncompressed_size();
+            if (compressed < 0 || uncompressed < 0) {
+                return std::nullopt;
+            }
+            fetchBytes[column] += static_cast<uint64_t>(compressed);
+            fetchPages[column] += std::max<uint64_t>(
+                1,
+                (static_cast<uint64_t>(uncompressed) + ParquetPageSizeGuess - 1)
+                    / ParquetPageSizeGuess);
+        }
     }
     std::ranges::sort(lookupByRowGroup, std::greater<>());
     const size_t touched = std::min<size_t>(
         static_cast<size_t>(maxRows), lookupByRowGroup.size());
-    cost.LookupBytes = std::accumulate(
+    const uint64_t wholeChunkBytes = std::accumulate(
         lookupByRowGroup.begin(), lookupByRowGroup.begin() + touched,
         uint64_t{0});
+
+    // A lookup reads pages, not whole column chunks: at most one page per
+    // requested row per column. Charging a chunk per row, as the whole-chunk
+    // bound does, overstates a wide fetch by an order of magnitude.
+    uint64_t pageBytes = 0;
+    for (const auto& [column, pages] : fetchPages) {
+        const uint64_t bytes = fetchBytes[column];
+        const uint64_t used = std::min<uint64_t>(maxRows, pages);
+        // Split the division to keep the product inside 64 bits.
+        pageBytes += bytes / pages * used + bytes % pages * used / pages;
+    }
+    cost.LookupBytes = std::min(pageBytes, wholeChunkBytes);
     return cost;
 }
 
@@ -1015,7 +1051,8 @@ bool TParquetSource::Next(TRowSet& rowSet) {
             }
         }
         if (remaining != 0) {
-            return false;
+            throw std::runtime_error(
+                "parquet source row-group metadata ended before the batch");
         }
         auto rowIdArray = rowIds.Finish();
         if (!rowIdArray.ok()) {
