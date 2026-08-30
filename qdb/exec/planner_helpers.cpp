@@ -6,6 +6,7 @@
 #include <qdb/plan/ops/aggregate.h>
 #include <qdb/plan/ops/join.h>
 #include <qdb/plan/ops/limit.h>
+#include <qdb/plan/ops/late_materialize.h>
 #include <qdb/kernel/compiler.h>
 #include <qdb/kernel/annotate_type.h>
 #include <qdb/kernel/spec.h>
@@ -856,6 +857,12 @@ void PrintRuntimePlanNode(
     if (auto node = TMaybeOp<TLimitOperator>(root)) {
         out << "limit [" << node.Cast()->Limit()
             << ", offset " << node.Cast()->Offset() << "]\n";
+        PrintRuntimePlanNode(out, node.Cast()->Input(), depth + 1);
+        return;
+    }
+    if (auto node = TMaybeOp<TLateMaterializeOperator>(root)) {
+        out << "late-materialize [" << node.Cast()->Columns().size()
+            << " columns]\n";
         PrintRuntimePlanNode(out, node.Cast()->Input(), depth + 1);
         return;
     }

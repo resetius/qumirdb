@@ -130,12 +130,15 @@ std::shared_ptr<TLateMaterializeOperator> FindLateMaterialize(
 
 } // namespace
 
-TEST(LateMaterialization, DisabledInPlanPipelineByDefault) {
+TEST(LateMaterialization, CanBeDisabledInPlanPipeline) {
     TLookupMockSource source;
     auto plan = BuildSqlPlan("SELECT * FROM hits LIMIT 10", source);
     ASSERT_TRUE(plan) << (plan ? "" : plan.error().ToString());
 
-    ApplyPlanPasses(*plan, {.EnableCbo = false});
+    ApplyPlanPasses(*plan, {
+        .EnableCbo = false,
+        .LateMaterialization = {.Enabled = false},
+    });
 
     EXPECT_FALSE(TMaybeOp<TLateMaterializeOperator>(*plan));
 }
