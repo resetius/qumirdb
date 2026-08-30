@@ -135,6 +135,15 @@ TFixture MakeFixture(std::string_view name) {
                 {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}}));
         return fixture;
     }
+    if (name == "top_sort") {
+        fixture.Sql = "SELECT k AS k, v AS v FROM t ORDER BY v DESC, k ASC LIMIT 3";
+        fixture.Tables.emplace("t", std::make_unique<TFixtureTable>(
+            std::vector<std::string>{"k", "v"},
+            std::vector<std::vector<int64_t>>{
+                {1, 2, 3, 4, 5, 6, 7, 8},
+                {30, 10, 30, 40, 20, 40, 10, 20}}));
+        return fixture;
+    }
     throw std::runtime_error("unknown fixture: " + std::string(name));
 }
 

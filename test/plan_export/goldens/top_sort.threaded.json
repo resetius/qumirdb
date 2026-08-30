@@ -1,0 +1,100 @@
+{
+  "supported": true,
+  "embedWasm": true,
+  "nodes": [
+    {
+      "columns": [
+        {
+          "name": "k",
+          "nullable": false,
+          "type": "i64"
+        },
+        {
+          "name": "v",
+          "nullable": false,
+          "type": "i64"
+        }
+      ],
+      "id": 0,
+      "kind": "source",
+      "stageId": 3,
+      "table": "t"
+    },
+    {
+      "entrypoints": {},
+      "id": 1,
+      "kind": "project",
+      "output": [
+        {
+          "inputIndex": 0,
+          "name": "k",
+          "nullable": false,
+          "source": "passthrough",
+          "type": "i64"
+        },
+        {
+          "inputIndex": 1,
+          "name": "v",
+          "nullable": false,
+          "source": "passthrough",
+          "type": "i64"
+        }
+      ],
+      "stageId": 2
+    },
+    {
+      "entrypoints": {
+        "qdb_top_sort_update": "qdb_top_sort_update"
+      },
+      "id": 2,
+      "kind": "top-sort",
+      "label": "top-sort [v desc, k asc] limit 3",
+      "limit": 3,
+      "radixKeys": [
+        {
+          "desc": true,
+          "index": 1,
+          "isString": false,
+          "nullsFirst": true,
+          "width": 8
+        },
+        {
+          "desc": false,
+          "index": 0,
+          "isString": false,
+          "nullsFirst": false,
+          "width": 8
+        }
+      ],
+      "radixNullable": false,
+      "sortKeys": [
+        {
+          "column": "v",
+          "direction": "desc",
+          "nulls": "nulls-default"
+        },
+        {
+          "column": "k",
+          "direction": "asc",
+          "nulls": "nulls-default"
+        }
+      ],
+      "stageId": 1
+    }
+  ],
+  "edges": [
+    {
+      "from": 0,
+      "input": 0,
+      "kind": "one-to-one",
+      "to": 1
+    },
+    {
+      "from": 1,
+      "input": 0,
+      "kind": "one-to-one",
+      "to": 2
+    }
+  ],
+  "root": 2
+}
