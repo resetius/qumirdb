@@ -108,6 +108,20 @@ TFixture MakeFixture(std::string_view name) {
                 {2, 4, 5}, {200, 400, 500}}));
         return fixture;
     }
+    if (name == "semi_join") {
+        fixture.Sql =
+            "SELECT k AS k, v AS v FROM l WHERE k IN (SELECT rk FROM r)";
+        fixture.Tables.emplace("l", std::make_unique<TFixtureTable>(
+            std::vector<std::string>{"k", "v"},
+            std::vector<std::vector<int64_t>>{
+                {1, 2, 3, 4, 5, 6, 1, 2, 3, 4, 5, 6, 1, 2, 3, 4, 5, 6, 1, 2, 3, 4, 5, 6, 1, 2, 3, 4, 5, 6, 1, 2, 3, 4, 5, 6, 1, 2, 3, 4},
+                {10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160, 170, 180, 190, 200, 210, 220, 230, 240, 250, 260, 270, 280, 290, 300, 310, 320, 330, 340, 350, 360, 370, 380, 390, 400}}));
+        fixture.Tables.emplace("r", std::make_unique<TFixtureTable>(
+            std::vector<std::string>{"rk"},
+            std::vector<std::vector<int64_t>>{
+                {2, 4, 5}}));
+        return fixture;
+    }
     if (name == "nested_limit") {
         fixture.Sql =
             "SELECT count(*) AS n FROM "

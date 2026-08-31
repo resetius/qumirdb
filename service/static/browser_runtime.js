@@ -3791,7 +3791,9 @@ class JoinTask {
     }
 
     if (this.bothDone || (this.leftDone && this.rightDone)) {
-      if (isLeftSemiAntiJoin(this.stage) && !this.state.semiAntiFinalized) {
+      if (isLeftSemiAntiJoin(this.stage) &&
+          !this.streamsSemiAntiLeft() &&
+          !this.state.semiAntiFinalized) {
         finalizeSemiAntiJoinState(this.state);
         this.ready.push(...drainJoinPairs(this.state, BROWSER_JOIN_OUTPUT_BATCH_ROWS, asWasm));
         if (this.ready.length > 0) {
@@ -3828,12 +3830,13 @@ class JoinTask {
   }
 
   pullOneInputBatch() {
-    if (isLeftSemiAntiJoin(this.stage)) {
+    const streamSemiAnti = this.streamsSemiAntiLeft();
+    if (isLeftSemiAntiJoin(this.stage) && !streamSemiAnti) {
       return this.pullOneSemiAntiInputBatch();
     }
     return this.pullOneSymmetricInputBatch(
       downstreamConsumesWasm(this.node),
-      isInnerJoin(this.stage));
+      isInnerJoin(this.stage) || streamSemiAnti);
   }
 
   chooseSymmetricPullSide() {
@@ -3923,9 +3926,6 @@ class JoinTask {
         return this.processStoredSide(0);
       }
 
-      // Asymmetric: drain only the build side chosen by C++ lowering (serialized
-      // as stage.buildSide); the leftDone/rightDone branches above then stream
-      // the probe side. Mirrors TInnerJoinProcessor's BuildSide_ path.
       if (allowStreaming && this.stage.buildSide === 'right') {
         return this.processStoredSide(1);
       }
@@ -3945,6 +3945,10 @@ class JoinTask {
       }
       return this.processStoredSide(0);
     }
+  }
+
+  streamsSemiAntiLeft() {
+    return isLeftSemiAntiJoin(this.stage) && this.stage.buildSide === 'right';
   }
 
   pullOneSemiAntiInputBatch() {

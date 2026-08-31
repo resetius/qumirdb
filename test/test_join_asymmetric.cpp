@@ -50,6 +50,75 @@ TJoinKernels CompileJoin(TKernelCompiler& compiler,
     return compiler.CompileJoin(spec);
 }
 
+struct TOut2 {
+    int64_t Lk, Lv;
+    auto operator<=>(const TOut2&) const = default;
+};
+
+// Duplicate right keys must not duplicate SEMI output.
+std::vector<TOut2> RunSemiAnti(EJoinType type, EJoinBuildSide buildSide) {
+    std::vector<int64_t> lk0 = {1, 2}, lv0 = {10, 20};
+    std::vector<int64_t> lk1 = {1, 3}, lv1 = {30, 40};
+    std::vector<int64_t> rk0 = {1, 1}, rv0 = {100, 200};
+    std::vector<int64_t> rk1 = {2}, rv1 = {300};
+    std::vector<TColumn> lcols0, lcols1, rcols0, rcols1;
+
+    auto leftType = KeyValSchema("lk", "lv");
+    auto rightType = KeyValSchema("rk", "rv");
+    auto leftBatch0 = KeyValBatch(lk0.data(), lv0.data(), 2, lcols0);
+    auto leftBatch1 = KeyValBatch(lk1.data(), lv1.data(), 2, lcols1);
+    auto rightBatch0 = KeyValBatch(rk0.data(), rv0.data(), 2, rcols0);
+    auto rightBatch1 = KeyValBatch(rk1.data(), rv1.data(), 1, rcols1);
+
+    TKernelCompiler compiler;
+    auto kernels = CompileJoin(compiler, leftType, rightType, type);
+    TInnerJoinProcessor processor(std::move(kernels), type, buildSide);
+
+    int leftFetches = 0;
+    int rightIndex = 0;
+    int leftIndex = 0;
+    auto right = [&](TRowSet& rowSet) {
+        if (rightIndex == 0) { rowSet = rightBatch0; ++rightIndex; return EJoinFetchResult::OK; }
+        if (rightIndex == 1) { rowSet = rightBatch1; ++rightIndex; return EJoinFetchResult::OK; }
+        return EJoinFetchResult::FINISHED;
+    };
+    auto left = [&](TRowSet& rowSet) {
+        ++leftFetches;
+        if (leftIndex == 0) { rowSet = leftBatch0; ++leftIndex; return EJoinFetchResult::OK; }
+        if (leftIndex == 1) { rowSet = leftBatch1; ++leftIndex; return EJoinFetchResult::OK; }
+        return EJoinFetchResult::FINISHED;
+    };
+
+    std::vector<TOut2> got;
+    TRowSet out{};
+    for (;;) {
+        if (buildSide == EJoinBuildSide::Right &&
+            processor.RequiredInputSide() == EJoinBuildSide::Right) {
+            EXPECT_EQ(leftFetches, 0) << "left streamed before the right was built";
+        }
+        auto result = processor.Process(left, right, out);
+        if (result == EJoinProcessorResult::NEED_DATA) continue;
+        if (result == EJoinProcessorResult::FINISHED) break;
+        EXPECT_EQ(out.ColumnCount, 2) << "semi/anti emits left columns only";
+        const auto* c0 = reinterpret_cast<const int64_t*>(out.Columns[0].Data);
+        const auto* c1 = reinterpret_cast<const int64_t*>(out.Columns[1].Data);
+        for (int64_t i = 0; i < out.RowCount; ++i) {
+            got.push_back({c0[i], c1[i]});
+        }
+        Release(&out);
+    }
+    std::sort(got.begin(), got.end());
+    return got;
+}
+
+std::vector<TOut2> ExpectedSemiAnti(EJoinType type) {
+    std::vector<TOut2> e = type == EJoinType::LeftAnti
+        ? std::vector<TOut2>{{3, 40}}
+        : std::vector<TOut2>{{1, 10}, {1, 30}, {2, 20}};
+    std::sort(e.begin(), e.end());
+    return e;
+}
+
 // Drives a processor with a one-batch build side and a two-batch probe side.
 // Asserts the probe is never fetched while RequiredInputSide reports the build
 // side, then returns the collected inner-join rows.
@@ -147,6 +216,16 @@ TStatsPtr Rows(uint64_t n) {
     return s;
 }
 
+TOperatorPtr JoinOfType(EJoinType type) {
+    auto left = std::make_shared<TFakeSource>(
+        std::vector<std::pair<std::string, TTypePtr>>{{"lk", I64Type()}, {"lv", I64Type()}});
+    auto right = std::make_shared<TFakeSource>(
+        std::vector<std::pair<std::string, TTypePtr>>{{"rk", I64Type()}, {"rv", I64Type()}});
+    auto join = MakeJoin(left, right, {{"lk", "rk"}}, type);
+    EXPECT_TRUE(join.has_value()) << (join ? "" : join.error().ToString());
+    return std::static_pointer_cast<IOperator>(join.value_or(nullptr));
+}
+
 TOperatorPtr InnerJoin() {
     auto left = std::make_shared<TFakeSource>(
         std::vector<std::pair<std::string, TTypePtr>>{{"lk", I64Type()}, {"lv", I64Type()}});
@@ -165,6 +244,59 @@ TEST(AsymmetricJoin, BuildRightMatchesSymmetric) {
 
 TEST(AsymmetricJoin, BuildLeftMatchesSymmetric) {
     EXPECT_EQ(RunAsymmetric(EJoinBuildSide::Left), ExpectedInner());
+}
+
+class SemiAntiOrientation : public testing::TestWithParam<EJoinType> {};
+
+INSTANTIATE_TEST_SUITE_P(
+    Types,
+    SemiAntiOrientation,
+    testing::Values(EJoinType::LeftSemi, EJoinType::LeftAnti),
+    [](const testing::TestParamInfo<EJoinType>& info) {
+        return info.param == EJoinType::LeftAnti ? "Anti" : "Semi";
+    });
+
+TEST_P(SemiAntiOrientation, BuildRightMatchesBuildLeft) {
+    EXPECT_EQ(RunSemiAnti(GetParam(), EJoinBuildSide::Right),
+              ExpectedSemiAnti(GetParam()));
+    EXPECT_EQ(RunSemiAnti(GetParam(), EJoinBuildSide::Auto),
+              ExpectedSemiAnti(GetParam()));
+}
+
+// Only right-build can stream the left output.
+TEST(ChooseJoinBuildSide, SemiAntiTakesRightBuildOnly) {
+    const uint64_t small = 1000;
+    const uint64_t big = static_cast<uint64_t>(std::ceil(small * JoinAsymmetryRatio)) + 1;
+
+    for (auto type : {EJoinType::LeftSemi, EJoinType::LeftAnti}) {
+        auto join = JoinOfType(type);
+        ASSERT_TRUE(join);
+        auto* j = static_cast<TJoinOperator*>(join.get());
+
+        j->Left()->Stats_ = Rows(big);
+        j->Right()->Stats_ = Rows(small);
+        EXPECT_EQ(ChooseJoinBuildSide(*j), EJoinBuildSide::Right);
+
+        j->Left()->Stats_ = Rows(small);
+        j->Right()->Stats_ = Rows(big);
+        EXPECT_EQ(ChooseJoinBuildSide(*j), EJoinBuildSide::Auto);
+    }
+}
+
+// A residual predicate needs right rows, which key-only build discards.
+TEST(ChooseJoinBuildSide, SemiAntiWithResidualStaysAuto) {
+    auto join = JoinOfType(EJoinType::LeftSemi);
+    ASSERT_TRUE(join);
+    auto* j = static_cast<TJoinOperator*>(join.get());
+    j->Left()->Stats_ = Rows(1000000);
+    j->Right()->Stats_ = Rows(1);
+    ASSERT_EQ(ChooseJoinBuildSide(*j), EJoinBuildSide::Right);
+
+    j->MutableFilter() = std::make_shared<TBinaryExpr>(
+        NQumir::TLocation{}, TOperator("!="),
+        std::make_shared<TIdentExpr>(NQumir::TLocation{}, "lv"),
+        std::make_shared<TIdentExpr>(NQumir::TLocation{}, "rv"));
+    EXPECT_EQ(ChooseJoinBuildSide(*j), EJoinBuildSide::Auto);
 }
 
 // Decision reads JoinAsymmetryRatio so it tracks the constant rather than a

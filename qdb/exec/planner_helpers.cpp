@@ -247,7 +247,12 @@ NQumir::NAst::TTypePtr BuildSourceRuntimeType(TSourceOperator& src)
 }
 
 EJoinBuildSide ChooseJoinBuildSide(const TJoinOperator& join) {
-    if (join.JoinType() != EJoinType::Inner || join.Keys().empty()) {
+    const auto type = join.JoinType();
+    // A residual predicate needs right rows, not just key membership.
+    const bool semiAnti =
+        type == EJoinType::LeftSemi || type == EJoinType::LeftAnti;
+    const bool streamable = semiAnti && !join.Filter();
+    if ((type != EJoinType::Inner && !streamable) || join.Keys().empty()) {
         return EJoinBuildSide::Auto;
     }
     auto leftStats = join.Left()->Stats_;
@@ -261,7 +266,7 @@ EJoinBuildSide ChooseJoinBuildSide(const TJoinOperator& join) {
     if (r * JoinAsymmetryRatio <= l) {
         return EJoinBuildSide::Right;
     }
-    if (l * JoinAsymmetryRatio <= r) {
+    if (!semiAnti && l * JoinAsymmetryRatio <= r) {
         return EJoinBuildSide::Left;
     }
     return EJoinBuildSide::Auto;

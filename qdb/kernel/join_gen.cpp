@@ -428,6 +428,7 @@ enum class EJoinBatchMode {
   ProbeOnly,
   InsertOnly,
   ProbeMark,
+  SemiProbe,
 };
 
 NQumir::NAst::TExprPtr GenJoinBatchAst(
@@ -435,7 +436,7 @@ NQumir::NAst::TExprPtr GenJoinBatchAst(
     NQumir::NAst::TTypePtr columnType, NQumir::NAst::TTypePtr rowSetType,
     NQumir::NAst::TTypePtr hashTableType, NQumir::NAst::TTypePtr pairBufferType,
     NQumir::NAst::TTypePtr stringViewType, EJoinBatchMode mode,
-    bool hasPrecomputedHash) {
+    bool hasPrecomputedHash, bool isAnti = false) {
   NQumir::TLocation loc{};
 
   auto i64Type = std::make_shared<TIntegerType>();
@@ -642,6 +643,16 @@ NQumir::NAst::TExprPtr GenJoinBatchAst(
                                               std::move(ownRowId),
                                               ident("hash_value"),
                                           });
+  } else if (mode == EJoinBatchMode::SemiProbe) {
+    emitCall = call("jt_probe_semi", {
+                                         ident("build"),
+                                         ident("key_value"),
+                                         ident("stored_witness"),
+                                         std::move(ownRowId),
+                                         numI64(isAnti ? 1 : 0),
+                                         ident("pairs"),
+                                         ident("hash_value"),
+                                     });
   } else {
     emitCall = call("jt_probe_and_mark", {
                                              ident("build"),
@@ -730,6 +741,17 @@ NQumir::NAst::TExprPtr GenJoinProbeAst(const TJoinKeyDescriptor &key,
                          EJoinBatchMode::ProbeOnly, hasPrecomputedHash);
 }
 
+NQumir::NAst::TExprPtr GenJoinProbeSemiAst(
+    const TJoinKeyDescriptor &key, bool isAnti, const std::string &funcName,
+    NQumir::NAst::TTypePtr columnType, NQumir::NAst::TTypePtr rowSetType,
+    NQumir::NAst::TTypePtr hashTableType, NQumir::NAst::TTypePtr pairBufferType,
+    NQumir::NAst::TTypePtr stringViewType, bool hasPrecomputedHash) {
+  return GenJoinBatchAst(key, /*isLeft=*/true, funcName, std::move(columnType),
+                         std::move(rowSetType), std::move(hashTableType),
+                         std::move(pairBufferType), std::move(stringViewType),
+                         EJoinBatchMode::SemiProbe, hasPrecomputedHash, isAnti);
+}
+
 NQumir::NAst::TExprPtr GenJoinProbeMarkAst(
     const TJoinKeyDescriptor &key, bool isLeft, const std::string &funcName,
     NQumir::NAst::TTypePtr columnType, NQumir::NAst::TTypePtr rowSetType,
@@ -810,6 +832,17 @@ GenJoinDispatchAst(int64_t keySize, EJoinType type, bool hasResidual,
                                         });
   };
   auto streamLeft = [&]() {
+    if (isSemiAnti && !isResidualSemiAnti) {
+      return Oz::Call("jt_probe_left_semi", {
+                                                Oz::Ident("right"),
+                                                Oz::Ident("batch"),
+                                                Oz::Ident("left_key_columns"),
+                                                Oz::Ident("batch_idx"),
+                                                Oz::Ident("pairs"),
+                                                Oz::Ident("left_store"),
+                                                Oz::Ident("right_store"),
+                                            });
+    }
     return Oz::Call("jt_probe_left_stream", {
                                                 Oz::Ident("right"),
                                                 Oz::Ident("batch"),
