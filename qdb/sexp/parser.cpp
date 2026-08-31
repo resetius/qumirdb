@@ -11,6 +11,7 @@
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/ops/window.h>
 
+#include <limits>
 #include <optional>
 
 namespace NQdb {
@@ -448,17 +449,68 @@ TNodeParserMap MakeRelParsers(TRelParserOptions options) {
                 co_return TError(loc, "cross join (empty key list) only supports inner type");
             }
 
-            // Optional residual predicate, then the closing ')'.
+            // Tag residuals to keep annotations unambiguous.
             TExprPtr filter;
-            auto tok = h.Next();
-            if (!IParseHandle::IsOp(tok, ')')) {
-                h.Unget(tok);
-                filter = co_await h.Expr();
-                co_await h.Take(')');
+            std::optional<TRuntimeFilterSpec> runtimeFilter;
+            for (;;) {
+                auto tok = h.Next();
+                if (IParseHandle::IsOp(tok, ')')) {
+                    break;
+                }
+                if (!IParseHandle::IsOp(tok, '(')) {
+                    co_return IParseHandle::MakeError(
+                        tok, "(rel join) expects ')' or a tagged annotation");
+                }
+                auto tag = ReadIdentifier(h, h.Next());
+                if (!tag) {
+                    co_return IParseHandle::MakeError(
+                        tok, "(rel join) annotation must start with a tag");
+                }
+                if (*tag == "residual") {
+                    if (filter) {
+                        co_return IParseHandle::MakeError(
+                            tok, "(rel join) accepts at most one (residual …)");
+                    }
+                    filter = co_await h.Expr();
+                    co_await h.Take(')');
+                    continue;
+                }
+                if (*tag == "emit-filter") {
+                    if (runtimeFilter) {
+                        co_return IParseHandle::MakeError(
+                            tok, "(rel join) accepts at most one (emit-filter …)");
+                    }
+                    auto idTok = h.Next();
+                    if (idTok.Type != TToken::Integer
+                        || idTok.Value.i64 <= 0
+                        || idTok.Value.i64 > std::numeric_limits<uint32_t>::max()) {
+                        co_return IParseHandle::MakeError(
+                            idTok, "(emit-filter) expects a positive uint32 id");
+                    }
+                    auto sideTok = h.Next();
+                    auto sideName = ReadIdentifier(h, sideTok);
+                    auto side = sideName
+                        ? ParseJoinFilterSide(*sideName)
+                        : std::nullopt;
+                    if (!side) {
+                        co_return IParseHandle::MakeError(
+                            sideTok, "(emit-filter) expects build side 'left' or 'right'");
+                    }
+                    runtimeFilter = TRuntimeFilterSpec{
+                        .Id = static_cast<uint32_t>(idTok.Value.i64),
+                        .BuildSide = *side,
+                    };
+                    co_await h.Take(')');
+                    continue;
+                }
+                co_return IParseHandle::MakeError(
+                    tok, "unknown (rel join) annotation: " + *tag);
             }
 
-            co_return std::make_shared<TJoinOperator>(
+            auto joinOp = std::make_shared<TJoinOperator>(
                 std::move(left), std::move(right), std::move(keys), type, std::move(filter));
+            joinOp->MutableRuntimeFilter() = std::move(runtimeFilter);
+            co_return joinOp;
         }
 
         if (*relName == TWindowOperator::OpId) {
