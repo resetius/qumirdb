@@ -9,6 +9,7 @@
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/ops/stats.h>
 #include <qdb/plan/pipeline.h>
+#include <qdb/plan/passes/estimate_stats.h>
 #include <qdb/plan/passes/row_group_predicate.h>
 #include <qdb/plan/passes/typing.h>
 #include <qdb/scheduler/plan_lowerer.h>
@@ -275,6 +276,25 @@ TEST(StatsTest, FilterSelectivityPropagation) {
     EXPECT_LE(plan->Stats_->RowCount, 300u);
     EXPECT_TRUE(sourceOp->RowGroupPredicate());
     EXPECT_TRUE(NQdb::TMaybeOp<NQdb::TFilterOperator>(plan));
+}
+
+TEST(StatsTest, AggregateStatsAccountForGroupingSets) {
+    TStatsSource src({{"x", 100}, {"y", 100}}, 100);
+    auto input = std::make_shared<NQdb::TSourceOperator>(src, "");
+    input->SetAlias("t");
+    auto aggregate = std::make_shared<NQdb::TAggregateOperator>(
+        input, std::vector<std::string>{"t.x", "t.y"},
+        std::vector<NQdb::TAggregateSpec>{});
+    aggregate->MutableGroupingSets() = {{0}, {1}};
+
+    auto stats = NQdb::EstimateStats(aggregate);
+
+    ASSERT_TRUE(stats);
+    EXPECT_EQ(stats->RowCount, 200u);
+    EXPECT_DOUBLE_EQ(stats->Cost, input->Stats_->Cost
+        + 2.0 * src.Stats_->RowCount * NQdb::EstimateTypeWidth(aggregate->OutputColumns()));
+    EXPECT_TRUE(stats->ColumnStats.at("t.x")->Histogram.empty());
+    EXPECT_TRUE(stats->ColumnStats.at("t.y")->Histogram.empty());
 }
 
 TEST(StatsTest, AggregateInitialCapacityUsesNdvAndPartitionCount) {

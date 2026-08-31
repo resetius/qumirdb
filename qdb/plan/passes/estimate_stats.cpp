@@ -603,14 +603,17 @@ TStatsPtr ComputeAggregateStats(const std::shared_ptr<TAggregateOperator>& aggre
             }
             rows += columns.empty() ? 1.0 : groupsFor(columns);
         }
-        rows = std::min(rows, inputRows);
     } else {
         rows = groupsFor(keys);
     }
 
     auto outputStats = std::make_shared<TStats>();
     outputStats->RowCount = std::max<uint64_t>(1, static_cast<uint64_t>(rows));
-    outputStats->Cost = inputStats->Cost + inputRows * std::max(OutputRowWidth(aggregate), 1.0);
+    const double inputPasses = aggregate->GroupingSets().empty()
+        ? 1.0
+        : static_cast<double>(aggregate->GroupingSets().size());
+    outputStats->Cost = inputStats->Cost
+        + inputRows * inputPasses * std::max(OutputRowWidth(aggregate), 1.0);
 
     for (const auto& key : keys) {
         auto it = inputStats->ColumnStats.find(key);
@@ -622,6 +625,7 @@ TStatsPtr ComputeAggregateStats(const std::shared_ptr<TAggregateOperator>& aggre
             column->Ndv = std::min<uint64_t>(*column->Ndv, outputStats->RowCount);
         }
         column->NullCount = std::nullopt;
+        column->Histogram.clear();
         outputStats->ColumnStats[key] = std::move(column);
     }
     return outputStats;
