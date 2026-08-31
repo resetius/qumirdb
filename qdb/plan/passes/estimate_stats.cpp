@@ -4,6 +4,7 @@
 
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/ops/cte_ref.h>
+#include <qdb/plan/ops/aggregate.h>
 #include <qdb/plan/ops/filter.h>
 #include <qdb/plan/ops/project.h>
 #include <qdb/plan/ops/join.h>
@@ -554,6 +555,78 @@ TStatsPtr ComputeUnionStats(const std::shared_ptr<TUnionAllOperator>& un) {
     return out;
 }
 
+TStatsPtr ComputeAggregateStats(const std::shared_ptr<TAggregateOperator>& aggregate)
+{
+    auto inputStats = aggregate->Input()->Stats_;
+    if (!inputStats) {
+        return nullptr;
+    }
+
+    const auto& keys = aggregate->GroupKeys();
+    const double inputRows = std::max<double>(1.0, static_cast<double>(inputStats->RowCount));
+
+    auto ndvOf = [&](const std::string& column) {
+        auto it = inputStats->ColumnStats.find(column);
+        if (it != inputStats->ColumnStats.end() && it->second->Ndv) {
+            return static_cast<double>(*it->second->Ndv);
+        }
+        return UnknownNdv;
+    };
+    auto groupsFor = [&](const std::vector<std::string>& columns) {
+        double groups = 1.0;
+        for (const auto& column : columns) {
+            groups *= std::max(1.0, std::min(ndvOf(column), inputRows));
+            if (groups >= inputRows) {
+                return inputRows;
+            }
+        }
+        return std::min(groups, inputRows);
+    };
+
+    const bool global = !keys.empty() &&
+        std::ranges::all_of(keys, [](const std::string& key) {
+            return key == "__group__";
+        });
+
+    double rows;
+    if (keys.empty() || global) {
+        rows = 1.0;
+    } else if (!aggregate->GroupingSets().empty()) {
+        rows = 0.0;
+        for (const auto& set : aggregate->GroupingSets()) {
+            std::vector<std::string> columns;
+            columns.reserve(set.size());
+            for (size_t index : set) {
+                if (index < keys.size()) {
+                    columns.push_back(keys[index]);
+                }
+            }
+            rows += columns.empty() ? 1.0 : groupsFor(columns);
+        }
+        rows = std::min(rows, inputRows);
+    } else {
+        rows = groupsFor(keys);
+    }
+
+    auto outputStats = std::make_shared<TStats>();
+    outputStats->RowCount = std::max<uint64_t>(1, static_cast<uint64_t>(rows));
+    outputStats->Cost = inputStats->Cost + inputRows * std::max(OutputRowWidth(aggregate), 1.0);
+
+    for (const auto& key : keys) {
+        auto it = inputStats->ColumnStats.find(key);
+        if (it == inputStats->ColumnStats.end()) {
+            continue;
+        }
+        auto column = std::make_shared<TStats::TColumnStats>(*it->second);
+        if (column->Ndv) {
+            column->Ndv = std::min<uint64_t>(*column->Ndv, outputStats->RowCount);
+        }
+        column->NullCount = std::nullopt;
+        outputStats->ColumnStats[key] = std::move(column);
+    }
+    return outputStats;
+}
+
 TStatsPtr ComputeStatsFor(TOperatorPtr op) {
     if (auto source = TMaybeOp<TSourceOperator>(op)) {
         return ComputeSourceStats(source.Cast());
@@ -574,6 +647,9 @@ TStatsPtr ComputeStatsFor(TOperatorPtr op) {
     if (auto maybeJoin = TMaybeOp<TJoinOperator>(op)) {
         return ComputeJoinStats(maybeJoin.Cast());
     }
+    if (auto maybeAggregate = TMaybeOp<TAggregateOperator>(op)) {
+        return ComputeAggregateStats(maybeAggregate.Cast());
+    }
     if (auto maybeLate = TMaybeOp<TLateMaterializeOperator>(op)) {
         auto result = std::make_shared<TStats>();
         if (maybeLate.Cast()->Input()->Stats_) {
@@ -583,7 +659,7 @@ TStatsPtr ComputeStatsFor(TOperatorPtr op) {
         return result;
     }
 
-    return nullptr; // TODO: aggregate / sort / limit
+    return nullptr; // TODO: sort / limit
 }
 
 } // namespace
