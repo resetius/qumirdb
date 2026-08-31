@@ -87,6 +87,17 @@ NQumir::NAst::TExprPtr GenJoinProbeAst(
     NQumir::NAst::TTypePtr stringViewType,
     bool hasPrecomputedHash = false);
 
+NQumir::NAst::TExprPtr GenJoinProbeSemiAst(
+    const TJoinKeyDescriptor& key,
+    bool isAnti,
+    const std::string& funcName,
+    NQumir::NAst::TTypePtr columnType,
+    NQumir::NAst::TTypePtr rowSetType,
+    NQumir::NAst::TTypePtr hashTableType,
+    NQumir::NAst::TTypePtr pairBufferType,
+    NQumir::NAst::TTypePtr stringViewType,
+    bool hasPrecomputedHash = false);
+
 // Generates residual SEMI/ANTI right-side probe: reads right batch keys, probes
 // the left build table, applies jt_residual_filter, and marks matched left row
 // ids in the matched-id table instead of emitting output pairs.

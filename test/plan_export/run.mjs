@@ -109,6 +109,15 @@ const fixtures = {
       r: { rk: [2, 4, 5], w: [200, 400, 500] },
     },
   },
+  // Force right-build SEMI with a ratio above JoinAsymmetryRatio.
+  semi_join: {
+    sql: 'SELECT k AS k, v AS v FROM l WHERE k IN (SELECT rk FROM r)',
+    tables: {
+      l: { k: [1, 2, 3, 4, 5, 6, 1, 2, 3, 4, 5, 6, 1, 2, 3, 4, 5, 6, 1, 2, 3, 4, 5, 6, 1, 2, 3, 4, 5, 6, 1, 2, 3, 4, 5, 6, 1, 2, 3, 4], v: [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160, 170, 180, 190, 200, 210, 220, 230, 240, 250, 260, 270, 280, 290, 300, 310, 320, 330, 340, 350, 360, 370, 380, 390, 400] },
+      r: { rk: [2, 4, 5] },
+    },
+    browserBatchSizes: { l: [16, 16, 8] },
+  },
   nested_limit: {
     sql: 'SELECT count(*) AS n FROM '
       + '(SELECT k FROM t WHERE k >= 2 LIMIT 2 OFFSET 1) u',

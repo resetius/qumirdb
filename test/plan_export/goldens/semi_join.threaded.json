@@ -1,0 +1,151 @@
+{
+  "supported": true,
+  "embedWasm": false,
+  "nodes": [
+    {
+      "columns": [
+        {
+          "name": "k",
+          "nullable": false,
+          "type": "i64"
+        },
+        {
+          "name": "v",
+          "nullable": false,
+          "type": "i64"
+        }
+      ],
+      "id": 0,
+      "kind": "source",
+      "stageId": 2,
+      "table": "l"
+    },
+    {
+      "columns": [
+        {
+          "name": "rk",
+          "nullable": false,
+          "type": "i64"
+        }
+      ],
+      "id": 1,
+      "kind": "source",
+      "stageId": 4,
+      "table": "r"
+    },
+    {
+      "entrypoints": {},
+      "id": 2,
+      "kind": "project",
+      "output": [
+        {
+          "inputIndex": 0,
+          "name": "__qdb_in__rk",
+          "nullable": false,
+          "source": "passthrough",
+          "type": "i64"
+        }
+      ],
+      "stageId": 3
+    },
+    {
+      "buildSide": "right",
+      "entrypoints": {},
+      "hasResidual": false,
+      "id": 3,
+      "joinType": "left_semi",
+      "keySize": 8,
+      "keys": [
+        {
+          "left": "k",
+          "leftIndex": 0,
+          "right": "__qdb_in__rk",
+          "rightIndex": 0
+        }
+      ],
+      "kind": "join",
+      "label": "join left_semi [l.k = __qdb_in__rk]",
+      "leftColumns": [
+        {
+          "name": "k",
+          "nullable": false,
+          "type": "i64"
+        },
+        {
+          "name": "v",
+          "nullable": false,
+          "type": "i64"
+        }
+      ],
+      "output": [
+        {
+          "name": "k",
+          "nullable": false,
+          "type": "i64"
+        },
+        {
+          "name": "v",
+          "nullable": false,
+          "type": "i64"
+        }
+      ],
+      "rightColumns": [
+        {
+          "name": "__qdb_in__rk",
+          "nullable": false,
+          "type": "i64"
+        }
+      ],
+      "stageId": 5
+    },
+    {
+      "entrypoints": {},
+      "id": 4,
+      "kind": "project",
+      "output": [
+        {
+          "inputIndex": 0,
+          "name": "k",
+          "nullable": false,
+          "source": "passthrough",
+          "type": "i64"
+        },
+        {
+          "inputIndex": 1,
+          "name": "v",
+          "nullable": false,
+          "source": "passthrough",
+          "type": "i64"
+        }
+      ],
+      "stageId": 1
+    }
+  ],
+  "edges": [
+    {
+      "from": 1,
+      "input": 0,
+      "kind": "one-to-one",
+      "to": 2
+    },
+    {
+      "from": 0,
+      "input": 0,
+      "kind": "one-to-one",
+      "to": 3
+    },
+    {
+      "from": 2,
+      "input": 1,
+      "kind": "one-to-one",
+      "to": 3
+    },
+    {
+      "from": 3,
+      "input": 0,
+      "kind": "one-to-one",
+      "to": 4
+    }
+  ],
+  "root": 4
+}

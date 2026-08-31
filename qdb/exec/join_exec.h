@@ -150,6 +150,7 @@ private:
     void DrainStreamingPairs(const TRowSet& streamBatch, EJoinSide streamSide);
     bool PullOneInputBatch(const TFetch& left, const TFetch& right);
     bool PullSemiAntiBatch(const TFetch& left, const TFetch& right);
+    bool StreamsSemiAntiLeft() const;
     void FinalizeOuterJoin();
     void FinalizeSemiAntiJoin();
     EJoinProcessorResult ProcessSemiAnti(

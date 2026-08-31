@@ -103,7 +103,7 @@ std::unordered_map<std::string, void*> CompileKernelAst(
 namespace {
 constexpr const char* CacheSchemaVersion = "v1";
 // Bump when the generated key helpers or the .oz kernel libraries change.
-constexpr const char* KernelLibVersion = "16";
+constexpr const char* KernelLibVersion = "17";
 } // namespace
 
 NQumir::NCodeGen::TLlvmRunner::TLinkedModule CompileKernelAstCached(
@@ -2468,6 +2468,10 @@ TJoinKernels TKernelCompiler::CompileJoin(
             program.push_back(NKernel::GenJoinFinalizeSemiAntiAst(
                 keyDesc, /*isAnti=*/type == EJoinType::LeftAnti,
                 "jt_finalize_semi_anti", hashTableType, pairBufferType));
+            program.push_back(NKernel::GenJoinProbeSemiAst(
+                keyDesc, /*isAnti=*/type == EJoinType::LeftAnti,
+                "jt_probe_left_semi", columnType, rowSetType, hashTableType,
+                pairBufferType, stringViewType, hasPrecomputedHash));
         }
         if (isOuter) {
             // jt_finalize_outer: same logic as ANTI (emit own rows with no opp match)

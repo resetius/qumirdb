@@ -82,6 +82,31 @@
               (= k (+ k (: 1 i64)))))))
       (return #t)))
 
+  ;; Membership probing avoids duplicate SEMI rows from duplicate build keys.
+  (fun jt_probe_semi [LookupKey StoredKey] ((var build <ref HashTable>)
+                      (var key LookupKey)
+                      (var stored_witness StoredKey)
+                      (var row_id i64)
+                      (var is_anti i64)
+                      (var pairs <ref PairBuffer>)
+                      (var hash u64)) -> bool
+    (block
+      (var build_keys =
+        (cast (field build Keys) <ptr StoredKey>))
+      (var build_slot = (call rh_lookup_dual build_keys (field build Ctrl)
+                          (field build SlotId) (field build Capacity) key
+                          hash))
+      (var matched = (!= build_slot -1))
+      (var emit bool)
+      (if (!= is_anti 0)
+        (block (= emit (! matched)))
+        (block (= emit matched)))
+      (if emit
+        (block
+          (if (! (call pb_push pairs row_id -1))
+            (block (return #f)))))
+      (return #t)))
+
   (fun jt_finalize_residual_semi_anti ((var matched <ref HashTable>)
                                        (var left_store <ptr TRowSet>)
                                        (var batch_count i64)

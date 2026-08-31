@@ -205,20 +205,32 @@ bool TInnerJoinProcessor::PullOneInputBatch(
             return true;
         }
 
-        StoredRightRows_ += batch.RowCount;
-        LastRightBatchRows_ = batch.RowCount;
-        const int32_t batchIdx = RightRows_.PushBatch(batch);
+        const bool keyOnly = StreamsSemiAntiLeft();
+        int32_t batchIdx = -1;
+        TRowSet* input = &batch;
+        if (!keyOnly) {
+            StoredRightRows_ += batch.RowCount;
+            LastRightBatchRows_ = batch.RowCount;
+            batchIdx = RightRows_.PushBatch(batch);
+            input = const_cast<TRowSet*>(&RightRows_.Batch(batchIdx));
+        }
         if (!Kernels_.Dispatch(
                 LeftTable_.data(),
                 RightTable_.data(),
-                const_cast<TRowSet*>(&RightRows_.Batch(batchIdx)),
+                input,
                 batchIdx,
                 &PairBuffer_,
                 const_cast<TRowSet*>(LeftRows_.Data()),
                 const_cast<TRowSet*>(RightRows_.Data()),
                 0,
                 JoinOp(EJoinKernelOp::UpdateRight))) {
+            if (keyOnly) {
+                Release(&batch);
+            }
             throw std::runtime_error("join kernel update failed");
+        }
+        if (keyOnly) {
+            Release(&batch);
         }
         return true;
     };
@@ -283,9 +295,7 @@ bool TInnerJoinProcessor::PullOneInputBatch(
         return true;
     };
 
-    // Outer joins must keep both sides materialized to emit unmatched rows in
-    // the final scan, so they never switch to the streaming (drop-one-side)
-    // path; they keep storing the remaining side after the other finishes.
+    // Outer joins need both sides for unmatched rows.
     const bool allowStreaming = !IsOuter();
 
     for (;;) {
@@ -317,8 +327,6 @@ bool TInnerJoinProcessor::PullOneInputBatch(
             return processLeft();
         }
 
-        // Asymmetric: drain only the build side; once it finishes the branches
-        // above switch to streaming the probe side against the built table.
         if (BuildSide_ == EJoinBuildSide::Right) {
             return processRight();
         }
@@ -356,10 +364,11 @@ void TInnerJoinProcessor::FinalizeOuterJoin() {
     OuterFinalized_ = true;
 }
 
-// Semi/anti joins are blocking: consume all of the left (building the left
-// table + row store), then all of the right, then emit. Left must be fully
-// processed before the right so the non-residual path builds LeftTable while
-// RightTable is still empty. Pulls one side at a time; left first.
+bool TInnerJoinProcessor::StreamsSemiAntiLeft() const {
+    return IsSemiAnti() && BuildSide_ == EJoinBuildSide::Right;
+}
+
+// Left rows must survive until the final membership scan.
 bool TInnerJoinProcessor::PullSemiAntiBatch(
     const TFetch& left,
     const TFetch& right)
@@ -468,7 +477,7 @@ EJoinProcessorResult TInnerJoinProcessor::Process(
 {
     EnsureInit();
 
-    if (IsSemiAnti()) {
+    if (IsSemiAnti() && !StreamsSemiAntiLeft()) {
         return ProcessSemiAnti(left, right, output);
     }
 

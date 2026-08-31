@@ -2506,7 +2506,7 @@ private:
             auto task = std::make_unique<NScheduler::TBinaryBlockingTask>(
                 joinCode,
                 std::make_shared<TSchedulerInnerJoinState>(
-                    *joinKernels, join.JoinType()),
+                    *joinKernels, join.JoinType(), ChooseJoinBuildSide(join)),
                 NScheduler::TInputPort{
                     .Connection = leftShuf.Connection, .Lane = j},
                 NScheduler::TInputPort{
