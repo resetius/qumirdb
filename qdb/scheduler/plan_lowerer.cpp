@@ -308,12 +308,16 @@ public:
         NScheduler::TSettings settings,
         std::ostream* diagnostics,
         std::vector<TGeneratedKernel>* kernelSink,
-        std::shared_ptr<const TExternalCatalogSnapshot> externalCatalog)
+        std::shared_ptr<const TExternalCatalogSnapshot> externalCatalog,
+        std::shared_ptr<IRuntimeFilterBindingFactory> filterBindings)
         : Graph_(graph)
         , Settings_(std::move(settings))
         , Diagnostics_(diagnostics)
         , KernelSink_(kernelSink)
         , ExternalCatalog_(std::move(externalCatalog))
+        , RuntimeFilterBindings_(filterBindings
+            ? std::move(filterBindings)
+            : std::make_shared<TLocalRuntimeFilterBindingFactory>())
         , RuntimeContext_(std::make_shared<TRuntimeContext>())
     {}
 
@@ -2486,12 +2490,32 @@ private:
             leftPartitionKeys.push_back(key.Left);
             rightPartitionKeys.push_back(key.Right);
         }
+        auto leftShuffleCode = MakeHashShuffleCode(hashKernels.Left, leftType);
+        auto rightShuffleCode = MakeHashShuffleCode(hashKernels.Right, rightType);
+        if (const auto& runtimeFilter = join.RuntimeFilter()) {
+            const bool buildIsLeft =
+                runtimeFilter->BuildSide == EJoinFilterSide::Left;
+            // The producers are the build side's repartition lanes; the last of
+            // them to finish publishes, and only from then on does the probe
+            // side reject anything. Before that a partial filter would be
+            // missing another lane's keys, so it passes everything instead.
+            auto binding = RuntimeFilterBindings_->Create(runtimeFilter->Id,
+                buildIsLeft ? leftLanes : rightLanes);
+            if (!binding.Producer || !binding.Probe) {
+                throw std::runtime_error(
+                    "runtime filter binding factory returned an incomplete binding");
+            }
+            (buildIsLeft ? leftShuffleCode : rightShuffleCode)->ProducedFilter =
+                std::move(binding.Producer);
+            (buildIsLeft ? rightShuffleCode : leftShuffleCode)->AppliedFilter =
+                std::move(binding.Probe);
+        }
         auto leftShuf = BuildRepartitionExchange(
             leftOut,
             leftPipeRef,
             leftLanes,
             joinParts,
-            MakeHashShuffleCode(hashKernels.Left, leftType),
+            std::move(leftShuffleCode),
             "join-left-repartition",
             {.Keys = std::move(leftPartitionKeys)});
         auto rightShuf = BuildRepartitionExchange(
@@ -2499,7 +2523,7 @@ private:
             rightPipeRef,
             rightLanes,
             joinParts,
-            MakeHashShuffleCode(hashKernels.Right, rightType),
+            std::move(rightShuffleCode),
             "join-right-repartition",
             {.Keys = std::move(rightPartitionKeys)});
 
@@ -2727,6 +2751,7 @@ private:
     std::ostream* Diagnostics_;
     std::vector<TGeneratedKernel>* KernelSink_ = nullptr;
     std::shared_ptr<const TExternalCatalogSnapshot> ExternalCatalog_;
+    std::shared_ptr<IRuntimeFilterBindingFactory> RuntimeFilterBindings_;
     std::shared_ptr<TRuntimeContext> RuntimeContext_;
     // Split planning includes Parquet predicate compilation and evaluation;
     // OutputLanes and LowerSource both query it. nullopt means "use the original
@@ -2907,12 +2932,14 @@ TLoweredPlan LowerPlanToGraph(
     const TOperatorPtr& root,
     TSettings settings,
     std::ostream* diagnostics,
-    std::shared_ptr<const TExternalCatalogSnapshot> externalCatalog)
+    std::shared_ptr<const TExternalCatalogSnapshot> externalCatalog,
+    std::shared_ptr<IRuntimeFilterBindingFactory> filterBindings)
 {
     auto graph = std::make_unique<TTaskGraph>();
     std::vector<TGeneratedKernel> kernels;
     TSchedulerGraphLowerer lowerer(
-        *graph, settings, diagnostics, &kernels, externalCatalog);
+        *graph, settings, diagnostics, &kernels, externalCatalog,
+        std::move(filterBindings));
     const size_t lanes = lowerer.OutputLanes(root);
     if (lanes == 0) {
         throw std::runtime_error(
