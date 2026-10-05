@@ -2368,6 +2368,10 @@ private:
         // Residual predicate is a plain filter over the glued schema.
         auto filterOp =
             std::make_shared<TFilterOperator>(join.Left(), join.Filter());
+        // The synthetic filter consumes the cross output, including both
+        // inputs. Its constructor inherits only the left input's schema.
+        filterOp->Type = std::make_shared<NQumir::NAst::TFunctionType>(
+            std::vector<NQumir::NAst::TTypePtr>{crossType}, crossType);
         const auto residualStageId = NewExecStage(
             &join, EExecPlanNodeKind::CrossResidualFilter);
         const auto residualGroup = StageLabel(
@@ -2375,7 +2379,6 @@ private:
         TSchedulerUnaryStage stage =
             [&]() {
                 TStageDiagnosticsScope diagnosticsScope(Diagnostics_, residualGroup);
-                // The residual filter kernel belongs to the join operator: the
                 // The residual is a separate executable stage even though its
                 // semantic metadata points at the owning join operator.
                 return BuildSchedulerFilterStage(

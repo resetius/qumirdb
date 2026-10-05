@@ -269,6 +269,45 @@ TEST(JoinPlanner, CrossJoinE2E) {
     EXPECT_EQ(got, expected);
 }
 
+TEST(JoinPlanner, CrossJoinResidualSupportsRightGroupKeys) {
+    for (auto mode : {NScheduler::EExecutionMode::SingleThreadedScheduler,
+                      NScheduler::EExecutionMode::ThreadedScheduler}) {
+        SCOPED_TRACE(static_cast<int>(mode));
+        std::vector<int64_t> lk = {1, 2, 3}, lv = {10, 20, 30};
+        std::vector<int64_t> rk = {7, 8, 9}, rv = {15, 25, 25};
+        std::vector<TColumn> lcols, rcols;
+        NQdb::TMockSource left({"lk", "lv"},
+            {KeyValBatch(lk.data(), lv.data(), 3, lcols)});
+        NQdb::TMockSource right({"rk", "rv"},
+            {KeyValBatch(rk.data(), rv.data(), 3, rcols)});
+        NScheduler::TSettings settings;
+        settings.Scheduler.Mode = mode;
+        settings.Scheduler.WorkerCount = 2;
+
+        auto plan = PlanJoin(R"qdb(
+(rel aggregate
+  (rel join (rel source "L") (rel source "R") () (inner) (> rv lv))
+  (keys rv) (agg n count) (agg total sum lv))
+)qdb", left, right, settings);
+
+        std::vector<std::tuple<int64_t, int64_t, int64_t>> got;
+        TRowSet out{};
+        while (plan->Next(out)) {
+            EXPECT_EQ(out.ColumnCount, 3);
+            for (int64_t i = 0; i < out.RowCount; ++i) {
+                got.emplace_back(
+                    reinterpret_cast<const int64_t*>(out.Columns[0].Data)[i],
+                    reinterpret_cast<const int64_t*>(out.Columns[1].Data)[i],
+                    reinterpret_cast<const int64_t*>(out.Columns[2].Data)[i]);
+            }
+            Release(&out);
+        }
+        std::sort(got.begin(), got.end());
+        EXPECT_EQ(got, (std::vector<std::tuple<int64_t, int64_t, int64_t>>{
+            {15, 1, 10}, {25, 4, 60}}));
+    }
+}
+
 TEST(JoinPlanner, SchedulerThreadedInnerJoinE2E) {
     std::vector<int64_t> lk = {1, 2, 1, 3}, lv = {10, 20, 30, 40};
     std::vector<int64_t> rk = {1, 1, 3, 4}, rv = {100, 200, 300, 400};
