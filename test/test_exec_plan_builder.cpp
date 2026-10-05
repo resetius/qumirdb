@@ -261,6 +261,38 @@ TEST(ExecPlanBuilder, SingleAndMultiCollapseUnionLanes) {
     EXPECT_EQ(root.Inputs.size(), 2u);
 }
 
+TEST(ExecPlanBuilder, CrossJoinResidualPreservesBothInputSchemas) {
+    TSplitMockSource left({"lv"});
+    TSplitMockSource right({"rv"});
+    const std::unordered_map<std::string, ISource*> sources{
+        {"l", &left}, {"r", &right},
+    };
+    constexpr std::string_view sql =
+        "SELECT r.rv, count(*) AS n, sum(l.lv) AS total "
+        "FROM l, r WHERE r.rv > l.lv GROUP BY r.rv";
+
+    auto single = Lower(sql, sources, SingleSettings());
+    auto multi = Lower(sql, sources, MultiSettings());
+
+    EXPECT_GT(multi.PhysicalTasks, single.PhysicalTasks);
+    ExpectKernelBindings(single);
+    ExpectKernelBindings(multi);
+    for (const auto* built : {&single, &multi}) {
+        EXPECT_EQ(CountKind(built->Exec, EExecPlanNodeKind::CrossJoin), 1u);
+        EXPECT_EQ(CountKind(built->Exec, EExecPlanNodeKind::CrossResidualFilter), 1u);
+        const auto residual = std::ranges::find_if(
+            built->Exec.Nodes, [](const auto& node) {
+                return node.Kind == EExecPlanNodeKind::CrossResidualFilter;
+            });
+        ASSERT_NE(residual, built->Exec.Nodes.end());
+        auto output = NQumir::NAst::TMaybeType<NQumir::NAst::TStructType>(
+            residual->OutputType);
+        ASSERT_TRUE(output);
+        EXPECT_TRUE(FieldType(output.Cast().get(), "l.lv"));
+        EXPECT_TRUE(FieldType(output.Cast().get(), "r.rv"));
+    }
+}
+
 TEST(ExecPlanBuilder, MultiKeepsRealPartialAndCombineStages) {
     TSplitMockSource source({"k"});
     const std::unordered_map<std::string, ISource*> sources{{"t", &source}};
