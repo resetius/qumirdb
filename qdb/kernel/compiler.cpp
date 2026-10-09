@@ -103,7 +103,7 @@ std::unordered_map<std::string, void*> CompileKernelAst(
 namespace {
 constexpr const char* CacheSchemaVersion = "v1";
 // Bump when the generated key helpers or the .oz kernel libraries change.
-constexpr const char* KernelLibVersion = "17";
+constexpr const char* KernelLibVersion = "22";
 } // namespace
 
 NQumir::NCodeGen::TLlvmRunner::TLinkedModule CompileKernelAstCached(
@@ -801,7 +801,7 @@ int64_t MaterializeFixedWidth(const NQumir::NAst::TTypePtr& type) {
 // Emits an entry that gathers `inputType`'s columns from a sorted row-id slice.
 // `entryName` names it. Callers may append computed columns (e.g. window
 // functions): reserve `extraColumnCount` column slots and `extraOwnerCount`
-// owner slots, and pass `emitExtraColumns` to fill them — it receives the
+// owner slots, and pass `emitExtraColumns` to fill them - it receives the
 // builder, the column-slot accessor, and the next free owner index (updated in
 // place). Shared by sort (sort_materialize_row_ids) and window.
 using TExtraColumnEmitter = std::function<void(

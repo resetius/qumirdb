@@ -8,6 +8,7 @@
 #include <qumir/ir/builder.h>
 #include <qumir/ir/eval.h>
 #include <qumir/ir/lowering/lower_ast.h>
+#include <qumir/ir/vmcompiler.h>
 #include <qumir/modules/system/system.h>
 #include <qumir/semantics/name_resolution/name_resolver.h>
 #include <qumir/semantics/transform/transform.h>
@@ -174,6 +175,7 @@ TVmFrontendContext& QumirdbVmContext() {
 
 struct TVmFunction::TImpl {
     NQumir::NIR::TModule Module;
+    NQumir::NIR::TVMCompiler Compiler{Module};
     NQumir::NIR::TFunction* Entry = nullptr;
     std::ostringstream Out;
     std::istringstream In;
@@ -228,7 +230,10 @@ std::expected<std::unique_ptr<TVmFunction>, std::string> TVmFunction::Compile(
                 "compiled module has no function " + functionName);
         }
         impl->Interpreter = std::make_unique<NQumir::NIR::TInterpreter>(
-            impl->Module, impl->Out, impl->In);
+            impl->Module,
+            impl->Compiler,
+            impl->Out,
+            impl->In);
         return std::unique_ptr<TVmFunction>(
             new TVmFunction(std::move(impl)));
     } catch (const std::exception& error) {

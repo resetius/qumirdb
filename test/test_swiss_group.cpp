@@ -1,13 +1,11 @@
 #include <gtest/gtest.h>
 
 #include <qdb/kernel/lib.h>
-
 #include "qumirdb_source_module.h"
-
 #include <qumir/codegen/llvm/llvm_initializer.h>
 #include <qumir/runner/runner_llvm.h>
 
-#include <bit>
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <random>
@@ -15,142 +13,140 @@
 
 namespace {
 
-constexpr uint64_t Msbs = 0x8080808080808080ULL;
 constexpr uint8_t Empty = 0x80;
 
-std::unique_ptr<NQumir::TLLVMRunner> CompileSwissGroup(
-    const std::string& entryName,
-    void*& entry)
-{
-    auto library = NQdb::NKernel::ParseFunctionLibrary(
-        NQdb::NKernel::ReadAggregationKernel("swiss_group.oz"));
-    if (!library) {
-        ADD_FAILURE() << library.error().ToString();
-        return {};
+class SwissGroup : public testing::Test {
+protected:
+    void SetUp() override {
+        auto library = NQdb::NKernel::ParseFunctionLibrary(
+            NQdb::NKernel::ReadAggregationKernel("swiss_group.oz"));
+        ASSERT_TRUE(library) << library.error().ToString();
+        NQumir::TLLVMRunnerOptions options;
+        options.CoreInput = true;
+        options.NativeCode = true;
+        options.AllowOverloads = true;
+        options.OptLevel = 3;
+        NQdb::NTest::ConfigureQumirDbSourceModule(options);
+        Runner_ = std::make_unique<NQumir::TLLVMRunner>(options);
+        auto program = std::make_shared<NQumir::NAst::TBlockExpr>(
+            NQumir::TLocation{}, std::move(*library));
+        NQdb::NTest::AddQumirDbUse(program);
+        std::string error;
+        auto entries = Runner_->CompileKernelAst(program, {
+            "swiss_match", "swiss_match_empty", "swiss_lowest_index",
+            "swiss_clear_first", "swiss_group_width"}, &error);
+        ASSERT_EQ(entries.size(), 5u) << error;
+        Match_ = reinterpret_cast<uint64_t(*)(const uint8_t*, uint64_t)>(entries.at("swiss_match"));
+        MatchEmpty_ = reinterpret_cast<uint64_t(*)(const uint8_t*)>(entries.at("swiss_match_empty"));
+        First_ = reinterpret_cast<int64_t(*)(uint64_t)>(entries.at("swiss_lowest_index"));
+        Clear_ = reinterpret_cast<uint64_t(*)(uint64_t)>(entries.at("swiss_clear_first"));
+        Width_ = reinterpret_cast<int64_t(*)()>(entries.at("swiss_group_width"))();
+        ASSERT_TRUE(Width_ == 8 || Width_ == 16);
     }
 
-    NQumir::TLLVMRunnerOptions options;
-    options.CoreInput = true;
-    options.NativeCode = true;
-    options.AllowOverloads = true;
-    NQdb::NTest::ConfigureQumirDbSourceModule(options);
-    auto runner = std::make_unique<NQumir::TLLVMRunner>(options);
-    auto program = std::make_shared<NQumir::NAst::TBlockExpr>(
-        NQumir::TLocation{}, std::move(*library));
-    NQdb::NTest::AddQumirDbUse(program);
-    std::string error;
-    entry = runner->CompileKernelAst(program, entryName, &error);
-    EXPECT_NE(entry, nullptr) << error;
-    return runner;
-}
-
-uint64_t PackBytes(const uint8_t (&bytes)[8]) {
-    uint64_t word = 0;
-    for (int i = 7; i >= 0; --i) {
-        word = (word << 8) | bytes[i];
-    }
-    return word;
-}
-
-TEST(SwissGroup, LowestIndexRecoversSlotWithinGroup) {
-    void* entry = nullptr;
-    auto runner = CompileSwissGroup("swiss_lowest_index", entry);
-    ASSERT_NE(entry, nullptr);
-    auto lowestIndex = reinterpret_cast<int64_t(*)(uint64_t)>(entry);
-
-    for (int k = 0; k < 8; ++k) {
-        const uint64_t mask = uint64_t{0x80} << (8 * k);
-        EXPECT_EQ(lowestIndex(mask), k) << "single bit at slot " << k;
+    uint64_t SlotBit(int slot) const {
+        return Width_ == 16
+            ? uint64_t{1} << slot
+            : uint64_t{0x80} << (8 * slot);
     }
 
-    // With several bits set the lowest one wins.
-    for (int low = 0; low < 8; ++low) {
-        for (int high = low + 1; high < 8; ++high) {
-            const uint64_t mask =
-                (uint64_t{0x80} << (8 * low)) | (uint64_t{0x80} << (8 * high));
-            EXPECT_EQ(lowestIndex(mask), low)
-                << "bits at " << low << " and " << high;
+    std::unique_ptr<NQumir::TLLVMRunner> Runner_;
+    uint64_t (*Match_)(const uint8_t*, uint64_t) = nullptr;
+    uint64_t (*MatchEmpty_)(const uint8_t*) = nullptr;
+    int64_t (*First_)(uint64_t) = nullptr;
+    uint64_t (*Clear_)(uint64_t) = nullptr;
+    int Width_ = 0;
+};
+
+TEST_F(SwissGroup, LowestIndexRecoversSlotWithinGroup) {
+    for (int low = 0; low < Width_; ++low) {
+        EXPECT_EQ(First_(SlotBit(low)), low);
+        for (int high = low + 1; high < Width_; ++high) {
+            EXPECT_EQ(First_(SlotBit(low) | SlotBit(high)), low);
         }
     }
-
-    EXPECT_EQ(lowestIndex(Msbs), 0) << "all slots set";
 }
 
-TEST(SwissGroup, MatchEmptyFindsExactlyTheEmptySlots) {
-    void* entry = nullptr;
-    auto runner = CompileSwissGroup("swiss_match_empty", entry);
-    ASSERT_NE(entry, nullptr);
-    auto matchEmpty = reinterpret_cast<uint64_t(*)(uint64_t)>(entry);
-
+TEST_F(SwissGroup, MatchEmptyFindsExactlyTheEmptySlots) {
     std::mt19937_64 rng(1234);
     std::uniform_int_distribution<int> h2Dist(0, 0x7F);
     for (int iteration = 0; iteration < 512; ++iteration) {
-        uint8_t bytes[8];
+        std::array<uint8_t, 16> bytes{};
         uint64_t expected = 0;
-        for (int k = 0; k < 8; ++k) {
+        for (int k = 0; k < Width_; ++k) {
             const bool empty = (rng() & 1) != 0;
-            bytes[k] = empty ? Empty : static_cast<uint8_t>(h2Dist(rng));
+            bytes[k] = empty
+                ? Empty
+                : static_cast<uint8_t>(h2Dist(rng));
             if (empty) {
-                expected |= uint64_t{0x80} << (8 * k);
+                expected |= SlotBit(k);
             }
         }
-        EXPECT_EQ(matchEmpty(PackBytes(bytes)), expected) << "iteration " << iteration;
+        EXPECT_EQ(MatchEmpty_(bytes.data()), expected) << iteration;
     }
 }
 
-// absl's portable Match may report a false positive, but never a false
-// negative and never on an empty byte -- the caller settles it with a key
-// comparison. Those are exactly the properties the table relies on.
-TEST(SwissGroup, MatchNeverMissesAndNeverHitsEmptySlots) {
-    void* entry = nullptr;
-    auto runner = CompileSwissGroup("swiss_match", entry);
-    ASSERT_NE(entry, nullptr);
-    auto match = reinterpret_cast<uint64_t(*)(uint64_t, uint64_t)>(entry);
-
+// Portable SWAR can produce false positives, resolved by the key comparison.
+// All implementations must report every actual match and exclude empty slots.
+TEST_F(SwissGroup, MatchNeverMissesAndNeverHitsEmptySlots) {
     std::mt19937_64 rng(4321);
     std::uniform_int_distribution<int> h2Dist(0, 0x7F);
     for (int iteration = 0; iteration < 2048; ++iteration) {
-        uint8_t bytes[8];
-        for (int k = 0; k < 8; ++k) {
+        std::array<uint8_t, 16> bytes{};
+        for (int k = 0; k < Width_; ++k) {
             bytes[k] = (rng() & 3) == 0
                 ? Empty
                 : static_cast<uint8_t>(h2Dist(rng));
         }
-        const uint64_t word = PackBytes(bytes);
         const auto h2 = static_cast<uint64_t>(h2Dist(rng));
-        const uint64_t mask = match(word, h2);
-
-        EXPECT_EQ(mask & ~Msbs, 0u) << "mask must only carry bits at 8k+7";
-        for (int k = 0; k < 8; ++k) {
-            const bool reported = (mask & (uint64_t{0x80} << (8 * k))) != 0;
+        const uint64_t mask = Match_(bytes.data(), h2);
+        if (Width_ == 16) {
+            EXPECT_EQ(mask >> 16, 0u);
+        }
+        for (int k = 0; k < Width_; ++k) {
+            const bool reported = (mask & SlotBit(k)) != 0;
             if (bytes[k] == h2) {
-                EXPECT_TRUE(reported)
-                    << "false negative at slot " << k << ", h2=" << h2;
+                EXPECT_TRUE(reported) << "slot " << k;
             }
             if (bytes[k] == Empty) {
-                EXPECT_FALSE(reported)
-                    << "empty slot " << k << " must never match";
+                EXPECT_FALSE(reported) << "slot " << k;
             }
         }
     }
 }
 
-TEST(SwissGroup, MatchFindsEveryH2Value) {
-    void* entry = nullptr;
-    auto runner = CompileSwissGroup("swiss_match", entry);
-    ASSERT_NE(entry, nullptr);
-    auto match = reinterpret_cast<uint64_t(*)(uint64_t, uint64_t)>(entry);
-
-    // One full slot per group position, every legal H2, rest empty.
+TEST_F(SwissGroup, MatchFindsEveryH2Value) {
     for (uint64_t h2 = 0; h2 <= 0x7F; ++h2) {
-        for (int k = 0; k < 8; ++k) {
-            uint8_t bytes[8];
-            for (auto& b : bytes) b = Empty;
+        for (int k = 0; k < Width_; ++k) {
+            std::array<uint8_t, 16> bytes;
+            bytes.fill(Empty);
             bytes[k] = static_cast<uint8_t>(h2);
-            const uint64_t mask = match(PackBytes(bytes), h2);
-            EXPECT_NE(mask & (uint64_t{0x80} << (8 * k)), 0u)
-                << "h2=" << h2 << " slot=" << k;
+            EXPECT_NE(Match_(bytes.data(), h2) & SlotBit(k), 0u);
         }
+    }
+}
+
+TEST_F(SwissGroup, CandidateIterationVisitsEachMatchingSlotOnce) {
+    // In particular, a NEON FF byte must not produce eight visits to one slot.
+    for (unsigned subset = 0; subset < (1u << Width_); ++subset) {
+        std::array<uint8_t, 16> bytes;
+        bytes.fill(Empty);
+        for (int k = 0; k < Width_; ++k) {
+            if (subset & (1u << k)) {
+                bytes[k] = 37;
+            }
+        }
+        auto mask = Match_(bytes.data(), 37);
+        unsigned visited = 0;
+        while (mask) {
+            const auto slot = First_(mask);
+            ASSERT_GE(slot, 0);
+            ASSERT_LT(slot, Width_);
+            ASSERT_EQ(visited & (1u << slot), 0u) << subset;
+            visited |= 1u << slot;
+            mask = Clear_(mask);
+        }
+        ASSERT_EQ(visited, subset);
     }
 }
 

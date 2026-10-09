@@ -1,31 +1,59 @@
 (block
-  ;; SwissTable group primitives: absl::container_internal::GroupPortableImpl
-  ;; over 8-slot groups. A control byte is 0x80 when the slot is empty, and
-  ;; H2 (hash & 0x7F) when it is full; deletion is not supported, so there are
-  ;; no tombstones and no sentinel.
-  ;;
-  ;; lsbs = 0x0101010101010101; msbs = lsbs << 7 = 0x8080808080808080, which is
-  ;; written as a shift because it does not fit a signed 64-bit literal.
+  ;; Backend selection is a constant emitted for the LLVM target machine:
+  ;; 0 = portable SWAR, 1 = 8-byte NEON, 2 = 16-byte SSE2.
+  ;; Every operation on one table uses this same geometry and mask format.
+  (fun swiss_backend () -> i64
+    (block (return (call builtin::byte_match_backend))))
 
-  ;; Bits 8k+7 of the result mark slots whose control byte may equal h2.
-  ;; Like absl, this can report a false positive, but never a false negative
-  ;; and never on an empty byte, so the caller's key comparison settles it.
-  ;; (~x & msbs is written as msbs ^ (x & msbs): oz has no bitwise not.)
-  (fun swiss_match ((var word u64) (var h2 u64)) -> u64
+  (fun swiss_group_shift () -> i64
     (block
+      (if (== (call swiss_backend) 2) (block (return 4)))
+      (return 3)))
+
+  (fun swiss_group_width () -> i64
+    (block (return (<< (: 1 i64) (call swiss_group_shift)))))
+
+  (fun swiss_group ((var ctrl <ptr u8>) (var group i64)) -> <ptr u8>
+    (block (return (cast (+ (cast ctrl i64)
+      (<< group (call swiss_group_shift))) <ptr u8>))))
+
+  ;; 8-byte masks carry a byte per slot (00/FF for NEON, 00/80 for SWAR).
+  ;; SSE masks carry one bit per slot in the low sixteen bits.
+  (fun swiss_match ((var ctrl <ptr u8>) (var h2 u64)) -> u64
+    (block
+      (if (== (call swiss_backend) 2)
+        (block (return (cast (call builtin::byte_match16 ctrl (cast h2 u8)) u64))))
+      (if (== (call swiss_backend) 1)
+        (block (return (call builtin::byte_match8 ctrl (cast h2 u8)))))
+      (var words = (cast ctrl <ptr u64>))
+      (var word = (index words 0))
       (var lsbs = (: 72340172838076673 u64))
       (var msbs = (<< lsbs (: 7 u64)))
       (var x = (^ word (* lsbs h2)))
       (return (& (- x lsbs) (^ msbs (& x msbs))))))
 
-  ;; Empty slots are exactly the bytes with the high bit set.
-  (fun swiss_match_empty ((var word u64)) -> u64
+  ;; No tombstones: only empty bytes have their high bit set. Insertion and
+  ;; rehash use a scalar AND on ARM/portable targets, without a SIMD transfer.
+  (fun swiss_match_empty ((var ctrl <ptr u8>)) -> u64
     (block
+      (if (== (call swiss_backend) 2)
+        (block (return (cast (call builtin::byte_match16 ctrl (: 128 u8)) u64))))
+      (var words = (cast ctrl <ptr u64>))
+      (var word = (index words 0))
       (var msbs = (<< (: 72340172838076673 u64) (: 7 u64)))
       (return (& word msbs))))
 
-  ;; Slot index within the group of the lowest set bit. Mask bits only ever
-  ;; sit at 8k+7, so the trailing-zero count divided by 8 is the index.
   (fun swiss_lowest_index ((var mask u64)) -> i64
     (block
-      (return (>> (call builtin::cttz mask) (: 3 i64))))))
+      (var index = (call builtin::cttz mask))
+      (if (== (call swiss_backend) 2) (block (return index)))
+      (return (>> index (: 3 i64)))))
+
+  ;; Normalize FF bytes only when advancing past a rejected candidate. The
+  ;; common successful first match avoids this AND entirely.
+  (fun swiss_clear_first ((var mask u64)) -> u64
+    (block
+      (if (== (call swiss_backend) 1)
+        (block (= mask (& mask
+          (<< (: 72340172838076673 u64) (: 7 u64))))))
+      (return (& mask (- mask (: 1 u64)))))))

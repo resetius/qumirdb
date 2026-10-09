@@ -175,14 +175,18 @@ TEST(JoinKernel, InitReusesHashTableAndDestroyClears) {
   auto jtInit = reinterpret_cast<bool (*)(void *, int64_t, int64_t)>(initEntry);
   auto jtDestroy = reinterpret_cast<void (*)(void *)>(destroyEntry);
 
+  void *widthEntry = nullptr;
+  auto widthRunner = CompileJoinEntry("swiss_group_width", widthEntry);
+  ASSERT_NE(widthEntry, nullptr);
+  const auto width = reinterpret_cast<int64_t (*)()>(widthEntry)();
   THashTable ht{};
   ASSERT_TRUE(jtInit(&ht, 8, 8));
-  EXPECT_EQ(ht.Capacity, 8);
+  EXPECT_EQ(ht.Capacity, width);
   EXPECT_EQ(ht.Size, 0);
   EXPECT_EQ(ht.NumAggs, 3); // three dense bucket columns
   EXPECT_EQ(ht.KeySize, 8);
   ASSERT_NE(ht.AggBuffers, nullptr);
-  for (int i = 0; i < 8; ++i) {
+  for (int i = 0; i < ht.Capacity; ++i) {
     EXPECT_EQ(ht.Ctrl[i], 0x80); // empty control byte
     EXPECT_EQ(ht.AggBuffers[0][i], 0); // length
     EXPECT_EQ(ht.AggBuffers[1][i], 0); // capacity
@@ -698,6 +702,7 @@ TEST(JoinKernelGeneric, Int32KeyTriggersRehash) {
   // Smallest capacity a SwissTable group allows -> still forces a rehash.
   ASSERT_TRUE(jtInit(&left, 8, keySize));
   ASSERT_TRUE(jtInit(&right, 8, keySize));
+  const auto initialCapacity = left.Capacity;
   TPairBuffer pairs{};
   ASSERT_TRUE(procLeft(&left, &right, &lbatch, leftKeyColumns, 0, &pairs,
                        &lbatch, &rbatch));
@@ -718,7 +723,7 @@ TEST(JoinKernelGeneric, Int32KeyTriggersRehash) {
       if (a == b)
         ++expected;
   EXPECT_EQ(matched, expected);
-  EXPECT_GT(left.Capacity, 4); // rehash happened (bucket pointers carried)
+  EXPECT_GT(left.Capacity, initialCapacity); // bucket pointers survived rehash
 
   pbDestroy(&pairs);
   jtDestroy(&left);
@@ -1290,6 +1295,7 @@ TEST(JoinStringKey, SemiAntiClonesRightKeysAndSurvivesRehash) {
   TPairBuffer pairs{};
   ASSERT_TRUE(kernels.Dispatch(&left, &right, nullptr, 0, &pairs, nullptr,
                                nullptr, 8, JoinOpCode(EJoinKernelOp::Init)));
+  const auto initialCapacity = right.Capacity;
   ASSERT_TRUE(kernels.Dispatch(&left, &right, &lbatch, 0, &pairs, &lbatch,
                                nullptr, 0,
                                JoinOpCode(EJoinKernelOp::UpdateLeft)));
@@ -1300,7 +1306,7 @@ TEST(JoinStringKey, SemiAntiClonesRightKeysAndSurvivesRehash) {
                                nullptr, 0,
                                JoinOpCode(EJoinKernelOp::UpdateRight)));
   std::fill(rk.Bytes.begin(), rk.Bytes.end(), '#');
-  EXPECT_GT(right.Capacity, 4); // rehash happened while inserting right keys
+  EXPECT_GT(right.Capacity, initialCapacity); // right keys survived rehash
 
   ASSERT_TRUE(kernels.Dispatch(&left, &right, nullptr, 0, &pairs, &lbatch,
                                nullptr, 0,
