@@ -185,7 +185,11 @@ const std::string TJoinOperator::ToString() const {
         if (i != 0) {
             s += " ";
         }
-        s += "(" + Keys_[i].Left + " " + Keys_[i].Right + ")";
+        s += "(" + Keys_[i].Left + " " + Keys_[i].Right;
+        if (Keys_[i].NullsEqual) {
+            s += " nulls_equal";
+        }
+        s += ")";
     }
     s += ")";
     s += " (" + std::string(JoinTypeName(Type_)) + ")";

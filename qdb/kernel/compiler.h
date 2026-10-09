@@ -434,7 +434,7 @@ private:
     TJoinKernels CompileJoin(
         const NQumir::NAst::TStructType& leftType,
         const NQumir::NAst::TStructType& rightType,
-        const std::vector<std::pair<std::string, std::string>>& keys,
+        const std::vector<TJoinKey>& keys,
         EJoinType type,
         const NQumir::NAst::TExprPtr& residualPredicate = nullptr,
         const NQumir::NAst::TStructType* innerType = nullptr,

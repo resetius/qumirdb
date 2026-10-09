@@ -272,6 +272,39 @@ TEST_P(OuterJoinToAntiExecution, NullKeysNeverMatchInOrdinaryJoins) {
     }
 }
 
+TEST_P(OuterJoinToAntiExecution, PreservesMixedNullEqualityThroughOptimizer) {
+    TTable sales({111, 222}, {10, 0}, {0}, {0b00000001});
+    TTable returns({333, 444, 555}, {10, 0, 0}, {0}, {0b00000001});
+    auto plan = PlanSql(R"sql(
+SELECT s.value FROM sales s INNER JOIN returns r
+ON s.key = r.key AND s.value = r.value
+)sql", sales, returns, false);
+    for (auto& key : Joins(plan).front()->MutableKeys()) {
+        key.NullsEqual = key.Left == "s.key";
+    }
+    ApplyPlanPasses(plan);
+    auto join = Joins(plan).front();
+    ASSERT_EQ(join->Keys().size(), 2);
+    EXPECT_EQ(std::ranges::count_if(join->Keys(), [](const TJoinKey& key) {
+        return key.NullsEqual;
+    }), 1);
+    EXPECT_EQ(RunValues(plan, Settings()), (std::vector<int64_t>{10}));
+}
+
+TEST_P(OuterJoinToAntiExecution, DoesNotRewriteNullEqualMarker) {
+    TTable sales({1, 111}, {10, 20}, {0b00000001});
+    TTable returns({1, 222, 333}, {100, 200, 201}, {0b00000001});
+    auto plan = PlanSql(R"sql(
+SELECT s.value FROM sales s LEFT JOIN returns r ON s.key = r.key
+WHERE r.key IS NULL
+)sql", sales, returns, false);
+    Joins(plan).front()->MutableKeys().front().NullsEqual = true;
+    EXPECT_FALSE(RewriteOuterJoinAsAnti(plan));
+    ApplyPlanPasses(plan);
+    EXPECT_EQ(Joins(plan).front()->JoinType(), EJoinType::Left);
+    EXPECT_EQ(RunValues(plan, Settings()), (std::vector<int64_t>{20, 20}));
+}
+
 TEST_P(OuterJoinToAntiExecution, PreservesOnResidualAfterSwapping) {
     for (bool swapped : {false, true}) {
         TTable sales({1, 1, 2}, {10, 200, 30});

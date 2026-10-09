@@ -30,7 +30,8 @@ std::string JoinPlanLabel(const TJoinOperator& join) {
     std::string label = "join " + std::string(JoinTypeName(join.JoinType()));
     const auto& keys = join.Keys();
     for (size_t i = 0; i < keys.size(); ++i) {
-        label += (i ? ", " : " [") + keys[i].Left + " = " + keys[i].Right;
+        label += (i ? ", " : " [") + keys[i].Left
+            + (keys[i].NullsEqual ? " IS NOT DISTINCT FROM " : " = ") + keys[i].Right;
     }
     if (!keys.empty()) {
         label += "]";

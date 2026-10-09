@@ -224,6 +224,9 @@ void PrintRel(NQumir::NAst::TExpr& expr, TPrinter& printer, TPrintFrame frame) {
             printer.PrintIdentifier(key.Left);
             printer.Space();
             printer.PrintIdentifier(key.Right);
+            if (key.NullsEqual) {
+                out << " nulls_equal";
+            }
             out << ')';
         }
         out << ')';

@@ -57,6 +57,7 @@ struct TKernelSortKeySpec {
 struct TKernelJoinKeySpec {
     TKernelColumnRef Left;
     TKernelColumnRef Right;
+    bool NullsEqual = false;
 };
 
 struct TOperatorKernelSpec {

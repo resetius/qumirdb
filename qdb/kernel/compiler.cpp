@@ -103,7 +103,7 @@ std::unordered_map<std::string, void*> CompileKernelAst(
 namespace {
 constexpr const char* CacheSchemaVersion = "v1";
 // Bump when the generated key helpers or the .oz kernel libraries change.
-constexpr const char* KernelLibVersion = "24";
+constexpr const char* KernelLibVersion = "25";
 } // namespace
 
 NQumir::NCodeGen::TLlvmRunner::TLinkedModule CompileKernelAstCached(
@@ -2038,10 +2038,10 @@ TJoinKernels TKernelCompiler::CompileJoin(
         throw NQumir::TError("CompileJoin: input schemas must be structs");
     }
 
-    std::vector<std::pair<std::string, std::string>> keys;
+    std::vector<TJoinKey> keys;
     keys.reserve(spec.JoinKeys.size());
     for (const auto& key : spec.JoinKeys) {
-        keys.emplace_back(key.Left.Name, key.Right.Name);
+        keys.push_back({key.Left.Name, key.Right.Name, key.NullsEqual});
     }
 
     TExprPtr residualPredicate =
@@ -2342,7 +2342,7 @@ std::function<bool(TRowSet*, uint64_t*)> TKernelCompiler::CompileAggregateHash(
 TJoinKernels TKernelCompiler::CompileJoin(
     const NQumir::NAst::TStructType& leftType,
     const NQumir::NAst::TStructType& rightType,
-    const std::vector<std::pair<std::string, std::string>>& keys,
+    const std::vector<TJoinKey>& keys,
     EJoinType type,
     const NQumir::NAst::TExprPtr& residualPredicate,
     const NQumir::NAst::TStructType* innerType,
@@ -2362,7 +2362,15 @@ TJoinKernels TKernelCompiler::CompileJoin(
 
     // Unified key descriptor (reuses the aggregation key machinery). Throws on
     // incompatible types / missing columns.
-    const auto keyDesc = NKernel::BuildJoinKeyDescriptor(leftType, rightType, keys);
+    std::vector<std::pair<std::string, std::string>> keyNames;
+    keyNames.reserve(keys.size());
+    for (const auto& key : keys) {
+        keyNames.emplace_back(key.Left, key.Right);
+    }
+    auto keyDesc = NKernel::BuildJoinKeyDescriptor(leftType, rightType, keyNames);
+    for (size_t i = 0; i < keys.size(); ++i) {
+        keyDesc.Fields[i].NullsEqual = keys[i].NullsEqual;
+    }
     const int64_t keySize = static_cast<int64_t>(keyDesc.Size);
     auto leftKeyColumns = std::make_shared<std::vector<int64_t>>();
     auto rightKeyColumns = std::make_shared<std::vector<int64_t>>();
