@@ -22,8 +22,8 @@
                        (var key Key)) -> i64
     (block
       (var hash = (cast (call rh_hash key) u64))
-      (var words = (cast ctrl <ptr u64>))
-      (var num_groups = (>> capacity (: 3 i64)))
+      (var group_shift = (call swiss_group_shift))
+      (var num_groups = (>> capacity group_shift))
       (var group_mask = (- num_groups (: 1 i64)))
       (var h2 = (& hash (: 127 u64)))
       (var g = (& (cast (>> hash (: 7 u64)) i64) group_mask))
@@ -33,14 +33,14 @@
       (= probes (: 0 i64))
       (while (< probes num_groups)
         (block
-          (var word = (index words g))
+          (var word = (call swiss_group ctrl g))
           (var m = (call swiss_match word h2))
           (while (!= m (: 0 u64))
             (block
-              (var slot = (+ (<< g (: 3 i64)) (call swiss_lowest_index m)))
+              (var slot = (+ (<< g group_shift) (call swiss_lowest_index m)))
               (if (call rh_key_equal (index keys slot) key)
                 (block (return (index slot_ids slot))))
-              (= m (& m (- m (: 1 u64))))))
+              (= m (call swiss_clear_first m))))
           (if (!= (call swiss_match_empty word) (: 0 u64))
             (block (return (: -1 i64))))
           (= step (+ step (: 1 i64)))
@@ -59,8 +59,8 @@
                            (var dense_slot i64)) -> bool
     (block
       (var hash = (cast (call rh_hash key) u64))
-      (var words = (cast ctrl <ptr u64>))
-      (var num_groups = (>> capacity (: 3 i64)))
+      (var group_shift = (call swiss_group_shift))
+      (var num_groups = (>> capacity group_shift))
       (var group_mask = (- num_groups (: 1 i64)))
       (var h2 = (& hash (: 127 u64)))
       (var g = (& (cast (>> hash (: 7 u64)) i64) group_mask))
@@ -70,10 +70,10 @@
       (= probes (: 0 i64))
       (while (< probes num_groups)
         (block
-          (var empty = (call swiss_match_empty (index words g)))
+          (var empty = (call swiss_match_empty (call swiss_group ctrl g)))
           (if (!= empty (: 0 u64))
             (block
-              (var slot = (+ (<< g (: 3 i64)) (call swiss_lowest_index empty)))
+              (var slot = (+ (<< g group_shift) (call swiss_lowest_index empty)))
               (= keys [slot] key)
               (= slot_ids [slot] dense_slot)
               (= ctrl [slot] (cast h2 u8))
@@ -90,8 +90,11 @@
                  (var num_aggs i64)
                  (var key_size i64)) -> bool
     (block
-      ;; Groups are 8 slots wide, so capacity must be a power of two >= 8.
-      (if (|| (< capacity (: 8 i64))
+      ;; Preserve the host API minimum request; SSE2 uses a 16-slot group.
+      (var min_capacity = (call swiss_group_width))
+      (if (&& (== capacity 8) (< capacity min_capacity))
+        (block (= capacity min_capacity)))
+      (if (|| (< capacity min_capacity)
               (> capacity (: 1152921504606846975 i64)))
         (block (return #f)))
       (if (!= (& capacity (- capacity (: 1 i64))) (: 0 i64))

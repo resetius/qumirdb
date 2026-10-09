@@ -4,21 +4,25 @@
   ;; SwissTable probing (absl flat_hash_map) over the dual lookup/stored key
   ;; pair. Ctrl holds one byte per slot: 0x80 empty, otherwise H2 = hash & 0x7F.
   ;; Deletion is unsupported, so there are no tombstones and a probe stops at
-  ;; the first group containing an empty slot. Groups are 8 slots wide and
-  ;; aligned, so a group is one aligned u64 load (swiss_group.oz); capacity is
-  ;; a power of two and at least 8, and probing walks whole groups with
+  ;; the first group containing an empty slot. Target-selected groups are
+  ;; 8 slots wide on ARM/portable and 16 on SSE2 (swiss_group.oz). Capacity is
+  ;; a power of two and at least one group, and probing walks whole groups with
   ;; triangular steps, which visits every group exactly once.
 
-  (fun rh_lookup_dual [StoredKey LookupKey]
+  ;; Return the physical slot on a hit. On a miss, retain the first empty probe
+  ;; slot so upsert can insert without walking the same groups again.
+  (fun rh_lookup_or_empty_physical [StoredKey LookupKey]
        ((var keys <ptr StoredKey>)
         (var ctrl <ptr u8>)
-        (var slot_ids <ptr i64>)
         (var capacity i64)
         (var key LookupKey)
-        (var hash u64)) -> i64
+        (var hash u64)
+        (var out_empty_slot <ref i64>)) -> i64
+    (attrs inline)
     (block
-      (var words = (cast ctrl <ptr u64>))
-      (var num_groups = (>> capacity (: 3 i64)))
+      (= out_empty_slot (: -1 i64))
+      (var group_shift = (call swiss_group_shift))
+      (var num_groups = (>> capacity group_shift))
       (var group_mask = (- num_groups (: 1 i64)))
       (var h2 = (& hash (: 127 u64)))
       (var g = (& (cast (>> hash (: 7 u64)) i64) group_mask))
@@ -28,16 +32,70 @@
       (= probes (: 0 i64))
       (while (< probes num_groups)
         (block
-          (var word = (index words g))
+          (var word = (call swiss_group ctrl g))
           (var m = (call swiss_match word h2))
           (while (!= m (: 0 u64))
             (block
-              (var slot = (+ (<< g (: 3 i64)) (call swiss_lowest_index m)))
+              (var slot = (+ (<< g group_shift) (call swiss_lowest_index m)))
               (if (call rh_key_equal (index keys slot) key)
-                (block (return (index slot_ids slot))))
-              (= m (& m (- m (: 1 u64))))))
-          (if (!= (call swiss_match_empty word) (: 0 u64))
-            (block (return (: -1 i64))))
+                (block (return slot)))
+              (= m (call swiss_clear_first m))))
+          (var empty = (call swiss_match_empty word))
+          (if (!= empty (: 0 u64))
+            (block
+              (= out_empty_slot
+                (+ (<< g group_shift) (call swiss_lowest_index empty)))
+              (return (: -1 i64))))
+          (= step (+ step (: 1 i64)))
+          (= g (& (+ g step) group_mask))
+          (= probes (+ probes (: 1 i64)))))
+      (return (: -1 i64))))
+
+  ;; Preserve the physical-slot -> dense-ID mapping used by joins and aggregates.
+  (fun rh_lookup_or_empty_dual [StoredKey LookupKey]
+       ((var keys <ptr StoredKey>) (var ctrl <ptr u8>)
+        (var slot_ids <ptr i64>) (var capacity i64) (var key LookupKey)
+        (var hash u64) (var out_empty_slot <ref i64>)) -> i64
+    (block
+      (var slot = (call rh_lookup_or_empty_physical
+        keys ctrl capacity key hash out_empty_slot))
+      (if (< slot 0) (block (return -1)))
+      (return (index slot_ids slot))))
+
+  (fun rh_lookup_dual [StoredKey LookupKey]
+       ((var keys <ptr StoredKey>)
+        (var ctrl <ptr u8>)
+        (var slot_ids <ptr i64>)
+        (var capacity i64)
+        (var key LookupKey)
+        (var hash u64)) -> i64
+    (block
+      (var empty_slot i64)
+      (= empty_slot (: -1 i64))
+      (return (call rh_lookup_or_empty_dual
+        keys ctrl slot_ids capacity key hash empty_slot))))
+
+  ;; Used for rehash and for insertion after a grow invalidates the saved slot.
+  (fun rh_find_empty_slot
+       ((var ctrl <ptr u8>)
+        (var capacity i64)
+        (var hash u64)) -> i64
+    (block
+      (var group_shift = (call swiss_group_shift))
+      (var num_groups = (>> capacity group_shift))
+      (var group_mask = (- num_groups (: 1 i64)))
+      (var g = (& (cast (>> hash (: 7 u64)) i64) group_mask))
+      (var step i64)
+      (= step (: 0 i64))
+      (var probes i64)
+      (= probes (: 0 i64))
+      (while (< probes num_groups)
+        (block
+          (var empty = (call swiss_match_empty (call swiss_group ctrl g)))
+          (if (!= empty (: 0 u64))
+            (block
+              (var slot = (+ (<< g group_shift) (call swiss_lowest_index empty)))
+              (return slot)))
           (= step (+ step (: 1 i64)))
           (= g (& (+ g step) group_mask))
           (= probes (+ probes (: 1 i64)))))
@@ -54,45 +112,40 @@
         (var dense_slot i64)
         (var hash u64)) -> bool
     (block
-      (var words = (cast ctrl <ptr u64>))
-      (var num_groups = (>> capacity (: 3 i64)))
-      (var group_mask = (- num_groups (: 1 i64)))
-      (var h2 = (& hash (: 127 u64)))
-      (var g = (& (cast (>> hash (: 7 u64)) i64) group_mask))
-      (var step i64)
-      (= step (: 0 i64))
-      (var probes i64)
-      (= probes (: 0 i64))
-      (while (< probes num_groups)
-        (block
-          (var empty = (call swiss_match_empty (index words g)))
-          (if (!= empty (: 0 u64))
-            (block
-              (var slot = (+ (<< g (: 3 i64)) (call swiss_lowest_index empty)))
-              (= keys [slot] key)
-              (= slot_ids [slot] dense_slot)
-              (= ctrl [slot] (cast h2 u8))
-              (return #t)))
-          (= step (+ step (: 1 i64)))
-          (= g (& (+ g step) group_mask))
-          (= probes (+ probes (: 1 i64)))))
-      (return #f)))
+      (var slot = (call rh_find_empty_slot ctrl capacity hash))
+      (if (< slot (: 0 i64)) (block (return #f)))
+      (= keys [slot] key)
+      (= slot_ids [slot] dense_slot)
+      (= ctrl [slot] (cast (& hash (: 127 u64)) u8))
+      (return #t)))
 
   (fun aht_upsert_dual [LookupKey StoredKey]
-       ((var ht <ref HashTable>)
-        (var key LookupKey)
-        (var stored_witness StoredKey)
-        (var out_is_new <ref i64>)
+       ((var ht <ref HashTable>) (var key LookupKey)
+        (var stored_witness StoredKey) (var out_is_new <ref i64>)
         (var hash u64)) -> i64
+    (attrs inline)
     (block
-      (= out_is_new (: 0 i64))
+      (= out_is_new 0)
+      (var empty_slot = -1)
+      (var slot = (call rh_lookup_or_empty_physical
+        (cast (field ht Keys) <ptr StoredKey>) (field ht Ctrl)
+        (field ht Capacity) key hash empty_slot))
+      (if (>= slot 0)
+        (block
+          (var slot_ids = (field ht SlotId))
+          (return (index slot_ids slot))))
+      (return (call aht_insert_dual ht key stored_witness out_is_new
+        hash empty_slot))))
+
+  ;; Keep ownership, allocation, and growth off the common hit path.
+  (fun aht_insert_dual [LookupKey StoredKey]
+       ((var ht <ref HashTable>) (var key LookupKey)
+        (var stored_witness StoredKey) (var out_is_new <ref i64>)
+        (var hash u64) (var empty_slot i64)) -> i64
+    (block
       (var capacity = (field ht Capacity))
-      (var keys = (cast (field ht Keys)
-        <ptr StoredKey>))
-      (var dense_slot = (call rh_lookup_dual
-        keys (field ht Ctrl) (field ht SlotId) capacity key hash))
-      (if (>= dense_slot (: 0 i64)) (block (return dense_slot)))
-      (= dense_slot (field ht Size))
+      (var keys = (cast (field ht Keys) <ptr StoredKey>))
+      (var dense_slot = (field ht Size))
       (if (> (+ dense_slot (: 1 i64))
              (- capacity (>> capacity (: 3 i64))))
         (block
@@ -103,7 +156,13 @@
             (block (return (: -1 i64))))
           (= capacity (field ht Capacity))
           (= keys (cast (field ht Keys)
-            <ptr StoredKey>))))
+            <ptr StoredKey>))
+          ;; Rehash invalidates the saved probe position. Only this path
+          ;; needs a fresh insertion probe in the new table.
+          (= empty_slot (call rh_find_empty_slot
+            (field ht Ctrl) capacity hash))))
+      ;; No table writes or owned-key allocations occur until a slot is known.
+      (if (< empty_slot (: 0 i64)) (block (return (: -1 i64))))
       (var owned_bytes = (call key_owned_bytes key))
       (var owned_block = (cast (: 0 i64) <ptr u8>))
       (if (> owned_bytes (: 0 i64))
@@ -112,14 +171,11 @@
           (if (== (cast owned_block i64) (: 0 i64))
             (block (return (: -1 i64))))))
       (var stored_key = (call key_clone_owned key owned_block))
-      (if (! (call rh_insert_stored
-        keys (field ht Ctrl) (field ht SlotId) capacity
-        stored_key dense_slot hash))
-        (block
-          (if (!= (cast owned_block i64) (: 0 i64))
-            (block (call aht_owned_arena_rewind
-              ht owned_block owned_bytes)))
-          (return (: -1 i64))))
+      (var ctrl = (field ht Ctrl))
+      (var slot_ids = (field ht SlotId))
+      (= keys [empty_slot] stored_key)
+      (= slot_ids [empty_slot] dense_slot)
+      (= ctrl [empty_slot] (cast (& hash (: 127 u64)) u8))
       (var group_keys = (cast (field ht GroupKeys)
         <ptr StoredKey>))
       (= group_keys [dense_slot] stored_key)
@@ -175,8 +231,8 @@
       (var size = (field ht Size))
       (var key_size = (field ht KeySize))
       (var num_aggs = (field ht NumAggs))
-      ;; Groups are 8 slots wide, so capacity must stay a power of two >= 8.
-      (if (|| (< new_capacity size) (< new_capacity (: 8 i64)))
+      ;; Rehash preserves the target-selected minimum group width.
+      (if (|| (< new_capacity size) (< new_capacity (call swiss_group_width)))
         (block (return #f)))
       (if (!= (& new_capacity (- new_capacity (: 1 i64))) (: 0 i64))
         (block (return #f)))

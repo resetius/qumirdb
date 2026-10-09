@@ -8,6 +8,7 @@
 #include <qumir/parser/type.h>
 
 #include "plan_runner.h"
+#include <qdb/exec/aggregate_exec.h>
 #include <qdb/io/io.h>
 #include <qdb/kernel/compiler.h>
 #include <qdb/modules/qumirdb_runtime.h>
@@ -366,7 +367,7 @@ TEST(AggregateE2E, MultipleGroups) {
     EXPECT_FALSE(runtime->Next(second));
 }
 
-// L6 (single group): same pipeline, but every row shares one key — the
+// L6 (single group): same pipeline, but every row shares one key - the
 // HashTable ends up with exactly one entry.
 TEST(AggregateE2E, SingleGroup) {
     std::vector<int64_t> keys = {7, 7, 7, 7, 7, 7};
@@ -1808,6 +1809,78 @@ TEST(AggregateE2E, NullableReducerArgumentWithNullStringKey) {
         EXPECT_TRUE(IsValid(result.Columns[3], row));
     }
     Release(&result);
+}
+
+namespace {
+
+void CheckAggregateStatesAcrossRepeatedGrowth(bool stringKeys) {
+    auto keyType = stringKeys
+        ? TTypePtr(std::make_shared<TStringType>())
+        : TTypePtr(std::make_shared<TIntegerType>());
+    TStructType input({{"k", keyType}, {"v", std::make_shared<TIntegerType>()}});
+    std::vector<TAggregateSpec> aggs = {{
+        .Name = "s", .Func = "sum",
+        .Arg = std::make_shared<TIdentExpr>(NQumir::TLocation{}, "v"),
+    }};
+    TKernelCompiler compiler;
+    TAggregateProcessor processor(compiler.CompileAggregate(
+        NKernel::BuildAggregateKernelSpec(input, {"k"}, aggs)), 8);
+    std::map<int64_t, int64_t> expected;
+    std::vector<int64_t> insertionOrder;
+    // Interleave inserts with updates across enough batches to grow repeatedly.
+    // Each batch owns its input strings only until Add returns.
+    for (int64_t batch = 0; batch < 12; ++batch) {
+        std::vector<int64_t> keys, values, offsets{0};
+        std::string data;
+        for (int64_t row = 0; row < 197; ++row) {
+            const int64_t key = ((batch * 197 + row) * 479) % 773;
+            const int64_t value = row - 100 + batch;
+            if (!expected.contains(key)) {
+                insertionOrder.push_back(key);
+            }
+            expected[key] += value;
+            keys.push_back(key);
+            values.push_back(value);
+            data += "owned_string_key_" + std::to_string(key);
+            offsets.push_back(static_cast<int64_t>(data.size()));
+        }
+        std::array<TColumn, 2> columns = {
+            TColumn{.Data = stringKeys ? data.data() : reinterpret_cast<char*>(keys.data()),
+                .Offsets = stringKeys ? offsets.data() : nullptr, .OffsetWidth = 8},
+            TColumn{.Data = reinterpret_cast<char*>(values.data())},
+        };
+        TRowSet rows{.Columns = columns.data(), .ColumnCount = 2,
+            .RowCount = 197, .RefCount = 1};
+        processor.Add(rows);
+    }
+    TRowSet result{};
+    processor.Finish(result);
+    ASSERT_EQ(result.RowCount, static_cast<int64_t>(expected.size()));
+    auto* sums = reinterpret_cast<const int64_t*>(result.Columns[1].Data);
+    auto* offsets = static_cast<const int64_t*>(result.Columns[0].Offsets);
+    for (int64_t row = 0; row < result.RowCount; ++row) {
+        int64_t key;
+        if (stringKeys) {
+            std::string value(result.Columns[0].Data + offsets[row],
+                result.Columns[0].Data + offsets[row + 1]);
+            key = std::stoll(value.substr(std::string("owned_string_key_").size()));
+        } else {
+            key = reinterpret_cast<const int64_t*>(result.Columns[0].Data)[row];
+        }
+        EXPECT_EQ(key, insertionOrder[row]);
+        EXPECT_EQ(sums[row], expected.at(key)) << "key " << key;
+    }
+    Release(&result);
+}
+
+} // namespace
+
+TEST(AggregateE2E, IntegerStatesPreserveOutputOrderAcrossRepeatedGrowth) {
+    CheckAggregateStatesAcrossRepeatedGrowth(false);
+}
+
+TEST(AggregateE2E, StringKeyStatesPreserveOwnershipAcrossRepeatedGrowth) {
+    CheckAggregateStatesAcrossRepeatedGrowth(true);
 }
 
 int main(int argc, char** argv) {
