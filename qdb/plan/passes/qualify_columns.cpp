@@ -47,10 +47,8 @@ void CollectSources(const TOperatorPtr& op,
         out.push_back(maybe.Cast());
         return;
     }
-    for (auto& child : op->Children()) {
-        if (auto maybeOp = TMaybeNode<IOperator>(child)) {
-            CollectSources(maybeOp.Cast(), out);
-        }
+    for (const auto& input : op->Inputs()) {
+        CollectSources(input, out);
     }
 }
 
@@ -323,11 +321,9 @@ std::shared_ptr<TStructType> QualifyColumnsImpl(const TOperatorPtr& op) {
         return first;
     }
 
-    // Unknown operator — recurse children to qualify sources beneath it.
-    for (auto& child : op->Children()) {
-        if (auto maybeOp = TMaybeNode<IOperator>(child)) {
-            QualifyColumnsImpl(maybeOp.Cast());
-        }
+    // Unknown operator: recurse into inputs to qualify sources beneath it.
+    for (const auto& input : op->Inputs()) {
+        QualifyColumnsImpl(input);
     }
     return nullptr;
 }

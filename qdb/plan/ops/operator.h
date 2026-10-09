@@ -7,10 +7,14 @@
 
 #include <string>
 #include <unordered_set>
+#include <span>
 
 #include "stats.h"
 
 namespace NQdb {
+
+struct IOperator;
+using TOperatorPtr = std::shared_ptr<IOperator>;
 
 struct IOperator : NQumir::NAst::TExpr {
     // Type of Source: TFunctionType : () -> TStructType
@@ -51,9 +55,17 @@ struct IOperator : NQumir::NAst::TExpr {
         auto* fun = static_cast<NQumir::NAst::TFunctionType*>(Type.get());
         return fun->ParamTypes.empty() ? nullptr : NQumir::NAst::TMaybeType<NQumir::NAst::TStructType>(fun->ParamTypes[0]).Cast();
     }
-};
 
-using TOperatorPtr = std::shared_ptr<IOperator>;
+    // Relational inputs in RequiredColumnsForChild order. The mutable view can
+    // replace inputs but cannot change their count.
+    virtual std::span<const TOperatorPtr> Inputs() const {
+        return {};
+    }
+
+    virtual std::span<TOperatorPtr> MutableInputs() {
+        return {};
+    }
+};
 
 inline NQumir::NAst::TTypePtr FieldType(
     const NQumir::NAst::TStructType* structType, const std::string& name) {

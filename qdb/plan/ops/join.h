@@ -4,6 +4,7 @@
 
 #include <qumir/error.h>
 
+#include <array>
 #include <expected>
 #include <optional>
 #include <string>
@@ -54,13 +55,13 @@ public:
     std::unordered_set<std::string> RequiredColumnsForChild(
         size_t childIdx, const std::unordered_set<std::string>& needed) const override;
     // First operator with TWO children.
-    std::vector<NQumir::NAst::TExprPtr> Children() const override { return {Left_, Right_}; }
+    std::vector<NQumir::NAst::TExprPtr> Children() const override { return {Left(), Right()}; }
     const std::string ToString() const override;
 
-    TOperatorPtr Left() const { return Left_; }
-    TOperatorPtr Right() const { return Right_; }
-    TOperatorPtr& MutableLeft() { return Left_; }
-    TOperatorPtr& MutableRight() { return Right_; }
+    TOperatorPtr Left() const { return Inputs_[0]; }
+    TOperatorPtr Right() const { return Inputs_[1]; }
+    TOperatorPtr& MutableLeft() { return Inputs_[0]; }
+    TOperatorPtr& MutableRight() { return Inputs_[1]; }
     const std::vector<TJoinKey>& Keys() const { return Keys_; }
     std::vector<TJoinKey>& MutableKeys() { return Keys_; }
     EJoinType JoinType() const { return Type_; }
@@ -68,8 +69,16 @@ public:
     const NQumir::NAst::TExprPtr& Filter() const { return Filter_; }
     NQumir::NAst::TExprPtr& MutableFilter() { return Filter_; }
 
+    std::span<const TOperatorPtr> Inputs() const override {
+        return std::span<const TOperatorPtr>(Inputs_);
+    }
+
+    std::span<TOperatorPtr> MutableInputs() override {
+        return std::span<TOperatorPtr>(Inputs_);
+    }
+
 private:
-    TOperatorPtr Left_, Right_;
+    std::array<TOperatorPtr, 2> Inputs_{nullptr, nullptr};
     std::vector<TJoinKey> Keys_;
     EJoinType Type_;
     NQumir::NAst::TExprPtr Filter_; // parsed, unannotated; may be null

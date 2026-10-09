@@ -1571,7 +1571,7 @@ std::string AddLogicalGraphNode(
     std::vector<std::string>* sectionNodes = nullptr)
 {
     std::vector<std::string> childIds;
-    for (const auto& child : ChildOps(op)) {
+    for (const auto& child : op->Inputs()) {
         childIds.push_back(AddLogicalGraphNode(
             child,
             nodes,

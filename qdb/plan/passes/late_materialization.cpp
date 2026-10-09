@@ -222,10 +222,8 @@ void BindLateMaterializationSources(const TOperatorPtr& root) {
     if (auto late = TMaybeOp<TLateMaterializeOperator>(root)) {
         ResolveLateMaterializationSource(*late.Cast()).Source.EnableRowId();
     }
-    for (const auto& child : root->Children()) {
-        if (auto childOp = TMaybeNode<IOperator>(child)) {
-            BindLateMaterializationSources(childOp.Cast());
-        }
+    for (const auto& input : root->Inputs()) {
+        BindLateMaterializationSources(input);
     }
 }
 

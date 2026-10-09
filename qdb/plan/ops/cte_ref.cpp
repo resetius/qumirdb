@@ -32,10 +32,8 @@ void Collect(const TOperatorPtr& op, std::unordered_set<TCteDefinition*>& seen,
         }
         return;
     }
-    for (const auto& child : op->Children()) {
-        if (auto childOp = NQumir::NAst::TMaybeNode<IOperator>(child)) {
-            Collect(childOp.Cast(), seen, out);
-        }
+    for (const auto& input : op->Inputs()) {
+        Collect(input, seen, out);
     }
 }
 

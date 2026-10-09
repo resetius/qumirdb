@@ -90,10 +90,8 @@ void AnnotateTypes(
     const NKernel::TAnnotationContext& context)
 {
     // Bottom-up: children first.
-    for (const auto& child : root->Children()) {
-        if (auto maybeOp = TMaybeNode<IOperator>(child)) {
-            AnnotateTypes(maybeOp.Cast(), context);
-        }
+    for (const auto& input : root->Inputs()) {
+        AnnotateTypes(input, context);
     }
 
     if (auto maybe = TMaybeOp<TSourceOperator>(root)) {
@@ -319,10 +317,8 @@ void AnnotateTypes(
 // unified output in a projection that casts them, so every branch physically emits the
 // same layout (the union operator only routes branch rowsets, it does not coerce).
 void CoerceSetOpBranches(const TOperatorPtr& root) {
-    for (const auto& child : root->Children()) {
-        if (auto op = TMaybeNode<IOperator>(child)) {
-            CoerceSetOpBranches(op.Cast());
-        }
+    for (const auto& input : root->Inputs()) {
+        CoerceSetOpBranches(input);
     }
     auto un = TMaybeOp<TUnionAllOperator>(root);
     if (!un) return;

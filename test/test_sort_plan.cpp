@@ -7,10 +7,14 @@
 #include <qdb/plan/build.h>
 #include <qdb/plan/ops/aggregate.h>
 #include <qdb/plan/ops/filter.h>
+#include <qdb/plan/ops/join.h>
+#include <qdb/plan/ops/late_materialize.h>
 #include <qdb/plan/ops/limit.h>
 #include <qdb/plan/ops/project.h>
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/ops/sort.h>
+#include <qdb/plan/ops/union.h>
+#include <qdb/plan/ops/window.h>
 #include <qdb/plan/passes/column_pruning.h>
 #include <qdb/plan/passes/qualify_columns.h>
 #include <qdb/plan/passes/top_sort.h>
@@ -185,6 +189,75 @@ TEST(SortPlan, LimitPushdownEnablesTopSortThroughStripProjection) {
     auto topSort = TMaybeOp<TTopSortOperator>(project.Cast()->Input());
     ASSERT_TRUE(topSort);
     EXPECT_EQ(topSort.Cast()->Limit(), 3);
+}
+
+TEST(SortPlan, LimitPushdownStaysAboveOtherOperators) {
+    auto i64 = std::make_shared<NQumir::NAst::TIntegerType>();
+    NQdb::TMockSource source(TMockColumns{}, {{"a", i64}});
+    auto plan = BuildSqlPlan("SELECT a FROM t", source);
+    ASSERT_TRUE(plan.has_value());
+    auto filter = MakeFilter(*plan, "(> a 0)");
+    ASSERT_TRUE(filter.has_value());
+
+    std::vector<TSortKey> sortKeys{{.Column = "a"}};
+    std::vector<TOperatorPtr> barriers = {
+        *filter,
+        std::make_shared<TJoinOperator>(
+            *plan, *plan, std::vector<TJoinKey>{{"a", "a"}}, EJoinType::LeftSemi, nullptr),
+        std::make_shared<TAggregateOperator>(
+            *plan, std::vector<std::string>{"a"}, std::vector<TAggregateSpec>{}),
+        std::make_shared<TSortOperator>(*plan, sortKeys),
+        std::make_shared<TTopSortOperator>(*plan, sortKeys, 8),
+        std::make_shared<TLimitOperator>((*plan)->Inputs().front(), 7, 1),
+        std::make_shared<TUnionAllOperator>(std::vector<TOperatorPtr>{*plan, *plan}),
+        std::make_shared<TWindowOperator>(
+            *plan, std::vector<std::string>{}, sortKeys, std::nullopt,
+            std::vector<TWindowFunc>{{.Name = "r", .Func = "rank"}}),
+        std::make_shared<TLateMaterializeOperator>(
+            *plan, "a", std::vector<TLateMaterializeColumn>{
+                {.PhysicalName = "a", .OutputName = "a", .Type = i64},
+            }),
+    };
+
+    for (const auto& barrier : barriers) {
+        SCOPED_TRACE(barrier->RelName());
+        auto limit = std::make_shared<TLimitOperator>(barrier, 3, 2);
+        auto optimized = PushDownLimits(limit);
+        ASSERT_EQ(optimized, limit);
+        EXPECT_EQ(limit->Input(), barrier);
+        EXPECT_EQ(limit->Limit(), 3);
+        EXPECT_EQ(limit->Offset(), 2);
+    }
+}
+
+TEST(SortPlan, LimitAndTopSortPassesTraverseUnionUnderTopSort) {
+    auto i64 = std::make_shared<NQumir::NAst::TIntegerType>();
+    NQdb::TMockSource source(TMockColumns{}, {{"a", i64}, {"b", i64}});
+    auto first = BuildSqlPlan("SELECT a FROM t ORDER BY b LIMIT 3", source);
+    auto second = BuildSqlPlan("SELECT a FROM t ORDER BY b LIMIT 5", source);
+    ASSERT_TRUE(first.has_value());
+    ASSERT_TRUE(second.has_value());
+
+    auto unionAll = std::make_shared<TUnionAllOperator>(
+        std::vector<TOperatorPtr>{*first, *second});
+    auto root = std::make_shared<TTopSortOperator>(
+        unionAll, std::vector<TSortKey>{{.Column = "a"}}, 2);
+    auto optimized = ApplyTopSort(PushDownLimits(root));
+
+    ASSERT_EQ(optimized, root);
+    ASSERT_EQ(root->Input(), unionAll);
+    ASSERT_EQ(unionAll->Inputs().size(), 2u);
+    std::vector<int64_t> limits;
+    for (const auto& input : unionAll->Inputs()) {
+        auto project = TMaybeOp<TProjectOperator>(input);
+        ASSERT_TRUE(project);
+        auto topSort = TMaybeOp<TTopSortOperator>(project.Cast()->Input());
+        ASSERT_TRUE(topSort);
+        ASSERT_EQ(topSort.Cast()->Keys().size(), 1u);
+        EXPECT_EQ(topSort.Cast()->Keys()[0].Column, "__sort_0");
+        limits.push_back(topSort.Cast()->Limit());
+    }
+    EXPECT_EQ(limits, (std::vector<int64_t>{3, 5}));
 }
 
 TEST(SortPlan, QualifyColumnsUpdatesTopSortKeys) {

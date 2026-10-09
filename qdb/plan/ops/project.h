@@ -50,6 +50,14 @@ public:
     const std::vector<TProjectionSpec>& Projections() const { return Projections_; }
     std::vector<TProjectionSpec>& MutableProjections() { return Projections_; }
 
+    std::span<const TOperatorPtr> Inputs() const override {
+        return std::span<const TOperatorPtr>(&Input_, 1);
+    }
+
+    std::span<TOperatorPtr> MutableInputs() override {
+        return std::span<TOperatorPtr>(&Input_, 1);
+    }
+
 private:
     TOperatorPtr Input_;
     std::vector<TProjectionSpec> Projections_;

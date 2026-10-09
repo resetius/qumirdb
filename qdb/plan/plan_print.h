@@ -23,7 +23,6 @@ std::string SortPlanLabel(
     const std::vector<TSortKey>& keys,
     std::optional<int64_t> limit = std::nullopt);
 std::string PlanLabel(const TOperatorPtr& op);
-std::vector<TOperatorPtr> ChildOps(const TOperatorPtr& op);
 void PrintPlanTree(
     std::ostream& out,
     const TOperatorPtr& op,

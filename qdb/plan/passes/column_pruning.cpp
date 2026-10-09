@@ -194,15 +194,13 @@ void Prune(const TOperatorPtr& root, const TColumnSet* explicitRootDemand, TCteU
             }
         }
 
-        auto children = op->Children();
-        for (size_t i = 0; i < children.size(); ++i) {
+        auto inputs = op->Inputs();
+        for (size_t i = 0; i < inputs.size(); ++i) {
             auto required = op->RequiredColumnsForChild(i, effectiveNeeded);
             if (fun && i < fun->ParamTypes.size()) {
                 fun->ParamTypes[i] = narrowStruct(fun->ParamTypes[i], required);
             }
-            if (auto maybeOp = TMaybeNode<IOperator>(children[i])) {
-                walk(maybeOp.Cast(), std::move(required));
-            }
+            walk(inputs[i], std::move(required));
         }
     };
 

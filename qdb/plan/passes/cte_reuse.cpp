@@ -1,20 +1,13 @@
 #include <qdb/plan/passes/cte_reuse.h>
 
 #include <qdb/plan/clone_operator.h>
-#include <qdb/plan/ops/aggregate.h>
 #include <qdb/plan/ops/cte_consumer.h>
 #include <qdb/plan/passes/equijoin.h>
 #include <qdb/plan/passes/estimate_stats.h>
 #include <qdb/plan/passes/predicate_requirements.h>
 #include <qdb/plan/passes/typing.h>
 #include <qdb/plan/ops/filter.h>
-#include <qdb/plan/ops/join.h>
-#include <qdb/plan/ops/late_materialize.h>
-#include <qdb/plan/ops/limit.h>
 #include <qdb/plan/ops/project.h>
-#include <qdb/plan/ops/sort.h>
-#include <qdb/plan/ops/union.h>
-#include <qdb/plan/ops/window.h>
 
 #include <cassert>
 #include <stdexcept>
@@ -123,38 +116,8 @@ TOperatorPtr Resolve(const TOperatorPtr& op, TResolveState& state) {
         }
         std::unreachable();
     }
-    if (auto maybeFilter = TMaybeOp<TFilterOperator>(op)) {
-        auto filter = maybeFilter.Cast();
-        filter->MutableInput() = Resolve(filter->Input(), state);
-    } else if (auto maybeProject = TMaybeOp<TProjectOperator>(op)) {
-        auto project = maybeProject.Cast();
-        project->MutableInput() = Resolve(project->Input(), state);
-    } else if (auto maybeAggregate = TMaybeOp<TAggregateOperator>(op)) {
-        auto aggregate = maybeAggregate.Cast();
-        aggregate->MutableInput() = Resolve(aggregate->Input(), state);
-    } else if (auto maybeSort = TMaybeOp<TSortOperator>(op)) {
-        auto sort = maybeSort.Cast();
-        sort->MutableInput() = Resolve(sort->Input(), state);
-    } else if (auto maybeTopSort = TMaybeOp<TTopSortOperator>(op)) {
-        auto topSort = maybeTopSort.Cast();
-        topSort->MutableInput() = Resolve(topSort->Input(), state);
-    } else if (auto maybeLimit = TMaybeOp<TLimitOperator>(op)) {
-        auto limit = maybeLimit.Cast();
-        limit->MutableInput() = Resolve(limit->Input(), state);
-    } else if (auto maybeLate = TMaybeOp<TLateMaterializeOperator>(op)) {
-        auto late = maybeLate.Cast();
-        late->MutableInput() = Resolve(late->Input(), state);
-    } else if (auto maybeWindow = TMaybeOp<TWindowOperator>(op)) {
-        auto window = maybeWindow.Cast();
-        window->MutableInput() = Resolve(window->Input(), state);
-    } else if (auto maybeJoin = TMaybeOp<TJoinOperator>(op)) {
-        auto join = maybeJoin.Cast();
-        join->MutableLeft() = Resolve(join->Left(), state);
-        join->MutableRight() = Resolve(join->Right(), state);
-    } else if (auto maybeUnion = TMaybeOp<TUnionAllOperator>(op)) {
-        for (auto& branch : maybeUnion.Cast()->MutableInputs()) {
-            branch = Resolve(branch, state);
-        }
+    for (auto& input : op->MutableInputs()) {
+        input = Resolve(input, state);
     }
     return op;
 }
@@ -238,10 +201,8 @@ void CollectRefPredicates(const TOperatorPtr& op, TRefPredicates& out) {
         out[ref.Cast()->Def().get()].push_back(nullptr);
         return;
     }
-    for (const auto& child : op->Children()) {
-        if (auto childOp = TMaybeNode<IOperator>(child)) {
-            CollectRefPredicates(childOp.Cast(), out);
-        }
+    for (const auto& input : op->Inputs()) {
+        CollectRefPredicates(input, out);
     }
 }
 

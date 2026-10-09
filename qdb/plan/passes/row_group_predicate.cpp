@@ -17,10 +17,8 @@ void Clear(const TOperatorPtr& node) {
     if (auto source = TMaybeOp<TSourceOperator>(node)) {
         source.Cast()->SetRowGroupPredicate(nullptr);
     }
-    for (const auto& child : node->Children()) {
-        if (auto op = TMaybeNode<IOperator>(child)) {
-            Clear(op.Cast());
-        }
+    for (const auto& input : node->Inputs()) {
+        Clear(input);
     }
 }
 
@@ -46,10 +44,8 @@ void Attach(const TOperatorPtr& node) {
             }
         }
     }
-    for (const auto& child : node->Children()) {
-        if (auto op = TMaybeNode<IOperator>(child)) {
-            Attach(op.Cast());
-        }
+    for (const auto& input : node->Inputs()) {
+        Attach(input);
     }
 }
 

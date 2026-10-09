@@ -3,6 +3,7 @@
 #include <qdb/plan/ops/operator.h>
 
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace NQdb {
@@ -28,8 +29,17 @@ public:
     }
     const std::string ToString() const override;
 
-    const std::vector<TOperatorPtr>& Inputs() const { return Inputs_; }
-    std::vector<TOperatorPtr>& MutableInputs() { return Inputs_; }
+    std::span<const TOperatorPtr> Inputs() const override {
+        return std::span<const TOperatorPtr>(Inputs_);
+    }
+
+    std::span<TOperatorPtr> MutableInputs() override {
+        return std::span<TOperatorPtr>(Inputs_);
+    }
+
+    void SetInputs(std::vector<TOperatorPtr> inputs) {
+        Inputs_ = std::move(inputs);
+    }
 
 private:
     std::vector<TOperatorPtr> Inputs_;

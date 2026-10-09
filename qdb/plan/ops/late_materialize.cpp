@@ -21,10 +21,8 @@ void CollectInputSources(
         sources.push_back(source.Cast().get());
         return;
     }
-    for (const auto& child : root->Children()) {
-        if (auto childOp = NQumir::NAst::TMaybeNode<IOperator>(child)) {
-            CollectInputSources(childOp.Cast(), sources);
-        }
+    for (const auto& input : root->Inputs()) {
+        CollectInputSources(input, sources);
     }
 }
 
