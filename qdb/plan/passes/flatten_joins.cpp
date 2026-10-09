@@ -1,13 +1,7 @@
 #include <qdb/plan/passes/flatten_joins.h>
 
-#include <qdb/plan/ops/aggregate.h>
 #include <qdb/plan/ops/filter.h>
 #include <qdb/plan/ops/join.h>
-#include <qdb/plan/ops/limit.h>
-#include <qdb/plan/ops/project.h>
-#include <qdb/plan/ops/sort.h>
-#include <qdb/plan/ops/union.h>
-#include <qdb/plan/ops/window.h>
 
 #include <algorithm>
 
@@ -81,27 +75,8 @@ TOperatorPtr FlattenInnerJoins(TOperatorPtr root) {
             ? chain
             : std::make_shared<TFilterOperator>(chain, Conjoin(conds));
     }
-    if (auto n = TMaybeOp<TFilterOperator>(root)) {
-        n.Cast()->MutableInput() = FlattenInnerJoins(n.Cast()->Input());
-    } else if (auto n = TMaybeOp<TProjectOperator>(root)) {
-        n.Cast()->MutableInput() = FlattenInnerJoins(n.Cast()->Input());
-    } else if (auto n = TMaybeOp<TAggregateOperator>(root)) {
-        n.Cast()->MutableInput() = FlattenInnerJoins(n.Cast()->Input());
-    } else if (auto n = TMaybeOp<TSortOperator>(root)) {
-        n.Cast()->MutableInput() = FlattenInnerJoins(n.Cast()->Input());
-    } else if (auto n = TMaybeOp<TTopSortOperator>(root)) {
-        n.Cast()->MutableInput() = FlattenInnerJoins(n.Cast()->Input());
-    } else if (auto n = TMaybeOp<TLimitOperator>(root)) {
-        n.Cast()->MutableInput() = FlattenInnerJoins(n.Cast()->Input());
-    } else if (auto n = TMaybeOp<TWindowOperator>(root)) {
-        n.Cast()->MutableInput() = FlattenInnerJoins(n.Cast()->Input());
-    } else if (auto n = TMaybeOp<TJoinOperator>(root)) {
-        n.Cast()->MutableLeft() = FlattenInnerJoins(n.Cast()->Left());
-        n.Cast()->MutableRight() = FlattenInnerJoins(n.Cast()->Right());
-    } else if (auto n = TMaybeOp<TUnionAllOperator>(root)) {
-        for (auto& branch : n.Cast()->MutableInputs()) {
-            branch = FlattenInnerJoins(branch);
-        }
+    for (auto& input : root->MutableInputs()) {
+        input = FlattenInnerJoins(input);
     }
     return root;
 }

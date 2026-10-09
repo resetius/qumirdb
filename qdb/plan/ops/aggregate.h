@@ -45,6 +45,14 @@ public:
     const std::vector<std::vector<size_t>>& GroupingSets() const { return GroupingSets_; }
     std::vector<std::vector<size_t>>& MutableGroupingSets() { return GroupingSets_; }
 
+    std::span<const TOperatorPtr> Inputs() const override {
+        return std::span<const TOperatorPtr>(&Input_, 1);
+    }
+
+    std::span<TOperatorPtr> MutableInputs() override {
+        return std::span<TOperatorPtr>(&Input_, 1);
+    }
+
 private:
     TOperatorPtr Input_;
     std::vector<std::string> GroupKeys_;

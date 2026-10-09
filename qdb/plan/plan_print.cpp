@@ -201,16 +201,6 @@ std::string PlanLabel(const TOperatorPtr& op) {
     return std::string(op->RelName());
 }
 
-std::vector<TOperatorPtr> ChildOps(const TOperatorPtr& op) {
-    std::vector<TOperatorPtr> out;
-    for (const auto& child : op->Children()) {
-        if (auto childOp = NQumir::NAst::TMaybeNode<IOperator>(child)) {
-            out.push_back(childOp.Cast());
-        }
-    }
-    return out;
-}
-
 void PrintPlanTree(
     std::ostream& out,
     const TOperatorPtr& op,
@@ -229,7 +219,7 @@ void PrintPlanTree(
     }
     out << "\n";
 
-    auto children = ChildOps(op);
+    auto children = op->Inputs();
     std::string childPrefix = isRoot ? prefix : prefix + (isLast ? "   " : "│  ");
     for (size_t i = 0; i < children.size(); ++i) {
         PrintPlanTree(out, children[i], childPrefix, i + 1 == children.size(), false);

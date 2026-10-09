@@ -112,14 +112,13 @@ std::expected<TTypePtr, NQumir::TError> ComputeJoinOutputType(
 
 TJoinOperator::TJoinOperator(TOperatorPtr left, TOperatorPtr right,
     std::vector<TJoinKey> keys, EJoinType type, TExprPtr filter)
-    : Left_(std::move(left))
-    , Right_(std::move(right))
+    : Inputs_{std::move(left), std::move(right)}
     , Keys_(std::move(keys))
     , Type_(type)
     , Filter_(std::move(filter))
 {
-    auto leftSchema = Left_->OutputColumns();
-    auto rightSchema = Right_->OutputColumns();
+    auto leftSchema = Left()->OutputColumns();
+    auto rightSchema = Right()->OutputColumns();
     auto output = ComputeJoinOutputType(leftSchema, rightSchema, Type_);
     // Callers go through MakeJoin, which validates before construction; on the
     // unvalidated path leave the output type null rather than throwing.
@@ -147,7 +146,7 @@ std::unordered_set<std::string> TJoinOperator::ComputeReferencedColumns() const 
 std::unordered_set<std::string> TJoinOperator::RequiredColumnsForChild(
     size_t childIdx, const std::unordered_set<std::string>& needed) const
 {
-    const auto& side = (childIdx == 0) ? Left_ : Right_;
+    const auto& side = (childIdx == 0) ? Left() : Right();
     auto&& sideStruct = side->OutputColumns();
     std::unordered_set<std::string> sideCols;
     if (sideStruct) {
@@ -180,7 +179,7 @@ std::unordered_set<std::string> TJoinOperator::RequiredColumnsForChild(
 
 const std::string TJoinOperator::ToString() const {
     using namespace NQumir::NAst::NCore;
-    std::string s = "(rel join " + Left_->ToString() + " " + Right_->ToString() + " (";
+    std::string s = "(rel join " + Left()->ToString() + " " + Right()->ToString() + " (";
     for (size_t i = 0; i < Keys_.size(); ++i) {
         if (i != 0) {
             s += " ";

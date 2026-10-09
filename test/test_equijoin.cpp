@@ -10,6 +10,7 @@
 #include <qdb/plan/ops/project.h>
 #include <qdb/plan/ops/sort.h>
 #include <qdb/plan/ops/source.h>
+#include <qdb/plan/ops/union.h>
 #include <qdb/plan/ops/window.h>
 #include <qdb/plan/passes/equijoin.h>
 #include <qdb/plan/passes/join_order.h>
@@ -383,6 +384,35 @@ TEST(PushDown, UnionAllPrunesConstantBranch) {
     auto source = dynamic_cast<const TSourceOperator*>(project->Input().get());
     ASSERT_NE(source, nullptr);
     EXPECT_EQ(source->GetAlias(), "a");
+}
+
+TEST(PushDown, UnionAllShrinksToMultipleSurvivingBranches) {
+    NQdb::TMockSource a({"aid"});
+    NQdb::TMockSource b({"bid"});
+    NQdb::TMockSource c({"cid"});
+    std::map<std::string, ISource*> tables = {{"A", &a}, {"B", &b}, {"C", &c}};
+
+    auto root = PushDownPredicates(BuildAnnotated(
+        "(rel filter"
+        "  (rel union-all"
+        "    (rel project (rel source \"A\" \"a\") (tag 1))"
+        "    (rel project (rel source \"B\" \"b\") (tag 2))"
+        "    (rel project (rel source \"C\" \"c\") (tag 1)))"
+        "  (== tag 1))",
+        tables));
+
+    auto unionAll = TMaybeOp<TUnionAllOperator>(root);
+    ASSERT_TRUE(unionAll);
+    ASSERT_EQ(unionAll.Cast()->Inputs().size(), 2u);
+    std::vector<std::string> aliases;
+    for (const auto& input : unionAll.Cast()->Inputs()) {
+        auto project = TMaybeOp<TProjectOperator>(input);
+        ASSERT_TRUE(project);
+        auto source = TMaybeOp<TSourceOperator>(project.Cast()->Input());
+        ASSERT_TRUE(source);
+        aliases.push_back(source.Cast()->GetAlias());
+    }
+    EXPECT_EQ(aliases, (std::vector<std::string>{"a", "c"}));
 }
 
 // When no branch can match the predicate, the union prunes to an empty relation

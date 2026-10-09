@@ -24,10 +24,8 @@ void CloneOperatorExprs(const TOperatorPtr& op) {
     if (!op) {
         return;
     }
-    for (const auto& child : op->Children()) {
-        if (auto childOp = TMaybeNode<IOperator>(child)) {
-            CloneOperatorExprs(childOp.Cast());
-        }
+    for (const auto& input : op->Inputs()) {
+        CloneOperatorExprs(input);
     }
     if (auto filter = TMaybeOp<TFilterOperator>(op)) {
         filter.Cast()->MutablePredicate() = CloneExpr(filter.Cast()->Predicate());

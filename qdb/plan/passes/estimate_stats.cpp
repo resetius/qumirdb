@@ -709,11 +709,8 @@ TJoinCardinality EstimateEquiJoin(
 }
 
 TStatsPtr EstimateStats(TOperatorPtr op) {
-    for (auto& child : op->Children()) {
-        if (auto maybeOp = TMaybeNode<IOperator>(child)) {
-            auto childOp = maybeOp.Cast();
-            childOp->Stats_ = EstimateStats(childOp);
-        }
+    for (const auto& input : op->Inputs()) {
+        input->Stats_ = EstimateStats(input);
     }
 
     return op->Stats_ = ComputeStatsFor(op);

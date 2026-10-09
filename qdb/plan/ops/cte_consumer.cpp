@@ -36,10 +36,8 @@ void CountConsumers(
         }
         return;
     }
-    for (const auto& child : op->Children()) {
-        if (auto childOp = NQumir::NAst::TMaybeNode<IOperator>(child)) {
-            CountConsumers(childOp.Cast(), seen, counts);
-        }
+    for (const auto& input : op->Inputs()) {
+        CountConsumers(input, seen, counts);
     }
 }
 
@@ -71,10 +69,8 @@ void CollectMats(
         }
         return;
     }
-    for (const auto& child : op->Children()) {
-        if (auto childOp = NQumir::NAst::TMaybeNode<IOperator>(child)) {
-            CollectMats(childOp.Cast(), seen, out);
-        }
+    for (const auto& input : op->Inputs()) {
+        CollectMats(input, seen, out);
     }
 }
 

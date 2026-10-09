@@ -3,7 +3,6 @@
 #include <qdb/plan/ops/aggregate.h>
 #include <qdb/plan/ops/filter.h>
 #include <qdb/plan/ops/join.h>
-#include <qdb/plan/ops/late_materialize.h>
 #include <qdb/plan/ops/limit.h>
 #include <qdb/plan/ops/project.h>
 #include <qdb/plan/ops/sort.h>
@@ -372,9 +371,9 @@ TOperatorPtr ProcessUnion(std::shared_ptr<TUnionAllOperator> unionAll, TContext 
         columnNameToId[field] = columnNameToId.size();
     }
 
-    auto& branches = unionAll->MutableInputs();
+    auto branches = unionAll->Inputs();
     std::vector<TOperatorPtr> newInputs; newInputs.reserve(branches.size());
-    for (auto& branch : branches) {
+    for (const auto& branch : branches) {
         std::unordered_map<std::string, TRemapTarget> remapFromTo;
         auto&& branchFields = TMaybeType<NQumir::NAst::TStructType>(branch->OutputColumns()).Cast()->Fields;
         std::vector<TConjuct> branchConjucts;
@@ -436,7 +435,7 @@ TOperatorPtr ProcessUnion(std::shared_ptr<TUnionAllOperator> unionAll, TContext 
     if (newInputs.size() == 1) {
         return newInputs[0];
     }
-    branches = std::move(newInputs);
+    unionAll->SetInputs(std::move(newInputs));
     return Materialize(unionAll, {});
 }
 
@@ -795,33 +794,10 @@ TOperatorPtr RewriteAntiJoins(
         }
     }
 
-    auto rewriteChild = [&](TOperatorPtr& child, size_t index) {
-        child = RewriteAntiJoins(
-            child, root->RequiredColumnsForChild(index, needed), changed);
-    };
-    if (auto node = TMaybeOp<TJoinOperator>(root)) {
-        rewriteChild(node.Cast()->MutableLeft(), 0);
-        rewriteChild(node.Cast()->MutableRight(), 1);
-    } else if (auto node = TMaybeOp<TFilterOperator>(root)) {
-        rewriteChild(node.Cast()->MutableInput(), 0);
-    } else if (auto node = TMaybeOp<TProjectOperator>(root)) {
-        rewriteChild(node.Cast()->MutableInput(), 0);
-    } else if (auto node = TMaybeOp<TAggregateOperator>(root)) {
-        rewriteChild(node.Cast()->MutableInput(), 0);
-    } else if (auto node = TMaybeOp<TSortOperator>(root)) {
-        rewriteChild(node.Cast()->MutableInput(), 0);
-    } else if (auto node = TMaybeOp<TTopSortOperator>(root)) {
-        rewriteChild(node.Cast()->MutableInput(), 0);
-    } else if (auto node = TMaybeOp<TLimitOperator>(root)) {
-        rewriteChild(node.Cast()->MutableInput(), 0);
-    } else if (auto node = TMaybeOp<TWindowOperator>(root)) {
-        rewriteChild(node.Cast()->MutableInput(), 0);
-    } else if (auto node = TMaybeOp<TLateMaterializeOperator>(root)) {
-        rewriteChild(node.Cast()->MutableInput(), 0);
-    } else if (auto node = TMaybeOp<TUnionAllOperator>(root)) {
-        for (size_t index = 0; index < node.Cast()->MutableInputs().size(); ++index) {
-            rewriteChild(node.Cast()->MutableInputs()[index], index);
-        }
+    auto inputs = root->MutableInputs();
+    for (size_t index = 0; index < inputs.size(); ++index) {
+        inputs[index] = RewriteAntiJoins(
+            inputs[index], root->RequiredColumnsForChild(index, needed), changed);
     }
     return root;
 }

@@ -42,6 +42,14 @@ public:
 
     const std::string ToString() const override;
 
+    std::span<const TOperatorPtr> Inputs() const override {
+        return std::span<const TOperatorPtr>(&Input_, 1);
+    }
+
+    std::span<TOperatorPtr> MutableInputs() override {
+        return std::span<TOperatorPtr>(&Input_, 1);
+    }
+
 private:
     TOperatorPtr Input_;
     std::string LocatorColumn_;

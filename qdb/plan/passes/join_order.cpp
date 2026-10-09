@@ -1,12 +1,7 @@
 #include "join_order.h"
 
-#include <qdb/plan/ops/aggregate.h>
 #include <qdb/plan/ops/filter.h>
 #include <qdb/plan/ops/join.h>
-#include <qdb/plan/ops/limit.h>
-#include <qdb/plan/ops/project.h>
-#include <qdb/plan/ops/sort.h>
-#include <qdb/plan/ops/window.h>
 #include <qdb/plan/passes/cbo/dpccp.h>
 
 #include "factor_conjuncts.h"
@@ -362,35 +357,8 @@ TOperatorPtr Reorder(
         join->MutableRight() = Reorder(join->Right(), edges, ctx);
         return join;
     }
-    if (auto maybeProject = TMaybeOp<TProjectOperator>(node)) {
-        auto project = maybeProject.Cast();
-        project->MutableInput() = Reorder(project->Input(), {}, ctx);
-        return project;
-    }
-    if (auto maybeAggregate = TMaybeOp<TAggregateOperator>(node)) {
-        auto aggregate = maybeAggregate.Cast();
-        aggregate->MutableInput() = Reorder(aggregate->Input(), {}, ctx);
-        return aggregate;
-    }
-    if (auto maybeLimit = TMaybeOp<TLimitOperator>(node)) {
-        auto limit = maybeLimit.Cast();
-        limit->MutableInput() = Reorder(limit->Input(), {}, ctx);
-        return limit;
-    }
-    if (auto maybeSort = TMaybeOp<TSortOperator>(node)) {
-        auto sort = maybeSort.Cast();
-        sort->MutableInput() = Reorder(sort->Input(), {}, ctx);
-        return sort;
-    }
-    if (auto maybeTopSort = TMaybeOp<TTopSortOperator>(node)) {
-        auto topSort = maybeTopSort.Cast();
-        topSort->MutableInput() = Reorder(topSort->Input(), {}, ctx);
-        return topSort;
-    }
-    if (auto maybeWindow = TMaybeOp<TWindowOperator>(node)) {
-        auto window = maybeWindow.Cast();
-        window->MutableInput() = Reorder(window->Input(), {}, ctx);
-        return window;
+    for (auto& input : node->MutableInputs()) {
+        input = Reorder(input, {}, ctx);
     }
     return node;
 }
@@ -484,24 +452,9 @@ TOperatorPtr PushDown(TOperatorPtr node) {
                 return PushDown(std::move(sunk));
             }
         }
-        j->MutableLeft() = PushDown(j->Left());
-        j->MutableRight() = PushDown(j->Right());
-        return j;
     }
-    if (auto f = TMaybeOp<TFilterOperator>(node)) {
-        f.Cast()->MutableInput() = PushDown(f.Cast()->Input());
-    } else if (auto p = TMaybeOp<TProjectOperator>(node)) {
-        p.Cast()->MutableInput() = PushDown(p.Cast()->Input());
-    } else if (auto a = TMaybeOp<TAggregateOperator>(node)) {
-        a.Cast()->MutableInput() = PushDown(a.Cast()->Input());
-    } else if (auto l = TMaybeOp<TLimitOperator>(node)) {
-        l.Cast()->MutableInput() = PushDown(l.Cast()->Input());
-    } else if (auto s = TMaybeOp<TSortOperator>(node)) {
-        s.Cast()->MutableInput() = PushDown(s.Cast()->Input());
-    } else if (auto t = TMaybeOp<TTopSortOperator>(node)) {
-        t.Cast()->MutableInput() = PushDown(t.Cast()->Input());
-    } else if (auto w = TMaybeOp<TWindowOperator>(node)) {
-        w.Cast()->MutableInput() = PushDown(w.Cast()->Input());
+    for (auto& input : node->MutableInputs()) {
+        input = PushDown(input);
     }
     return node;
 }

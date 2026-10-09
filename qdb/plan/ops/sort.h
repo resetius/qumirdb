@@ -45,6 +45,14 @@ public:
     const std::vector<TSortKey>& Keys() const { return Keys_; }
     std::vector<TSortKey>& MutableKeys() { return Keys_; }
 
+    std::span<const TOperatorPtr> Inputs() const override {
+        return std::span<const TOperatorPtr>(&Input_, 1);
+    }
+
+    std::span<TOperatorPtr> MutableInputs() override {
+        return std::span<TOperatorPtr>(&Input_, 1);
+    }
+
 private:
     TOperatorPtr Input_;
     std::vector<TSortKey> Keys_;
@@ -66,6 +74,14 @@ public:
     const std::vector<TSortKey>& Keys() const { return Keys_; }
     std::vector<TSortKey>& MutableKeys() { return Keys_; }
     int64_t Limit() const { return Limit_; }
+
+    std::span<const TOperatorPtr> Inputs() const override {
+        return std::span<const TOperatorPtr>(&Input_, 1);
+    }
+
+    std::span<TOperatorPtr> MutableInputs() override {
+        return std::span<TOperatorPtr>(&Input_, 1);
+    }
 
 private:
     TOperatorPtr Input_;
