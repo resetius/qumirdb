@@ -38,6 +38,9 @@
   (type HashTable <struct
     (Keys <ptr u8>)
     (Ctrl <ptr u8>)
+    ;; Dense-state tables (joins/string reducers): physical slot -> dense ID.
+    ;; Physical-state aggregates: dense output ID -> physical slot. Their hot
+    ;; update path indexes AggBuffers directly by the probe result.
     (SlotId <ptr i64>)
     (GroupKeys <ptr u8>)
     (AggBuffers <ptr <ptr i64>>)

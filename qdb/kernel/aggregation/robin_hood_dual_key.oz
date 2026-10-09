@@ -51,7 +51,7 @@
           (= probes (+ probes (: 1 i64)))))
       (return (: -1 i64))))
 
-  ;; Preserve the physical-slot -> dense-ID mapping used by joins and aggregates.
+  ;; Joins and dense-state aggregates retain physical-slot -> dense-ID mapping.
   (fun rh_lookup_or_empty_dual [StoredKey LookupKey]
        ((var keys <ptr StoredKey>) (var ctrl <ptr u8>)
         (var slot_ids <ptr i64>) (var capacity i64) (var key LookupKey)
@@ -135,13 +135,29 @@
           (var slot_ids = (field ht SlotId))
           (return (index slot_ids slot))))
       (return (call aht_insert_dual ht key stored_witness out_is_new
-        hash empty_slot))))
+        hash empty_slot #f))))
+
+  (fun aht_upsert_aggregate [LookupKey StoredKey]
+       ((var ht <ref HashTable>) (var key LookupKey)
+        (var stored_witness StoredKey) (var out_is_new <ref i64>)
+        (var hash u64)) -> i64
+    (attrs inline)
+    (block
+      (= out_is_new 0)
+      (var empty_slot = -1)
+      (var slot = (call rh_lookup_or_empty_physical
+        (cast (field ht Keys) <ptr StoredKey>) (field ht Ctrl)
+        (field ht Capacity) key hash empty_slot))
+      (if (>= slot 0)
+        (block (return slot)))
+      (return (call aht_insert_dual ht key stored_witness out_is_new
+        hash empty_slot #t))))
 
   ;; Keep ownership, allocation, and growth off the common hit path.
   (fun aht_insert_dual [LookupKey StoredKey]
        ((var ht <ref HashTable>) (var key LookupKey)
         (var stored_witness StoredKey) (var out_is_new <ref i64>)
-        (var hash u64) (var empty_slot i64)) -> i64
+        (var hash u64) (var empty_slot i64) (var physical_states bool)) -> i64
     (block
       (var capacity = (field ht Capacity))
       (var keys = (cast (field ht Keys) <ptr StoredKey>))
@@ -151,8 +167,8 @@
         (block
           (if (> capacity (: 576460752303423487 i64))
             (block (return (: -1 i64))))
-          (if (! (call aht_rehash_dual
-            ht (* capacity (: 2 i64)) stored_witness))
+          (if (! (call aht_rehash_dual_impl
+            ht (* capacity (: 2 i64)) stored_witness physical_states))
             (block (return (: -1 i64))))
           (= capacity (field ht Capacity))
           (= keys (cast (field ht Keys)
@@ -174,7 +190,11 @@
       (var ctrl = (field ht Ctrl))
       (var slot_ids = (field ht SlotId))
       (= keys [empty_slot] stored_key)
-      (= slot_ids [empty_slot] dense_slot)
+      (if physical_states
+        (block (= slot_ids [dense_slot] empty_slot))
+        (block (= slot_ids [empty_slot] dense_slot)))
+      (var state_slot = dense_slot)
+      (if physical_states (block (= state_slot empty_slot)))
       (= ctrl [empty_slot] (cast (& hash (: 127 u64)) u8))
       (var group_keys = (cast (field ht GroupKeys)
         <ptr StoredKey>))
@@ -185,11 +205,11 @@
       (while (< agg (field ht NumAggs))
         (block
           (var agg_buffer = (index agg_buffers agg))
-          (= agg_buffer [dense_slot] (: 0 i64))
+          (= agg_buffer [state_slot] (: 0 i64))
           (= agg (+ agg (: 1 i64)))))
       (field_assign ht Size (+ dense_slot (: 1 i64)))
       (= out_is_new (: 1 i64))
-      (return dense_slot)))
+      (return state_slot)))
 
   (fun rh_rehash_stored [StoredKey]
        ((var old_keys <ptr StoredKey>)
@@ -223,9 +243,43 @@
       (return #t)))
 
   (fun aht_rehash_dual [StoredKey]
+       ((var ht <ref HashTable>) (var new_capacity i64)
+        (var stored_witness StoredKey)) -> bool
+    (block (return (call aht_rehash_dual_impl
+      ht new_capacity stored_witness #f))))
+
+  ;; Scalar aggregate states use physical slots. SlotId then maps dense output
+  ;; IDs to physical slots, so updates never load it; finalization loads it once
+  ;; per group. GroupKeys remains dense and preserves output order.
+  (fun rh_rehash_aggregate [StoredKey]
+       ((var group_keys <ptr StoredKey>) (var size i64)
+        (var new_keys <ptr StoredKey>) (var new_ctrl <ptr u8>)
+        (var new_slot_ids <ptr i64>) (var new_capacity i64)) -> bool
+    (block
+      (var i = 0)
+      (while (< i new_capacity)
+        (block
+          (= new_ctrl [i] (: 128 u8))
+          (= new_slot_ids [i] -1)
+          (= i (+ i 1))))
+      (= i 0)
+      (while (< i size)
+        (block
+          (var key = (index group_keys i))
+          (var hash = (cast (call rh_hash key) u64))
+          (var slot = (call rh_find_empty_slot new_ctrl new_capacity hash))
+          (if (< slot 0) (block (return #f)))
+          (= new_keys [slot] key)
+          (= new_ctrl [slot] (cast (& hash (: 127 u64)) u8))
+          (= new_slot_ids [i] slot)
+          (= i (+ i 1))))
+      (return #t)))
+
+  (fun aht_rehash_dual_impl [StoredKey]
        ((var ht <ref HashTable>)
         (var new_capacity i64)
-        (var stored_witness StoredKey)) -> bool
+        (var stored_witness StoredKey)
+        (var physical_states bool)) -> bool
     (block
       (var old_capacity = (field ht Capacity))
       (var size = (field ht Size))
@@ -300,9 +354,15 @@
         <ptr StoredKey>))
       (var new_keys_typed = (cast new_keys
         <ptr StoredKey>))
-      (if (! (call rh_rehash_stored
-        old_keys (field ht Ctrl) (field ht SlotId) old_capacity
-        new_keys_typed new_ctrl new_slot_ids new_capacity stored_witness))
+      (var rehashed bool)
+      (if physical_states
+        (block (= rehashed (call rh_rehash_aggregate
+          (cast (field ht GroupKeys) <ptr StoredKey>) size
+          new_keys_typed new_ctrl new_slot_ids new_capacity)))
+        (block (= rehashed (call rh_rehash_stored
+          old_keys (field ht Ctrl) (field ht SlotId) old_capacity
+          new_keys_typed new_ctrl new_slot_ids new_capacity stored_witness))))
+      (if (! rehashed)
         (block
           (call qdb_free (cast new_keys <ptr i8>))
           (call qdb_free (cast new_ctrl <ptr i8>))
@@ -328,6 +388,7 @@
         (block
           (= new_group_keys_typed [index] (index old_group_keys index))
           (= index (+ index (: 1 i64)))))
+      (var old_slot_ids = (field ht SlotId))
       (var old_agg_buffers = (field ht AggBuffers))
       (var agg i64)
       (= agg (: 0 i64))
@@ -338,7 +399,11 @@
           (= index (: 0 i64))
           (while (< index size)
             (block
-              (= new_buffer [index] (index old_buffer index))
+              (if physical_states
+                (block
+                  (= new_buffer [(index new_slot_ids index)]
+                    (index old_buffer (index old_slot_ids index))))
+                (block (= new_buffer [index] (index old_buffer index))))
               (= index (+ index (: 1 i64)))))
           (= agg (+ agg (: 1 i64)))))
       (call qdb_free (cast (field ht Keys) <ptr i8>))
