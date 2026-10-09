@@ -6,6 +6,7 @@
 #include <qdb/plan/ops/join.h>
 #include <qdb/plan/ops/operator.h>
 #include <qdb/plan/ops/stats.h>
+#include <qdb/plan/types/nullable.h>
 
 #include <qumir/codegen/llvm/llvm_initializer.h>
 #include <qumir/parser/type.h>
@@ -56,7 +57,9 @@ struct TOut2 {
 };
 
 // Duplicate right keys must not duplicate SEMI output.
-std::vector<TOut2> RunSemiAnti(EJoinType type, EJoinBuildSide buildSide) {
+std::vector<TOut2> RunSemiAnti(
+    EJoinType type, EJoinBuildSide buildSide, bool nullableKeys = false)
+{
     std::vector<int64_t> lk0 = {1, 2}, lv0 = {10, 20};
     std::vector<int64_t> lk1 = {1, 3}, lv1 = {30, 40};
     std::vector<int64_t> rk0 = {1, 1}, rv0 = {100, 200};
@@ -69,6 +72,19 @@ std::vector<TOut2> RunSemiAnti(EJoinType type, EJoinBuildSide buildSide) {
     auto leftBatch1 = KeyValBatch(lk1.data(), lv1.data(), 2, lcols1);
     auto rightBatch0 = KeyValBatch(rk0.data(), rv0.data(), 2, rcols0);
     auto rightBatch1 = KeyValBatch(rk1.data(), rv1.data(), 1, rcols1);
+
+    uint8_t valid = 0b00000001;
+    uint8_t invalid = 0;
+    if (nullableKeys) {
+        static_cast<TStructType&>(*leftType).Fields[0].second =
+            std::make_shared<TNullable>(I64Type());
+        static_cast<TStructType&>(*rightType).Fields[0].second =
+            std::make_shared<TNullable>(I64Type());
+        lcols0[0].Mask = &valid;
+        lcols1[0].Mask = &valid;
+        rcols0[0].Mask = &valid;
+        rcols1[0].Mask = &invalid;
+    }
 
     TKernelCompiler compiler;
     auto kernels = CompileJoin(compiler, leftType, rightType, type);
@@ -103,7 +119,12 @@ std::vector<TOut2> RunSemiAnti(EJoinType type, EJoinBuildSide buildSide) {
         const auto* c0 = reinterpret_cast<const int64_t*>(out.Columns[0].Data);
         const auto* c1 = reinterpret_cast<const int64_t*>(out.Columns[1].Data);
         for (int64_t i = 0; i < out.RowCount; ++i) {
-            got.push_back({c0[i], c1[i]});
+            const bool validKey = !out.Columns[0].Mask ||
+                ((out.Columns[0].Mask[i / 8] >> (i % 8)) & 1);
+            if (nullableKeys) {
+                EXPECT_EQ(validKey, type == EJoinType::LeftSemi);
+            }
+            got.push_back({validKey ? c0[i] : 0, c1[i]});
         }
         Release(&out);
     }
@@ -261,6 +282,15 @@ TEST_P(SemiAntiOrientation, BuildRightMatchesBuildLeft) {
               ExpectedSemiAnti(GetParam()));
     EXPECT_EQ(RunSemiAnti(GetParam(), EJoinBuildSide::Auto),
               ExpectedSemiAnti(GetParam()));
+}
+
+TEST_P(SemiAntiOrientation, NullKeysNeverMatchInEitherOrientation) {
+    const std::vector<TOut2> expected = GetParam() == EJoinType::LeftAnti
+        ? std::vector<TOut2>{{0, 20}, {0, 40}}
+        : std::vector<TOut2>{{1, 10}, {1, 30}};
+    for (auto buildSide : {EJoinBuildSide::Auto, EJoinBuildSide::Right}) {
+        EXPECT_EQ(RunSemiAnti(GetParam(), buildSide, true), expected);
+    }
 }
 
 // Only right-build can stream the left output.

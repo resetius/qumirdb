@@ -94,7 +94,29 @@ GenJoinKeyTypeDecls(const TJoinKeyDescriptor &key) {
 
 std::vector<NQumir::NAst::TExprPtr>
 GenJoinKeyOpsFunDecls(const TJoinKeyDescriptor &key) {
-  return GenKeyOperationFunDecls(JoinKeyAggregateShim(key));
+  auto functions = GenKeyOperationFunDecls(JoinKeyAggregateShim(key));
+  auto addValidity = [&](const TTypePtr &type) {
+    namespace Oz = NOz;
+    // Hash table equality groups NULL keys together. SQL join equality must
+    // reject them instead, without changing that table equality on insertion.
+    TExprPtr valid = Oz::Bool(true);
+    for (size_t i = 0; i < key.Fields.size(); ++i) {
+      if (key.Fields[i].IsNullable) {
+        valid = Oz::Bin(TOperator("&&"), std::move(valid),
+                        Oz::Field("key", "valid_" + std::to_string(i)));
+      }
+    }
+    Oz::TFunBuilder builder("jt_key_valid");
+    builder.Param("key", type)
+        .Return(std::make_shared<TBoolType>())
+        .Stmt(Oz::Return(std::move(valid)));
+    functions.push_back(std::move(builder).Build());
+  };
+  addValidity(key.StoredType);
+  if (key.HasDistinctLookupType()) {
+    addValidity(key.LookupType);
+  }
+  return functions;
 }
 
 std::vector<NQumir::NAst::TExprPtr>
@@ -382,11 +404,12 @@ GenJoinFinalizeSemiAntiAst(const TJoinKeyDescriptor &key, bool isAnti,
                                                       field("opp", "Capacity"),
                                                       ident("key"),
                                                   })));
-    // found = opp_slot != -1
+    // A NULL key never matches, even if the hash table contains another NULL.
     slotBody.push_back(var("found", boolType));
     slotBody.push_back(
-        assign("found", binary("!=", ident("opp_slot"), numI64(-1))));
-    // emit_condition: SEMI → found; ANTI → !found
+        assign("found", binary("&&", call("jt_key_valid", {ident("key")}),
+                               binary("!=", ident("opp_slot"), numI64(-1)))));
+    // emit_condition: SEMI -> found; ANTI -> !found
     TExprPtr emitCond =
         isAnti ? std::static_pointer_cast<TExpr>(std::make_shared<TUnaryExpr>(
                      loc, TOperator("!"), ident("found")))

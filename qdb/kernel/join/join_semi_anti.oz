@@ -56,6 +56,7 @@
                           (var stream_right_batch <ref TRowSet>)
                           (var hash u64)) -> bool
     (block
+      (if (! (call jt_key_valid key)) (block (return #t)))
       (var build_keys =
         (cast (field build Keys) <ptr StoredKey>))
       (var build_slot = (call rh_lookup_dual build_keys (field build Ctrl)
@@ -91,6 +92,11 @@
                       (var pairs <ref PairBuffer>)
                       (var hash u64)) -> bool
     (block
+      (if (! (call jt_key_valid key))
+        (block
+          (if (!= is_anti 0)
+            (block (return (call pb_push pairs row_id -1))))
+          (return #t)))
       (var build_keys =
         (cast (field build Keys) <ptr StoredKey>))
       (var build_slot = (call rh_lookup_dual build_keys (field build Ctrl)

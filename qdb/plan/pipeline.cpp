@@ -61,6 +61,16 @@ void OptimizeOne(TOperatorPtr& plan, TPlanPassOptions& options) {
     AnnotateTypes(plan, options.Annotation); // re-annotate: coercion added cast projections on union branches
     ApplyColumnPruning(plan); stage("ApplyColumnPruning");
 
+    // Pruning removes dead null-extended projections before the anti-join rule
+    // checks demand. The narrower join schema needs typing/pruning again.
+    if (RewriteOuterJoinAsAnti(plan)) {
+        stage("RewriteOuterJoinAsAnti");
+        AnnotateTypes(plan, options.Annotation);
+        plan = PushDownSemiJoins(plan);
+        AnnotateTypes(plan, options.Annotation);
+        ApplyColumnPruning(plan);
+    }
+
     EstimateStats(plan);
 }
 

@@ -3,6 +3,7 @@
 #include <qdb/plan/ops/aggregate.h>
 #include <qdb/plan/ops/filter.h>
 #include <qdb/plan/ops/join.h>
+#include <qdb/plan/ops/late_materialize.h>
 #include <qdb/plan/ops/limit.h>
 #include <qdb/plan/ops/project.h>
 #include <qdb/plan/ops/sort.h>
@@ -17,6 +18,7 @@
 #include "flatten_disjuncts.h"
 #include "const_fold.h"
 
+#include <algorithm>
 #include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
@@ -532,7 +534,7 @@ TOperatorPtr ProcessJoin(std::shared_ptr<TJoinOperator> join, TContext ctx)
                 right.push_back(col);
             } else {
                 // The column is part of an equi-join class but exists in neither
-                // input schema — it cannot become a key nor be pushed to a child,
+                // input schema - it cannot become a key nor be pushed to a child,
                 // so the edge would be silently dropped (turning the join into an
                 // accidental cross product). This means an upstream column stayed
                 // unqualified/unresolved; fail loudly instead of producing a plan
@@ -598,7 +600,7 @@ TOperatorPtr ProcessJoin(std::shared_ptr<TJoinOperator> join, TContext ctx)
 // Outer join. WHERE predicates from above may only be pushed onto the preserved
 // side (Left keeps left, Right keeps right, Full neither). The ON residual is
 // different: a non-key ON conjunct constraining only the null-extended side can
-// be filtered on that side before the join — equivalent for an outer join, and
+// be filtered on that side before the join - equivalent for an outer join, and
 // what the executor needs (it has no join-residual support for outer joins).
 TOperatorPtr ProcessOuterJoin(std::shared_ptr<TJoinOperator> join, TContext ctx) {
     EJoinType type = join->JoinType();
@@ -716,6 +718,113 @@ TOperatorPtr Process(TOperatorPtr node, TContext ctx) {
     return Materialize(node, ctx.Conjucts);
 }
 
+bool IsNullJoinKey(
+    const TConjuct& conjunct,
+    const TJoinOperator& join,
+    bool rightKey)
+{
+    auto call = TMaybeNode<TCallExpr>(conjunct.Expr);
+    if (!call || call.Cast()->Args.size() != 1) {
+        return false;
+    }
+    auto callee = TMaybeNode<TIdentExpr>(call.Cast()->Callee);
+    auto column = TMaybeNode<TIdentExpr>(call.Cast()->Args.front());
+    if (!callee || callee.Cast()->Name != "qdb_is_null" || !column) {
+        return false;
+    }
+    return std::ranges::any_of(join.Keys(), [&](const TJoinKey& key) {
+        return (rightKey ? key.Right : key.Left) == column.Cast()->Name;
+    });
+}
+
+TOperatorPtr RewriteAntiJoins(
+    TOperatorPtr root,
+    const std::unordered_set<std::string>& needed,
+    bool& changed)
+{
+    if (auto filter = TMaybeOp<TFilterOperator>(root)) {
+        auto join = TMaybeOp<TJoinOperator>(filter.Cast()->Input());
+        if (join && (join.Cast()->JoinType() == EJoinType::Left
+            || join.Cast()->JoinType() == EJoinType::Right))
+        {
+            // TPC-DS Q78's store-sales CTE includes:
+            // SELECT ss_item_sk, sum(ss_quantity) FROM store_sales
+            // LEFT JOIN store_returns ON sr_ticket_number = ss_ticket_number
+            //                        AND sr_item_sk = ss_item_sk
+            // WHERE sr_ticket_number IS NULL GROUP BY ss_item_sk
+            // is an anti join: ordinary equality cannot match a NULL key,
+            // even when the source key is nullable. A nullable payload such
+            // as returns.comment is not a marker: matched rows may have NULL there.
+            // Keep the whole ON condition, including any residual, and reject
+            // the rewrite if a consumer or another WHERE conjunct needs returns.*.
+            // RIGHT JOIN is the same rule with inputs and key pairs swapped;
+            // normalize it to LeftAnti, which the executor already supports.
+            const bool swapped = join.Cast()->JoinType() == EJoinType::Right;
+            std::vector<TConjuct> conjuncts;
+            ExtractConjucts(conjuncts, filter.Cast()->Predicate());
+            std::vector<TConjuct> remaining;
+            bool hasMarker = false;
+            for (const auto& conjunct : conjuncts) {
+                if (IsNullJoinKey(conjunct, *join.Cast(), !swapped)) {
+                    hasMarker = true;
+                } else {
+                    remaining.push_back(conjunct);
+                }
+            }
+            const auto preservedColumns = JoinColumns(swapped ? 1 : 0, join.Cast());
+            if (hasMarker && Covers(needed, preservedColumns)
+                && std::ranges::all_of(remaining, [&](const TConjuct& conjunct) {
+                    return Covers(ColumnsOf(conjunct), preservedColumns);
+                }))
+            {
+                auto keys = join.Cast()->Keys();
+                if (swapped) {
+                    for (auto& key : keys) {
+                        std::swap(key.Left, key.Right);
+                    }
+                }
+                auto anti = std::make_shared<TJoinOperator>(
+                    swapped ? join.Cast()->Right() : join.Cast()->Left(),
+                    swapped ? join.Cast()->Left() : join.Cast()->Right(), std::move(keys),
+                    EJoinType::LeftAnti, join.Cast()->Filter());
+                anti->Location = join.Cast()->Location;
+                root = Materialize(std::move(anti), remaining);
+                changed = true;
+            }
+        }
+    }
+
+    auto rewriteChild = [&](TOperatorPtr& child, size_t index) {
+        child = RewriteAntiJoins(
+            child, root->RequiredColumnsForChild(index, needed), changed);
+    };
+    if (auto node = TMaybeOp<TJoinOperator>(root)) {
+        rewriteChild(node.Cast()->MutableLeft(), 0);
+        rewriteChild(node.Cast()->MutableRight(), 1);
+    } else if (auto node = TMaybeOp<TFilterOperator>(root)) {
+        rewriteChild(node.Cast()->MutableInput(), 0);
+    } else if (auto node = TMaybeOp<TProjectOperator>(root)) {
+        rewriteChild(node.Cast()->MutableInput(), 0);
+    } else if (auto node = TMaybeOp<TAggregateOperator>(root)) {
+        rewriteChild(node.Cast()->MutableInput(), 0);
+    } else if (auto node = TMaybeOp<TSortOperator>(root)) {
+        rewriteChild(node.Cast()->MutableInput(), 0);
+    } else if (auto node = TMaybeOp<TTopSortOperator>(root)) {
+        rewriteChild(node.Cast()->MutableInput(), 0);
+    } else if (auto node = TMaybeOp<TLimitOperator>(root)) {
+        rewriteChild(node.Cast()->MutableInput(), 0);
+    } else if (auto node = TMaybeOp<TWindowOperator>(root)) {
+        rewriteChild(node.Cast()->MutableInput(), 0);
+    } else if (auto node = TMaybeOp<TLateMaterializeOperator>(root)) {
+        rewriteChild(node.Cast()->MutableInput(), 0);
+    } else if (auto node = TMaybeOp<TUnionAllOperator>(root)) {
+        for (size_t index = 0; index < node.Cast()->MutableInputs().size(); ++index) {
+            rewriteChild(node.Cast()->MutableInputs()[index], index);
+        }
+    }
+    return root;
+}
+
 } // namespace
 
 TOperatorPtr PushDownPredicates(TOperatorPtr root) {
@@ -724,6 +833,19 @@ TOperatorPtr PushDownPredicates(TOperatorPtr root) {
 
 TOperatorPtr ExtractEquiJoins(TOperatorPtr root) {
     return Process(root, {{}, EMode::ExtractKeys});
+}
+
+bool RewriteOuterJoinAsAnti(TOperatorPtr& root) {
+    if (!root) {
+        return false;
+    }
+    std::unordered_set<std::string> needed;
+    for (const auto& [name, type] : root->OutputColumns()->Fields) {
+        needed.insert(name);
+    }
+    bool changed = false;
+    root = RewriteAntiJoins(root, needed, changed);
+    return changed;
 }
 
 } // namespace NQdb

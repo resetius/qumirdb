@@ -12,4 +12,10 @@ TOperatorPtr ExtractEquiJoins(TOperatorPtr root);
 
 TOperatorPtr PushDownPredicates(TOperatorPtr root);
 
+// Removes LEFT/RIGHT JOIN + IS NULL on a null-extended equijoin key when that
+// side's columns are not needed above the filter. RIGHT is swapped to LeftAnti.
+// Requires annotated types and extracted keys.
+// Returns whether the plan changed; re-annotate and prune after a rewrite.
+bool RewriteOuterJoinAsAnti(TOperatorPtr& root);
+
 } // namespace NQdb
