@@ -1883,6 +1883,202 @@ TEST(AggregateE2E, StringKeyStatesPreserveOwnershipAcrossRepeatedGrowth) {
     CheckAggregateStatesAcrossRepeatedGrowth(true);
 }
 
+TEST(AggregateE2E, NullableFloatAndWideStatesSurviveRepeatedGrowth) {
+    TStructType input({
+        {"k", std::make_shared<TIntegerType>()},
+        {"f", std::make_shared<TNullable>(std::make_shared<TFloatType>())},
+        {"d", std::make_shared<TNullable>(std::make_shared<TDecimal>(28, 0))},
+    });
+    std::vector<TAggregateSpec> aggs;
+    auto add = [&](const std::string& name, const std::string& func, const std::string& arg) {
+        aggs.push_back({
+            .Name = name,
+            .Func = func,
+            .Arg = arg.empty()
+                ? nullptr
+                : std::make_shared<TIdentExpr>(NQumir::TLocation{}, arg),
+        });
+    };
+    add("c", "count", "");
+    add("cn", "count", "f");
+    for (const auto& column : {"f", "d"}) {
+        for (const auto& func : {"sum", "min", "max"}) {
+            add(std::string(column) + func, func, column);
+        }
+    }
+    TKernelCompiler compiler;
+    TAggregateProcessor processor(compiler.CompileAggregate(
+        NKernel::BuildAggregateKernelSpec(input, {"k"}, aggs)), 8);
+    struct TReference {
+        int64_t Count = 0;
+        int64_t ValidCount = 0;
+        double FloatSum = 0;
+        double FloatMin = 0;
+        double FloatMax = 0;
+        __int128 WideSum = 0;
+        __int128 WideMin = 0;
+        __int128 WideMax = 0;
+    };
+    std::map<int64_t, TReference> expected;
+    std::vector<int64_t> insertionOrder;
+    constexpr __int128 wideUnit = static_cast<__int128>(1) << 80;
+    constexpr int64_t rowsPerBatch = 197;
+    for (int64_t batch = 0; batch < 8; ++batch) {
+        std::vector<int64_t> keys(rowsPerBatch);
+        std::vector<double> floats(rowsPerBatch);
+        std::vector<__int128> wide(rowsPerBatch);
+        std::vector<uint8_t> validity((rowsPerBatch + 7) / 8, 0);
+        std::vector<uint8_t> selection(rowsPerBatch, 0);
+        for (int64_t row = 0; row < rowsPerBatch; ++row) {
+            const auto key = ((batch * rowsPerBatch + row) * 191) % 353;
+            const double value = (row - 100 + batch) * 0.25;
+            const __int128 wideValue = wideUnit * (key - 176) + row - 100 + batch;
+            const bool valid = key % 17 != 0 && row % 4 != 0;
+            keys[row] = key;
+            floats[row] = valid ? value : -123456.75;
+            wide[row] = valid ? wideValue : -123456;
+            if (valid) {
+                validity[row / 8] |= uint8_t{1} << (row % 8);
+            }
+            if (row % 11 == 0) {
+                continue;
+            }
+            selection[row] = 1;
+            if (!expected.contains(key)) {
+                insertionOrder.push_back(key);
+            }
+            auto& state = expected[key];
+            ++state.Count;
+            if (!valid) {
+                continue;
+            }
+            if (state.ValidCount == 0) {
+                state.FloatMin = value;
+                state.FloatMax = value;
+                state.WideMin = wideValue;
+                state.WideMax = wideValue;
+            } else {
+                state.FloatMin = std::min(state.FloatMin, value);
+                state.FloatMax = std::max(state.FloatMax, value);
+                state.WideMin = std::min(state.WideMin, wideValue);
+                state.WideMax = std::max(state.WideMax, wideValue);
+            }
+            ++state.ValidCount;
+            state.FloatSum += value;
+            state.WideSum += wideValue;
+        }
+        std::array<TColumn, 3> columns = {
+            TColumn{.Data = reinterpret_cast<char*>(keys.data())},
+            TColumn{.Data = reinterpret_cast<char*>(floats.data()), .Mask = validity.data()},
+            TColumn{.Data = reinterpret_cast<char*>(wide.data()), .Mask = validity.data()},
+        };
+        TRowSet rows{
+            .Columns = columns.data(),
+            .ColumnCount = 3,
+            .RowCount = rowsPerBatch,
+            .Selection = selection.data(),
+            .RefCount = 1,
+        };
+        processor.Add(rows);
+    }
+    TRowSet result{};
+    ASSERT_TRUE(processor.Finish(result));
+    ASSERT_EQ(result.ColumnCount, 9);
+    ASSERT_EQ(result.RowCount, static_cast<int64_t>(expected.size()));
+    for (int64_t row = 0; row < result.RowCount; ++row) {
+        const auto key = reinterpret_cast<const int64_t*>(result.Columns[0].Data)[row];
+        ASSERT_EQ(key, insertionOrder[row]);
+        const auto& state = expected.at(key);
+        EXPECT_EQ(reinterpret_cast<const int64_t*>(result.Columns[1].Data)[row], state.Count);
+        EXPECT_EQ(reinterpret_cast<const int64_t*>(result.Columns[2].Data)[row], state.ValidCount);
+        for (int col = 3; col < 9; ++col) {
+            EXPECT_EQ(IsValid(result.Columns[col], row), state.ValidCount > 0);
+        }
+        if (state.ValidCount == 0) {
+            continue;
+        }
+        EXPECT_DOUBLE_EQ(reinterpret_cast<const double*>(result.Columns[3].Data)[row], state.FloatSum);
+        EXPECT_DOUBLE_EQ(reinterpret_cast<const double*>(result.Columns[4].Data)[row], state.FloatMin);
+        EXPECT_DOUBLE_EQ(reinterpret_cast<const double*>(result.Columns[5].Data)[row], state.FloatMax);
+        EXPECT_TRUE(reinterpret_cast<const __int128*>(result.Columns[6].Data)[row] == state.WideSum);
+        EXPECT_TRUE(reinterpret_cast<const __int128*>(result.Columns[7].Data)[row] == state.WideMin);
+        EXPECT_TRUE(reinterpret_cast<const __int128*>(result.Columns[8].Data)[row] == state.WideMax);
+    }
+    Release(&result);
+}
+
+TEST(AggregateE2E, MixedStringAndNumericReducersSurviveRepeatedGrowth) {
+    TStructType input({
+        {"k", std::make_shared<TIntegerType>()},
+        {"v", std::make_shared<TIntegerType>()},
+        {"s", std::make_shared<TStringType>()},
+    });
+    std::vector<TAggregateSpec> aggs = {
+        {.Name = "sum", .Func = "sum", .Arg = std::make_shared<TIdentExpr>(NQumir::TLocation{}, "v")},
+        {.Name = "min", .Func = "min", .Arg = std::make_shared<TIdentExpr>(NQumir::TLocation{}, "s")},
+        {.Name = "max", .Func = "max", .Arg = std::make_shared<TIdentExpr>(NQumir::TLocation{}, "s")},
+    };
+    TKernelCompiler compiler;
+    TAggregateProcessor processor(compiler.CompileAggregate(
+        NKernel::BuildAggregateKernelSpec(input, {"k"}, aggs)), 8);
+    struct TReference {
+        int64_t Sum = 0;
+        std::string Min;
+        std::string Max;
+    };
+    std::map<int64_t, TReference> expected;
+    std::vector<int64_t> insertionOrder;
+    constexpr int64_t rowsPerBatch = 197;
+    for (int64_t batch = 0; batch < 8; ++batch) {
+        std::vector<int64_t> keys, values, offsets{0};
+        std::string data;
+        for (int64_t row = 0; row < rowsPerBatch; ++row) {
+            const auto key = ((batch * rowsPerBatch + row) * 191) % 353;
+            const auto value = row - 100 + batch;
+            const std::string text = std::to_string((row + batch) % 23) +
+                "_owned_reducer_string_" + std::to_string(key);
+            if (!expected.contains(key)) {
+                insertionOrder.push_back(key);
+                expected[key].Min = text;
+                expected[key].Max = text;
+            }
+            auto& state = expected[key];
+            state.Sum += value;
+            state.Min = std::min(state.Min, text);
+            state.Max = std::max(state.Max, text);
+            keys.push_back(key);
+            values.push_back(value);
+            data += text;
+            offsets.push_back(static_cast<int64_t>(data.size()));
+        }
+        std::array<TColumn, 3> columns = {
+            TColumn{.Data = reinterpret_cast<char*>(keys.data())},
+            TColumn{.Data = reinterpret_cast<char*>(values.data())},
+            TColumn{.Data = data.data(), .Offsets = offsets.data(), .OffsetWidth = 8},
+        };
+        TRowSet rows{
+            .Columns = columns.data(),
+            .ColumnCount = 3,
+            .RowCount = rowsPerBatch,
+            .RefCount = 1,
+        };
+        processor.Add(rows);
+    }
+    TRowSet result{};
+    ASSERT_TRUE(processor.Finish(result));
+    ASSERT_EQ(result.ColumnCount, 4);
+    ASSERT_EQ(result.RowCount, static_cast<int64_t>(expected.size()));
+    for (int64_t row = 0; row < result.RowCount; ++row) {
+        const auto key = reinterpret_cast<const int64_t*>(result.Columns[0].Data)[row];
+        ASSERT_EQ(key, insertionOrder[row]);
+        const auto& state = expected.at(key);
+        EXPECT_EQ(reinterpret_cast<const int64_t*>(result.Columns[1].Data)[row], state.Sum);
+        EXPECT_EQ(StringAt(result.Columns[2], row), state.Min);
+        EXPECT_EQ(StringAt(result.Columns[3], row), state.Max);
+    }
+    Release(&result);
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     NQumir::NCodeGen::TLLVMInitializer llvmInit;

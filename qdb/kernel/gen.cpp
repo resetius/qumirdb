@@ -92,8 +92,8 @@ std::vector<NQumir::NAst::TExprPtr> StringCleanupCalls(
 }
 
 // Rewrites string-column TIdentExpr nodes to their pre-materialized StringView
-// variable names (e.g. "col" → "col_value"). String literals and operator
-// comparisons are left as-is — the qumirdb module registers == / != overloads
+// variable names (e.g. "col" -> "col_value"). String literals and operator
+// comparisons are left as-is - the qumirdb module registers == / != overloads
 // for (Named("StringView"), Named("StringView")) and
 // (Named("StringView"), TStringType) that the Qumir type-checker resolves.
 void SpecializeFilterPredicate(
@@ -888,7 +888,7 @@ NQumir::NAst::TExprPtr GenFilterKernelAst(
         predicate, stringFields, stringValues);
     SubstFieldsInPlace(predicate, fixedValues);
 
-    // Single param: (var rowSet <ref TRowSet>) — raw struct type, no TNamedType wrapper
+    // Single param: (var rowSet <ref TRowSet>) - raw struct type, no TNamedType wrapper
     auto rowSetRefType = std::make_shared<TReferenceType>(rowSetType);
 
     std::vector<TExprPtr> bodyStmts;
@@ -1110,7 +1110,7 @@ NQumir::NAst::TExprPtr GenJoinResidualFilterAst(
     auto i64Type = std::make_shared<TIntegerType>();
     auto boolType = std::make_shared<TBoolType>();
 
-    // Work on a private copy — CompileJoin compiles each entry from a fresh
+    // Work on a private copy - CompileJoin compiles each entry from a fresh
     // program, so the shared predicate must not be mutated in place.
     predicate = CloneFilterExpr(predicate);
 
@@ -1353,7 +1353,7 @@ NQumir::NAst::TExprPtr GenProjectKernelAst(
 
     auto rowSetRefType = std::make_shared<TReferenceType>(rowSetType);
     // `__arena__` is the string-concat scratch arena (opaque TStringArena*). It is
-    // always passed even when unused; qdb_string_concat(__arena__, …) references it.
+    // always passed even when unused; qdb_string_concat(__arena__, ...) references it.
     auto ptrI8Type = std::make_shared<TPointerType>(
         std::make_shared<TIntegerType>(TIntegerType::I8));
     auto ptrPtrI8Type = std::make_shared<TPointerType>(ptrI8Type);
@@ -1677,8 +1677,8 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
     update.push_back(var("selection_is_null", boolType));
     update.push_back(assign("selection_is_null",
         binary("==", cast(ident("selection"), i64Type), numI64(0))));
-    update.push_back(var("dense_slot", i64Type));
-    update.push_back(assign("dense_slot", numI64(-1)));
+    update.push_back(var("state_slot", i64Type));
+    update.push_back(assign("state_slot", numI64(-1)));
     update.push_back(var("is_new", i64Type));
     update.push_back(assign("is_new", numI64(0)));
     update.push_back(var("stored_witness", key.StoredType));
@@ -1750,7 +1750,12 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
         keyValueSetup.push_back(assign("hash_value",
             cast(call("rh_hash", {ident("key_value")}), u64Type)));
     }
-    auto upsertCall = call("aht_upsert_dual", {
+    // Scalar states live at the probe slot; string reducers retain their dense
+    // ownership buffers. This policy must match aggregate finalization.
+    const std::string upsertName = HasStringReducer(layout)
+        ? "aht_upsert_dual"
+        : "aht_upsert_aggregate";
+    auto upsertCall = call(upsertName, {
         ident("ht"),
         ident("key_value"),
         ident("stored_witness"),
@@ -1759,7 +1764,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
     });
     auto ptrPtrI64Type = std::make_shared<TPointerType>(ptrI64Type);
     auto slotIndex = [&](const std::string& buf) -> TExprPtr {
-        return std::make_shared<TIndexExpr>(loc, ident(buf), ident("dense_slot"));
+        return std::make_shared<TIndexExpr>(loc, ident(buf), ident("state_slot"));
     };
 
     std::vector<TExprPtr> materialize;
@@ -1858,7 +1863,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
         if (info.IsString()) {
             auto invoke = [&](TExprPtr seed) -> TExprPtr {
                 return call("agg_string_reduce", {
-                    ident(bufName), ident(hiBufName), ident("dense_slot"),
+                    ident(bufName), ident(hiBufName), ident("state_slot"),
                     valueI(), number(info.Func == "min", boolType),
                     std::move(seed)});
             };
@@ -1880,7 +1885,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
                         invoke(binary("==", slotIndex(validBufName), numI64(0)))),
                     block({std::make_shared<TReturnExpr>(loc, numI64(-1))}), nullptr),
                 std::make_shared<TArrayAssignExpr>(loc, validBufName,
-                    std::vector<TExprPtr>{ident("dense_slot")},
+                    std::vector<TExprPtr>{ident("state_slot")},
                     binary("+", slotIndex(validBufName), numI64(1))),
             }), nullptr));
             continue;
@@ -1888,7 +1893,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
         if (info.IsBinInt()) {
             if (!info.NeedsValidity) {
                 reducerStmts.push_back(call(reduceName, {
-                    ident(bufName), ident(hiBufName), ident("dense_slot"),
+                    ident(bufName), ident(hiBufName), ident("state_slot"),
                     valueI(), binary("!=", ident("is_new"), numI64(0))}));
                 continue;
             }
@@ -1898,7 +1903,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
                 std::make_shared<TIndexExpr>(loc, ident("agg_buffers"),
                     numI64(static_cast<int64_t>(info.ValidBufIdx)))));
             reducerStmts.push_back(call(reduceName, {
-                ident(bufName), ident(hiBufName), ident("dense_slot"),
+                ident(bufName), ident(hiBufName), ident("state_slot"),
                 ident(validBufName), valueI(), validI()}));
             continue;
         }
@@ -1906,10 +1911,10 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
             auto callR = call(reduceName, {slotIndex(bufName), valueI(),
                 binary("!=", ident("is_new"), numI64(0))});
             reducerStmts.push_back(std::make_shared<TArrayAssignExpr>(loc, bufName,
-                std::vector<TExprPtr>{ident("dense_slot")}, std::move(callR)));
+                std::vector<TExprPtr>{ident("state_slot")}, std::move(callR)));
         } else if (info.Func == "count") {
             reducerStmts.push_back(call(reduceName,
-                {ident(bufName), ident("dense_slot"), validI()}));
+                {ident(bufName), ident("state_slot"), validI()}));
         } else {
             const std::string validBufName = "validbuf_" + std::to_string(ri);
             reducerStmts.push_back(var(validBufName, ptrI64Type));
@@ -1917,14 +1922,14 @@ NQumir::NAst::TExprPtr GenGenericAggregateDispatchAst(
                 std::make_shared<TIndexExpr>(loc, ident("agg_buffers"),
                     numI64(static_cast<int64_t>(info.ValidBufIdx)))));
             reducerStmts.push_back(call(reduceName, {ident(bufName),
-                ident(validBufName), ident("dense_slot"), valueI(), validI()}));
+                ident(validBufName), ident("state_slot"), valueI(), validI()}));
         }
     }
 
     std::vector<TExprPtr> validBody = {
-        assign("dense_slot", std::move(upsertCall)),
+        assign("state_slot", std::move(upsertCall)),
         std::make_shared<TIfExpr>(loc,
-            binary("<", ident("dense_slot"), numI64(0)),
+            binary("<", ident("state_slot"), numI64(0)),
             block({std::make_shared<TReturnExpr>(loc, numI64(-1))}), nullptr),
     };
     validBody.insert(validBody.end(),
@@ -2142,6 +2147,18 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
         loc, "slot", std::make_shared<TNumberExpr>(loc, int64_t{0})));
 
     std::vector<TExprPtr> loopStmts;
+    // Dense output order is independent of the physical aggregate-state slot.
+    if (!HasStringReducer(layout)) {
+        project.push_back(std::make_shared<TVarStmt>(loc, "state_slots", ptrI64Type));
+        project.push_back(std::make_shared<TAssignExpr>(loc, "state_slots",
+            std::make_shared<TFieldAccessExpr>(loc, ident("ht"), "SlotId")));
+    }
+    auto stateSlot = [&]() -> TExprPtr {
+        if (HasStringReducer(layout)) {
+            return ident("slot");
+        }
+        return index(ident("state_slots"), ident("slot"));
+    };
     for (size_t fieldIndex = 0; fieldIndex < key.Fields.size(); ++fieldIndex) {
         auto keyValue = std::make_shared<TIndexExpr>(
             loc, ident("group_keys"), ident("slot"));
@@ -2210,14 +2227,14 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
                     binary("*", ident("slot"), numI64(2)), numI64(1));
                 loopStmts.push_back(std::make_shared<TArrayAssignExpr>(loc, dstName,
                     std::vector<TExprPtr>{std::move(outLoSlot)},
-                    index(ident(srcName), ident("slot"))));
+                    index(ident(srcName), stateSlot())));
                 loopStmts.push_back(std::make_shared<TArrayAssignExpr>(loc, dstName,
                     std::vector<TExprPtr>{std::move(outHiSlot)},
-                    index(ident(hiName), ident("slot"))));
+                    index(ident(hiName), stateSlot())));
             } else {
                 loopStmts.push_back(std::make_shared<TArrayAssignExpr>(loc, dstName,
                     std::vector<TExprPtr>{ident("slot")},
-                    index(ident(srcName), ident("slot"))));
+                    index(ident(srcName), stateSlot())));
             }
         }
         if (!r.IsNullableOutput) {
@@ -2225,7 +2242,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinalizeAst(
         }
         const std::string validName = "validbuf_" + std::to_string(i);
         auto validCount = std::make_shared<TIndexExpr>(
-            loc, ident(validName), ident("slot"));
+            loc, ident(validName), stateSlot());
         loopStmts.push_back(std::make_shared<TCallExpr>(loc,
             ident("qdb_bitmap_set_valid"),
             std::vector<TExprPtr>{
@@ -2267,7 +2284,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinishRowSetAst(
     // Conservative (native/wasm64) sizes, used only for qdb_alloc calls.
     // Real strides can be smaller under wasm32 (24 and 4 bytes), never
     // larger, so this never under-allocates. Never use these for address
-    // math — use column() below, which qumir scales to the real target size.
+    // math - use column() below, which qumir scales to the real target size.
     constexpr int64_t ColumnSize = 48;
     constexpr int64_t PtrSize = 8;
 
@@ -2310,7 +2327,7 @@ NQumir::NAst::TExprPtr GenGenericAggregateFinishRowSetAst(
     };
     // TODO(wasm32): the string-reducer branch below still needs a raw
     // address for agg_string_finalize_at, which column() cannot give (see
-    // above). It falls back to a fixed ColumnSize stride — correct for
+    // above). It falls back to a fixed ColumnSize stride - correct for
     // wasm64, wrong for wasm32 the same way the key-field bug was. No
     // current query hits this (string MIN/MAX plus wasm32), so it stays
     // open. Fix it like the key-field path: pass `columns` and index it
