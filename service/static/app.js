@@ -3,6 +3,7 @@ import { renderGraph } from './graph.js';
 import { tpchQueries } from './tpch_queries.js';
 import { tpcdsQueries } from './tpcds_queries.js';
 import { externalQueries } from './external_queries.js';
+import { initGitHubProject } from './github.js';
 import {
   addFilesToBrowserDataset,
   addStoredFilesToBrowserDataset,
@@ -76,6 +77,7 @@ let browserExecWorker = null;
 
 window.addEventListener('DOMContentLoaded', async () => {
   window.lucide?.createIcons();
+  initGitHubProject();
   initEditor();
   initDrawers();
   initTooltips();

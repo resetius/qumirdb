@@ -20,7 +20,16 @@ install(DIRECTORY static/
     DESTINATION share/qumirdb-service/static
     COMPONENT service)
 
+install(PROGRAMS github_stats.py
+    DESTINATION ${QDB_PRIVATE_DIR}/tools
+    COMPONENT service)
+
 configure_file(qumirdb-service.service.in qumirdb-service.service @ONLY)
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/qumirdb-service.service
     DESTINATION lib/systemd/system
+    COMPONENT service)
+
+configure_file(github_stats.cron.in qumirdb-service-github-stats @ONLY)
+install(PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/qumirdb-service-github-stats
+    DESTINATION /etc/cron.hourly
     COMPONENT service)

@@ -1,0 +1,11 @@
+#!/bin/sh
+set -e
+
+statsUpdater="@CMAKE_INSTALL_PREFIX@/@QDB_PRIVATE_DIR@/tools/github_stats.py"
+
+# dpkg keeps this configuration file until the package is purged.
+if [ ! -x "$statsUpdater" ] || [ ! -x /usr/bin/python3 ]; then
+    exit 0
+fi
+
+exec /usr/bin/python3 "$statsUpdater" --output "@CMAKE_INSTALL_PREFIX@/share/qumirdb-service/static/github-stats.json" >/dev/null

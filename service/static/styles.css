@@ -8,6 +8,7 @@
   --accent: #4da3ff;
   --accent-2: #64d2a4;
   --danger: #ff6b6b;
+  --topbar-height: 48px;
 }
 
 * {
@@ -79,7 +80,7 @@ button:hover {
 .app-shell {
   height: 100%;
   display: grid;
-  grid-template-rows: 48px 1fr 26px;
+  grid-template-rows: var(--topbar-height) 1fr 26px;
   overflow: hidden;
 }
 
@@ -108,6 +109,77 @@ button:hover {
 .brand {
   font-size: 16px;
   font-weight: 700;
+}
+
+.github-project {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 2px 8px;
+  flex: none;
+  padding-left: 10px;
+  border-left: 1px solid var(--line);
+  font-size: 12px;
+  line-height: 14px;
+}
+
+.github-project a {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text);
+  text-decoration: none;
+}
+
+.github-project a:hover {
+  color: var(--accent);
+}
+
+.github-project a:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+  border-radius: 2px;
+}
+
+.github-project-source {
+  font-weight: 600;
+}
+
+.github-project-source svg {
+  width: 17px;
+  height: 17px;
+  fill: currentColor;
+}
+
+.github-project .github-project-release {
+  display: block;
+  align-self: center;
+  max-width: 76px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.github-project-stats {
+  grid-column: 1 / -1;
+  display: flex;
+  gap: 12px;
+  font-size: 11px;
+}
+
+.github-project-stats svg {
+  width: 12px;
+  height: 12px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.github-project-stats #github-stars {
+  color: #e8bf67;
 }
 
 .appbar {
@@ -641,7 +713,7 @@ button:hover {
 
 .drawer {
   position: fixed;
-  top: 48px;
+  top: var(--topbar-height);
   bottom: 0;
   z-index: 10;
   width: min(360px, 86vw);
@@ -1053,9 +1125,16 @@ button:hover {
   color: var(--accent);
 }
 
+@media (max-width: 900px) {
+  .topbar .brand {
+    display: none;
+  }
+}
+
 @media (max-width: 720px) {
   .topbar {
     grid-template-columns: auto 1fr auto;
+    gap: 8px;
   }
 
   .toolbar {
@@ -1066,6 +1145,10 @@ button:hover {
     display: none;
   }
 
+  .status-wrap {
+    min-width: 0;
+  }
+
   .graph-main {
     grid-template-columns: 1fr;
     grid-template-rows: minmax(220px, 1fr) minmax(140px, 34%);
@@ -1074,5 +1157,42 @@ button:hover {
   .graph-inspector {
     border-left: 0;
     border-top: 1px solid var(--line);
+  }
+}
+
+@media (max-width: 600px) {
+  :root {
+    --topbar-height: 90px;
+  }
+
+  .topbar {
+    position: relative;
+    grid-template-columns: 1fr auto;
+    gap: 8px 16px;
+    padding: 8px 12px;
+  }
+
+  .topbar-right {
+    grid-column: 2;
+    grid-row: 1;
+  }
+
+  .toolbar {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    justify-content: flex-start;
+  }
+
+  .status-wrap {
+    position: absolute;
+    right: 12px;
+    bottom: 8px;
+    min-width: 0;
+    height: 32px;
+  }
+
+  .github-project {
+    padding-left: 0;
+    border-left: 0;
   }
 }
