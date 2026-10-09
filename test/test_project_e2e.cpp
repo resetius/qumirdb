@@ -13,6 +13,7 @@
 #include <qdb/plan/ops/source.h>
 #include <qdb/plan/passes/column_pruning.h>
 #include <qdb/plan/passes/typing.h>
+#include <qdb/plan/pipeline.h>
 #include <qdb/plan/types/decimal.h>
 #include <qdb/plan/types/nullable.h>
 #include <qdb/sexp/parser.h>
@@ -23,9 +24,11 @@
 #include <cmath>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 using namespace NQdb;
@@ -61,7 +64,9 @@ std::unique_ptr<TTestRuntime> Plan(
 
 std::unique_ptr<TTestRuntime> SqlPlan(
     const std::string& sql,
-    const std::unordered_map<std::string, ISource*>& sources)
+    const std::unordered_map<std::string, ISource*>& sources,
+    NScheduler::TSettings settings = {},
+    bool optimize = false)
 {
     std::istringstream in(sql);
     NSql::TTokenStream ts(in);
@@ -83,9 +88,13 @@ std::unique_ptr<TTestRuntime> SqlPlan(
     if (!root) {
         throw std::runtime_error(root.error().ToString());
     }
-    AnnotateTypes(*root);
-    ApplyColumnPruning(*root);
-    return RunPlan(*root);
+    if (optimize) {
+        ApplyPlanPasses(*root);
+    } else {
+        AnnotateTypes(*root);
+        ApplyColumnPruning(*root);
+    }
+    return RunPlan(*root, settings);
 }
 
 std::vector<int64_t> ReadAllI64(TTestRuntime& runtime) {
@@ -318,6 +327,72 @@ TEST(SqlExceptE2E, BareExceptDeduplicatesNullRows) {
     EXPECT_EQ(validValues, (std::vector<int64_t>{1}));
     EXPECT_EQ(nullCount, 0);
 }
+
+class SqlNullableSetOps
+    : public testing::TestWithParam<std::pair<NScheduler::EExecutionMode, bool>> {};
+
+TEST_P(SqlNullableSetOps, CompositeKeysCompareNullsBySetSemantics) {
+    for (const std::string operation : {"INTERSECT", "EXCEPT"}) {
+        // Invalid cells deliberately contain different bytes on either side.
+        std::array<int64_t, 7> leftA = {1, 1, 111, 222, 0, 3, 333};
+        std::array<int64_t, 7> leftB = {111, 222, 2, 333, 2, 3, 7};
+        std::array<int64_t, 5> rightA = {1, 444, 555, 666, 2};
+        std::array<int64_t, 5> rightB = {444, 2, 555, 0, 2};
+        uint8_t leftAMask = 0b00110011, leftBMask = 0b01110100;
+        uint8_t rightAMask = 0b00010001, rightBMask = 0b00011010;
+        std::array<TColumn, 2> leftCols = {
+            TColumn{.Data = reinterpret_cast<char*>(leftA.data()), .Mask = &leftAMask},
+            TColumn{.Data = reinterpret_cast<char*>(leftB.data()), .Mask = &leftBMask},
+        };
+        std::array<TColumn, 2> rightCols = {
+            TColumn{.Data = reinterpret_cast<char*>(rightA.data()), .Mask = &rightAMask},
+            TColumn{.Data = reinterpret_cast<char*>(rightB.data()), .Mask = &rightBMask},
+        };
+        auto nullableI64 = std::make_shared<TNullable>(std::make_shared<TIntegerType>());
+        TMockSource left({"a", "b"}, {nullableI64, nullableI64}, {TRowSet{
+            .Columns = leftCols.data(), .ColumnCount = 2, .RowCount = 7, .RefCount = 1}});
+        TMockSource right({"a", "b"}, {nullableI64, nullableI64}, {TRowSet{
+            .Columns = rightCols.data(), .ColumnCount = 2, .RowCount = 5, .RefCount = 1}});
+        NScheduler::TSettings settings;
+        settings.Scheduler.Mode = GetParam().first;
+        settings.Scheduler.WorkerCount = 2;
+        settings.HashShuffle.PartitionCount = 2;
+        auto runtime = SqlPlan("SELECT a, b FROM l " + operation + " SELECT a, b FROM r",
+            {{"l", &left}, {"r", &right}}, settings, GetParam().second);
+
+        using TCell = std::optional<int64_t>;
+        using TRow = std::pair<TCell, TCell>;
+        std::vector<TRow> rows;
+        TRowSet out{};
+        while (runtime->Next(out)) {
+            for (int64_t i = 0; i < out.RowCount; ++i) {
+                if (out.Selection && !out.Selection[i]) {
+                    continue;
+                }
+                auto cell = [&](size_t column) -> TCell {
+                    return IsValid(out.Columns[column], i)
+                        ? TCell{reinterpret_cast<const int64_t*>(out.Columns[column].Data)[i]}
+                        : std::nullopt;
+                };
+                rows.emplace_back(cell(0), cell(1));
+            }
+            Release(&out);
+        }
+        auto expected = operation == "INTERSECT"
+            ? std::vector<TRow>{{1, std::nullopt}, {std::nullopt, 2}, {std::nullopt, std::nullopt}}
+            : std::vector<TRow>{{0, 2}, {3, 3}, {std::nullopt, 7}};
+        std::ranges::sort(rows);
+        std::ranges::sort(expected);
+        EXPECT_EQ(rows, expected) << operation;
+    }
+}
+
+INSTANTIATE_TEST_SUITE_P(SchedulersAndOptimizer, SqlNullableSetOps,
+    testing::Values(
+        std::pair{NScheduler::EExecutionMode::SingleThreadedScheduler, false},
+        std::pair{NScheduler::EExecutionMode::SingleThreadedScheduler, true},
+        std::pair{NScheduler::EExecutionMode::ThreadedScheduler, false},
+        std::pair{NScheduler::EExecutionMode::ThreadedScheduler, true}));
 
 TEST(SqlGroupingE2E, RollupGroupingColumns) {
     std::array<int64_t, 3> a = {1, 1, 2};

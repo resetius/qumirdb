@@ -5,7 +5,7 @@
       (rel join
         (rel project (rel aggregate (rel project (rel source "s") (a a)) (keys a)) (a a))
         (rel project (rel aggregate (rel project (rel source "u") (a a)) (keys a)) (a a))
-        ((a a))
+        ((a a nulls_equal))
         (left_semi)))
     (keys a))
   (a a))

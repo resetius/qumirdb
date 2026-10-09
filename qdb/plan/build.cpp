@@ -2983,6 +2983,10 @@ std::expected<TOperatorPtr, TError> BuildSetOp(
         if (!join) {
             return std::unexpected(join.error());
         }
+        // Set membership uses IS NOT DISTINCT FROM semantics, including NULLs.
+        for (auto& key : TMaybeOp<TJoinOperator>(*join).Cast()->MutableKeys()) {
+            key.NullsEqual = true;
+        }
         return *join;
     }
 

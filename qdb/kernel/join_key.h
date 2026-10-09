@@ -24,6 +24,7 @@ struct TJoinKeyField {
     NQumir::NAst::TTypePtr LookupType;
     NQumir::NAst::TTypePtr StoredType;
     bool IsNullable = false;           // left.Nullable || right.Nullable (unified)
+    bool NullsEqual = false;
     size_t Offset = 0;
     size_t Size = 0;
     size_t Alignment = 0;

@@ -97,11 +97,11 @@ GenJoinKeyOpsFunDecls(const TJoinKeyDescriptor &key) {
   auto functions = GenKeyOperationFunDecls(JoinKeyAggregateShim(key));
   auto addValidity = [&](const TTypePtr &type) {
     namespace Oz = NOz;
-    // Hash table equality groups NULL keys together. SQL join equality must
-    // reject them instead, without changing that table equality on insertion.
+    // Hash table equality groups NULL keys together. Reject NULL components
+    // for ordinary equality, while allowing NULL-equal keys for set membership.
     TExprPtr valid = Oz::Bool(true);
     for (size_t i = 0; i < key.Fields.size(); ++i) {
-      if (key.Fields[i].IsNullable) {
+      if (key.Fields[i].IsNullable && !key.Fields[i].NullsEqual) {
         valid = Oz::Bin(TOperator("&&"), std::move(valid),
                         Oz::Field("key", "valid_" + std::to_string(i)));
       }
@@ -404,7 +404,7 @@ GenJoinFinalizeSemiAntiAst(const TJoinKeyDescriptor &key, bool isAnti,
                                                       field("opp", "Capacity"),
                                                       ident("key"),
                                                   })));
-    // A NULL key never matches, even if the hash table contains another NULL.
+    // A NULL component in ordinary equality never matches another NULL.
     slotBody.push_back(var("found", boolType));
     slotBody.push_back(
         assign("found", binary("&&", call("jt_key_valid", {ident("key")}),

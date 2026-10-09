@@ -733,7 +733,8 @@ bool IsNullJoinKey(
         return false;
     }
     return std::ranges::any_of(join.Keys(), [&](const TJoinKey& key) {
-        return (rightKey ? key.Right : key.Left) == column.Cast()->Name;
+        return !key.NullsEqual
+            && (rightKey ? key.Right : key.Left) == column.Cast()->Name;
     });
 }
 

@@ -445,7 +445,7 @@
                           (ca_zip ca_zip))
                         (keys ca_zip))
                       (ca_zip ca_zip))
-                    ((ca_zip ca_zip))
+                    ((ca_zip ca_zip nulls_equal))
                     (left_semi))
                   (|a2.ca_zip| ca_zip))
                 (ca_zip ca_zip))

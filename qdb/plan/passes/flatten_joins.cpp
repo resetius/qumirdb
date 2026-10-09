@@ -9,6 +9,8 @@
 #include <qdb/plan/ops/union.h>
 #include <qdb/plan/ops/window.h>
 
+#include <algorithm>
+
 namespace NQdb {
 
 using namespace NQumir::NAst;
@@ -33,7 +35,12 @@ TExprPtr Conjoin(const std::vector<TExprPtr>& parts) {
 
 bool IsInner(const TOperatorPtr& node) {
     auto join = TMaybeOp<TJoinOperator>(node);
-    return join && join.Cast()->JoinType() == EJoinType::Inner;
+    // Flattening represents keys as ordinary equality predicates. Keep joins
+    // with NULL-equal keys intact so that conversion preserves their semantics.
+    return join && join.Cast()->JoinType() == EJoinType::Inner
+        && std::ranges::none_of(join.Cast()->Keys(), [](const TJoinKey& key) {
+            return key.NullsEqual;
+        });
 }
 
 void Collect(const TOperatorPtr& node, std::vector<TOperatorPtr>& leaves, std::vector<TExprPtr>& conds) {

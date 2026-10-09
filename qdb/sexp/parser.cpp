@@ -405,7 +405,7 @@ TNodeParserMap MakeRelParsers(TRelParserOptions options) {
             auto rightExpr = co_await h.Expr();
             auto right = std::static_pointer_cast<IOperator>(rightExpr);
 
-            // Key list: ((lk rk) (lk rk) ...)
+            // Key pairs optionally carry NULL-equal comparison semantics.
             co_await h.Take('(');
             std::vector<TJoinKey> keys;
             while (true) {
@@ -422,8 +422,15 @@ TNodeParserMap MakeRelParsers(TRelParserOptions options) {
                 if (rightKey.Type != TToken::Identifier) {
                     co_return IParseHandle::MakeError(rightKey, "expected right key column");
                 }
-                co_await h.Take(')');
-                keys.push_back({leftKey.Name, rightKey.Name});
+                bool nullsEqual = false;
+                auto keyEnd = h.Next();
+                if (keyEnd.Type == TToken::Identifier && keyEnd.Name == "nulls_equal") {
+                    nullsEqual = true;
+                    co_await h.Take(')');
+                } else if (!IParseHandle::IsOp(keyEnd, ')')) {
+                    co_return IParseHandle::MakeError(keyEnd, "expected ')' or nulls_equal after join keys");
+                }
+                keys.push_back({leftKey.Name, rightKey.Name, nullsEqual});
             }
             // Join type as a bare keyword: (inner)
             co_await h.Take('(');

@@ -29,6 +29,8 @@ enum class EJoinType {
 struct TJoinKey {
     std::string Left;
     std::string Right;
+    // INTERSECT/EXCEPT compare NULLs as equal; ordinary SQL equality does not.
+    bool NullsEqual = false;
 };
 
 // String <-> enum helpers (used by sexp and ToString).

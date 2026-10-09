@@ -42,12 +42,13 @@ struct TOut4 {
 };
 
 TJoinKernels CompileJoin(TKernelCompiler& compiler,
-    const TTypePtr& leftType, const TTypePtr& rightType, EJoinType type)
+    const TTypePtr& leftType, const TTypePtr& rightType, EJoinType type,
+    bool nullsEqual = false)
 {
     auto spec = NKernel::BuildJoinKernelSpec(
         static_cast<TStructType&>(*leftType),
         static_cast<TStructType&>(*rightType),
-        {{"lk", "rk"}}, type, nullptr);
+        {{"lk", "rk", nullsEqual}}, type, nullptr);
     return compiler.CompileJoin(spec);
 }
 
@@ -58,7 +59,8 @@ struct TOut2 {
 
 // Duplicate right keys must not duplicate SEMI output.
 std::vector<TOut2> RunSemiAnti(
-    EJoinType type, EJoinBuildSide buildSide, bool nullableKeys = false)
+    EJoinType type, EJoinBuildSide buildSide, bool nullableKeys = false,
+    bool nullsEqual = false)
 {
     std::vector<int64_t> lk0 = {1, 2}, lv0 = {10, 20};
     std::vector<int64_t> lk1 = {1, 3}, lv1 = {30, 40};
@@ -87,7 +89,7 @@ std::vector<TOut2> RunSemiAnti(
     }
 
     TKernelCompiler compiler;
-    auto kernels = CompileJoin(compiler, leftType, rightType, type);
+    auto kernels = CompileJoin(compiler, leftType, rightType, type, nullsEqual);
     TInnerJoinProcessor processor(std::move(kernels), type, buildSide);
 
     int leftFetches = 0;
@@ -122,7 +124,7 @@ std::vector<TOut2> RunSemiAnti(
             const bool validKey = !out.Columns[0].Mask ||
                 ((out.Columns[0].Mask[i / 8] >> (i % 8)) & 1);
             if (nullableKeys) {
-                EXPECT_EQ(validKey, type == EJoinType::LeftSemi);
+                EXPECT_EQ(validKey, c1[i] == 10 || c1[i] == 30);
             }
             got.push_back({validKey ? c0[i] : 0, c1[i]});
         }
@@ -290,6 +292,15 @@ TEST_P(SemiAntiOrientation, NullKeysNeverMatchInEitherOrientation) {
         : std::vector<TOut2>{{1, 10}, {1, 30}};
     for (auto buildSide : {EJoinBuildSide::Auto, EJoinBuildSide::Right}) {
         EXPECT_EQ(RunSemiAnti(GetParam(), buildSide, true), expected);
+    }
+}
+
+TEST_P(SemiAntiOrientation, NullEqualKeysMatchInEitherOrientation) {
+    const std::vector<TOut2> expected = GetParam() == EJoinType::LeftSemi
+        ? std::vector<TOut2>{{0, 20}, {0, 40}, {1, 10}, {1, 30}}
+        : std::vector<TOut2>{};
+    for (auto buildSide : {EJoinBuildSide::Auto, EJoinBuildSide::Right}) {
+        EXPECT_EQ(RunSemiAnti(GetParam(), buildSide, true, true), expected);
     }
 }
 

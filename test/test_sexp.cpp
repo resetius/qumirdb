@@ -428,7 +428,7 @@ TEST(SexpParser, JoinPrintRoundtrip) {
 
     const std::string input =
         "(rel join (rel source \"left.parquet\") (rel source \"right.parquet\") "
-        "((a c)) (left) (< b d))";
+        "((a c nulls_equal) (b d)) (left) (< b d))";
 
     TRelParserOptions opts;
     opts.SourceFactory = [&](std::string_view path, NQumir::TLocation) -> TOperatorPtr {
@@ -443,9 +443,11 @@ TEST(SexpParser, JoinPrintRoundtrip) {
     ASSERT_NE(expr, nullptr);
 
     auto& join = static_cast<TJoinOperator&>(*expr);
-    ASSERT_EQ(join.Keys().size(), 1u);
+    ASSERT_EQ(join.Keys().size(), 2u);
     EXPECT_EQ(join.Keys()[0].Left, "a");
     EXPECT_EQ(join.Keys()[0].Right, "c");
+    EXPECT_TRUE(join.Keys()[0].NullsEqual);
+    EXPECT_FALSE(join.Keys()[1].NullsEqual);
     EXPECT_EQ(join.JoinType(), EJoinType::Left);
     EXPECT_NE(join.Filter(), nullptr);
 

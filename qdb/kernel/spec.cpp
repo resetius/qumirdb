@@ -388,6 +388,7 @@ TOperatorKernelSpec BuildJoinKernelSpec(
         joinKeys.push_back({
             .Left = columnRef(leftType, key.Left),
             .Right = columnRef(rightType, key.Right),
+            .NullsEqual = key.NullsEqual,
         });
     }
 
@@ -555,7 +556,7 @@ void PrintKernelSpec(std::ostream& out, const TOperatorKernelSpec& spec) {
         for (const auto& key : spec.JoinKeys) {
             out << "    ";
             PrintColumn(out, key.Left);
-            out << " = ";
+            out << (key.NullsEqual ? " IS NOT DISTINCT FROM " : " = ");
             PrintColumn(out, key.Right);
             out << "\n";
         }
