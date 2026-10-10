@@ -53,8 +53,8 @@
       )
     )
     (where
-      (&& (<= (/ 2 3) (if (call qdb_is_true (> inv_before 0)) (/ inv_after inv_before) (call qdb_sql_null)))
-        (<= (if (call qdb_is_true (> inv_before 0)) (/ inv_after inv_before) (call qdb_sql_null)) (/ 3 2)))
+      (&& (<= (/ 2.0 3.0) (if (call qdb_is_true (> inv_before 0)) (/ inv_after inv_before) (call qdb_sql_null)))
+        (<= (if (call qdb_is_true (> inv_before 0)) (/ inv_after inv_before) (call qdb_sql_null)) (/ 3.0 2.0)))
     )
   )
   (order-by

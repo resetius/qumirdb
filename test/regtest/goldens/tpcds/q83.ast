@@ -196,22 +196,22 @@
         sr_item_qty
       )
       (item as sr_dev
-        (* (/ (/ sr_item_qty (+ (+ sr_item_qty cr_item_qty) wr_item_qty)) 3) 100)
+        (* (/ (/ sr_item_qty (+ (+ sr_item_qty cr_item_qty) wr_item_qty)) 3.0) 100)
       )
       (item
         cr_item_qty
       )
       (item as cr_dev
-        (* (/ (/ cr_item_qty (+ (+ sr_item_qty cr_item_qty) wr_item_qty)) 3) 100)
+        (* (/ (/ cr_item_qty (+ (+ sr_item_qty cr_item_qty) wr_item_qty)) 3.0) 100)
       )
       (item
         wr_item_qty
       )
       (item as wr_dev
-        (* (/ (/ wr_item_qty (+ (+ sr_item_qty cr_item_qty) wr_item_qty)) 3) 100)
+        (* (/ (/ wr_item_qty (+ (+ sr_item_qty cr_item_qty) wr_item_qty)) 3.0) 100)
       )
       (item as average
-        (/ (+ (+ sr_item_qty cr_item_qty) wr_item_qty) 3)
+        (/ (+ (+ sr_item_qty cr_item_qty) wr_item_qty) 3.0)
       )
     )
     (from

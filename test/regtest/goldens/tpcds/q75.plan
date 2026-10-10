@@ -26,7 +26,7 @@
                   (i_category_id i_category_id)
                   (i_manufact_id i_manufact_id)
                   (sales_cnt (- cs_quantity (call coalesce cr_return_quantity 0)))
-                  (sales_amt (- cs_ext_sales_price (call coalesce cr_return_amount 0))))
+                  (sales_amt (- cs_ext_sales_price (call coalesce cr_return_amount 0.0))))
                 (rel project
                   (rel filter
                     (rel join
@@ -47,7 +47,7 @@
                   (i_category_id i_category_id)
                   (i_manufact_id i_manufact_id)
                   (sales_cnt (- ss_quantity (call coalesce sr_return_quantity 0)))
-                  (sales_amt (- ss_ext_sales_price (call coalesce sr_return_amt 0))))
+                  (sales_amt (- ss_ext_sales_price (call coalesce sr_return_amt 0.0))))
                 (rel project
                   (rel filter
                     (rel join
@@ -68,7 +68,7 @@
                   (i_category_id i_category_id)
                   (i_manufact_id i_manufact_id)
                   (sales_cnt (- ws_quantity (call coalesce wr_return_quantity 0)))
-                  (sales_amt (- ws_ext_sales_price (call coalesce wr_return_amt 0)))))
+                  (sales_amt (- ws_ext_sales_price (call coalesce wr_return_amt 0.0)))))
               (keys d_year i_brand_id i_class_id i_category_id i_manufact_id sales_cnt sales_amt))
             (d_year d_year)
             (i_brand_id i_brand_id)

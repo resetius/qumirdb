@@ -2,7 +2,7 @@
   (select
     (select-list
       (item as avg_yearly
-        (/ (call sum l_extendedprice) 7)
+        (/ (call sum l_extendedprice) 7.0)
       )
     )
     (from
