@@ -141,11 +141,11 @@
               (> (if
                   (call qdb_is_true (> |t_w_firstyear.year_total| 0))
                   (/ |t_w_secyear.year_total| |t_w_firstyear.year_total|)
-                  0)
+                  0.0)
                 (if
                   (call qdb_is_true (> |t_s_firstyear.year_total| 0))
                   (/ |t_s_secyear.year_total| |t_s_firstyear.year_total|)
-                  0))))
+                  0.0))))
           (customer_id |t_s_secyear.customer_id|)
           (customer_first_name |t_s_secyear.customer_first_name|)
           (customer_last_name |t_s_secyear.customer_last_name|)

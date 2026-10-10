@@ -99,7 +99,7 @@
           )
           (having
             (> (call sum (* ss_quantity ss_sales_price))
-              (* (/ 95 100)
+              (* (/ 95 100.0)
                 (subquery scalar (query
               (select
                 (select-list

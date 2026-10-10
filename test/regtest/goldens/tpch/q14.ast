@@ -2,7 +2,7 @@
   (select
     (select-list
       (item as promo_revenue
-        (/ (* 100
+        (/ (* 100.0
             (call
               sum
               (if
