@@ -360,7 +360,29 @@ TNodeParserMap MakeRelParsers(TRelParserOptions options) {
                     co_return IParseHandle::MakeError(tok, "expected '(' before sort key or limit");
                 }
                 auto keyTok = h.Next();
-                auto keyName = ReadIdentifier(h, keyTok);
+                std::optional<std::string> keyName;
+                std::optional<TSortOutputPosition> outputPosition;
+                if (IParseHandle::IsOp(keyTok, '(')) {
+                    auto tagTok = h.Next();
+                    auto tag = ReadIdentifier(h, tagTok);
+                    auto indexTok = h.Next();
+                    auto hiddenTok = h.Next();
+                    if (!tag || *tag != "output" || indexTok.Type != TToken::Integer
+                        || indexTok.Value.i64 <= 0 || hiddenTok.Type != TToken::Integer
+                        || hiddenTok.Value.i64 < 0)
+                    {
+                        co_return IParseHandle::MakeError(keyTok,
+                            "expected (output positive-position hidden-column-count)");
+                    }
+                    co_await h.Take(')');
+                    outputPosition = TSortOutputPosition{
+                        .Index = static_cast<size_t>(indexTok.Value.i64 - 1),
+                        .HiddenColumns = static_cast<size_t>(hiddenTok.Value.i64),
+                    };
+                    keyName = "";
+                } else {
+                    keyName = ReadIdentifier(h, keyTok);
+                }
                 if (!keyName) {
                     co_return IParseHandle::MakeError(keyTok, "expected sort key column or 'limit'");
                 }
@@ -393,7 +415,12 @@ TNodeParserMap MakeRelParsers(TRelParserOptions options) {
                     co_return IParseHandle::MakeError(nullsTok, "unknown sort nulls mode: " + *nullsName);
                 }
                 co_await h.Take(')');
-                keys.push_back({*keyName, *direction, *nulls});
+                keys.push_back({
+                    .Column = *keyName,
+                    .Direction = *direction,
+                    .Nulls = *nulls,
+                    .OutputPosition = outputPosition,
+                });
             }
 
             if (isTopSort) {

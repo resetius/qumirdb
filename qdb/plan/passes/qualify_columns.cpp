@@ -159,7 +159,9 @@ std::shared_ptr<TStructType> QualifyColumnsImpl(const TOperatorPtr& op) {
         auto childSchema = QualifyColumnsImpl(sort->Input());
         if (childSchema) {
             for (auto& key : sort->MutableKeys()) {
-                key.Column = QualifyIdent(*childSchema, key.Column);
+                if (!key.OutputPosition) {
+                    key.Column = QualifyIdent(*childSchema, key.Column);
+                }
             }
         }
         return childSchema;
@@ -170,7 +172,9 @@ std::shared_ptr<TStructType> QualifyColumnsImpl(const TOperatorPtr& op) {
         auto childSchema = QualifyColumnsImpl(topSort->Input());
         if (childSchema) {
             for (auto& key : topSort->MutableKeys()) {
-                key.Column = QualifyIdent(*childSchema, key.Column);
+                if (!key.OutputPosition) {
+                    key.Column = QualifyIdent(*childSchema, key.Column);
+                }
             }
         }
         return childSchema;
@@ -290,7 +294,9 @@ std::shared_ptr<TStructType> QualifyColumnsImpl(const TOperatorPtr& op) {
                 key = QualifyIdent(*childSchema, key);
             }
             for (auto& key : window->MutableOrderKeys()) {
-                key.Column = QualifyIdent(*childSchema, key.Column);
+                if (!key.OutputPosition) {
+                    key.Column = QualifyIdent(*childSchema, key.Column);
+                }
             }
             for (auto& func : window->MutableFunctions()) {
                 QualifyExpr(func.Arg, *childSchema);

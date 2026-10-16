@@ -112,7 +112,7 @@ For a plain `GROUP BY`, the builder removes key components that cannot split a
 group already defined by another retained component:
 
 ```sql
-GROUP BY 1, url
+GROUP BY CAST(1 AS BIGINT), url
 -- physical group key: url
 
 GROUP BY client_ip, client_ip - 1, client_ip - 2
@@ -129,13 +129,19 @@ key once per output group.
 This rewrite intentionally runs inside `BuildSelect`, after GROUP BY aliases
 are resolved and before computed keys become materialized `gb_n` columns. A
 later plan pass would otherwise see only the synthetic column reference and
-would have to reconstruct its dependency through the lower project. In the
-current qdb SQL dialect an integer in GROUP BY is a literal expression, not a
-SELECT-list ordinal; ordinal support must resolve such references before this
-rewrite.
+would have to reconstruct its dependency through the lower project. In qdb, bare
+positive integer positions in `GROUP BY` refer to visible
+SELECT expressions after star expansion. They are resolved before this rewrite;
+expressions such as `1 + 0` remain scalar grouping keys. Aggregate and window
+outputs cannot be grouping targets.
 
-`GROUPING SETS`, `ROLLUP`, and `CUBE` are excluded because their key subsets and
-`GROUPING()` bit positions are observable.
+Statement-level `ORDER BY` positions bind to typed visible outputs, after
+struct-return projections have been flattened. Hidden sort expressions do not
+extend the valid position range. Window ordering and partition expressions keep
+their scalar-expression meaning.
+
+The key-narrowing rule excludes `GROUPING SETS`, `ROLLUP`, and `CUBE` because
+their key subsets and `GROUPING()` bit positions are observable.
 
 ### Affine integer aggregates
 

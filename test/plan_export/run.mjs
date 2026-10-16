@@ -865,6 +865,31 @@ async function runFixture(name, mode) {
   }
 }
 
+async function runOrdinalContract() {
+  const cases = [
+    ['SELECT k AS a, v AS b FROM t ORDER BY 2 DESC, 1 ASC LIMIT 3',
+      { columns: ['a', 'b'], rows: [['2', '20'], ['1', '10'], ['4', '5']] }],
+    ['SELECT k, sum(v) AS s FROM t GROUP BY 1 ORDER BY 2 DESC, 1 DESC',
+      { columns: ['k', 's'], rows: [['2', '20'], ['1', '10'], ['4', '9'], ['3', '3']] }],
+    ['SELECT k AS a FROM t WHERE k = 1 UNION ALL SELECT v AS a FROM t WHERE k = 2 ORDER BY 1 DESC LIMIT 1',
+      { columns: ['a'], rows: [['20']] }],
+    ['SELECT *, v + 1 FROM t ORDER BY 3 DESC LIMIT 2',
+      { columns: ['k', 'v', 'col2'], rows: [['2', '20', '21'], ['1', '10', '11']] }],
+  ];
+  for (const [sql, expected] of cases) {
+    const request = {
+      sql, dataset: datasetFor(fixtures.aggregate),
+      options: { scheduler: 'single', scanTasks: 1, shufflePartitions: 1, embedWasm: true },
+    };
+    const bundle = JSON.parse(run(exporter, exporterBaseArgs, JSON.stringify(request)));
+    assert.equal(bundle.ok, true, bundle.error?.message);
+    assert.equal(bundle.exec.supported, true, bundle.exec.reason);
+    const result = await browserResult('aggregate', resolveExecArtifacts(bundle));
+    assert.deepEqual(normalizeResult(result), expected, sql);
+    assert.equal(result.memory.liveMB, '0.0');
+  }
+}
+
 async function main() {
   const suiteStarted = performance.now();
   const results = [];
@@ -1026,6 +1051,16 @@ async function main() {
       } catch (error) {
         results.push({ name: 'operator-instrumentation', elapsedMs: performance.now() - started, error });
         console.error(`[FAIL] operator-instrumentation\n${errorText(error)}`);
+      }
+    }
+    {
+      const started = performance.now();
+      try {
+        await runOrdinalContract();
+        results.push({ name: 'select-ordinals', elapsedMs: performance.now() - started, error: null });
+      } catch (error) {
+        results.push({ name: 'select-ordinals', elapsedMs: performance.now() - started, error });
+        console.error(`[FAIL] select-ordinals\n${errorText(error)}`);
       }
     }
     for (const name of Object.keys(fixtures)) {

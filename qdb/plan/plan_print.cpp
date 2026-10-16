@@ -99,7 +99,9 @@ std::string FormatEstimate(double value) {
 }
 
 std::string SortKeyLabel(const TSortKey& key) {
-    std::string label = key.Column;
+    std::string label = key.OutputPosition
+        ? std::to_string(key.OutputPosition->Index + 1)
+        : key.Column;
     label += " " + std::string(SortDirectionName(key.Direction));
     if (key.Nulls != ESortNulls::Default) {
         label += " " + std::string(SortNullsName(key.Nulls));

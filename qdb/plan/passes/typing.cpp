@@ -60,11 +60,22 @@ void ResolveProjectionSortKeys(
 {
     auto project = TMaybeOp<TProjectOperator>(input);
     auto&& output = input->OutputColumns();
-    if (!project || !output) {
+    if (!output) {
         return;
     }
     for (auto& key : keys) {
-        if (!key.ProjectionIndex) {
+        if (key.OutputPosition) {
+            const auto position = *key.OutputPosition;
+            if (position.HiddenColumns > output->Fields.size()
+                || position.Index >= output->Fields.size() - position.HiddenColumns)
+            {
+                throw NQumir::TError("ORDER BY position " + std::to_string(position.Index + 1)
+                    + " is not in the select list");
+            }
+            key.Column = output->Fields[position.Index].first;
+            key.OutputPosition.reset();
+        }
+        if (!project || !key.ProjectionIndex) {
             continue;
         }
         const auto& projections = project.Cast()->Projections();

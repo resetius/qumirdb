@@ -44,7 +44,9 @@ TSortOperator::TSortOperator(TOperatorPtr input, std::vector<TSortKey> keys)
 std::unordered_set<std::string> TSortOperator::ComputeReferencedColumns() const {
     std::unordered_set<std::string> refs;
     for (const auto& key : Keys_) {
-        refs.insert(key.Column);
+        if (!key.OutputPosition) {
+            refs.insert(key.Column);
+        }
     }
     return refs;
 }
@@ -52,7 +54,14 @@ std::unordered_set<std::string> TSortOperator::ComputeReferencedColumns() const 
 const std::string TSortOperator::ToString() const {
     std::string s = "(rel sort " + Input_->ToString();
     for (const auto& key : Keys_) {
-        s += " (" + key.Column + " ";
+        s += " (";
+        if (key.OutputPosition) {
+            s += "(output " + std::to_string(key.OutputPosition->Index + 1)
+                + " " + std::to_string(key.OutputPosition->HiddenColumns) + ")";
+        } else {
+            s += key.Column;
+        }
+        s += " ";
         s += SortDirectionName(key.Direction);
         s += " ";
         s += SortNullsName(key.Nulls);
@@ -75,7 +84,9 @@ TTopSortOperator::TTopSortOperator(TOperatorPtr input, std::vector<TSortKey> key
 std::unordered_set<std::string> TTopSortOperator::ComputeReferencedColumns() const {
     std::unordered_set<std::string> refs;
     for (const auto& key : Keys_) {
-        refs.insert(key.Column);
+        if (!key.OutputPosition) {
+            refs.insert(key.Column);
+        }
     }
     return refs;
 }
@@ -83,7 +94,14 @@ std::unordered_set<std::string> TTopSortOperator::ComputeReferencedColumns() con
 const std::string TTopSortOperator::ToString() const {
     std::string s = "(rel top-sort " + Input_->ToString();
     for (const auto& key : Keys_) {
-        s += " (" + key.Column + " ";
+        s += " (";
+        if (key.OutputPosition) {
+            s += "(output " + std::to_string(key.OutputPosition->Index + 1)
+                + " " + std::to_string(key.OutputPosition->HiddenColumns) + ")";
+        } else {
+            s += key.Column;
+        }
+        s += " ";
         s += SortDirectionName(key.Direction);
         s += " ";
         s += SortNullsName(key.Nulls);
