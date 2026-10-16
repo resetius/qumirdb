@@ -399,7 +399,8 @@ BuildGenericAggregateFusedProgramAst(
     NQumir::NAst::TTypePtr columnType,
     NQumir::NAst::TTypePtr rowSetType,
     NQumir::NAst::TTypePtr hashTableType,
-    bool hasPrecomputedHash)
+    bool hasPrecomputedHash,
+    bool global)
 {
     using namespace NQumir::NAst;
 
@@ -488,7 +489,7 @@ BuildGenericAggregateFusedProgramAst(
     if (auto err = appendEntry(
             GenGenericAggregateDispatchAst(
                 inputType, key, layout, columnType, rowSetType, hashTableType,
-                hasPrecomputedHash),
+                hasPrecomputedHash, global),
             "generic aggregate dispatch")) {
         return std::unexpected(*err);
     }

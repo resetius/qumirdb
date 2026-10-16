@@ -2572,7 +2572,10 @@ std::expected<TOperatorPtr, TError> BuildSelect(
                 const std::string innerName = "partial_" + spec.Name;
                 const std::string mergeFunc = spec.Func == "count" ? "sum" : spec.Func;
                 innerSpecs.push_back({ .Name = innerName, .Func = spec.Func, .Arg = std::move(spec.Arg) });
-                outerSpecs.push_back({ .Name = spec.Name, .Func = mergeFunc, .Arg = Ident({}, innerName) });
+                outerSpecs.push_back({
+                    .Name = spec.Name, .Func = mergeFunc, .Arg = Ident({}, innerName),
+                    .EmptyIsZero = spec.Func == "count" || spec.EmptyIsZero,
+                });
             }
             node = std::make_shared<TAggregateOperator>(
                 std::move(node), std::move(dedupKeys), std::move(innerSpecs));
@@ -2639,7 +2642,7 @@ std::expected<TOperatorPtr, TError> BuildSelect(
     }
 
     auto aggregate = std::make_shared<TAggregateOperator>(
-        std::move(node), std::move(keys), std::move(specs));
+        std::move(node), std::move(keys), std::move(specs), global);
     if (multiSet) {
         aggregate->MutableGroupingSets() = std::move(groupingSets);
         auto inputSchema = aggregate->Input()->OutputColumns();
