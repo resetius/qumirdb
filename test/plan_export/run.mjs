@@ -885,7 +885,10 @@ async function runOrdinalContract() {
     assert.equal(bundle.ok, true, bundle.error?.message);
     assert.equal(bundle.exec.supported, true, bundle.exec.reason);
     const result = await browserResult('aggregate', resolveExecArtifacts(bundle));
-    assert.deepEqual(normalizeResult(result), expected, sql);
+    assert.deepEqual({
+      columns: result.columns.map(String),
+      rows: result.rows.map(row => row.map(String)),
+    }, expected, sql);
     assert.equal(result.memory.liveMB, '0.0');
   }
 }
