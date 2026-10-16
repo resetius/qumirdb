@@ -1983,7 +1983,77 @@ bool HasUnmappedOuter(
     return false;
 }
 
-// Replaces each scalar subquery in `expr` with a reference to a fresh column.
+// The grouped rewrite must recover COUNT's identity before evaluating the
+// scalar expression or HAVING; a missing group is not a NULL COUNT value.
+NAst::TExprPtr RestoreCorrelatedCountDefaults(
+    NAst::TExprPtr expr,
+    const std::unordered_map<std::string, NAst::TExprPtr>& replacements)
+{
+    if (!expr) {
+        return expr;
+    }
+    if (auto ident = NAst::TMaybeNode<NAst::TIdentExpr>(expr)) {
+        if (auto it = replacements.find(ident.Cast()->Name); it != replacements.end()) {
+            return CloneExpr(it->second);
+        }
+    }
+    for (auto* child : expr->MutableChildren()) {
+        *child = RestoreCorrelatedCountDefaults(*child, replacements);
+    }
+    return expr;
+}
+
+std::optional<NAst::TExprPtr> AttachCorrelatedCountAggregate(
+    TOperatorPtr& outer,
+    const std::shared_ptr<TProjectOperator>& project,
+    const std::vector<TJoinKey>& joinKeys,
+    size_t correlationCount,
+    int id)
+{
+    auto input = project->Input();
+    auto having = TMaybeOp<TFilterOperator>(input);
+    auto aggregate = TMaybeOp<TAggregateOperator>(having ? having.Cast()->Input() : input);
+    if (!aggregate || !std::ranges::any_of(aggregate.Cast()->Aggs(), [](const auto& agg) {
+        return agg.Func == "count" || agg.EmptyIsZero;
+    })) {
+        return std::nullopt;
+    }
+
+    std::vector<TProjectionSpec> states(
+        project->Projections().begin(), project->Projections().begin() + correlationCount);
+    std::unordered_map<std::string, NAst::TExprPtr> replacements;
+    size_t index = 0;
+    for (const auto& agg : aggregate.Cast()->Aggs()) {
+        const std::string name = "__scalar_" + std::to_string(id) +
+            "_state_" + std::to_string(index++) + "__";
+        states.push_back({.Name = name, .Expression = Ident({}, agg.Name)});
+        NAst::TExprPtr value = Ident({}, name);
+        if (agg.Func == "count" || agg.EmptyIsZero) {
+            value = Call({}, "coalesce", {std::move(value), I64Literal({}, 0)});
+        }
+        replacements.emplace(agg.Name, std::move(value));
+    }
+
+    auto value = RestoreCorrelatedCountDefaults(
+        CloneExpr(project->Projections().back().Expression), replacements);
+    if (having) {
+        // Evaluate HAVING on the recovered aggregate values. A rejected group
+        // means an empty scalar subquery, whose result is NULL, even for COUNT.
+        auto condition = RestoreCorrelatedCountDefaults(
+            CloneExpr(having.Cast()->Predicate()), replacements);
+        const auto location = value->Location;
+        value = std::make_shared<NAst::TIfExpr>(
+            location,
+            Call({}, "qdb_is_true", {std::move(condition)}),
+            std::move(value), Call({}, "qdb_sql_null", {}));
+    }
+    auto right = std::make_shared<TProjectOperator>(aggregate.Cast(), std::move(states));
+    outer = std::make_shared<TJoinOperator>(
+        std::move(outer), std::move(right), joinKeys, EJoinType::Left, nullptr);
+    return value;
+}
+
+// Replaces each scalar subquery in `expr` with its joined scalar expression.
 // Uncorrelated subqueries broadcast via a cross join (a single row). Correlated
 // ones are decorrelated: the subquery is grouped by its correlation columns and
 // LEFT-joined onto `node` (Apply elimination).
@@ -2083,6 +2153,7 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
 
             if (!correlation.empty()) {
                 int id = counter++;
+                const bool ungrouped = !sel->GroupBy;
                 if (!sel->GroupBy) {
                     sel->GroupBy = std::make_shared<NSql::TSqlGroupBy>();
                 }
@@ -2124,6 +2195,13 @@ std::expected<NAst::TExprPtr, TError> ExtractScalarSubqueries(
                 {
                     return std::unexpected(
                         TError("correlated scalar subquery must return one value"));
+                }
+                if (ungrouped) {
+                    if (auto value = AttachCorrelatedCountAggregate(
+                        node, project.Cast(), joinKeys, correlation.size(), id))
+                    {
+                        return std::move(*value);
+                    }
                 }
                 std::string scalarName = "__scalar_" + std::to_string(id) + "__";
                 auto& projection = project.Cast()->MutableProjections().back();
@@ -2572,7 +2650,10 @@ std::expected<TOperatorPtr, TError> BuildSelect(
                 const std::string innerName = "partial_" + spec.Name;
                 const std::string mergeFunc = spec.Func == "count" ? "sum" : spec.Func;
                 innerSpecs.push_back({ .Name = innerName, .Func = spec.Func, .Arg = std::move(spec.Arg) });
-                outerSpecs.push_back({ .Name = spec.Name, .Func = mergeFunc, .Arg = Ident({}, innerName) });
+                outerSpecs.push_back({
+                    .Name = spec.Name, .Func = mergeFunc, .Arg = Ident({}, innerName),
+                    .EmptyIsZero = spec.Func == "count" || spec.EmptyIsZero,
+                });
             }
             node = std::make_shared<TAggregateOperator>(
                 std::move(node), std::move(dedupKeys), std::move(innerSpecs));
