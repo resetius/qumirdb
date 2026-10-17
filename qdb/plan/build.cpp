@@ -989,6 +989,64 @@ std::string TableName(const std::vector<std::string>& parts) {
     return name;
 }
 
+std::expected<std::optional<size_t>, TError> OutputOrdinal(
+    const NAst::TExprPtr& expr,
+    std::string_view clause)
+{
+    auto number = NAst::TMaybeNode<NAst::TNumberExpr>(expr);
+    bool negative = false;
+    if (auto unary = NAst::TMaybeNode<NAst::TUnaryExpr>(expr);
+        unary && unary.Cast()->Operator == "-")
+    {
+        number = NAst::TMaybeNode<NAst::TNumberExpr>(unary.Cast()->Operand);
+        negative = true;
+    }
+    if (!number || number.Cast()->IsFloat()) {
+        return std::optional<size_t>{};
+    }
+    const auto value = number.Cast()->IntValue;
+    if (negative || value <= 0 || !std::in_range<size_t>(value - 1)) {
+        return std::unexpected(TError(expr->Location,
+            std::string(clause) + " position must be a positive integer"));
+    }
+    return std::optional<size_t>{static_cast<size_t>(value - 1)};
+}
+
+struct TExpandedSelectItem {
+    size_t OriginalIndex;
+    NSql::TSqlPtr<NSql::TSqlSelectItem> Item;
+};
+
+std::expected<std::vector<TExpandedSelectItem>, TError> ExpandSelectItems(
+    const NSql::TSqlSelectList& list,
+    const NAst::TConcreteTypePtr<NAst::TStructType>& schema)
+{
+    std::vector<TExpandedSelectItem> result;
+    for (size_t i = 0; i < list.Items.size(); ++i) {
+        const auto& item = list.Items[i];
+        if (!item->Star) {
+            result.push_back({i, item});
+            continue;
+        }
+        if (!schema) {
+            return std::unexpected(TError("'*' over an unresolved input"));
+        }
+        std::string prefix;
+        for (const auto& part : item->StarPrefix) {
+            prefix += part + ".";
+        }
+        for (const auto& [name, _] : schema->Fields) {
+            if (!prefix.empty() && !name.starts_with(prefix)) {
+                continue;
+            }
+            auto expanded = std::make_shared<NSql::TSqlSelectItem>();
+            expanded->Expr = Ident({}, name);
+            result.push_back({i, std::move(expanded)});
+        }
+    }
+    return result;
+}
+
 // A plain column keeps its name; an expression is materialized into a synthetic
 // `gb_<n>` column below the aggregate, and references to it are rewritten to that.
 struct TGroupKey {
@@ -1033,8 +1091,8 @@ std::optional<std::string> AffineGroupKeyBase(const NAst::TExprPtr& expr) {
 }
 
 bool IsLiteralGroupKey(const NAst::TExprPtr& expr) {
-    // In the current qdb dialect GROUP BY 1 is the literal 1, not a SELECT-list
-    // ordinal.  If ordinals are added, they must be resolved before this check.
+    // Positional references have already been replaced by their SELECT
+    // expressions, so actual literal keys keep their constant meaning here.
     if (NAst::TMaybeNode<NAst::TNumberExpr>(expr) ||
         NAst::TMaybeNode<NAst::TStringLiteralExpr>(expr))
     {
@@ -1154,7 +1212,10 @@ ExpandGroupingElement(const NSql::TSqlNodePtr& element) {
     return std::unexpected(TError("unsupported grouping element"));
 }
 
-std::expected<TGroupingParse, TError> ParseGrouping(const NSql::TSqlGroupBy& groupBy) {
+std::expected<TGroupingParse, TError> ParseGrouping(
+    const NSql::TSqlGroupBy& groupBy,
+    const std::function<std::expected<NAst::TExprPtr, TError>(const NAst::TExprPtr&)>& resolve)
+{
     // Multiple grouping elements combine as a cross product of their set-lists.
     std::vector<std::vector<NAst::TExprPtr>> combos = {{}};
     for (const auto& item : groupBy.Items) {
@@ -1202,7 +1263,11 @@ std::expected<TGroupingParse, TError> ParseGrouping(const NSql::TSqlGroupBy& gro
     for (const auto& combo : combos) {
         std::vector<size_t> set;
         for (const auto& expr : combo) {
-            auto idx = keyFor(expr);
+            auto resolved = resolve(expr);
+            if (!resolved) {
+                return std::unexpected(resolved.error());
+            }
+            auto idx = keyFor(*resolved);
             if (!idx) return std::unexpected(idx.error());
             if (std::find(set.begin(), set.end(), *idx) == set.end()) {
                 set.push_back(*idx);
@@ -2273,9 +2338,70 @@ std::expected<TOperatorPtr, TError> BuildSelect(
         return std::unexpected(TError("empty select list"));
     }
 
+    auto expanded = ExpandSelectItems(*select.SelectList, node->OutputColumns());
+    if (!expanded) {
+        return std::unexpected(expanded.error());
+    }
+    auto resolveGroup = [&](const NAst::TExprPtr& expr) -> std::expected<NAst::TExprPtr, TError> {
+        auto ordinal = OutputOrdinal(expr, "GROUP BY");
+        if (!ordinal) {
+            return std::unexpected(ordinal.error());
+        }
+        if (!*ordinal) {
+            return expr;
+        }
+        size_t index = **ordinal;
+        for (const auto& entry : *expanded) {
+            const auto& item = entry.Item;
+            if (!item->Alias && item->ColumnAliases.empty()
+                && (NAst::TMaybeNode<NAst::TCallExpr>(item->Expr)
+                    || NAst::TMaybeNode<NAst::TIfExpr>(item->Expr))
+                && !AsAggCall(item->Expr))
+            {
+                // A scalar AS alias fixes the output width at one. Otherwise
+                // external return widths are unavailable at this build phase;
+                // do not guess a later SELECT position across such an expression.
+                try {
+                    auto type = NKernel::AnnotateExprType(item->Expr, *node->OutputColumns());
+                    if (NAst::TMaybeType<NAst::TStructType>(NAst::UnwrapNamedType(type))) {
+                        return std::unexpected(TError(expr->Location,
+                            "GROUP BY position across a struct-return projection is not supported"));
+                    }
+                } catch (const TError&) {
+                    return std::unexpected(TError(expr->Location,
+                        "GROUP BY position requires resolved SELECT projection widths"));
+                }
+            }
+            const auto arity = item->ColumnAliases.empty() ? 1 : item->ColumnAliases.size();
+            if (index >= arity) {
+                index -= arity;
+                continue;
+            }
+            if (!item->ColumnAliases.empty()) {
+                return std::unexpected(TError(expr->Location,
+                    "GROUP BY position in a struct-return projection is not supported"));
+            }
+            if (HasSubquery(item->Expr) || HasWindowExprLocal(item->Expr) || HasGroupingCall(item->Expr)) {
+                return std::unexpected(TError(expr->Location,
+                    "GROUP BY position must refer to a scalar input expression"));
+            }
+            TAggCollector probe;
+            auto scalar = probe.Rewrite(item->Expr);
+            if (!scalar) {
+                return std::unexpected(scalar.error());
+            }
+            if (!probe.Empty()) {
+                return std::unexpected(TError(expr->Location,
+                    "GROUP BY position cannot refer to an aggregate"));
+            }
+            return CloneExpr(item->Expr);
+        }
+        return std::unexpected(TError(expr->Location,
+            "GROUP BY position " + std::to_string(**ordinal + 1) + " is not in the select list"));
+    };
     std::optional<TGroupingParse> parsedGrouping;
     if (select.GroupBy) {
-        auto parsed = ParseGrouping(*select.GroupBy);
+        auto parsed = ParseGrouping(*select.GroupBy, resolveGroup);
         if (!parsed) {
             return std::unexpected(parsed.error());
         }
@@ -2295,27 +2421,9 @@ std::expected<TOperatorPtr, TError> BuildSelect(
     std::vector<TProjectionSpec> projections;
     std::unordered_map<std::string, NAst::TExprPtr> selectAliases;
     std::unordered_set<std::string> ambiguousSelectAliases;
-    for (size_t i = 0; i < select.SelectList->Items.size(); ++i) {
-        const auto& item = select.SelectList->Items[i];
-        if (item->Star) {
-            auto&& schema = node->OutputColumns();
-            if (!schema) {
-                return std::unexpected(TError("'*' over an unresolved input"));
-            }
-            std::string prefix;
-            for (const auto& part : item->StarPrefix) {
-                prefix += part + ".";
-            }
-            for (const auto& [colName, _] : schema->Fields) {
-                if (!prefix.empty() && colName.rfind(prefix, 0) != 0) {
-                    continue;
-                }
-                auto dot = colName.rfind('.');
-                std::string bare = dot != std::string::npos ? colName.substr(dot + 1) : colName;
-                projections.push_back({ .Name = bare, .Expression = Ident({}, colName) });
-            }
-            continue;
-        }
+    for (const auto& entry : *expanded) {
+        const auto i = entry.OriginalIndex;
+        const auto& item = entry.Item;
         const auto outputLocation = item->Expr
             ? item->Expr->Location
             : TLocation{};
@@ -2763,6 +2871,18 @@ std::expected<TOperatorPtr, TError> ApplyOrderBy(
     int sortCounter = 0;
 
     for (const auto& item : query.OrderBy->Items) {
+        auto ordinal = OutputOrdinal(item->Expr, "ORDER BY");
+        if (!ordinal) {
+            return std::unexpected(ordinal.error());
+        }
+        if (*ordinal) {
+            keys.push_back({
+                .Direction = item->Desc ? ESortDirection::Desc : ESortDirection::Asc,
+                .Nulls = ConvertSortNulls(item->NullOrder),
+                .OutputPosition = TSortOutputPosition{.Index = **ordinal},
+            });
+            continue;
+        }
         std::string column;
         std::optional<size_t> projectionIndex;
         auto ident = NAst::TMaybeNode<NAst::TIdentExpr>(item->Expr);
@@ -2808,6 +2928,11 @@ std::expected<TOperatorPtr, TError> ApplyOrderBy(
         });
     }
 
+    for (auto& key : keys) {
+        if (key.OutputPosition) {
+            key.OutputPosition->HiddenColumns = hidden.size();
+        }
+    }
     if (hidden.empty()) {
         return std::make_shared<TSortOperator>(std::move(plan), std::move(keys));
     }

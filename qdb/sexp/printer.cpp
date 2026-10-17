@@ -97,7 +97,12 @@ void PrintRelBody(NQumir::NAst::TExpr& expr, TPrinter& printer, TPrintFrame fram
         for (const auto& key : sort.Keys()) {
             printer.Separator(frame.Level + 1);
             out << '(';
-            printer.PrintIdentifier(key.Column);
+            if (key.OutputPosition) {
+                out << "(output " << key.OutputPosition->Index + 1
+                    << ' ' << key.OutputPosition->HiddenColumns << ')';
+            } else {
+                printer.PrintIdentifier(key.Column);
+            }
             printer.Space();
             out << SortDirectionName(key.Direction);
             printer.Space();
@@ -116,7 +121,12 @@ void PrintRelBody(NQumir::NAst::TExpr& expr, TPrinter& printer, TPrintFrame fram
         for (const auto& key : sort.Keys()) {
             printer.Separator(frame.Level + 1);
             out << '(';
-            printer.PrintIdentifier(key.Column);
+            if (key.OutputPosition) {
+                out << "(output " << key.OutputPosition->Index + 1
+                    << ' ' << key.OutputPosition->HiddenColumns << ')';
+            } else {
+                printer.PrintIdentifier(key.Column);
+            }
             printer.Space();
             out << SortDirectionName(key.Direction);
             printer.Space();

@@ -20,6 +20,11 @@ enum class ESortNulls {
     Last,
 };
 
+struct TSortOutputPosition {
+    size_t Index = 0;
+    size_t HiddenColumns = 0;
+};
+
 struct TSortKey {
     std::string Column;
     ESortDirection Direction = ESortDirection::Asc;
@@ -27,6 +32,9 @@ struct TSortKey {
     // Set while ORDER BY structurally references an unnamed SELECT expression.
     // Type annotation resolves it to the expression's first flattened output.
     std::optional<size_t> ProjectionIndex;
+    // SQL positions bind after typing expands the visible projection. Hidden
+    // scalar ORDER BY expressions are excluded from the position bounds.
+    std::optional<TSortOutputPosition> OutputPosition;
 };
 
 class TSortOperator : public IOperator {
