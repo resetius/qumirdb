@@ -43,7 +43,8 @@ TTypePtr ComputeAggregateOutputType(
     const TTypePtr& inputSchema,
     const std::vector<std::string>& groupKeys,
     const std::vector<TAggregateSpec>& aggs,
-    bool nullableKeys)
+    bool nullableKeys,
+    bool global)
 {
     auto* inputStruct = static_cast<TStructType*>(inputSchema.get());
     std::vector<std::pair<std::string, TTypePtr>> outFields;
@@ -66,20 +67,28 @@ TTypePtr ComputeAggregateOutputType(
                 argType = FieldType(inputStruct, ident.Cast()->Name);
             }
         }
-        outFields.emplace_back(agg.Name, AggResultType(agg.Func, argType));
+        auto resultType = AggResultType(agg.Func, argType);
+        if (global && agg.Func != "count" && !agg.EmptyIsZero &&
+            resultType && !IsNullableType(resultType))
+        {
+            resultType = std::make_shared<TNullable>(std::move(resultType));
+        }
+        outFields.emplace_back(agg.Name, std::move(resultType));
     }
     return std::make_shared<TStructType>(std::move(outFields));
 }
 
-TAggregateOperator::TAggregateOperator(TOperatorPtr input, std::vector<std::string> groupKeys, std::vector<TAggregateSpec> aggs)
+TAggregateOperator::TAggregateOperator(TOperatorPtr input, std::vector<std::string> groupKeys,
+    std::vector<TAggregateSpec> aggs, bool global)
     : Input_(std::move(input))
     , GroupKeys_(std::move(groupKeys))
     , Aggs_(std::move(aggs))
+    , Global_(global)
 {
     auto inputSchema = Input_->OutputColumns();
     Type = std::make_shared<TFunctionType>(
         std::vector<TTypePtr>{inputSchema},
-        ComputeAggregateOutputType(inputSchema, GroupKeys_, Aggs_, !GroupingSets_.empty()));
+        ComputeAggregateOutputType(inputSchema, GroupKeys_, Aggs_, !GroupingSets_.empty(), Global_));
 }
 
 std::unordered_set<std::string> TAggregateOperator::ComputeReferencedColumns() const {

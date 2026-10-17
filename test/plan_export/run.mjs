@@ -469,6 +469,57 @@ ORDER BY REGEXP_REPLACE(
   });
 }
 
+async function runEmptyGlobalAggregateContract() {
+  for (const mode of ['single', 'threaded']) {
+    for (const kind of ['empty', 'filtered', 'string', 'grouped']) {
+      const stringValues = kind === 'string';
+      const sql = kind === 'grouped'
+        ? 'SELECT v, COUNT(*) AS n FROM t GROUP BY v'
+        : stringValues
+          ? 'SELECT COUNT(*) AS n, COUNT(v) AS nv, MIN(v) AS mn, MAX(v) AS mx FROM t'
+          : 'SELECT COUNT(*) AS n, COUNT(v) AS nv, SUM(v) AS s, '
+            + 'MIN(v) AS mn, MAX(v) AS mx, AVG(v) AS a FROM t'
+            + (kind === 'filtered' ? ' WHERE v > 100' : '');
+      const request = {
+        sql,
+        dataset: { tables: [{
+          name: 't',
+          columns: [{ name: 'v', type: stringValues ? 'string' : 'i64' }],
+          stats: { rows: kind === 'filtered' ? 3 : 0, bytes: 24, rowGroups: 2 },
+        }] },
+        options: {
+          scheduler: mode,
+          schedulerWorkers: 2,
+          scanTasks: 2,
+          shufflePartitions: 2,
+          format: 'runtime-bundle',
+          embedWasm: true,
+        },
+      };
+      const bundle = JSON.parse(run(exporter, exporterBaseArgs, JSON.stringify(request)));
+      assert.equal(bundle.ok, true, bundle.error?.message);
+      assert.equal(bundle.exec?.supported, true, bundle.exec?.reason);
+      const result = await executeBrowserPipelineScheduled(
+        resolveExecArtifacts(bundle),
+        async function* (stage) {
+          assert.equal(stage.table, 't');
+          if (kind === 'filtered') {
+            yield { rowCount: 3, columns: stage.columns.map(column => ({
+              ...column, values: [7, -2, 5],
+            })) };
+          }
+        });
+      assert.equal(result.memory?.liveMB, '0.0', `${mode}/${kind}: leaked wasm memory`);
+      assert.deepEqual(normalizeResult(result), kind === 'grouped'
+        ? { columns: ['v', 'n'], rows: [] }
+        : stringValues
+          ? { columns: ['n', 'nv', 'mn', 'mx'], rows: [['0', '0', '', '']] }
+          : { columns: ['n', 'nv', 's', 'mn', 'mx', 'a'], rows: [['0', '0', '', '', '', '']] },
+      `${mode}/${kind}: empty aggregate identity`);
+    }
+  }
+}
+
 async function runStringAggregateBatchContract() {
   const request = {
     sql: 'SELECT k, MIN(v) AS mn, MAX(v) AS mx FROM t GROUP BY k',
@@ -962,6 +1013,16 @@ async function main() {
           error,
         });
         console.error(`[FAIL] regexp-replace-batch\n${errorText(error)}`);
+      }
+    }
+    {
+      const started = performance.now();
+      try {
+        await runEmptyGlobalAggregateContract();
+        results.push({ name: 'empty-global-aggregate', elapsedMs: performance.now() - started, error: null });
+      } catch (error) {
+        results.push({ name: 'empty-global-aggregate', elapsedMs: performance.now() - started, error });
+        console.error(`[FAIL] empty-global-aggregate\n${errorText(error)}`);
       }
     }
     {
